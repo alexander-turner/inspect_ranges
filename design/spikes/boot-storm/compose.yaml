@@ -1,0 +1,35 @@
+# Boot-storm spike: one of these per concurrent range (compose -p storm-<i>).
+# Same prototype envelope as the other Linux spikes; CID_BASE parameterizes
+# the host-global vsock CIDs per range.
+services:
+  range:
+    build: ./range
+    init: true
+    # no Docker network at all: the range's networking lives inside the
+    # container's own netns, and the control plane is docker-exec + vsock.
+    # (Also the fix for the real limit this spike found: compose's default
+    # per-project networks exhaust Docker's address pools at ~31 projects.)
+    network_mode: none
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+      - /dev/vhost-net
+      - /dev/vhost-vsock
+    security_opt:
+      - apparmor=unconfined
+    environment:
+      - CID_BASE
+    volumes:
+      - ${IMAGE_CACHE:-~/.cache/inspect-ranges/images}:/images:ro
+      - scratch:/scratch
+      - ./assets:/assets:ro
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  scratch:
