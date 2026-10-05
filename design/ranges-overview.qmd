@@ -210,13 +210,13 @@ Inspect interacts with the range (e.g. to send `exec()` commands) using a hyperv
 
 ### Images {#images}
 
-Disk images for range guests are large (roughly 600 MB for Linux and 10–20 GB for Windows). This creates two problems: booting many identical VMs quickly for every sample, and getting multi-gigabyte images onto fleets of machines without expensive copying. These challenges are addressed by never copying full images. Rather, images are shared, and only differences are stored:
+Disk images for range guests are large (roughly 600 MB for Linux and 10–20 GB for Windows). These are VM disk images (qcow2), not container images: the only Docker image in the system is the hypervisor stack described above. The size creates two problems: booting many identical VMs quickly for every sample, and getting multi-gigabyte images onto fleets of machines without expensive copying. These challenges are addressed by never copying full images. Rather, images are shared, and only differences are stored:
 
 ![](../docs/diagrams/image-layers.excalidraw.png){fig-alt="The image layer stack: a shared read-only upstream base image at the bottom, a narrower golden-additions layer (control daemon and settings) on top of it, and small per-VM copy-on-write overlays for web, db, and agent fanning out above."}
 
 - Guests boot from shared, read-only "golden" images; each VM writes its changes to a small private overlay. Overlays are created instantly and deleted with the range, so every sample starts from a pristine disk.
 - A golden image is itself a small set of additions (the control daemon, settings) layered onto an upstream base image (e.g. Ubuntu's official cloud image, the same disk AWS boots), applied directly to the disk file without booting it. Windows golden images are built once by a scripted install (about 3 minutes) and treated the same way thereafter.
-- Images are published the way Docker publishes containers: as stacks of layers, each stored once and fetched only if a host doesn't already have it. So a base image ships only once, and task-specific images are megabytes in size. Images are pulled from object storage (S3) and verified against their digests, and a guest can boot while a large image downloads in the background.
+- Images are published the way Docker publishes containers: as stacks of layers, each stored once and fetched only if a host doesn't already have it. So a base image ships only once, and task-specific images are megabytes in size. Images are pulled from object storage (S3) and verified against their digests before guests boot.
 
 Sharing solves size, but not startup time: a disk image captures a machine that is powered off, so booting one means a full OS startup. These costs are mitigated with memory snapshots: a fully booted and settled VM is captured once, including its memory, and each sample restores it in about a second with a warm cache, resuming exactly where it left off.
 
