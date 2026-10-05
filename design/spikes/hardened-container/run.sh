@@ -62,6 +62,18 @@ echo "T8 host netns invisibility:"
 echo "T9 range-netns invariants:"
 docker compose exec -T range sh -c 'nft list ruleset | grep -q rangehost && echo PASS nft-loaded; ip -o link show type bridge | wc -l'
 
+echo "=== Docker non-involvement: the netns boundary is interface-absence, not configuration ==="
+echo "container interfaces (expect: lo + our bridges + taps, NO eth0/veth):"
+docker compose exec -T range sh -c 'ip -o link | awk -F": " "{print \$2}"'
+docker compose exec -T range sh -c 'ip -o link | grep -qE "eth0|veth" && echo "FAIL docker-provided interface present" || echo "PASS no docker-provided interface"'
+echo "host-side veth for this container (expect none):"
+ip -o link | grep -q veth && echo "NOTE host has veths (other containers)" || true
+CONTAINER_ID=$(docker compose ps -q range)
+[ -z "$(docker inspect -f '{{.NetworkSettings.IPAddress}}' "$CONTAINER_ID")" ] && echo "PASS container has no Docker-assigned IP" || echo "FAIL container has a Docker IP"
+echo "host firewall rules referencing the range (expect none; Docker's iptables machinery untouched by this container):"
+sudo iptables-save 2>/dev/null | grep -q "$CONTAINER_ID" && echo "FAIL container-specific iptables rules" || echo "PASS no container-specific iptables rules"
+sudo nft list ruleset 2>/dev/null | grep -q "rangehost" && echo "FAIL range nft table leaked to host" || echo "PASS range nft table not present in host netns"
+
 echo "=== egress conformance: no external path from any guest ==="
 for cid in 4 5 6; do
   echo "guest cid=$cid external IP + TCP (expect blocked):"

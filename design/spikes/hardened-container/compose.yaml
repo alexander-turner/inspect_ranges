@@ -15,6 +15,11 @@ services:
   range:
     build: ./range
     init: true
+    # Docker provides NO networking to the range container (boot-storm
+    # finding, promoted to the production template): no veth, no docker0,
+    # no embedded DNS, no port publishing, no per-container iptables rules.
+    # Non-propagation is interface-absence, not configuration.
+    network_mode: none
     cap_drop:
       - ALL
     cap_add:

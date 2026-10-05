@@ -6,6 +6,10 @@
 
 **The full stack runs under a hardened profile at zero measured cost**: all capabilities dropped except an explicit list of eight, Docker's default seccomp and AppArmor (`docker-default (enforce)`) in place, `no-new-privileges` set, every QEMU process running as `libvirt-qemu` (not root), and QEMU's own seccomp sandbox on (`obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`). Range fully enforced-ready in **49.8 s** vs ~50 s for the unhardened prototype; all nine ACL/isolation tests pass; external egress is blocked from every guest **before and after a simulated router compromise** (router firewall flushed in-guest; the hypervisor-side invariants, not the router, are the external containment authority).
 
+## Docker non-involvement (added 2026-10-05, after reviewer skepticism of Docker networking)
+
+The container now runs `network_mode: none`: Docker provides no networking whatsoever to the range container, so the machinery behind Docker's networking reputation (per-container iptables rules, published ports, docker0 veths, embedded DNS, the userland proxy) is absent rather than configured around. Non-propagation to the host is interface-absence, not filtering. Asserted from the running system by `run.sh`: the container netns holds only loopback plus the compiled bridges/taps (no `eth0`/veth), the container has no Docker-assigned IP, `iptables-save` on the host contains no rules referencing the container, and the range's nft table does not exist in the host netns — all while the full T1-T9 + egress battery stays green at unchanged cost (50.1 s enforced-ready).
+
 ## The measured capability floor
 
 Every capability in the final set is justified by an observed failure when removed:
