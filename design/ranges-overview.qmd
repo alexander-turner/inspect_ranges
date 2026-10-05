@@ -169,8 +169,6 @@ The middle container boundary is run with reduced privilege. The range container
 
 Escapes are therefore treated as possible but unprofitable. An agent that escapes gains an instance that holds no secrets and a sample that is simply discarded. Evidence (packet captures, consoles, logs) streams off the instance continuously, so the record received before an escape cannot be rewritten. Streaming preserves that record but does not by itself detect an escape, so each goal type is scored against proof the agent cannot fabricate (see [Scoring](#scoring)). Score integrity rests on detection rather than prevention.
 
-The Inspect scaffold process may serve many samples and parses attacker-controlled output, so its compromise is also assumed possible. The scaffold therefore should store no credentials of value and ensure that evidence once written cannot be changed.
-
 In the other direction, defenders inside the range can detect and react to everything the agent transmits, but they cannot observe its interior, connect to it (it runs no services), or reach the channel controlling it.
 
 ## Architecture
@@ -183,7 +181,7 @@ Compilation starts with allocation: every IP, MAC address, hostname, and control
 |------------------------|------------------------------------------------|
 | network | Linux bridge, private to the range, with no IP of its own |
 | host, router, or attacker | KVM/libvirt domain with virtio devices, booted from a copy-on-write overlay on a read-only golden image |
-| interface | Virtio NIC on the named bridge, with its allocated MAC; the guest's addressing and hostname are delivered by a generated cloud-init seed |
+| interface | Virtio NIC on the named bridge, with its allocated MAC; the guest's addressing and hostname are applied from compiled per-guest configuration |
 | router `acl` | nftables ruleset loaded on the router guest: default-deny, stateful |
 | (implicit) | Vsock device per guest, with an allocated channel ID (the control plane for exec and file transfer) |
 
@@ -191,7 +189,7 @@ Range startup consists of:
 
 1.  Create the bridges and load the generated firewall invariants.
 2.  Create each guest's overlay and define its domain.
-3.  Boot all guests in parallel.
+3.  Boot guests in parallel, in dependency order where a range's provisioning requires it. Ranges with heavy cross-host dependencies (such as Active Directory) are built and converged once, then each sample restores the result.
 4.  Wait for every guest to finish provisioning: a range is ready only once every guest's configuration has been applied.
 
 ### Range Container
@@ -218,7 +216,7 @@ Disk images for range guests are large (roughly 600 MB for Linux and 10–20 GB 
 
 - Guests boot from shared, read-only "golden" images; each VM writes its changes to a small private overlay. Overlays are created instantly and deleted with the range, so every sample starts from a pristine disk.
 - A golden image is itself a small set of additions (the control daemon, settings) layered onto an upstream base image (e.g. Ubuntu's official cloud image, the same disk AWS boots), applied directly to the disk file without booting it. Windows golden images are built once by a scripted install (about 3 minutes) and treated the same way thereafter.
-- Images are published the way Docker publishes containers: as stacks of layers, each stored once and fetched only if a host doesn't already have it. So a base image ships only once, and task-specific images are megabytes in size. On EC2, image caches travel as EBS snapshots whose blocks load lazily from S3, so a sample can start before its images have fully downloaded.
+- Images are published the way Docker publishes containers: as stacks of layers, each stored once and fetched only if a host doesn't already have it. So a base image ships only once, and task-specific images are megabytes in size. Images are pulled from object storage (S3) and verified against their digests, and a guest can boot while a large image downloads in the background.
 
 Sharing solves size, but not startup time: a disk image captures a machine that is powered off, so booting one means a full OS startup. These costs are mitigated with memory snapshots: a fully booted and settled VM is captured once, including its memory, and each sample restores it in about a second with a warm cache, resuming exactly where it left off.
 

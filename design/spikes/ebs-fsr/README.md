@@ -1,6 +1,8 @@
-# Spike: EBS/FSR cold start — prepared, blocked on credentials
+# Spike: EBS/FSR cold start — superseded, never run
 
-*Status: **ready to run, not yet run.** The devbox role deliberately has no EC2/EBS permissions (verified 2026-10-04: every volume/snapshot/FSR action is denied; only `DescribeInstances` is allowed), so this spike needs a temporary scoped policy attached by an operator. Everything else — scripts, measurement harness, cleanup — is in place.*
+*Status: **superseded (2026-10-05).** S3-only was adopted as the image-distribution baseline after the deployment design under review declined an EBS interface and analysis showed the cost is small ([image-distribution](../../inspect-ranges/image-distribution.md) §3; measured by the [s3-pull spike](../s3-pull/README.md)). The runbook and scoped policy below are kept as reference should an FSR comparison ever be wanted; the pending IAM policy request is withdrawn (it was never attached, so there is nothing to revoke). Original status: ready to run.*
+
+*Previously: The devbox role deliberately has no EC2/EBS permissions (verified 2026-10-04: every volume/snapshot/FSR action is denied; only `DescribeInstances` is allowed), so this spike needs a temporary scoped policy attached by an operator. Everything else — scripts, measurement harness, cleanup — is in place.*
 
 ## What it measures
 
