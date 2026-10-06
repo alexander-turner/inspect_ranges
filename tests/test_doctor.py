@@ -11,7 +11,7 @@ from inspect_ranges._doctor import (
     render_fix_script,
     render_text,
 )
-from inspect_ranges._doctor._checks import (
+from inspect_ranges._doctor.checks import (
     check_br_netfilter,
     check_docker,
     check_image_tools,
