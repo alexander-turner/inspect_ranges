@@ -1,0 +1,22 @@
+range:
+  name: acl
+  description: every flavor of ACL mistake
+networks:
+  - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+  - { name: internal, cidr: 10.80.20.0/24, mode: isolated }
+  - { name: mgmt, cidr: 10.80.30.0/24, mode: isolated }
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      - { from: dmz, to: wan, allow: [tcp/5432] }
+      - { from: dmz, to: mgmt, allow: [tcp/22] }
+      - { from: dmz, to: dmz, allow: [tcp/80] }
+hosts:
+  - name: db
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: internal }]
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external

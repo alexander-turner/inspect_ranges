@@ -28,6 +28,20 @@ def test_validate_accepts_example_and_rejects_bad_file(tmp_path: Path) -> None:
     assert "unknown_section" in failed.output
 
 
+def test_validate_json_contract(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("range: {}\nunknown_section: 1\n")
+    result = CliRunner().invoke(ranges, ["validate", "--json", EXAMPLE, str(bad)])
+    assert result.exit_code == 1
+    reports = json.loads(result.output)
+    assert [report["valid"] for report in reports] == [True, False]
+    issue = next(
+        issue for issue in reports[1]["issues"] if issue["code"] == "unknown-key"
+    )
+    assert issue["path"] == "unknown_section"
+    assert issue["line"] == 2
+
+
 def test_devbox_command_registered() -> None:
     result = CliRunner().invoke(ranges, ["devbox", "--help"])
     assert result.exit_code == 0

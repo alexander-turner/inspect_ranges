@@ -1,0 +1,21 @@
+range:
+  name: typos
+  description: typo'd cross references
+networks:
+  - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+  - { name: internal, cidr: 10.80.20.0/24, mode: isolated }
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+hosts:
+  - name: web
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: dnz }]
+  - name: db
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: internol }]
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external

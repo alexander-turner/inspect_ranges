@@ -1,36 +1,38 @@
+import json as json_module
 from pathlib import Path
 
 import click
-import yaml
-from pydantic import ValidationError
 
-from ..schema import load_range
+from ..schema import validate_range
 
 
 @click.command()
 @click.argument(
     "paths", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path)
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit one JSON report per file instead of text.",
+)
 @click.pass_context
-def validate(ctx: click.Context, paths: tuple[Path, ...]) -> None:
+def validate(ctx: click.Context, paths: tuple[Path, ...], as_json: bool) -> None:
     """Validate `range.yaml` files against schema v0.1.
 
-    Exits with status 1 if any file is invalid.
+    Reports every detectable issue in each file at once, with source positions and hints. Exits with status 1 if any file is invalid.
     """
-    failed = False
-    for path in paths:
-        try:
-            spec = load_range(path)
-        except ValidationError as error:
-            failed = True
-            click.echo(f"{click.style('✗', fg='red')} {path}")
-            for issue in error.errors():
-                location = ".".join(str(part) for part in issue["loc"]) or "(root)"
-                click.echo(f"    {location}: {issue['msg']}")
-        except (yaml.YAMLError, ValueError) as error:
-            failed = True
-            click.echo(f"{click.style('✗', fg='red')} {path}")
-            click.echo(f"    {error}")
-        else:
-            click.echo(f"{click.style('✓', fg='green')} {path}  ({spec.meta.name})")
-    ctx.exit(1 if failed else 0)
+    reports = [validate_range(path) for path in paths]
+    if as_json:
+        click.echo(
+            json_module.dumps([report.to_json() for report in reports], indent=2)
+        )
+    else:
+        for report in reports:
+            if report.valid:
+                name = f"  ({report.spec.meta.name})" if report.spec is not None else ""
+                click.echo(f"{click.style('✓', fg='green')} {report.file}{name}")
+            else:
+                styled = report.render().replace("✗", click.style("✗", fg="red"), 1)
+                click.echo(styled)
+    ctx.exit(0 if all(report.valid for report in reports) else 1)

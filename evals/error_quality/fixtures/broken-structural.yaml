@@ -1,0 +1,17 @@
+range:
+  name: structural
+  description: several structural schema errors at once
+networks:
+  - { name: lab, cidr: 10.0.0.0/33, mode: isolated }
+  - { name: dmz, cidr: 10.0.1.0/24, mode: bananas }
+hosts:
+  - name: web
+    os: { type: linux }
+    imagee: img
+    interfaces: [{ network: lab }]
+  - name: db
+    os: { type: linux }
+    interfaces: [{ network: dmz }]
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external

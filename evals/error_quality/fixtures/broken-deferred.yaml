@@ -1,0 +1,19 @@
+range:
+  name: deferred
+  description: deferred schema sections that belong in deferred.yaml
+networks:
+  - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+hosts:
+  - name: web
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab }]
+    services:
+      - { name: http, port: 80 }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+goals:
+  - { type: flag, host: web, path: /root/flag.txt }
+attack_path:
+  - foothold

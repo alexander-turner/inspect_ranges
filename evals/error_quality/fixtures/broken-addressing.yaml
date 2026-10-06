@@ -1,0 +1,25 @@
+range:
+  name: addressing
+  description: addressing mistakes on one segment
+networks:
+  - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+hosts:
+  - name: web
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab, ip: 10.0.9.9 }]
+  - name: db
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab, ip: 10.0.0.255 }]
+  - name: files
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab, ip: 10.0.0.10 }]
+  - name: backup
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab, ip: 10.0.0.10 }]
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external

@@ -1,0 +1,23 @@
+range:
+  name: multi
+  description: structural errors hiding semantic ones (requires more than one pass)
+networks:
+  - { name: dmz, cidr: 10.80.10.0/33, mode: isolated }
+  - { name: internal, cidr: 10.80.20.0/24, mode: isolated }
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      - { from: dmz, to: internal, allow: ["5432"] }
+hosts:
+  - name: web
+    os: { type: linux }
+    imagee: img
+    interfaces: [{ network: dnz }]
+  - name: db
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: internal, ip: 10.80.20.255 }]
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external

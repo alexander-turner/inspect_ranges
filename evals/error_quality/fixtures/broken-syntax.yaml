@@ -1,0 +1,13 @@
+range:
+  name: syntax
+  description: a file with a YAML syntax error
+networks:
+  - { name: lab, cidr: 10.0.0.0/24, mode: isolated
+hosts:
+  - name: web
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: lab }]
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external

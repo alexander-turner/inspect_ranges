@@ -37,6 +37,7 @@ dev = [
     "pytest-xdist",
     "pytest-dotenv",
     "pytest-timeout>=2.4.0",
+    "anthropic>=1.11.0",
     {include-group = "doc"},
 ]
 doc = [

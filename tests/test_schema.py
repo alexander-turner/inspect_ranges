@@ -46,214 +46,26 @@ def test_minimal_spec_validates() -> None:
     assert spec.attacker.egress == "none"
 
 
-@pytest.mark.parametrize(
-    ("overrides", "match"),
-    [
-        pytest.param("attack_path: []", "attack_path", id="deferred-top-level-key"),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab }]
-                services: []
-            """,
-            "services",
-            id="deferred-host-key",
-        ),
-        pytest.param(
-            "networks: [{ name: lab, cidr: banana, mode: isolated }]",
-            "cidr",
-            id="bad-cidr",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab, ip: 10.9.9.9 }]
-            """,
-            "outside",
-            id="ip-outside-subnet",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: wan }]
-            """,
-            "undeclared network",
-            id="dangling-network-ref",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: attacker
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab }]
-            """,
-            "unique",
-            id="guest-name-collision-with-attacker",
-        ),
-        pytest.param(
-            """
-            networks:
-              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
-              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
-            routers:
-              - name: r
-                interfaces: [{ network: lab }, { network: dmz }]
-                acl: [{ from: lab, to: dmz, allow: ["25"] }]
-            """,
-            "proto/port",
-            id="bad-allow-entry",
-        ),
-        pytest.param(
-            """
-            networks:
-              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
-              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
-            routers:
-              - name: r
-                interfaces: [{ network: lab }, { network: dmz }]
-                acl: [{ from: lab, to: wan, allow: [] }]
-            """,
-            "undeclared network",
-            id="acl-dangling-network",
-        ),
-        pytest.param(
-            """
-            networks:
-              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
-              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
-              - { name: ext, cidr: 10.0.2.0/24, mode: isolated }
-            routers:
-              - name: r
-                interfaces: [{ network: lab }, { network: dmz }]
-                acl: [{ from: lab, to: ext, allow: [] }]
-            """,
-            "not attached",
-            id="acl-unattached-network",
-        ),
-        pytest.param(
-            """
-            networks:
-              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
-              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
-            routers:
-              - name: r
-                interfaces: [{ network: lab }, { network: dmz }]
-                acl: [{ from: lab, to: lab, allow: [] }]
-            """,
-            "same-segment",
-            id="acl-from-equals-to",
-        ),
-        pytest.param(
-            """
-            routers:
-              - name: r
-                interfaces: [{ network: lab }, { network: lab }]
-            """,
-            "more than once",
-            id="router-duplicate-attachment",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab, ip: 10.0.0.10 }]
-              - name: db
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab, ip: 10.0.0.10 }]
-            """,
-            "both use",
-            id="duplicate-ip-on-segment",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab, ip: 10.0.0.0 }]
-            """,
-            "network or broadcast",
-            id="network-address-as-ip",
-        ),
-        pytest.param(
-            """
-            hosts:
-              - name: web
-                os: { type: linux }
-                image: img
-                interfaces: [{ network: lab, ip: 10.0.0.255 }]
-            """,
-            "network or broadcast",
-            id="broadcast-address-as-ip",
-        ),
-        pytest.param(
-            """
-            networks:
-              - name: lab
-                cidr: 10.0.0.0/24
-                mode: isolated
-                dns: { authoritative: [ghost] }
-            """,
-            "undeclared guest",
-            id="dns-authoritative-undeclared-guest",
-        ),
-        pytest.param(
-            """
-            networks:
-              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
-              - name: dmz
-                cidr: 10.0.1.0/24
-                mode: isolated
-                dns: { authoritative: [web] }
-            """,
-            "not attached",
-            id="dns-authoritative-not-attached",
-        ),
-        pytest.param(
-            "attacker: { host: nosuch, entry: assumed-breach }",
-            "undeclared host",
-            id="dangling-attacker-host",
-        ),
-        pytest.param(
-            """
-            attacker:
-              host: web
-              interfaces: [{ network: lab }]
-              entry: assumed-breach
-            """,
-            "must not also declare",
-            id="attacker-host-and-interfaces",
-        ),
-        pytest.param(
-            "attacker: { entry: external }",
-            "host= or at least one interface",
-            id="attacker-without-foothold",
-        ),
-    ],
-)
-def test_invalid_specs_rejected(overrides: str, match: str) -> None:
-    with pytest.raises(ValidationError, match=match):
-        RangeSpec.model_validate(_with(overrides))
-
-
-def test_bad_schema_version_rejected() -> None:
-    data = _with("{}")
-    data["range"]["schema_version"] = "0.2"
-    with pytest.raises(ValidationError, match="schema_version"):
+def test_invalid_spec_raises_with_every_finding() -> None:
+    """Valid-by-construction: direct `model_validate` rejects semantic errors, and the raised error carries all of them (per-code coverage lives in `test_diagnostics.py`)."""
+    data = _with(
+        """
+        hosts:
+          - name: web
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: wan }]
+          - name: db
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: lab, ip: 10.0.0.255 }]
+        """
+    )
+    with pytest.raises(ValidationError) as excinfo:
         RangeSpec.model_validate(data)
+    message = str(excinfo.value)
+    assert "undeclared network 'wan'" in message
+    assert "network or broadcast address" in message
 
 
 @pytest.mark.parametrize("entry", ["tcp/5432", "udp/53", "tcp/1-65535"])

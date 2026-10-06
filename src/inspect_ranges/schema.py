@@ -2,7 +2,7 @@
 
 v0.1 deliberately covers only the five sections the runtime consumes — `range`, `networks`, `routers`, `hosts`, `attacker` — and rejects everything else loudly. Sections awaiting real design (`attack_path`, `goals`, `variables`, `defense`, `vulnerabilities`, guest configuration, ...) are excluded entirely; see `design/inspect-ranges/schema-v0.1-scope.md` for the deferral rationale and each example range's `deferred.yaml` for parked content.
 
-Load a spec with `load_range`, or validate pre-parsed data with `RangeSpec.model_validate`. The published JSON Schema is `range_json_schema` (also `inspect-ranges schema` on the CLI).
+Load a spec with `load_range`, or validate pre-parsed data with `RangeSpec.model_validate`. For complete diagnostics (every error at once, with source positions and hints) use `validate_range`, which returns a `ValidationReport` instead of raising. The published JSON Schema is `range_json_schema` (also `inspect-ranges schema` on the CLI).
 """
 
 import re
@@ -11,7 +11,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from ._diagnostics import (
+    Issue,
+    IssueError,
+    PathElement,
+    ValidationReport,
+    did_you_mean,
+    issues_from_validation_error,
+    issues_from_yaml_error,
+    parse_marked,
+)
 
 _ALLOW_RULE = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$")
 
@@ -139,16 +150,30 @@ class AclRule(_StrictModel):
 
     @model_validator(mode="after")
     def _check_allow_entries(self) -> "AclRule":
-        for entry in self.allow:
+        issues: list[Issue] = []
+        for index, entry in enumerate(self.allow):
             match = _ALLOW_RULE.match(entry)
             if match is None:
-                raise ValueError(
-                    f"ACL allow entry {entry!r} must be proto/port or proto/lo-hi, e.g. tcp/5432"
+                issues.append(
+                    Issue(
+                        code="invalid-allow-entry",
+                        path=("allow", index),
+                        message=f"ACL allow entry {entry!r} must be proto/port or proto/lo-hi, e.g. tcp/5432",
+                    )
                 )
+                continue
             low = int(match.group(2))
             high = int(match.group(3)) if match.group(3) else low
             if not 0 < low <= high < 65536:
-                raise ValueError(f"ACL allow entry {entry!r} has an invalid port range")
+                issues.append(
+                    Issue(
+                        code="invalid-allow-entry",
+                        path=("allow", index),
+                        message=f"ACL allow entry {entry!r} has an invalid port range",
+                    )
+                )
+        if issues:
+            raise IssueError(issues)
         return self
 
 
@@ -235,11 +260,26 @@ class Attacker(_StrictModel):
                 if getattr(self, field) is not None
             ]
             if extras:
-                raise ValueError(
-                    f"attacker with host= must not also declare {', '.join(extras)}"
+                raise IssueError(
+                    [
+                        Issue(
+                            code="attacker-foothold-conflict",
+                            path=(),
+                            message=f"attacker with host= must not also declare {', '.join(extras)}",
+                            hint="declare either a foothold on an existing host or a dedicated attack box, not both",
+                        )
+                    ]
                 )
         elif self.interfaces is None or not self.interfaces:
-            raise ValueError("attacker needs either host= or at least one interface")
+            raise IssueError(
+                [
+                    Issue(
+                        code="attacker-no-foothold",
+                        path=(),
+                        message="attacker needs either host= or at least one interface",
+                    )
+                ]
+            )
         return self
 
 
@@ -263,98 +303,228 @@ class RangeSpec(_StrictModel):
 
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":
-        networks = {network.name: network for network in self.networks}
-        if len(networks) != len(self.networks):
-            raise ValueError("network names must be unique")
+        issues = semantic_issues(self)
+        if issues:
+            raise IssueError(issues)
+        return self
 
-        guests = (
-            [(host.name, host.interfaces) for host in self.hosts]
-            + [(router.name, router.interfaces) for router in self.routers]
-            + (
-                [(self.attacker.name, self.attacker.interfaces or [])]
-                if self.attacker.host is None
-                else []
+
+def semantic_issues(spec: RangeSpec) -> list[Issue]:
+    """Run every cross-reference check on a structurally valid spec, collecting all findings.
+
+    This is the single implementation of the semantic checks: `RangeSpec` validation calls it (raising if any issue is found, so a constructed spec is always consistent), and `validate_range` calls it via that same validation to report every issue at once.
+
+    Args:
+        spec: A structurally valid range definition.
+
+    Returns:
+        Every semantic issue found, each with a path into the spec (empty when the spec is consistent).
+    """
+    issues: list[Issue] = []
+    networks: dict[str, Network] = {}
+    network_names = [network.name for network in spec.networks]
+    for index, network in enumerate(spec.networks):
+        if network.name in networks:
+            issues.append(
+                Issue(
+                    code="duplicate-network-name",
+                    path=("networks", index, "name"),
+                    message=f"duplicate network name {network.name!r} (network names must be unique)",
+                )
+            )
+        networks.setdefault(network.name, network)
+
+    guests: list[tuple[tuple[PathElement, ...], str, list[Interface]]] = [
+        (("hosts", i), host.name, host.interfaces) for i, host in enumerate(spec.hosts)
+    ]
+    guests += [
+        (("routers", i), router.name, router.interfaces)
+        for i, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        guests.append(
+            (("attacker",), spec.attacker.name, spec.attacker.interfaces or [])
+        )
+    seen_names: set[str] = set()
+    for base, name, _ in guests:
+        if name in seen_names:
+            issues.append(
+                Issue(
+                    code="duplicate-guest-name",
+                    path=base + ("name",),
+                    message=f"guest name {name!r} is not unique (hosts, routers, and the attacker share one namespace)",
+                )
+            )
+        seen_names.add(name)
+
+    used_ips: dict[tuple[str, IPv4Address], str] = {}
+    for base, name, interfaces in guests:
+        attached: set[str] = set()
+        for index, interface in enumerate(interfaces):
+            path = base + ("interfaces", index)
+            network_spec = networks.get(interface.network)
+            if network_spec is None:
+                issues.append(
+                    Issue(
+                        code="undeclared-network",
+                        path=path + ("network",),
+                        message=f"guest {name!r} attaches to undeclared network {interface.network!r}",
+                        hint=did_you_mean(interface.network, network_names),
+                    )
+                )
+                continue
+            if interface.network in attached:
+                issues.append(
+                    Issue(
+                        code="duplicate-attachment",
+                        path=path + ("network",),
+                        message=f"guest {name!r} attaches to network {interface.network!r} more than once",
+                    )
+                )
+            attached.add(interface.network)
+            if interface.ip is None:
+                continue
+            if interface.ip not in network_spec.cidr:
+                issues.append(
+                    Issue(
+                        code="ip-outside-subnet",
+                        path=path + ("ip",),
+                        message=f"guest {name!r} address {interface.ip} is outside {network_spec.name!r} ({network_spec.cidr})",
+                    )
+                )
+                continue
+            if network_spec.cidr.num_addresses > 2 and interface.ip in (
+                network_spec.cidr.network_address,
+                network_spec.cidr.broadcast_address,
+            ):
+                issues.append(
+                    Issue(
+                        code="reserved-ip",
+                        path=path + ("ip",),
+                        message=f"guest {name!r} address {interface.ip} is the network or broadcast address of {network_spec.name!r} ({network_spec.cidr})",
+                    )
+                )
+                continue
+            claimed = used_ips.setdefault((interface.network, interface.ip), name)
+            if claimed != name:
+                issues.append(
+                    Issue(
+                        code="duplicate-ip",
+                        path=path + ("ip",),
+                        message=f"guests {claimed!r} and {name!r} both use {interface.ip} on {interface.network!r}",
+                    )
+                )
+
+    for router_index, router in enumerate(spec.routers):
+        router_networks = {interface.network for interface in router.interfaces}
+        for rule_index, rule in enumerate(router.acl):
+            rule_path: tuple[PathElement, ...] = (
+                "routers",
+                router_index,
+                "acl",
+                rule_index,
+            )
+            for key, endpoint in (("from", rule.from_), ("to", rule.to)):
+                if endpoint not in networks:
+                    issues.append(
+                        Issue(
+                            code="acl-undeclared-network",
+                            path=rule_path + (key,),
+                            message=f"router {router.name!r} ACL references undeclared network {endpoint!r}",
+                            hint=did_you_mean(endpoint, network_names),
+                        )
+                    )
+                elif endpoint not in router_networks:
+                    issues.append(
+                        Issue(
+                            code="acl-unattached-network",
+                            path=rule_path + (key,),
+                            message=f"router {router.name!r} ACL references network {endpoint!r} it is not attached to",
+                        )
+                    )
+            if rule.from_ == rule.to:
+                issues.append(
+                    Issue(
+                        code="acl-same-segment",
+                        path=rule_path,
+                        message=f"router {router.name!r} ACL rule from/to are both {rule.to!r}: same-segment traffic does not traverse the router",
+                    )
+                )
+
+    guest_networks = {
+        name: {interface.network for interface in interfaces}
+        for _, name, interfaces in guests
+    }
+    for network_index, network in enumerate(spec.networks):
+        if network.dns is None or not network.dns.authoritative:
+            continue
+        for server_index, server in enumerate(network.dns.authoritative):
+            path = ("networks", network_index, "dns", "authoritative", server_index)
+            server_networks = guest_networks.get(server)
+            if server_networks is None:
+                issues.append(
+                    Issue(
+                        code="dns-undeclared-guest",
+                        path=path,
+                        message=f"network {network.name!r} dns.authoritative references undeclared guest {server!r}",
+                        hint=did_you_mean(server, sorted(guest_networks)),
+                    )
+                )
+            elif network.name not in server_networks:
+                issues.append(
+                    Issue(
+                        code="dns-unattached-guest",
+                        path=path,
+                        message=f"network {network.name!r} dns.authoritative guest {server!r} is not attached to it",
+                    )
+                )
+
+    host_names = [host.name for host in spec.hosts]
+    if spec.attacker.host is not None and spec.attacker.host not in host_names:
+        issues.append(
+            Issue(
+                code="undeclared-attacker-host",
+                path=("attacker", "host"),
+                message=f"attacker foothold references undeclared host {spec.attacker.host!r}",
+                hint=did_you_mean(spec.attacker.host, host_names),
             )
         )
-        names = [name for name, _ in guests]
-        if len(set(names)) != len(names):
-            raise ValueError("guest names (hosts, routers, attacker) must be unique")
+    return issues
 
-        used_ips: dict[tuple[str, IPv4Address], str] = {}
-        for name, interfaces in guests:
-            attached: set[str] = set()
-            for interface in interfaces:
-                network = networks.get(interface.network)
-                if network is None:
-                    raise ValueError(
-                        f"guest {name!r} attaches to undeclared network {interface.network!r}"
-                    )
-                if interface.network in attached:
-                    raise ValueError(
-                        f"guest {name!r} attaches to network {interface.network!r} more than once"
-                    )
-                attached.add(interface.network)
-                if interface.ip is None:
-                    continue
-                if interface.ip not in network.cidr:
-                    raise ValueError(
-                        f"guest {name!r} address {interface.ip} is outside {network.name!r} ({network.cidr})"
-                    )
-                if network.cidr.num_addresses > 2 and interface.ip in (
-                    network.cidr.network_address,
-                    network.cidr.broadcast_address,
-                ):
-                    raise ValueError(
-                        f"guest {name!r} address {interface.ip} is the network or broadcast address of {network.name!r} ({network.cidr})"
-                    )
-                claimed = used_ips.setdefault((interface.network, interface.ip), name)
-                if claimed != name:
-                    raise ValueError(
-                        f"guests {claimed!r} and {name!r} both use {interface.ip} on {interface.network!r}"
-                    )
 
-        for router in self.routers:
-            router_networks = {interface.network for interface in router.interfaces}
-            for rule in router.acl:
-                for endpoint in (rule.from_, rule.to):
-                    if endpoint not in networks:
-                        raise ValueError(
-                            f"router {router.name!r} ACL references undeclared network {endpoint!r}"
-                        )
-                    if endpoint not in router_networks:
-                        raise ValueError(
-                            f"router {router.name!r} ACL references network {endpoint!r} it is not attached to"
-                        )
-                if rule.from_ == rule.to:
-                    raise ValueError(
-                        f"router {router.name!r} ACL rule from/to are both {rule.to!r}: same-segment traffic does not traverse the router"
-                    )
+def validate_range(path: Path) -> ValidationReport:
+    """Validate a `range.yaml` file, reporting every detectable issue at once.
 
-        guest_networks = {
-            name: {interface.network for interface in interfaces}
-            for name, interfaces in guests
-        }
-        for network_spec in self.networks:
-            if network_spec.dns is None or not network_spec.dns.authoritative:
-                continue
-            for server in network_spec.dns.authoritative:
-                server_networks = guest_networks.get(server)
-                if server_networks is None:
-                    raise ValueError(
-                        f"network {network_spec.name!r} dns.authoritative references undeclared guest {server!r}"
-                    )
-                if network_spec.name not in server_networks:
-                    raise ValueError(
-                        f"network {network_spec.name!r} dns.authoritative guest {server!r} is not attached to it"
-                    )
+    Unlike `load_range`, this never raises on invalid content: YAML syntax errors, structural schema violations, and semantic cross-reference problems all become `Issue` entries with stable codes, source positions, and hints where available. Field-level structural errors suppress the cross-reference pass (reflected in `ValidationReport.semantic_checked`).
 
-        if self.attacker.host is not None and self.attacker.host not in {
-            host.name for host in self.hosts
-        }:
-            raise ValueError(
-                f"attacker foothold references undeclared host {self.attacker.host!r}"
-            )
-        return self
+    Args:
+        path: Path to the YAML file.
+
+    Returns:
+        The report; `ValidationReport.spec` carries the validated spec when the file is valid.
+    """
+    try:
+        data, node = parse_marked(path.read_text())
+    except yaml.YAMLError as error:
+        return ValidationReport(file=str(path), issues=issues_from_yaml_error(error))
+    if not isinstance(data, dict):
+        return ValidationReport(
+            file=str(path),
+            issues=[
+                Issue(
+                    code="not-a-mapping",
+                    message="expected a YAML mapping at the top level",
+                )
+            ],
+        )
+    try:
+        spec = RangeSpec.model_validate(data)
+    except ValidationError as error:
+        issues, semantic_checked = issues_from_validation_error(error, RangeSpec, node)
+        return ValidationReport(
+            file=str(path), issues=issues, semantic_checked=semantic_checked
+        )
+    return ValidationReport(file=str(path), spec=spec)
 
 
 def load_range(path: Path) -> RangeSpec:
