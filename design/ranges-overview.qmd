@@ -15,7 +15,7 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 ## Range Definition
 
-Ranges are specified using a `range.yaml` file or a `Range` Python model. For example, this network has four guests (two targets, a router joining two segments, and a dedicated attack VM):
+Ranges are specified using a `range.yaml` file or a `RangeSpec` Python model. For example, this network has four guests (two targets, a router joining two segments, and a dedicated attack VM):
 
 ![](../docs/diagrams/dmz-pivot.excalidraw.png){fig-alt="The dmz-pivot topology: an attacker VM and web server on the DMZ segment, a database on the internal segment, and a router joining the two segments whose ACL allows only tcp/5432 from dmz to internal."}
 

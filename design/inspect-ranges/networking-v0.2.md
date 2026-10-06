@@ -118,9 +118,16 @@ The sandbox configuration is `str | RangeSpec`: a `range.yaml` path or a fully r
 
 Consequences:
 
-- **Every spec model is public API**: `RangeSpec`, `Network`, `Router`, `Host`, `Attacker`, `Interface`, `AclRule`, `Os`, `Resources`, `DnsConfig`, `DnsRecord`, `RangeMeta`, plus `load_range`, `validate_range`, `semantic_issues`, `Issue`, and `ValidationReport` — exported from the package top level and documented in the reference docs. Model and field names become stability-governed by `schema_version` exactly like the YAML surface: a renamed field is a schema version bump, whichever surface it entered through.
+- **Every spec model is public API, housed in `inspect_ranges.types`**: `RangeSpec`, `Network`, `Router`, `Host`, `Attacker`, `Interface`, `AclRule`, `Os`, `Resources`, `DnsConfig`, `DnsRecord`, `RangeMeta`, and the diagnostics types `Issue` and `ValidationReport`. The callables (`load_range`, `validate_range`, `semantic_issues`) export from the package top level. Everything is documented in the reference docs, and model and field names become stability-governed by `schema_version` exactly like the YAML surface: a renamed field is a schema version bump, whichever surface it entered through.
 - **Validation parity, documented difference in ergonomics**: a typed config is structurally and semantically valid at construction (the model validators run; an invalid construction raises with every finding, via `IssueError`); the YAML path additionally gets source positions and rendered hints via `validate_range`. Same checks, one implementation, two entry points.
 - **Provider contract**: the sandbox provider accepts both forms; `config_files()` discovers `range.yaml` for the path form; the compiler consumes `RangeSpec` either way (as the e2e spike already demonstrated).
+
+Construction ergonomics (level-set 2026-10-06, verified against the implemented models):
+
+- **Typed construction reads like the YAML.** Strings coerce to address types (`cidr="10.80.10.0/24"`), literals take plain strings, nested dicts are accepted via `model_validate` for fully config-literal style, and both field names and aliases work as kwargs (`meta=` or `range=`).
+- **`from` stays `from`** in YAML; typed construction writes `from_=` (Python keyword), documented as the one spelling divergence. No rename.
+- **Models stay mutable** for flexible programmatic construction; valid-by-construction is therefore a point-in-time property, not an invariant. The compensating contract: **every consumer boundary revalidates**. When a `RangeSpec` object is passed as sandbox config, the provider round-trips it through `model_validate` (catching semantic drift and type-unsafe mutations alike) before compiling; `validate` and the compiler do the same for any typed input. Mutating between construction and handoff is safe and supported.
+- **`RangeSpec` is the canonical public name** (the overview's earlier `Range` wording is updated); no alias.
 
 ## 9. Implementation path (the follow-on, not this record)
 
