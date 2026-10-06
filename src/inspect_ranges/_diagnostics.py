@@ -113,20 +113,28 @@ class ValidationReport(BaseModel):
         return not any(issue.severity == "error" for issue in self.issues)
 
     def render(self) -> str:
-        """Render the report as aligned, human-readable text."""
-        if self.valid:
+        """Render the report as aligned, human-readable text (warnings do not invalidate)."""
+        if not self.issues:
             return f"✓ {self.file}"
         issues = sorted(
             self.issues,
             key=lambda i: (i.line is None, i.line or 0, i.col or 0, i.path_str),
         )
         errors = sum(1 for issue in issues if issue.severity == "error")
-        header = f"✗ {self.file}  {errors} error{'s' if errors != 1 else ''}"
+        warnings = len(issues) - errors
+        counts = [
+            f"{count} {label}{'s' if count != 1 else ''}"
+            for count, label in ((errors, "error"), (warnings, "warning"))
+            if count
+        ]
+        header = f"{'✗' if errors else '✓'} {self.file}  {', '.join(counts)}"
         loc_width = max(len(_loc_str(i)) for i in issues)
         path_width = min(max(len(i.path_str) for i in issues), 40)
         lines = [header]
         for issue in issues:
             message = issue.message
+            if issue.severity == "warning":
+                message = f"warning: {message}"
             if issue.hint:
                 message = f"{message} ({issue.hint})"
             lines.append(

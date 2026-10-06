@@ -14,6 +14,7 @@ from ._diagnostics import (
     ValidationReport,
     issues_from_validation_error,
     issues_from_yaml_error,
+    locate,
     parse_marked,
 )
 from .types import (
@@ -91,7 +92,20 @@ def validate_range(path: Path) -> ValidationReport:
         return ValidationReport(
             file=str(path), issues=issues, semantic_checked=semantic_checked
         )
-    return ValidationReport(file=str(path), spec=spec)
+    warnings: list[Issue] = []
+    for issue in semantic_issues(spec):
+        if issue.severity != "warning":
+            continue
+        position = locate(node, issue.path)
+        warnings.append(
+            issue.model_copy(
+                update={
+                    "line": position[0] if position else None,
+                    "col": position[1] if position else None,
+                }
+            )
+        )
+    return ValidationReport(file=str(path), issues=warnings, spec=spec)
 
 
 def load_range(path: Path) -> RangeSpec:

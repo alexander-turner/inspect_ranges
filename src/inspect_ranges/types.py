@@ -540,9 +540,9 @@ class RangeSpec(_StrictModel):
 
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":
-        issues = semantic_issues(self)
-        if issues:
-            raise IssueError(issues)
+        errors = [issue for issue in semantic_issues(self) if issue.severity == "error"]
+        if errors:
+            raise IssueError(errors)
         return self
 
 
@@ -749,6 +749,42 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         name: {interface.network for interface in interfaces}
         for _, name, interfaces in guests
     }
+
+    # '.local' zones are reserved for mDNS: Linux stub resolvers (systemd-resolved)
+    # never send them to unicast DNS, so range-served or AD zones under .local
+    # silently fail to resolve on Linux guests without resolver domain routing
+    for network_index, network in enumerate(spec.networks):
+        if network.dns is None:
+            continue
+        for record_index, record in enumerate(network.dns.records or []):
+            if record.name.endswith(".local"):
+                issues.append(
+                    Issue(
+                        code="dot-local-zone",
+                        severity="warning",
+                        path=(
+                            "networks",
+                            network_index,
+                            "dns",
+                            "records",
+                            record_index,
+                            "name",
+                        ),
+                        message=f"dns record {record.name!r} is under '.local', which Linux stub resolvers reserve for mDNS and never send to unicast DNS",
+                        hint="prefer another TLD, or configure Linux guests' resolver domain routing",
+                    )
+                )
+    for host_index, host in enumerate(spec.hosts):
+        if host.fqdn is not None and host.fqdn.endswith(".local"):
+            issues.append(
+                Issue(
+                    code="dot-local-zone",
+                    severity="warning",
+                    path=("hosts", host_index, "fqdn"),
+                    message=f"host fqdn {host.fqdn!r} is under '.local', which Linux stub resolvers reserve for mDNS and never send to unicast DNS",
+                    hint="Windows guests resolve it; Linux guests need resolver domain routing (see the netsvc spike findings)",
+                )
+            )
 
     # dns records without an explicit ip must resolve to a guest on the network
     for network_index, network in enumerate(spec.networks):

@@ -29,10 +29,14 @@ def validate(ctx: click.Context, paths: tuple[Path, ...], as_json: bool) -> None
         )
     else:
         for report in reports:
-            if report.valid:
+            if report.valid and not report.issues:
                 name = f"  ({report.spec.meta.name})" if report.spec is not None else ""
                 click.echo(f"{click.style('✓', fg='green')} {report.file}{name}")
             else:
-                styled = report.render().replace("✗", click.style("✗", fg="red"), 1)
+                marker = "✓" if report.valid else "✗"
+                color = "green" if report.valid else "red"
+                styled = report.render().replace(
+                    marker, click.style(marker, fg=color), 1
+                )
                 click.echo(styled)
     ctx.exit(0 if all(report.valid for report in reports) else 1)

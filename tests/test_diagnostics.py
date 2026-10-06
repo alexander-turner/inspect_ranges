@@ -770,6 +770,36 @@ def test_yaml_syntax_error_has_position(tmp_path: Path) -> None:
     assert report.issues[0].line is not None
 
 
+def test_dot_local_zone_warns_without_invalidating(tmp_path: Path) -> None:
+    report = report_with(
+        """
+        networks:
+          - name: lab
+            cidr: 10.0.0.0/24
+            mode: isolated
+            dns: { records: [{ name: dc.kingdom.local, ip: 10.0.0.5 }] }
+        hosts:
+          - name: web
+            os: { type: linux }
+            image: img
+            fqdn: web.kingdom.local
+            interfaces: [{ network: lab, ip: 10.0.0.10 }]
+        """,
+        tmp_path,
+    )
+    assert report.valid
+    assert [issue.code for issue in report.issues] == [
+        "dot-local-zone",
+        "dot-local-zone",
+    ]
+    assert all(issue.severity == "warning" for issue in report.issues)
+    assert all(issue.line is not None for issue in report.issues)
+    rendered = report.render()
+    assert rendered.startswith("✓") and "2 warnings" in rendered
+    # and warnings never block construction
+    assert report.spec is not None
+
+
 def test_render_lists_every_error_once(tmp_path: Path) -> None:
     report = report_with("attacker: { host: nosuch, entry: assumed-breach }", tmp_path)
     rendered = report.render()
