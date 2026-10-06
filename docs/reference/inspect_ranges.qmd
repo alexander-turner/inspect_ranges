@@ -3,3 +3,19 @@ title: inspect_ranges
 description: Loading, validation, and revalidation of range definitions.
 reference: inspect_ranges
 ---
+
+Load a definition with `load_range`, or get complete diagnostics (every error at once, with source positions and hints) from `validate_range`. Typed specs crossing a consumer boundary are re-checked with `revalidate_range`.
+
+## Loading
+
+### load_range
+
+### validate_range
+
+### revalidate_range
+
+## Checks and Schema
+
+### semantic_issues
+
+### range_json_schema

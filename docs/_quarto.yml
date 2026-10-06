@@ -12,6 +12,8 @@ inspect-docs:
   navigation:
     - text: Getting Started
       href: index.qmd
+    - text: Defining Networks
+      href: networks.qmd
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk

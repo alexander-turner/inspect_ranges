@@ -1,0 +1,520 @@
+---
+title: "Defining Networks"
+description: "The range.yaml networking syntax, from a single flat network to multi-router enterprise topologies."
+llms-description: "Tutorial and review guide for the range.yaml networking syntax: addressing, DNS, segmentation, ACLs, routing, and egress."
+---
+
+## Overview
+
+Ranges are defined in a `range.yaml` file (or the equivalent Python types, shown [below](#python)). This page walks the networking syntax from the simplest possible network to multi-segment enterprise topologies, one construct at a time.
+
+Two properties hold throughout:
+
+1. **Everything is compiled, nothing is configured.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition. There is no second configuration to drift out of sync.
+2. **Everything shown here is enforced and tested.** Each construct on this page is realized by the compiler and verified by a booted conformance battery; every complete example on this page is validated in CI. Constructs the runtime cannot yet realize are rejected at validation with a specific error code, never silently accepted (see [Boundaries](#boundaries)).
+
+## A flat network
+
+The smallest range: one network, one target, and the attacker:
+
+```yaml
+range:
+  name: flat
+  description: One target on one flat network.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab }]
+
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+Every guest attaches to networks explicitly through `interfaces`. The attacker is an ordinary guest (a dedicated VM with a real NIC in the broadcast domain), declared separately because evaluations treat it specially.
+
+`mode: isolated` means no traffic leaves the range from this network. It is the default posture to reach for; `nat` and `routed` are covered [below](#egress).
+
+## Addressing
+
+Addresses are optional. When omitted, they are allocated deterministically: the same definition always produces the same addresses (routers take the first usable addresses, the attacker follows, hosts allocate from `.10` upward). Explicit addresses are validated against the subnet and for conflicts:
+
+```yaml
+range:
+  name: addressing
+  description: Explicit and allocated addresses on one segment.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab, ip: 10.10.10.80 }]   # explicit
+  - name: db
+    os: { type: linux }
+    image: acme/db-golden
+    interfaces: [{ network: lab }]                    # allocated: 10.10.10.10
+
+attacker:
+  interfaces: [{ network: lab }]                      # allocated: 10.10.10.2
+  entry: external
+```
+
+Networks can also address their guests over DHCP. DHCP is reservation-only: every lease comes from the deterministic allocation by MAC address, so DHCP addressing is exactly as predictable as static addressing while exercising a realistic DHCP service on the wire:
+
+```yaml
+range:
+  name: dhcp
+  description: Guests addressed over reservation-only DHCP.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+    dhcp: true
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab, ip: 10.10.10.80 }]   # reserved for web's MAC
+
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+## Name resolution
+
+Per-network DNS covers the three shapes real ranges need. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
+
+```yaml
+range:
+  name: dns-records
+  description: Range-served name records, derived and explicit.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+    dns:
+      records:
+        - { name: web }                               # resolves to web's address
+        - { name: files.corp.example, ip: 10.10.10.200 }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab }]
+
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+Records networks hand their guests a derived search domain (`<network>.internal`), because modern stub resolvers do not send single-label names like `web` to DNS without one.
+
+`nameservers` points guests at external resolvers, and `authoritative` names guests (such as domain controllers) that are the network's DNS servers, optionally chaining to a `forwarder`. This is the Active Directory pattern, where the DC is the DNS server:
+
+```yaml
+range:
+  name: dns-ad
+  description: An authoritative guest serves DNS, chaining to an upstream forwarder.
+
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+    dns:
+      authoritative: [dc01]
+      forwarder: 1.1.1.1
+
+hosts:
+  - name: dc01
+    hostname: dc01
+    fqdn: dc01.corp.example
+    os: { type: linux }
+    image: acme/dc-golden
+    interfaces: [{ network: corp, ip: 10.20.0.5 }]
+  - name: ws01
+    os: { type: linux }
+    image: acme/ws-golden
+    interfaces: [{ network: corp }]
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+```
+
+::: {.callout-warning}
+## `.local` zones
+
+Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide deliberately:
+
+```
+✓ range.yaml  1 warning
+  12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is under '.local', which
+                        Linux stub resolvers reserve for mDNS and never send to unicast DNS
+```
+:::
+
+## Segmentation
+
+Routers join segments and carry the inter-segment policy. Rules are default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. This is the classic DMZ pivot:
+
+```yaml
+range:
+  name: dmz-pivot
+  description: >
+    An external attacker compromises a web server in the DMZ, then pivots to a
+    database on an internal segment reachable only through the router.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    interfaces:
+      - { network: dmz, ip: 10.80.10.1 }
+      - { network: internal, ip: 10.80.20.1 }
+    acl:
+      - { from: dmz, to: internal, allow: [tcp/5432] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: acme/db-golden
+    interfaces: [{ network: internal }]
+
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external
+```
+
+Segments are genuinely separate broadcast domains: same-segment L2 tradecraft (ARP, LLMNR poisoning) works within a segment and not across one, and the router is an ordinary guest running an ordinary generated firewall that a defender could inspect in-range.
+
+## Richer policy
+
+Rules evaluate first-match in declaration order, and each rule carries exactly one of `allow:` or `deny:`. Endpoints are a network name, a guest name (resolved to its allocated addresses at compile time), or a CIDR (`/32` for a single host, `0.0.0.0/0` for any). Services are `proto/port`, `proto/lo-hi` ranges, or bare `icmp`:
+
+```yaml
+range:
+  name: policy
+  description: Ordered rules with carve-outs, guest endpoints, and CIDR endpoints.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      # carve-out: ssh to the db host is dropped even though the next rule allows tcp/22
+      - { from: dmz, to: db, deny: [tcp/22] }
+      - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
+      # only the web server may open http into the internal segment
+      - { from: web, to: internal, allow: [tcp/80] }
+      # a literal address range as an endpoint
+      - { from: 10.80.10.0/28, to: internal, allow: [tcp/8080-8090] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: acme/db-golden
+    interfaces: [{ network: internal }]
+
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external
+```
+
+Networks and guests share one namespace (a guest may not take a network's name), so an endpoint is never ambiguous. Unknown endpoints are rejected at validation with a did-you-mean suggestion.
+
+## Topology
+
+Larger networks chain routers. Each network's default gateway is elected implicitly when exactly one router attaches; a segment with more than one router must declare its `gateway:` (ambiguity is rejected, never guessed). Routers carry static `routes:` to segments they reach through other routers, and their rules may name routed segments, not only attached ones (each transit router enforces its own policy):
+
+```yaml
+range:
+  name: chained
+  description: Three segments chained through two routers.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+  - name: core
+    cidr: 10.80.20.0/24
+    mode: isolated
+    gateway: r1          # two routers attach here: election must be explicit
+  - name: vault
+    cidr: 10.80.30.0/24
+    mode: isolated
+
+routers:
+  - name: r1
+    interfaces:
+      - { network: dmz, ip: 10.80.10.1 }
+      - { network: core, ip: 10.80.20.1 }
+    routes: [{ to: 10.80.30.0/24, via: 10.80.20.2 }]
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }
+  - name: r2
+    interfaces:
+      - { network: core, ip: 10.80.20.2 }
+      - { network: vault, ip: 10.80.30.1 }
+    routes: [{ to: 10.80.10.0/24, via: 10.80.20.1 }]
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }
+
+hosts:
+  - name: app
+    os: { type: linux }
+    image: acme/app-golden
+    interfaces: [{ network: core }]
+  - name: safe
+    os: { type: linux }
+    image: acme/safe-golden
+    interfaces: [{ network: vault }]
+
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external
+```
+
+## Leaving the range {#egress}
+
+Each network declares its egress posture through `mode`:
+
+- `isolated`: nothing leaves. The default posture.
+- `nat`: traffic leaves through hypervisor NAT, scoped by an explicit allowlist.
+- `routed`: the segment is really routed toward the deployment's uplink, in both directions, with real source addresses and no NAT.
+
+A `nat` network says exactly what may leave, and nothing else does. Entries are `CIDR[:proto/port]` (a bare address is its `/32`; omitting the service allows all traffic to the CIDR):
+
+```yaml
+range:
+  name: egress
+  description: A corp segment that may reach one https host and NTP, nothing else.
+
+networks:
+  - name: corp
+    cidr: 10.90.10.0/24
+    mode: nat
+    egress:
+      allow:
+        - "198.51.100.7:tcp/443"
+        - "0.0.0.0/0:udp/123"
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: acme/ws-golden
+    interfaces: [{ network: corp }]
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+  egress: none
+```
+
+The attacker's own `egress` composes ahead of network policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
+
+Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code rather than silently unenforced:
+
+```yaml
+# invalid-example: FQDN egress targets are gated until their realization lands
+range:
+  name: egress-fqdn
+  description: FQDN entries are in the vocabulary but gated.
+networks:
+  - name: corp
+    cidr: 10.90.10.0/24
+    mode: nat
+    egress:
+      allow: ["updates.example.com:tcp/443"]
+hosts:
+  - name: ws
+    os: { type: linux }
+    image: acme/ws-golden
+    interfaces: [{ network: corp }]
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+```
+
+```
+✗ range.yaml  1 error
+  9:15  networks[0].egress.allow[0]  egress entry 'updates.example.com:tcp/443': FQDN
+                                     targets are not yet realized (use a CIDR for now)
+```
+
+## The attacker
+
+The attacker either boots as a dedicated attack box (declare `interfaces`, optionally `name`, `image`, and `resources`) or starts from a foothold on a declared host (assumed breach):
+
+```yaml
+range:
+  name: foothold
+  description: The attacker starts from a foothold on the web server.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: dmz }]
+
+attacker:
+  host: web
+  entry: assumed-breach
+```
+
+`entry` records how the attacker arrives (`external`, `assumed-breach`, or `operator`) for scorers and dataset builders.
+
+## Defining ranges in Python {#python}
+
+Everything above can be written as typed Python. The models live in `inspect_ranges.types`, construction reads like the YAML (strings coerce to address types, including under strict type checking), and a `RangeSpec` object is accepted directly as sandbox configuration:
+
+```python
+from inspect_ranges.types import (
+    AclRule, Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec, Router,
+)
+
+dmz_pivot = RangeSpec(
+    meta=RangeMeta(name="dmz-pivot", description="DMZ pivot to an internal database."),
+    networks=[
+        Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
+        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+    ],
+    routers=[
+        Router(
+            name="router",
+            interfaces=[
+                Interface(network="dmz", ip="10.80.10.1"),
+                Interface(network="internal", ip="10.80.20.1"),
+            ],
+            acl=[AclRule(from_="dmz", to="internal", allow=["tcp/5432"])],
+        )
+    ],
+    hosts=[
+        Host(name="web", os=Os(type="linux"), image="acme/web-golden",
+             interfaces=[Interface(network="dmz", ip="10.80.10.10")]),
+        Host(name="db", os=Os(type="linux"), image="acme/db-golden",
+             interfaces=[Interface(network="internal")]),
+    ],
+    attacker=Attacker(interfaces=[Interface(network="dmz")], entry="external"),
+)
+```
+
+```python
+Task(..., sandbox=("libvirt_range", dmz_pivot))      # typed configuration
+Task(..., sandbox=("libvirt_range", "range.yaml"))   # file configuration
+```
+
+Three things to know:
+
+- The one spelling divergence from YAML is `AclRule(from_=...)`, since `from` is a Python keyword; the YAML surface keeps `from:`.
+- Models validate fully at construction and stay mutable for programmatic building. Validity is re-established at every consumer boundary (the sandbox revalidates a typed configuration on receipt), so mutating a spec between construction and handoff is safe.
+- Address fields are dual-stack types so IPv6 never requires a migration, but IPv6 values are rejected until their realization lands (see [Boundaries](#boundaries)).
+
+## Validation and diagnostics
+
+`inspect-ranges validate` reports every detectable problem at once, with source positions and actionable hints, because the primary authors of these files are often models and every validate/fix round trip counts:
+
+```yaml
+# invalid-example: several mistakes at once, for the diagnostics below
+range:
+  name: broken
+  description: A definition with several mistakes.
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/33
+    mode: isolated
+hosts:
+  - name: web
+    os: { type: linux }
+    imagee: acme/web-golden
+    interfaces: [{ network: dmz }]
+attacker:
+  interfaces: [{ network: dnz }]
+  entry: external
+```
+
+```
+✗ range.yaml  3 errors
+   7:11  networks[0].cidr   '10.80.10.0/33' is not a valid IPv4 or IPv6 network
+  10:5   hosts[0].image     missing required field
+  12:5   hosts[0].imagee    unknown key 'imagee' (did you mean 'image'?)
+  (cross-reference checks run once the errors above are fixed)
+```
+
+Once a definition validates, `inspect-ranges plan` shows the resolved result (every address, MAC, and control-channel id, plus host requirements and resource totals), and `inspect-ranges render` emits the digest-manifested bundle the runtime realizes:
+
+```{.bash filename="Terminal"}
+inspect-ranges validate range.yaml
+inspect-ranges plan range.yaml
+inspect-ranges render range.yaml -o bundle/
+```
+
+## Boundaries {#boundaries}
+
+The syntax refuses loudly rather than degrading silently. For reviewers, these are the current edges, in three categories:
+
+**Gated**: in the vocabulary, rejected with a specific code until their realization lands.
+
+| Construct | Code |
+|---|---|
+| IPv6 values (any field) | `ipv6-not-realized` |
+| FQDN egress targets | `egress-fqdn-not-realized` |
+| Egress allowlists on router-attached networks | `egress-with-router-not-realized` |
+
+**Excluded**: not in the vocabulary; nothing surveyed forces them yet.
+
+| Construct | Status |
+|---|---|
+| VLANs / trunking on shared bridges | reserved code `vlan-not-supported` |
+| Multiple NICs on one network | rejected as `duplicate-attachment` |
+| Traffic shaping / latency injection | reserved code `shaping-not-supported` |
+
+**Deferred sections**: `attack_path`, `variables`, `defense`, guest configuration, and friends are not networking and are excluded from the schema entirely until their designs land; they are rejected with a pointer to where their content currently lives.
+
+::: {.callout-note}
+## Status and feedback
+
+The networking syntax is schema v0.2. Every construct on this page is realized by the compiler and held to a booted conformance battery. If a network you want to express does not fit this syntax, that is exactly the feedback we are looking for: please share the topology (ideally as a sketch of the `range.yaml` you wish you could write).
+:::
