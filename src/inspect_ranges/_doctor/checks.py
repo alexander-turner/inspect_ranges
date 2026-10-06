@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
-from ._result import CheckResult, CheckStatus
+from .result import CheckResult, CheckStatus
 
 PLATFORM = "Platform"
 VIRTUALIZATION = "Virtualization"

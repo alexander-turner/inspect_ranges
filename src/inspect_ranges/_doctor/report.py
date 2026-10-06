@@ -4,7 +4,7 @@ from itertools import groupby
 
 import click
 
-from ._result import CheckResult, CheckStatus
+from .result import CheckResult, CheckStatus
 
 _SYMBOLS: dict[CheckStatus, tuple[str, str]] = {
     "ok": ("✓", "green"),

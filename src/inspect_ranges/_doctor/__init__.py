@@ -1,8 +1,8 @@
 """Host checks for `inspect-ranges doctor`: can this machine run and develop ranges?"""
 
-from ._checks import run_checks
-from ._report import passed, render_fix_script, render_json, render_text
-from ._result import CheckResult, CheckStatus
+from .checks import run_checks
+from .report import passed, render_fix_script, render_json, render_text
+from .result import CheckResult, CheckStatus
 
 __all__ = [
     "CheckResult",
