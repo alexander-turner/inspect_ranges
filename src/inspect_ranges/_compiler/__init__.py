@@ -4,6 +4,7 @@ This package grows stage by stage with the networking v0.2 slices (see `design/i
 """
 
 from .allocate import Allocation, GuestAllocation, InterfaceAllocation, allocate
+from .dnsmasq import render_dnsmasq_conf, resolvers_for, search_domain
 from .egress import bridge_name, render_egress_nftables
 from .nftables import render_router_nftables
 from .routing import elect_gateways
@@ -15,6 +16,9 @@ __all__ = [
     "allocate",
     "bridge_name",
     "elect_gateways",
+    "render_dnsmasq_conf",
     "render_egress_nftables",
     "render_router_nftables",
+    "resolvers_for",
+    "search_domain",
 ]

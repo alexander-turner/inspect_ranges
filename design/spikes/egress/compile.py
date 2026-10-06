@@ -79,7 +79,7 @@ def main() -> None:
     RENDER.joinpath("nat-gateways.txt").write_text(
         "".join(
             f"{bridge(name)} {ip}/{networks[name].cidr.prefixlen}\n"
-            for name, ip in allocation.nat_gateways.items()
+            for name, ip in allocation.hypervisor_addresses.items()
         )
     )
     RENDER.joinpath("allocation.json").write_text(

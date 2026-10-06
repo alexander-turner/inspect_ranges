@@ -623,6 +623,18 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
         ),
         pytest.param(
             """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: isolated
+                dns: { records: [{ name: ghost }] }
+            """,
+            "dns-record-unresolvable",
+            "networks[0].dns.records[0]",
+            id="dns-record-unresolvable",
+        ),
+        pytest.param(
+            """
             hosts:
               - name: web
                 os: { type: linux }

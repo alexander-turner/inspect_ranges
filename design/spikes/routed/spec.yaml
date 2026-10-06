@@ -1,0 +1,25 @@
+# Routed-egress conformance spec (schema v0.2): un-NATed routed egress, the
+# third egress posture (isolated and nat are proven by earlier batteries).
+range:
+  name: routed
+  schema_version: "0.2"
+  description: >
+    One wide segment with mode routed: guests reach the simulated internet with
+    their real addresses (no NAT), and the upstream can route back in. The
+    attacker's egress none still composes ahead of the posture.
+
+networks:
+  - name: wide
+    cidr: 10.91.10.0/24
+    mode: routed
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: wide }]   # allocated: 10.91.10.10 (hypervisor gateway .1, attacker .2)
+
+attacker:
+  interfaces: [{ network: wide }]
+  entry: assumed-breach
+  egress: none

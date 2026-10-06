@@ -137,12 +137,14 @@ Each construct lands as a vertical slice under the lockstep rule, in dependency 
 
 ### The remaining ledger (committed scope of the plan/render stage; nothing ships undone)
 
-Three v0.1-legacy fields predate the lockstep rule: they are expressible today without a production realization or a booted battery. The plan/render stage (the next phase, which unifies the compiler stages into the realization bundle) is **not complete until this table is empty** — each row is either realized with conformance or explicitly gated, and silent expressibility is eliminated.
+Three v0.1-legacy fields predated the lockstep rule: expressible without a production realization or a booted battery. **All three landed 2026-10-06 — the ledger is empty**; the entire expressible surface is now realized-with-conformance or explicitly gated, with no silent expressibility.
 
-| Construct | Today | Committed realization (slice 5–7) |
+| Construct | Realization (landed) | Battery |
 |---|---|---|
-| `dhcp: true` | expressible, unrealized, ungated | (5) DHCP service in the range (reservations generated from the allocation, per the §8a one-source-of-truth rule), conformance: a DHCP guest receives exactly its allocated address |
-| `mode: routed` | expressible; isolated and nat egress proven, routed never pinned | (6) un-NATed routed egress through the range netns (the egress-battery sibling: forward without masquerade, uplink routes), conformance: allowed flows route with real source addresses, everything else drops |
-| `dns` (`records`, `nameservers`, `authoritative`/`forwarder`) | expressible; authoritative chain demonstrated spike-side (goad-forest), no production stage | (7) DNS rendering as a compiler stage (per-network records/resolvers in the generated guest config; authoritative chains per the goad-forest pattern), conformance: name-based discovery and the chain resolve in a booted range |
+| `dhcp: true` | (5) reservation-only dnsmasq in the range netns, generated from the allocation; DHCP addressing is exactly as deterministic as static | [netsvc](../spikes/netsvc/README.md) 8/8: guests receive exactly their allocated addresses |
+| `mode: routed` | (6) un-NATed two-way forwarding through the range netns; masquerade stays scoped to `mode: nat` subnets | [routed](../spikes/routed/README.md) 7/7: upstream logs real in-range source addresses; attacker `egress: none` still composes ahead |
+| `dns` (`records`, `nameservers`, `authoritative`) | (7) per-network dnsmasq records (derived or explicit) on a reserved hypervisor service address; `resolvers_for` orders authoritative → range service → external; a derived search domain makes single-label discovery work on systemd-resolved guests (`forwarder` remains guest-provisioning, as goad-forest demonstrated) | [netsvc](../spikes/netsvc/README.md): derived and explicit records resolve; resolver ordering verified |
+
+Realization findings recorded by the batteries: records networks need a derived search domain (stub resolvers drop single-label DNS); `.local` zones never reach unicast DNS on systemd-resolved Linux guests (future validator candidate for AD ranges); dhcp/records networks are the second declared exception to "bridges carry no IP" (service address, after nat/routed gateways). New semantic code: `dns-record-unresolvable`.
 
 Deliberately gated forms (loud, not silent — each fails validation with its own code and hint) stay gated until something forces their slice: FQDN egress (`egress-fqdn-not-realized`), IPv6 per construct (`ipv6-not-realized`), egress on router-attached networks (`egress-with-router-not-realized`). Deliberately excluded with reserved codes: VLANs, same-network multi-NIC, traffic shaping.

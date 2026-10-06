@@ -750,6 +750,30 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         for _, name, interfaces in guests
     }
 
+    # dns records without an explicit ip must resolve to a guest on the network
+    for network_index, network in enumerate(spec.networks):
+        if network.dns is None:
+            continue
+        for record_index, record in enumerate(network.dns.records or []):
+            if record.ip is not None:
+                continue
+            if network.name not in guest_networks.get(record.name, set()):
+                issues.append(
+                    Issue(
+                        code="dns-record-unresolvable",
+                        path=(
+                            "networks",
+                            network_index,
+                            "dns",
+                            "records",
+                            record_index,
+                        ),
+                        message=f"dns record {record.name!r} has no ip and names no guest attached to {network.name!r}",
+                        hint=did_you_mean(record.name, sorted(guest_networks))
+                        or "give the record an explicit ip, or name an attached guest",
+                    )
+                )
+
     # routing: static-route validity and per-router reachability (attached + routed)
     reachable: dict[str, set[str]] = {}
     for router_index, router in enumerate(spec.routers):

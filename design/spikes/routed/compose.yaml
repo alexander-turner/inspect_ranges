@@ -1,0 +1,49 @@
+# Egress spike: the range container gets an uplink (eth0 on the simulated
+# internet) because this range legitimately grants egress; an upstream
+# container at a fixed address plays the allowed https host (and an
+# unallowed port 80 listener, for the exactly-the-allowlist check).
+services:
+  range:
+    build: ./range
+    init: true
+    devices:
+      - /dev/kvm
+      - /dev/vhost-vsock
+      - /dev/vhost-net
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      - ${IMAGE_CACHE:-~/.cache/inspect-ranges/images}:/images:ro
+      - scratch:/scratch
+      - ./tmp/render:/render:ro
+    networks:
+      sim_internet:
+        ipv4_address: 198.51.100.2
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  upstream:
+    image: python:3.12-alpine
+    cap_add:
+      - NET_ADMIN
+    command: sh -c "ip route add 10.91.10.0/24 via 198.51.100.2; (python3 -m http.server 443 &); exec python3 -m http.server 80"
+    networks:
+      sim_internet:
+        ipv4_address: 198.51.100.7
+
+networks:
+  sim_internet:
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+
+volumes:
+  scratch:

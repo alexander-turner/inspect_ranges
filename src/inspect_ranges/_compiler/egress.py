@@ -2,7 +2,9 @@
 
 Scoped egress is enforced where the agent cannot reach it: in the range container's network namespace, not on any guest. The forward chain stays default-deny with stateful returns; each `mode: nat` network's allowlist entries become accepts from its bridge to the uplink, and the attacker's own egress policy composes ahead of network policy (an explicit drop for `none`, so a network allowlist never grants the attacker a path; its own entries for a scoped policy). A masquerade rule NATs whatever the filter admitted.
 
-Realization scope (networking-v0.2 §3): routerless `mode: nat` networks; validation gates the router-attached combination (`egress-with-router-not-realized`) and FQDN entries (`egress-fqdn-not-realized`) before this stage runs.
+`mode: routed` networks realize here too: un-NATed, two-way forwarding between the bridge and the uplink (the routed posture; upstream must route the subnet back). `mode: nat` traffic is masqueraded per source subnet, so routed traffic keeps real addresses even when both modes coexist.
+
+Realization scope (networking-v0.2 §3): routerless `mode: nat`/`routed` networks; validation gates the router-attached egress combination (`egress-with-router-not-realized`) and FQDN entries (`egress-fqdn-not-realized`) before this stage runs.
 """
 
 from ipaddress import IPv4Address
@@ -41,15 +43,17 @@ def render_egress_nftables(
     else:
         rules += _entry_rules(spec.attacker.egress, attacker_match, uplink)
 
-    has_egress = isinstance(spec.attacker.egress, EgressPolicy) or (
-        spec.attacker.egress == "open"
-    )
+    nat_subnets: list[str] = []
     for network in spec.networks:
+        bridge = bridge_name(network.name)
+        if network.mode == "routed":
+            rules.append(f'iifname "{bridge}" oifname "{uplink}" accept')
+            rules.append(f'iifname "{uplink}" oifname "{bridge}" accept')
+        if network.mode == "nat":
+            nat_subnets.append(str(network.cidr))
         if network.egress is None:
             continue
-        has_egress = True
-        source = f'iifname "{bridge_name(network.name)}"'
-        rules += _entry_rules(network.egress, source, uplink)
+        rules += _entry_rules(network.egress, f'iifname "{bridge}"', uplink)
 
     lines = [
         "flush ruleset",
@@ -61,12 +65,15 @@ def render_egress_nftables(
         "  }",
         "}",
     ]
-    if has_egress:
+    if nat_subnets:
         lines += [
             "table ip rangenat {",
             "  chain postrouting {",
             "    type nat hook postrouting priority srcnat; policy accept;",
-            f'    oifname "{uplink}" masquerade',
+            *[
+                f'    ip saddr {subnet} oifname "{uplink}" masquerade'
+                for subnet in nat_subnets
+            ],
             "  }",
             "}",
         ]

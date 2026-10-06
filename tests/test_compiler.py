@@ -3,12 +3,16 @@ from ipaddress import IPv4Address
 from inspect_ranges._compiler import (
     allocate,
     elect_gateways,
+    render_dnsmasq_conf,
     render_egress_nftables,
     render_router_nftables,
+    resolvers_for,
 )
 from inspect_ranges.types import (
     AclRule,
     Attacker,
+    DnsConfig,
+    DnsRecord,
     EgressPolicy,
     Host,
     Interface,
@@ -101,7 +105,7 @@ def nat_spec() -> RangeSpec:
 def test_nat_gateway_reserved_and_elected() -> None:
     spec = nat_spec()
     allocation = allocate(spec)
-    assert allocation.nat_gateways == {"corp": IPv4Address("10.90.10.1")}
+    assert allocation.hypervisor_addresses == {"corp": IPv4Address("10.90.10.1")}
     # the reservation precedes guest allocation: attacker lands on .2, host on .10
     assert allocation.addresses("attacker") == [IPv4Address("10.90.10.2")]
     assert allocation.addresses("workstation") == [IPv4Address("10.90.10.10")]
@@ -130,6 +134,102 @@ def test_no_egress_renders_invariants_only() -> None:
     assert "policy drop" in ruleset
     # the attacker's default egress: none still renders its explicit drop
     assert 'ip saddr 10.80.10.2 oifname "eth0" drop' in ruleset
+
+
+def netsvc_spec() -> RangeSpec:
+    return RangeSpec(
+        meta=RangeMeta(name="netsvc-unit", description="dhcp + dns fixture"),
+        networks=[
+            Network(
+                name="lab",
+                cidr="10.95.10.0/24",
+                mode="isolated",
+                dhcp=True,
+                dns=DnsConfig(
+                    records=[
+                        DnsRecord(name="web"),
+                        DnsRecord(name="files.corp.local", ip="10.95.10.200"),
+                    ]
+                ),
+            ),
+            Network(
+                name="net2",
+                cidr="10.95.20.0/24",
+                mode="isolated",
+                dns=DnsConfig(authoritative=["db"], nameservers=["9.9.9.9"]),
+            ),
+        ],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="img",
+                interfaces=[Interface(network="lab")],
+            ),
+            Host(
+                name="db",
+                os=Os(type="linux"),
+                image="img",
+                interfaces=[Interface(network="net2", ip="10.95.20.5")],
+            ),
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+
+
+def test_hypervisor_address_reserved_for_dhcp_and_records_networks() -> None:
+    allocation = allocate(netsvc_spec())
+    # lab needs the dnsmasq service address; net2 (authoritative only) does not
+    assert allocation.hypervisor_addresses == {"lab": IPv4Address("10.95.10.1")}
+    # the reservation precedes guest allocation (attacker lands on .2)
+    assert allocation.addresses("attacker") == [IPv4Address("10.95.10.2")]
+    # isolated networks never get a default gateway, service address or not
+    assert elect_gateways(netsvc_spec(), allocation) == {}
+
+
+def test_dnsmasq_conf_renders_reservations_and_records() -> None:
+    spec = netsvc_spec()
+    allocation = allocate(spec)
+    conf = render_dnsmasq_conf(spec, allocation, "lab")
+    assert conf is not None
+    lines = conf.splitlines()
+    assert "interface=br-lab" in lines
+    assert "no-hosts" in lines and "no-resolv" in lines
+    assert "dhcp-range=10.95.10.0,static" in lines
+    web_mac = allocation.guest("web").interfaces[0].mac
+    assert f"dhcp-host={web_mac},10.95.10.10,web" in lines
+    # the network serves records, so dhcp hands out the service as resolver
+    assert "dhcp-option=option:dns-server,10.95.10.1" in lines
+    # derived record (web's address) and explicit record
+    assert "domain=lab.internal" in lines
+    assert "dhcp-option=option:domain-search,lab.internal" in lines
+    assert "host-record=web,web.lab.internal,10.95.10.10" in lines
+    assert "host-record=files.corp.local,10.95.10.200" in lines
+    # no gateway on an isolated network: no router option
+    assert not any(line.startswith("dhcp-option=option:router") for line in lines)
+    # networks with neither dhcp nor records need no service
+    assert render_dnsmasq_conf(spec, allocation, "net2") is None
+
+
+def test_resolvers_for_orders_authoritative_then_service_then_external() -> None:
+    spec = netsvc_spec()
+    allocation = allocate(spec)
+    assert resolvers_for(spec, allocation, "lab") == [IPv4Address("10.95.10.1")]
+    assert resolvers_for(spec, allocation, "net2") == [
+        IPv4Address("10.95.20.5"),  # authoritative guest first
+        IPv4Address("9.9.9.9"),  # then explicit external nameservers
+    ]
+
+
+def test_routed_mode_renders_two_way_unnatted_forwarding() -> None:
+    spec = nat_spec()
+    spec.networks.append(Network(name="wide", cidr="10.91.10.0/24", mode="routed"))
+    ruleset = render_egress_nftables(spec, allocate(spec))
+    assert 'iifname "br-wide" oifname "eth0" accept' in ruleset
+    assert 'iifname "eth0" oifname "br-wide" accept' in ruleset
+    # masquerade is scoped to the nat subnet: routed traffic keeps real addresses
+    assert 'ip saddr 10.90.10.0/24 oifname "eth0" masquerade' in ruleset
+    assert 'ip saddr 10.91.10.0/24 oifname "eth0" masquerade' not in ruleset
 
 
 def test_transit_router_renders_routed_endpoints_as_subnet_matches() -> None:

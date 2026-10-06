@@ -19,7 +19,12 @@ def elect_gateways(spec: RangeSpec, allocation: Allocation) -> dict[str, IPv4Add
     Returns:
         Gateway addresses for every network with at least one attached router.
     """
-    gateways: dict[str, IPv4Address] = dict(allocation.nat_gateways)
+    gateways: dict[str, IPv4Address] = {
+        network.name: allocation.hypervisor_addresses[network.name]
+        for network in spec.networks
+        if network.mode in ("nat", "routed")
+        and network.name in allocation.hypervisor_addresses
+    }
     for network in spec.networks:
         attached = [
             router
