@@ -1,0 +1,5 @@
+---
+title: inspect_ranges
+description: Loading, validation, and revalidation of range definitions.
+reference: inspect_ranges
+---

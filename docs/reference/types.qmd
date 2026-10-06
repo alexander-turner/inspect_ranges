@@ -1,0 +1,5 @@
+---
+title: Types
+description: Range definition types (`RangeSpec` and friends), usable directly as sandbox configuration.
+reference: inspect_ranges.types
+---
