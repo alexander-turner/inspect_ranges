@@ -28,6 +28,7 @@ from .types import (
     RangeMeta,
     RangeSpec,
     Resources,
+    Route,
     Router,
     semantic_issues,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "RangeMeta",
     "RangeSpec",
     "Resources",
+    "Route",
     "Router",
     "ValidationReport",
     "load_range",

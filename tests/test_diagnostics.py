@@ -139,6 +139,60 @@ def test_acl_rule_shape_codes(acl: str, code: str, tmp_path: Path) -> None:
     assert code in codes(report)
 
 
+def test_chained_routing_validates(tmp_path: Path) -> None:
+    """The chained-routers shape: explicit gateway, static routes, ACL endpoints reached via routes."""
+    report = report_with(
+        """
+        networks:
+          - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+          - { name: core, cidr: 10.80.20.0/24, mode: isolated, gateway: r1 }
+          - { name: vault, cidr: 10.80.30.0/24, mode: isolated }
+        routers:
+          - name: r1
+            interfaces: [{ network: dmz, ip: 10.80.10.1 }, { network: core, ip: 10.80.20.1 }]
+            routes: [{ to: 10.80.30.0/24, via: 10.80.20.2 }]
+            acl: [{ from: dmz, to: vault, allow: [tcp/443] }]
+          - name: r2
+            interfaces: [{ network: core, ip: 10.80.20.2 }, { network: vault, ip: 10.80.30.1 }]
+            routes: [{ to: 10.80.10.0/24, via: 10.80.20.1 }]
+            acl: [{ from: dmz, to: vault, allow: [tcp/443] }]
+        hosts:
+          - name: safe
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: vault }]
+        attacker: { interfaces: [{ network: dmz }], entry: external }
+        """,
+        tmp_path,
+    )
+    assert report.valid, [issue.message for issue in report.issues]
+
+
+def test_route_does_not_relax_unrouted_acl_endpoints(tmp_path: Path) -> None:
+    """Without the covering route, a transit router's ACL endpoint stays rejected."""
+    report = report_with(
+        """
+        networks:
+          - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+          - { name: core, cidr: 10.80.20.0/24, mode: isolated }
+          - { name: vault, cidr: 10.80.30.0/24, mode: isolated }
+        routers:
+          - name: r2
+            interfaces: [{ network: core, ip: 10.80.20.2 }, { network: vault }]
+            acl: [{ from: dmz, to: vault, allow: [tcp/443] }]
+        hosts:
+          - name: safe
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: vault }]
+        attacker: { interfaces: [{ network: dmz }], entry: external }
+        """,
+        tmp_path,
+    )
+    issue = next(i for i in report.issues if i.code == "acl-unattached-network")
+    assert issue.path_str == "routers[0].acl[0].from"
+
+
 def test_acl_v2_constructs_validate(tmp_path: Path) -> None:
     acl = (
         "[{ from: lab, to: web, deny: [tcp/22] },"
@@ -438,6 +492,58 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "undeclared-attacker-host",
             "attacker.host",
             id="undeclared-attacker-host",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r1
+                interfaces: [{ network: lab }, { network: dmz }]
+              - name: r2
+                interfaces: [{ network: lab }, { network: dmz }]
+            """,
+            "ambiguous-gateway",
+            "networks[0]",
+            id="ambiguous-gateway",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated, gateway: ghost }
+            """,
+            "undeclared-gateway",
+            "networks[0].gateway",
+            id="undeclared-gateway",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+                routes: [{ to: 10.0.2.0/24, via: 10.0.9.1 }]
+            """,
+            "unreachable-route",
+            "routers[0].routes[0].via",
+            id="unreachable-route",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+                routes: [{ to: 'fd00::/8', via: 10.0.0.1 }]
+            """,
+            "ipv6-not-realized",
+            "routers[0].routes[0].to",
+            id="ipv6-gate-route",
         ),
         pytest.param(
             "networks: [{ name: lab, cidr: 'fd00::/8', mode: isolated }]",

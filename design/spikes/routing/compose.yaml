@@ -1,0 +1,28 @@
+# Networking spike: one range container realizing a compiled two-segment
+# topology (4 VMs: router, web, db, agent). All control is vsock; the only
+# networks are the range's own bridges inside the container netns.
+services:
+  range:
+    build: ./range
+    init: true
+    devices:
+      - /dev/kvm
+      - /dev/vhost-vsock
+      - /dev/vhost-net
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN   # bridges + nft inside this container's netns only
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - ${IMAGE_CACHE:-~/.cache/inspect-ranges/images}:/images:ro
+      - scratch:/scratch
+      - ./tmp/render:/render:ro
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  scratch:

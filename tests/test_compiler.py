@@ -1,6 +1,6 @@
 from ipaddress import IPv4Address
 
-from inspect_ranges._compiler import allocate, render_router_nftables
+from inspect_ranges._compiler import allocate, elect_gateways, render_router_nftables
 from inspect_ranges.types import (
     AclRule,
     Attacker,
@@ -10,8 +10,66 @@ from inspect_ranges.types import (
     Os,
     RangeMeta,
     RangeSpec,
+    Route,
     Router,
 )
+
+
+def chained_spec() -> RangeSpec:
+    return RangeSpec(
+        meta=RangeMeta(name="chained-unit", description="two routers in a chain"),
+        networks=[
+            Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
+            Network(name="core", cidr="10.80.20.0/24", mode="isolated", gateway="r1"),
+            Network(name="vault", cidr="10.80.30.0/24", mode="isolated"),
+        ],
+        routers=[
+            Router(
+                name="r1",
+                interfaces=[
+                    Interface(network="dmz", ip="10.80.10.1"),
+                    Interface(network="core", ip="10.80.20.1"),
+                ],
+                routes=[Route(to="10.80.30.0/24", via="10.80.20.2")],
+                acl=[AclRule(from_="dmz", to="vault", allow=["tcp/443"])],
+            ),
+            Router(
+                name="r2",
+                interfaces=[
+                    Interface(network="core", ip="10.80.20.2"),
+                    Interface(network="vault", ip="10.80.30.1"),
+                ],
+                routes=[Route(to="10.80.10.0/24", via="10.80.20.1")],
+                acl=[AclRule(from_="dmz", to="vault", allow=["tcp/443"])],
+            ),
+        ],
+        hosts=[
+            Host(
+                name="safe",
+                os=Os(type="linux"),
+                image="img",
+                interfaces=[Interface(network="vault")],
+            ),
+        ],
+        attacker=Attacker(interfaces=[Interface(network="dmz")], entry="external"),
+    )
+
+
+def test_gateway_election_implicit_and_explicit() -> None:
+    spec = chained_spec()
+    gateways = elect_gateways(spec, allocate(spec))
+    assert gateways == {
+        "dmz": IPv4Address("10.80.10.1"),  # single attached router, implicit
+        "core": IPv4Address("10.80.20.1"),  # two routers, explicit gateway: r1
+        "vault": IPv4Address("10.80.30.1"),  # single attached router, implicit
+    }
+
+
+def test_transit_router_renders_routed_endpoints_as_subnet_matches() -> None:
+    spec = chained_spec()
+    ruleset = render_router_nftables(spec, "r2", allocate(spec))
+    # dmz is not attached to r2: the rendered rule matches its subnet, not an interface
+    assert 'ip saddr 10.80.10.0/24 oifname "eth1" tcp dport 443 accept' in ruleset
 
 
 def two_segment_spec() -> RangeSpec:

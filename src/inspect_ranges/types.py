@@ -44,6 +44,7 @@ __all__ = [
     "RangeMeta",
     "RangeSpec",
     "Resources",
+    "Route",
     "Router",
     "ValidationReport",
     "semantic_issues",
@@ -138,6 +139,9 @@ class Network(_StrictModel):
     dns: DnsConfig | None = None
     """DNS behavior on this network."""
 
+    gateway: str | None = None
+    """The router that is this network's default gateway; required only when more than one router attaches (a single attached router is elected implicitly)."""
+
     if TYPE_CHECKING:
         # static signature only: address fields also accept strings (runtime-coerced by pydantic)
         def __init__(
@@ -148,6 +152,7 @@ class Network(_StrictModel):
             mode: Literal["isolated", "nat", "routed"],
             dhcp: bool = False,
             dns: DnsConfig | None = None,
+            gateway: str | None = None,
         ) -> None: ...
 
 
@@ -260,6 +265,22 @@ class AclRule(_StrictModel):
         return self
 
 
+class Route(_StrictModel):
+    """A static route on a router, for traffic to segments it reaches through another router."""
+
+    to: AnyIPNetwork
+    """Destination subnet."""
+
+    via: AnyIPAddress
+    """Next hop; must be an address inside one of the router's attached networks."""
+
+    if TYPE_CHECKING:
+        # static signature only: address fields also accept strings (runtime-coerced by pydantic)
+        def __init__(
+            self, *, to: AnyIPNetwork | str, via: AnyIPAddress | str
+        ) -> None: ...
+
+
 class Router(_StrictModel):
     """A gateway guest joining two or more networks, carrying the inter-segment ACL."""
 
@@ -278,8 +299,11 @@ class Router(_StrictModel):
     interfaces: list[Interface] = Field(min_length=2)
     """One attachment per joined network (at least two)."""
 
+    routes: list[Route] = []
+    """Static routes to segments reached through other routers."""
+
     acl: list[AclRule] = []
-    """Inter-segment policy enforced on this router (default-deny, stateful)."""
+    """Inter-segment policy enforced on this router (default-deny, stateful; endpoints may be routed, not only attached)."""
 
 
 class Host(_StrictModel):
@@ -596,8 +620,91 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         for _, name, interfaces in guests
     }
 
+    # routing: static-route validity and per-router reachability (attached + routed)
+    reachable: dict[str, set[str]] = {}
     for router_index, router in enumerate(spec.routers):
         router_networks = {interface.network for interface in router.interfaces}
+        attached_subnets = [
+            networks[name].cidr
+            for name in router_networks
+            if name in networks and isinstance(networks[name].cidr, IPv4Network)
+        ]
+        routed: set[str] = set()
+        for route_index, route in enumerate(router.routes):
+            route_path: tuple[PathElement, ...] = (
+                "routers",
+                router_index,
+                "routes",
+                route_index,
+            )
+            if isinstance(route.to, IPv6Network) or isinstance(route.via, IPv6Address):
+                if isinstance(route.to, IPv6Network):
+                    issues.append(
+                        _ipv6_gate(
+                            route_path + ("to",),
+                            f"router {router.name!r} route destination",
+                            route.to,
+                        )
+                    )
+                if isinstance(route.via, IPv6Address):
+                    issues.append(
+                        _ipv6_gate(
+                            route_path + ("via",),
+                            f"router {router.name!r} route next hop",
+                            route.via,
+                        )
+                    )
+                continue
+            if not any(route.via in subnet for subnet in attached_subnets):
+                issues.append(
+                    Issue(
+                        code="unreachable-route",
+                        path=route_path + ("via",),
+                        message=f"router {router.name!r} route next hop {route.via} is not inside any attached network",
+                        hint="the next hop must be an address on a network this router attaches to",
+                    )
+                )
+            for network_name, network in networks.items():
+                if isinstance(network.cidr, IPv4Network) and network.cidr.subnet_of(
+                    route.to
+                ):
+                    routed.add(network_name)
+        reachable[router.name] = router_networks | routed
+
+    # gateway election: implicit with one attached router, declared with more
+    for network_index, network in enumerate(spec.networks):
+        attached_routers = [
+            router.name
+            for router in spec.routers
+            if any(interface.network == network.name for interface in router.interfaces)
+        ]
+        if network.gateway is not None:
+            if network.gateway not in attached_routers:
+                issues.append(
+                    Issue(
+                        code="undeclared-gateway",
+                        path=("networks", network_index, "gateway"),
+                        message=f"network {network.name!r} gateway {network.gateway!r} is not a router attached to it",
+                        hint=did_you_mean(network.gateway, attached_routers)
+                        or (
+                            f"attached routers: {', '.join(attached_routers)}"
+                            if attached_routers
+                            else "no router attaches to this network"
+                        ),
+                    )
+                )
+        elif len(attached_routers) > 1:
+            issues.append(
+                Issue(
+                    code="ambiguous-gateway",
+                    path=("networks", network_index),
+                    message=f"network {network.name!r} attaches more than one router ({', '.join(attached_routers)}) and declares no gateway",
+                    hint="set gateway: to one of the attached routers",
+                )
+            )
+
+    for router_index, router in enumerate(spec.routers):
+        router_reachable = reachable[router.name]
         for rule_index, rule in enumerate(router.acl):
             rule_path: tuple[PathElement, ...] = (
                 "routers",
@@ -636,22 +743,22 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                             cidr,
                         )
                     )
-                elif kind == "network" and endpoint not in router_networks:
+                elif kind == "network" and endpoint not in router_reachable:
                     issues.append(
                         Issue(
                             code="acl-unattached-network",
                             path=rule_path + (key,),
-                            message=f"router {router.name!r} ACL references network {endpoint!r} it is not attached to",
+                            message=f"router {router.name!r} ACL references network {endpoint!r} it neither attaches nor routes to",
                         )
                     )
                 elif kind == "guest" and not (
-                    guest_networks[endpoint] & router_networks
+                    guest_networks[endpoint] & router_reachable
                 ):
                     issues.append(
                         Issue(
                             code="acl-unattached-network",
                             path=rule_path + (key,),
-                            message=f"router {router.name!r} ACL references guest {endpoint!r}, which shares no network with it",
+                            message=f"router {router.name!r} ACL references guest {endpoint!r}, which is on no network this router attaches or routes to",
                         )
                     )
             if rule.from_ == rule.to:

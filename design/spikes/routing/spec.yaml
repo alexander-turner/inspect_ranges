@@ -1,0 +1,41 @@
+# Routing conformance spec (schema v0.2): three segments chained through two routers.
+range:
+  name: routing
+  schema_version: "0.2"
+  description: >
+    dmz - r1 - core - r2 - vault. Exercises explicit gateway election on the
+    shared core segment, static routes on both routers, and ACLs whose
+    endpoints are routed rather than attached (each transit router enforces
+    its own policy).
+
+networks:
+  - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+  - { name: core, cidr: 10.80.20.0/24, mode: isolated, gateway: r1 }
+  - { name: vault, cidr: 10.80.30.0/24, mode: isolated }
+
+routers:
+  - name: r1
+    interfaces: [{ network: dmz, ip: 10.80.10.1 }, { network: core, ip: 10.80.20.1 }]
+    routes: [{ to: 10.80.30.0/24, via: 10.80.20.2 }]
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }
+      - { from: core, to: dmz, allow: [icmp] }
+  - name: r2
+    interfaces: [{ network: core, ip: 10.80.20.2 }, { network: vault, ip: 10.80.30.1 }]
+    routes: [{ to: 10.80.10.0/24, via: 10.80.20.1 }]
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }
+
+hosts:
+  - name: app
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: core }]      # allocated: 10.80.20.10
+  - name: safe
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: vault }]     # allocated: 10.80.30.10
+
+attacker:
+  interfaces: [{ network: dmz }]         # allocated: 10.80.10.2
+  entry: external
