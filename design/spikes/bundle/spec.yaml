@@ -1,0 +1,46 @@
+# Bundle conformance spec (schema v0.2): combined coverage realized purely from
+# a rendered bundle: ACL v2 (deny carve-out, guest + CIDR endpoints, icmp) plus
+# DHCP reservations and range-served DNS records on the dmz.
+range:
+  name: bundle
+  schema_version: "0.2"
+  description: >
+    Two segments joined by a router carrying the full ACL v2 vocabulary; the
+    dmz addresses its guests via DHCP reservations and serves name records.
+    Realized from a rendered realization bundle by a generic applier.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+    dhcp: true
+    dns:
+      records:
+        - { name: web }
+        - { name: files.corp.example, ip: 10.80.10.200 }
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      - { from: dmz, to: db, deny: [tcp/22] }
+      - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
+      - { from: web, to: internal, allow: [tcp/80] }
+      - { from: 10.80.10.3/32, to: internal, allow: [tcp/8080] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: internal }]   # allocated: 10.80.20.10
+
+attacker:
+  interfaces: [{ network: dmz }]          # allocated: 10.80.10.3 (router .1? service .2?)
+  entry: external

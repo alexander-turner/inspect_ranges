@@ -7,18 +7,26 @@ from .allocate import Allocation, GuestAllocation, InterfaceAllocation, allocate
 from .dnsmasq import render_dnsmasq_conf, resolvers_for, search_domain
 from .egress import bridge_name, render_egress_nftables
 from .nftables import render_router_nftables
+from .plan import ImageRef, PlanOptions, ResolvedPlan, plan_json, resolve_plan
+from .render import render_bundle
 from .routing import elect_gateways
 
 __all__ = [
     "Allocation",
     "GuestAllocation",
+    "ImageRef",
+    "PlanOptions",
+    "ResolvedPlan",
     "InterfaceAllocation",
     "allocate",
     "bridge_name",
     "elect_gateways",
+    "plan_json",
+    "render_bundle",
     "render_dnsmasq_conf",
     "render_egress_nftables",
     "render_router_nftables",
     "resolvers_for",
+    "resolve_plan",
     "search_domain",
 ]

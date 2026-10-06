@@ -42,6 +42,41 @@ def test_validate_json_contract(tmp_path: Path) -> None:
     assert issue["line"] == 2
 
 
+def test_plan_json_contract(tmp_path: Path) -> None:
+    result = CliRunner().invoke(ranges, ["plan", EXAMPLE, "--json"])
+    assert result.exit_code == 0
+    plan = json.loads(result.output)
+    assert plan["format_version"] == "1"
+    assert plan["range"]["name"] == "vulhub-zabbix"
+    assert plan["totals"]["guests"] == len(plan["guests"])
+
+
+def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    spec = Path(__file__).parent.parent / "design/spikes/acl-v2/spec.yaml"
+    (cache / "noble-range-guest.qcow2").write_bytes(b"fake")
+    out = tmp_path / "bundle"
+    result = CliRunner().invoke(
+        ranges,
+        ["render", str(spec), "-o", str(out), "--image-cache", str(cache)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "bundle sha256:" in result.output
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert "plan.json" in manifest["files"]
+
+
+def test_plan_refuses_windows_examples() -> None:
+    goad = str(
+        Path(__file__).parent.parent
+        / "design/inspect-ranges/ranges/goad-light/range.yaml"
+    )
+    result = CliRunner().invoke(ranges, ["plan", goad])
+    assert result.exit_code == 1
+    assert "windows-render-not-supported" in result.output or "Windows guest" in result.output
+
+
 def test_devbox_command_registered() -> None:
     result = CliRunner().invoke(ranges, ["devbox", "--help"])
     assert result.exit_code == 0

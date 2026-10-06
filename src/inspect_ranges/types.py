@@ -40,6 +40,7 @@ __all__ = [
     "Host",
     "Interface",
     "Issue",
+    "IssueError",
     "Network",
     "Os",
     "RangeMeta",

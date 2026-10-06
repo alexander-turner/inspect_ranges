@@ -97,6 +97,7 @@ addopts = "-n auto"
 
 [tool.pyright]
 include = ["src", "tests"]
+extraPaths = ["."]
 typeCheckingMode = "strict"
 pythonPlatform = "All"
 
