@@ -129,6 +129,20 @@ Construction ergonomics (level-set 2026-10-06, verified against the implemented 
 - **Models stay mutable** for flexible programmatic construction; valid-by-construction is therefore a point-in-time property, not an invariant. The compensating contract: **every consumer boundary revalidates**. When a `RangeSpec` object is passed as sandbox config, the provider round-trips it through `model_validate` (catching semantic drift and type-unsafe mutations alike) before compiling; `validate` and the compiler do the same for any typed input. Mutating between construction and handoff is safe and supported.
 - **`RangeSpec` is the canonical public name** (the overview's earlier `Range` wording is updated); no alias.
 
-## 9. Implementation path (the follow-on, not this record)
+## 9. Implementation path
 
 Each construct lands as a vertical slice under the lockstep rule, in dependency order: (0) public spec API — top-level exports, reference docs for every model, and the dual-form config contract stated in the provider design; (1) dual-stack types + gates and name disjointness (schema-only semantics, no realization needed); (2) ACL v2 with plan-time endpoint resolution — this forces the allocation stage design and is why this record precedes it; (3) routing (gateway election + static routes) with the two-hop conformance battery; (4) scoped CIDR egress with the NAT conformance spike; FQDN egress and IPv6 stay gated until their slices.
+
+**Status (2026-10-06): slices 0–4 are landed**, each with its booted conformance battery (spikes `acl-v2`, `routing`, `egress`; batteries 11/11, 9/9, 8/8).
+
+### The remaining ledger (committed scope of the plan/render stage; nothing ships undone)
+
+Three v0.1-legacy fields predate the lockstep rule: they are expressible today without a production realization or a booted battery. The plan/render stage (the next phase, which unifies the compiler stages into the realization bundle) is **not complete until this table is empty** — each row is either realized with conformance or explicitly gated, and silent expressibility is eliminated.
+
+| Construct | Today | Committed realization (slice 5–7) |
+|---|---|---|
+| `dhcp: true` | expressible, unrealized, ungated | (5) DHCP service in the range (reservations generated from the allocation, per the §8a one-source-of-truth rule), conformance: a DHCP guest receives exactly its allocated address |
+| `mode: routed` | expressible; isolated and nat egress proven, routed never pinned | (6) un-NATed routed egress through the range netns (the egress-battery sibling: forward without masquerade, uplink routes), conformance: allowed flows route with real source addresses, everything else drops |
+| `dns` (`records`, `nameservers`, `authoritative`/`forwarder`) | expressible; authoritative chain demonstrated spike-side (goad-forest), no production stage | (7) DNS rendering as a compiler stage (per-network records/resolvers in the generated guest config; authoritative chains per the goad-forest pattern), conformance: name-based discovery and the chain resolve in a booted range |
+
+Deliberately gated forms (loud, not silent — each fails validation with its own code and hint) stay gated until something forces their slice: FQDN egress (`egress-fqdn-not-realized`), IPv6 per construct (`ipv6-not-realized`), egress on router-attached networks (`egress-with-router-not-realized`). Deliberately excluded with reserved codes: VLANs, same-network multi-NIC, traffic shaping.
