@@ -100,6 +100,55 @@ def test_dual_stack_union_error_collapses_to_one_issue(tmp_path: Path) -> None:
     assert "IPv4 or IPv6 network" in report.issues[0].message
 
 
+ACL_BASE = """
+networks:
+  - {{ name: lab, cidr: 10.0.0.0/24, mode: isolated }}
+  - {{ name: dmz, cidr: 10.0.1.0/24, mode: isolated }}
+hosts:
+  - name: web
+    os: {{ type: linux }}
+    image: img
+    interfaces: [{{ network: dmz, ip: 10.0.1.10 }}]
+routers:
+  - name: r
+    interfaces: [{{ network: lab }}, {{ network: dmz }}]
+    acl: {acl}
+"""
+
+
+@pytest.mark.parametrize(
+    ("acl", "code"),
+    [
+        pytest.param(
+            "[{ from: lab, to: dmz, allow: [tcp/80], deny: [tcp/22] }]",
+            "invalid-deny-rule",
+            id="both-allow-and-deny",
+        ),
+        pytest.param(
+            "[{ from: lab, to: dmz }]", "invalid-deny-rule", id="neither-allow-nor-deny"
+        ),
+        pytest.param(
+            "[{ from: lab, to: dmz, allow: [icmp/8] }]",
+            "invalid-icmp-rule",
+            id="icmp-with-port",
+        ),
+    ],
+)
+def test_acl_rule_shape_codes(acl: str, code: str, tmp_path: Path) -> None:
+    report = report_with(ACL_BASE.format(acl=acl), tmp_path)
+    assert code in codes(report)
+
+
+def test_acl_v2_constructs_validate(tmp_path: Path) -> None:
+    acl = (
+        "[{ from: lab, to: web, deny: [tcp/22] },"
+        " { from: lab, to: dmz, allow: [tcp/22, icmp] },"
+        " { from: 0.0.0.0/0, to: 10.0.1.10/32, allow: [tcp/443] }]"
+    )
+    report = report_with(ACL_BASE.format(acl=acl), tmp_path)
+    assert report.valid, [issue.message for issue in report.issues]
+
+
 def test_invalid_allow_entry_path_is_rerooted(tmp_path: Path) -> None:
     report = report_with(
         """
@@ -278,9 +327,57 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
                 interfaces: [{ network: lab }, { network: dmz }]
                 acl: [{ from: lab, to: wan, allow: [] }]
             """,
-            "acl-undeclared-network",
+            "acl-endpoint-unknown",
             "routers[0].acl[0].to",
-            id="acl-undeclared-network",
+            id="acl-endpoint-unknown",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+                acl: [{ from: lab, to: 10.0.1.5/24, allow: [tcp/80] }]
+            """,
+            "acl-endpoint-unknown",
+            "routers[0].acl[0].to",
+            id="acl-endpoint-bad-cidr",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+              - { name: far, cidr: 10.0.2.0/24, mode: isolated }
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: far }]
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+                acl: [{ from: lab, to: web, allow: [tcp/80] }]
+            """,
+            "acl-unattached-network",
+            "routers[0].acl[0].to",
+            id="acl-unattached-guest",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+                acl: [{ from: lab, to: "fd00::/8", allow: [tcp/80] }]
+            """,
+            "ipv6-not-realized",
+            "routers[0].acl[0].to",
+            id="acl-ipv6-cidr-endpoint-gated",
         ),
         pytest.param(
             """

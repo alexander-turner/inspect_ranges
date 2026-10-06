@@ -10,7 +10,7 @@ v0.1 deliberately covers only the five sections the runtime consumes — `range`
 """
 
 import re
-from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_network
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -49,7 +49,7 @@ __all__ = [
     "semantic_issues",
 ]
 
-_ALLOW_RULE = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$")
+_SERVICE_ENTRY = re.compile(r"^(tcp|udp)/(\d{1,5})(?:-(\d{1,5}))?$")
 
 
 class _StrictModel(BaseModel):
@@ -194,44 +194,67 @@ class Resources(_StrictModel):
 
 
 class AclRule(_StrictModel):
-    """One allow rule on a router: new connections `from` one network `to` another.
+    """One ordered rule on a router, carrying exactly one of `allow:` or `deny:`.
 
-    Semantics are default-deny and stateful: anything not allowed is dropped, return traffic of allowed flows always passes. In typed construction the source field is spelled `from_` (the YAML surface keeps `from:`).
+    Rules evaluate first-match in list order against new connections `from` one endpoint `to` another; anything no rule matches is dropped (default-deny), and return traffic of allowed flows always passes (stateful). Endpoints are a network name, a guest name (resolved to its allocated addresses at plan time), or a CIDR (`/32` for a literal host, `0.0.0.0/0` for any). `deny` exists for carve-outs inside a broader allow. In typed construction the source field is spelled `from_` (the YAML surface keeps `from:`).
     """
 
     from_: str = Field(validation_alias="from", serialization_alias="from")
-    """Source network name (`from:` in YAML; `from_=` in typed construction)."""
+    """Source endpoint: network name, guest name, or CIDR (`from:` in YAML; `from_=` in typed construction)."""
 
     to: str
-    """Destination network name."""
+    """Destination endpoint: network name, guest name, or CIDR."""
 
-    allow: list[str]
-    """Allowed services as `proto/port` or `proto/lo-hi` entries, e.g. `tcp/5432`, `tcp/1-65535`; empty allows nothing."""
+    allow: list[str] | None = None
+    """Services to allow, as `proto/port`, `proto/lo-hi`, or `icmp` entries, e.g. `tcp/5432`, `tcp/1-65535`; empty allows nothing."""
+
+    deny: list[str] | None = None
+    """Services to drop at this point in the rule order (same entry syntax as `allow`)."""
 
     @model_validator(mode="after")
-    def _check_allow_entries(self) -> "AclRule":
+    def _check_entries(self) -> "AclRule":
         issues: list[Issue] = []
-        for index, entry in enumerate(self.allow):
-            match = _ALLOW_RULE.match(entry)
-            if match is None:
-                issues.append(
-                    Issue(
-                        code="invalid-allow-entry",
-                        path=("allow", index),
-                        message=f"ACL allow entry {entry!r} must be proto/port or proto/lo-hi, e.g. tcp/5432",
-                    )
+        if (self.allow is None) == (self.deny is None):
+            issues.append(
+                Issue(
+                    code="invalid-deny-rule",
+                    path=(),
+                    message="ACL rule must carry exactly one of allow: or deny:",
                 )
-                continue
-            low = int(match.group(2))
-            high = int(match.group(3)) if match.group(3) else low
-            if not 0 < low <= high < 65536:
-                issues.append(
-                    Issue(
-                        code="invalid-allow-entry",
-                        path=("allow", index),
-                        message=f"ACL allow entry {entry!r} has an invalid port range",
+            )
+        for field_name, entries in (("allow", self.allow), ("deny", self.deny)):
+            for index, entry in enumerate(entries or []):
+                if entry == "icmp":
+                    continue
+                if entry.startswith("icmp"):
+                    issues.append(
+                        Issue(
+                            code="invalid-icmp-rule",
+                            path=(field_name, index),
+                            message=f"ACL entry {entry!r}: icmp takes no port; write it as bare `icmp`",
+                        )
                     )
-                )
+                    continue
+                match = _SERVICE_ENTRY.match(entry)
+                if match is None:
+                    issues.append(
+                        Issue(
+                            code="invalid-allow-entry",
+                            path=(field_name, index),
+                            message=f"ACL {field_name} entry {entry!r} must be proto/port, proto/lo-hi, or icmp, e.g. tcp/5432",
+                        )
+                    )
+                    continue
+                low = int(match.group(2))
+                high = int(match.group(3)) if match.group(3) else low
+                if not 0 < low <= high < 65536:
+                    issues.append(
+                        Issue(
+                            code="invalid-allow-entry",
+                            path=(field_name, index),
+                            message=f"ACL {field_name} entry {entry!r} has an invalid port range",
+                        )
+                    )
         if issues:
             raise IssueError(issues)
         return self
@@ -367,6 +390,37 @@ class RangeSpec(_StrictModel):
         if issues:
             raise IssueError(issues)
         return self
+
+
+EndpointKind = Literal["network", "guest", "cidr", "unknown"]
+"""How an ACL endpoint resolved: a declared network, a declared guest, a CIDR literal, or nothing."""
+
+
+def endpoint_kind(
+    endpoint: str,
+    networks: dict[str, Network],
+    guest_networks: dict[str, set[str]],
+) -> tuple[EndpointKind, AnyIPNetwork | None]:
+    """Classify an ACL endpoint against the declared names, falling back to CIDR parsing.
+
+    Networks and guests share one namespace (`name-collision` enforces disjointness), so resolution order cannot be ambiguous. A bare address parses as its `/32` (or `/128`) network.
+
+    Args:
+        endpoint: The `from`/`to` value of an ACL rule.
+        networks: Declared networks by name.
+        guest_networks: Each guest's attached network names, by guest name.
+
+    Returns:
+        The kind, plus the parsed network when the endpoint is a CIDR.
+    """
+    if endpoint in networks:
+        return "network", None
+    if endpoint in guest_networks:
+        return "guest", None
+    try:
+        return "cidr", ip_network(endpoint)
+    except ValueError:
+        return "unknown", None
 
 
 def _ipv6_gate(
@@ -537,6 +591,11 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                     )
                 )
 
+    guest_networks = {
+        name: {interface.network for interface in interfaces}
+        for _, name, interfaces in guests
+    }
+
     for router_index, router in enumerate(spec.routers):
         router_networks = {interface.network for interface in router.interfaces}
         for rule_index, rule in enumerate(router.acl):
@@ -547,16 +606,37 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 rule_index,
             )
             for key, endpoint in (("from", rule.from_), ("to", rule.to)):
-                if endpoint not in networks:
+                kind, cidr = endpoint_kind(endpoint, networks, guest_networks)
+                if kind == "unknown":
+                    if "/" in endpoint:
+                        issues.append(
+                            Issue(
+                                code="acl-endpoint-unknown",
+                                path=rule_path + (key,),
+                                message=f"router {router.name!r} ACL endpoint {endpoint!r} is not a valid CIDR",
+                                hint="use the network address (host bits must be zero), e.g. 10.0.0.0/24",
+                            )
+                        )
+                    else:
+                        issues.append(
+                            Issue(
+                                code="acl-endpoint-unknown",
+                                path=rule_path + (key,),
+                                message=f"router {router.name!r} ACL endpoint {endpoint!r} matches no declared network, guest, or CIDR",
+                                hint=did_you_mean(
+                                    endpoint, network_names + sorted(guest_networks)
+                                ),
+                            )
+                        )
+                elif kind == "cidr" and isinstance(cidr, IPv6Network):
                     issues.append(
-                        Issue(
-                            code="acl-undeclared-network",
-                            path=rule_path + (key,),
-                            message=f"router {router.name!r} ACL references undeclared network {endpoint!r}",
-                            hint=did_you_mean(endpoint, network_names),
+                        _ipv6_gate(
+                            rule_path + (key,),
+                            f"router {router.name!r} ACL endpoint",
+                            cidr,
                         )
                     )
-                elif endpoint not in router_networks:
+                elif kind == "network" and endpoint not in router_networks:
                     issues.append(
                         Issue(
                             code="acl-unattached-network",
@@ -564,19 +644,25 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                             message=f"router {router.name!r} ACL references network {endpoint!r} it is not attached to",
                         )
                     )
+                elif kind == "guest" and not (
+                    guest_networks[endpoint] & router_networks
+                ):
+                    issues.append(
+                        Issue(
+                            code="acl-unattached-network",
+                            path=rule_path + (key,),
+                            message=f"router {router.name!r} ACL references guest {endpoint!r}, which shares no network with it",
+                        )
+                    )
             if rule.from_ == rule.to:
                 issues.append(
                     Issue(
                         code="acl-same-segment",
                         path=rule_path,
-                        message=f"router {router.name!r} ACL rule from/to are both {rule.to!r}: same-segment traffic does not traverse the router",
+                        message=f"router {router.name!r} ACL rule from/to are both {rule.to!r}: traffic between identical endpoints does not traverse the router",
                     )
                 )
 
-    guest_networks = {
-        name: {interface.network for interface in interfaces}
-        for _, name, interfaces in guests
-    }
     for network_index, network in enumerate(spec.networks):
         if network.dns is None or not network.dns.authoritative:
             continue

@@ -1,0 +1,38 @@
+# ACL v2 conformance spec (schema v0.2): every endpoint form and verdict in one topology.
+range:
+  name: acl-v2
+  schema_version: "0.2"
+  description: >
+    Two segments joined by a router whose ACL exercises every v2 construct: a deny
+    carve-out ahead of a broader allow (first-match), a guest source endpoint, a
+    CIDR source endpoint, and icmp.
+
+networks:
+  - { name: dmz, cidr: 10.80.10.0/24, mode: isolated }
+  - { name: internal, cidr: 10.80.20.0/24, mode: isolated }
+
+routers:
+  - name: router
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      # carve-out: ssh to the db host is dropped even though the next rule allows tcp/22
+      - { from: dmz, to: db, deny: [tcp/22] }
+      - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
+      # guest endpoint: only web may open tcp/80 into internal
+      - { from: web, to: internal, allow: [tcp/80] }
+      # CIDR endpoint: only the attacker's allocated /32 may open tcp/8080
+      - { from: 10.80.10.2/32, to: internal, allow: [tcp/8080] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: internal }]   # allocated: 10.80.20.10
+
+attacker:
+  interfaces: [{ network: dmz }]          # allocated: 10.80.10.2
+  entry: external
