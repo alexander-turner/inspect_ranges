@@ -112,6 +112,16 @@ Added to the diagnostics registry as the v0.2 slices land: `name-collision`, `am
 
 `schema_version: "0.2"`. Fully additive: every valid v0.1 spec is a valid v0.2 spec with identical semantics (v0.1 ACL lists are the all-allow, network-endpoint case, where order is immaterial; `egress: none|open` and absent `gateway`/`routes` keep their meanings). The six examples migrate by changing only the version literal. One new constraint can invalidate pathological v0.1 specs: network/guest name disjointness (`name-collision`); none of the six collides.
 
-## 8. Implementation path (the follow-on, not this record)
+## 8. Public spec API (typed sandbox configuration)
 
-Each construct lands as a vertical slice under the lockstep rule, in dependency order: (1) dual-stack types + gates and name disjointness (schema-only semantics, no realization needed); (2) ACL v2 with plan-time endpoint resolution — this forces the allocation stage design and is why this record precedes it; (3) routing (gateway election + static routes) with the two-hop conformance battery; (4) scoped CIDR egress with the NAT conformance spike; FQDN egress and IPv6 stay gated until their slices.
+The sandbox configuration is `str | RangeSpec`: a `range.yaml` path or a fully realized pydantic object, matching Inspect's sandbox contract (`SandboxEnvironmentConfigType` is `BaseModel | str`) and the precedent set by the Docker, k8s, and Proxmox sandboxes. `sandbox=("libvirt_range", RangeSpec(...))` and `sandbox=("libvirt_range", "range.yaml")` are equally supported, and programmatic range construction (including by the generation layer later) goes through the same types as hand-written YAML.
+
+Consequences:
+
+- **Every spec model is public API**: `RangeSpec`, `Network`, `Router`, `Host`, `Attacker`, `Interface`, `AclRule`, `Os`, `Resources`, `DnsConfig`, `DnsRecord`, `RangeMeta`, plus `load_range`, `validate_range`, `semantic_issues`, `Issue`, and `ValidationReport` — exported from the package top level and documented in the reference docs. Model and field names become stability-governed by `schema_version` exactly like the YAML surface: a renamed field is a schema version bump, whichever surface it entered through.
+- **Validation parity, documented difference in ergonomics**: a typed config is structurally and semantically valid at construction (the model validators run; an invalid construction raises with every finding, via `IssueError`); the YAML path additionally gets source positions and rendered hints via `validate_range`. Same checks, one implementation, two entry points.
+- **Provider contract**: the sandbox provider accepts both forms; `config_files()` discovers `range.yaml` for the path form; the compiler consumes `RangeSpec` either way (as the e2e spike already demonstrated).
+
+## 9. Implementation path (the follow-on, not this record)
+
+Each construct lands as a vertical slice under the lockstep rule, in dependency order: (0) public spec API — top-level exports, reference docs for every model, and the dual-form config contract stated in the provider design; (1) dual-stack types + gates and name disjointness (schema-only semantics, no realization needed); (2) ACL v2 with plan-time endpoint resolution — this forces the allocation stage design and is why this record precedes it; (3) routing (gateway election + static routes) with the two-hop conformance battery; (4) scoped CIDR egress with the NAT conformance spike; FQDN egress and IPv6 stay gated until their slices.
