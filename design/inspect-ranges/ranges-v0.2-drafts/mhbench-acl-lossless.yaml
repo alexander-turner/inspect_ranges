@@ -1,0 +1,74 @@
+# v0.2 DRAFT — not valid under schema v0.1. Acceptance fixture for networking-v0.2.md §1.
+#
+# The MHBench equifax_small ACL re-expressed losslessly from
+# ../ranges/mhbench-equifax-small/upstream/security_rules.tf (+ modules/attacker/security_rules.tf),
+# restoring what the v0.1 translation dropped: the 0.0.0.0/0 form and per-group direction.
+#
+# OpenStack secgroup semantics: a new flow src→dst is admitted iff the dst group has a
+# matching ingress rule AND the src group has a matching egress rule. An ordered router
+# list encodes the same reachability as the set of admitted (src, dst) pairs; each rule
+# below names the tf resources whose conjunction it realizes.
+#
+# Intra-subnet note: upstream's intra_critical_company_tcp_{in,out} rules filter traffic
+# that never crosses a router. Our model deliberately leaves same-segment traffic
+# unfiltered (L2 realism); those two resources have no router realization and are
+# recorded here, not translated.
+
+range:
+  name: mhbench-acl-lossless
+  schema_version: "0.2"
+  description: >
+    ACL-focused v0.2 re-translation of MHBench equifax_small: three routed subnets
+    whose reachability mirrors the upstream OpenStack security groups rule-for-rule.
+
+networks:
+  - name: webserver_network
+    cidr: 192.168.200.0/24
+    mode: routed
+  - name: critical_company_network
+    cidr: 192.168.201.0/24
+    mode: routed
+  - name: attacker_network
+    cidr: 192.168.202.0/24
+    mode: routed
+
+routers:
+  - name: router_external
+    interfaces:
+      - { network: webserver_network }
+      - { network: critical_company_network }
+      - { network: attacker_network }
+    acl:
+      # webserver_tcp_in (ingress 0.0.0.0/0 → webserver group). Admits every source whose
+      # own egress reaches 192.168.200.0/24: attacker_tcp_out (0.0.0.0/0) and
+      # critical_company_webserver_tcp_out (192.168.200.0/24). The 0.0.0.0/0 endpoint is
+      # faithful because no source group's egress excludes the webserver subnet.
+      - { from: 0.0.0.0/0, to: webserver_network, allow: [tcp/1-65535] }
+
+      # webserver_tcp_out (egress 0.0.0.0/0) ∧ attacker_tcp_in (ingress 0.0.0.0/0)
+      - { from: webserver_network, to: attacker_network, allow: [tcp/1-65535] }
+
+      # webserver_tcp_out ∧ critical_company_webserver_tcp_in (ingress 192.168.200.0/24)
+      - { from: webserver_network, to: critical_company_network, allow: [tcp/1-65535] }
+
+      # Not expressible as attacker→0.0.0.0/0: attacker_tcp_out is 0.0.0.0/0, but the
+      # critical group's ingress admits only 192.168.200.0/24 and 192.168.201.0/24, so
+      # attacker→critical must stay default-deny. attacker→webserver is already admitted
+      # by the first rule; no attacker-source rule is needed at all.
+      # critical→attacker is likewise denied (critical egress lists only .200/.201).
+
+hosts:
+  - name: webserver_0
+    os: { type: linux, distro: ubuntu-20.04 }
+    image: Ubuntu20
+    interfaces: [{ network: webserver_network, ip: 192.168.200.10 }]
+  - name: database_0
+    os: { type: linux, distro: ubuntu-20.04 }
+    image: Ubuntu20
+    interfaces: [{ network: critical_company_network, ip: 192.168.201.50 }]
+
+attacker:
+  image: Kali
+  interfaces: [{ network: attacker_network, ip: 192.168.202.100 }]
+  entry: external
+  egress: none   # upstream's provider-network uplink is deployment plumbing, not range semantics

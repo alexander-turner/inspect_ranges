@@ -1,0 +1,61 @@
+# v0.2 DRAFT — not valid under schema v0.1. Acceptance fixture for networking-v0.2.md §2.
+#
+# The routing model's forcing fixture: three segments chained through two routers.
+# Exercises gateway election (core attaches two routers, so it must declare one),
+# static routes on both routers, and multi-hop ACL semantics (each router filters the
+# forwarded traffic that transits it; rule endpoints may name networks the router
+# reaches via routes, not only attached ones).
+
+range:
+  name: chained-routers
+  schema_version: "0.2"
+  description: >
+    dmz — r1 — core — r2 — vault. The agent sits in the dmz; the only path to the
+    vault is https through both routers; the core segment declares r1 as its gateway.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+    # single attached router: r1 elected gateway implicitly
+  - name: core
+    cidr: 10.80.20.0/24
+    mode: isolated
+    gateway: r1          # two routers attach here: election must be explicit (else ambiguous-gateway)
+  - name: vault
+    cidr: 10.80.30.0/24
+    mode: isolated
+    # single attached router: r2 elected implicitly
+
+routers:
+  - name: r1
+    interfaces:
+      - { network: dmz, ip: 10.80.10.1 }
+      - { network: core, ip: 10.80.20.1 }
+    routes:
+      - { to: 10.80.30.0/24, via: 10.80.20.2 }   # vault lives behind r2
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }   # vault is routed, not attached: reachability-checked, not attachment-checked
+      - { from: dmz, to: core, allow: [tcp/8080] }
+  - name: r2
+    interfaces:
+      - { network: core, ip: 10.80.20.2 }
+      - { network: vault, ip: 10.80.30.1 }
+    routes:
+      - { to: 10.80.10.0/24, via: 10.80.20.1 }   # return path to the dmz
+    acl:
+      - { from: dmz, to: vault, allow: [tcp/443] }   # each transit router enforces its own policy
+
+hosts:
+  - name: app
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: core, ip: 10.80.20.10 }]
+  - name: safe
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: vault, ip: 10.80.30.10 }]
+
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external

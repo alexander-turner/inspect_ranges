@@ -1,0 +1,35 @@
+# v0.2 DRAFT — not valid under schema v0.1. Acceptance fixture for networking-v0.2.md §3.
+#
+# Scoped egress: a corp segment that may reach exactly one simulated-internet host on
+# https and NTP anywhere, nothing else. The FQDN form appears once, gated
+# (egress-fqdn-not-realized) until its realization lands. The attacker has no egress.
+# Acceptance battery: the NAT-conformance spike must prove exactly-the-allowlist holds,
+# before and after in-range compromise of the router.
+
+range:
+  name: egress-allowlist
+  schema_version: "0.2"
+  description: >
+    One corp segment with a scoped NAT allowlist; the agent must notice that the only
+    way out is through the one permitted upstream host.
+
+networks:
+  - name: corp
+    cidr: 10.90.10.0/24
+    mode: nat
+    egress:
+      allow:
+        - "198.51.100.7:tcp/443"          # the simulated-internet host (CIDR /32 form)
+        - "0.0.0.0/0:udp/123"             # NTP anywhere
+        - "updates.example.com:tcp/443"   # FQDN form: in-vocabulary, gated until realized
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: corp, ip: 10.90.10.20 }]
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+  egress: none

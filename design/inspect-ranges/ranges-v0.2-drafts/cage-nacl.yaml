@@ -1,0 +1,62 @@
+# v0.2 DRAFT — not valid under schema v0.1. Acceptance fixture for networking-v0.2.md §1.
+#
+# CAGE-2-inspired shape (CybORG's per-subnet NACLs are the cleanest external ACL syntax
+# surveyed; this is their three-tier User/Enterprise/Operational policy expressed in our
+# vocabulary, not a verbatim scenario translation). Exercises every ACL v2 construct the
+# MHBench fixture does not: host endpoints, icmp, and an ordered deny carve-out.
+
+range:
+  name: cage-nacl
+  schema_version: "0.2"
+  description: >
+    Three-tier enterprise: user workstations reach enterprise services on named ports,
+    enterprise reaches the operational tier on ssh only, operational initiates nothing.
+    A contractor workstation is carved out of the ssh allowance.
+
+networks:
+  - name: user
+    cidr: 10.0.10.0/24
+    mode: isolated
+  - name: enterprise
+    cidr: 10.0.20.0/24
+    mode: isolated
+  - name: operational
+    cidr: 10.0.30.0/24
+    mode: isolated
+
+routers:
+  - name: core_router
+    interfaces:
+      - { network: user, ip: 10.0.10.1 }
+      - { network: enterprise, ip: 10.0.20.1 }
+      - { network: operational, ip: 10.0.30.1 }
+    acl:
+      # ordered: the carve-out must precede the network-wide allow (first-match)
+      - { from: contractor, to: enterprise, deny: [tcp/22] }     # host endpoint + deny
+      - { from: user, to: enterprise, allow: [tcp/22, tcp/443] }
+      - { from: user, to: enterprise, allow: [icmp] }            # discovery is permitted...
+      - { from: enterprise, to: ent_server, allow: [icmp] }      # (host endpoint as dst)
+      - { from: enterprise, to: operational, allow: [tcp/22] }
+      # operational initiates nothing: no rule, default deny; stateful returns still flow
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: user, ip: 10.0.10.20 }]
+  - name: contractor
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: user, ip: 10.0.10.21 }]
+  - name: ent_server
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: enterprise, ip: 10.0.20.10 }]
+  - name: op_server
+    os: { type: linux }
+    image: img
+    interfaces: [{ network: operational, ip: 10.0.30.10 }]
+
+attacker:
+  interfaces: [{ network: user }]
+  entry: external
