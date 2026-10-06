@@ -4,7 +4,7 @@ The ruleset is default-deny and stateful: policy `drop` on the forward hook, `es
 """
 
 from ..types import AclRule, RangeSpec, Router, endpoint_kind
-from ._allocate import Allocation
+from .allocate import Allocation
 
 
 def router_nic_names(router: Router) -> dict[str, str]:
@@ -53,7 +53,7 @@ def _render_rule(
     verdict = "accept" if rule.allow is not None else "drop"
     rendered: list[str] = []
     for entry in rule.allow if rule.allow is not None else rule.deny or []:
-        matches = [match for match in (source, dest, _service_match(entry)) if match]
+        matches = [match for match in (source, dest, service_match(entry)) if match]
         rendered.append(" ".join(matches + [verdict]))
     return rendered
 
@@ -94,7 +94,7 @@ def _endpoint_match(
     )
 
 
-def _service_match(entry: str) -> str:
+def service_match(entry: str) -> str:
     if entry == "icmp":
         return "meta l4proto icmp"
     proto, _, ports = entry.partition("/")

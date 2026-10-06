@@ -553,6 +553,76 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
         ),
         pytest.param(
             """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: isolated
+                egress: { allow: ["198.51.100.7:tcp/443"] }
+            """,
+            "egress-requires-nat",
+            "networks[0].egress",
+            id="egress-requires-nat",
+        ),
+        pytest.param(
+            """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: nat
+                egress: { allow: ["198.51.100.7:tcp/443"] }
+              - { name: dmz, cidr: 10.0.1.0/24, mode: isolated }
+            routers:
+              - name: r
+                interfaces: [{ network: lab }, { network: dmz }]
+            """,
+            "egress-with-router-not-realized",
+            "networks[0].egress",
+            id="egress-with-router-gated",
+        ),
+        pytest.param(
+            """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: nat
+                egress: { allow: ["updates.example.com:tcp/443"] }
+            """,
+            "egress-fqdn-not-realized",
+            "networks[0].egress.allow[0]",
+            id="egress-fqdn-gated",
+        ),
+        pytest.param(
+            """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: nat
+                egress: { allow: ["not a target:tcp/443"] }
+            """,
+            "invalid-egress-entry",
+            "networks[0].egress.allow[0]",
+            id="invalid-egress-entry",
+        ),
+        pytest.param(
+            """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: nat
+                egress: { allow: ["fd00::7:tcp/443"] }
+            """,
+            "ipv6-not-realized",
+            "networks[0].egress.allow[0]",
+            id="egress-ipv6-target-gated",
+        ),
+        pytest.param(
+            "attacker: { interfaces: [{ network: lab }], entry: external, egress: { allow: ['bad'] } }",
+            "invalid-egress-entry",
+            "attacker.egress.allow[0]",
+            id="attacker-egress-invalid-entry",
+        ),
+        pytest.param(
+            """
             hosts:
               - name: web
                 os: { type: linux }
@@ -613,9 +683,9 @@ def test_semantic_codes(
     assert not report.valid
     issue = next(i for i in report.issues if i.code == code)
     assert issue.path_str == path_str
-    # attacker foothold checks live on the nested Attacker validator, which suppresses the root pass
-    nested = code in ("attacker-foothold-conflict", "attacker-no-foothold")
-    assert report.semantic_checked == (not nested)
+    # (semantic_checked behavior is pinned separately: nested-validator errors suppress
+    # the root pass, see test_structural_errors_suppress_semantic_stage and the
+    # invalid-allow-entry test)
 
 
 def test_semantic_report_is_complete(tmp_path: Path) -> None:

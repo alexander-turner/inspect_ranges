@@ -1,9 +1,15 @@
 from ipaddress import IPv4Address
 
-from inspect_ranges._compiler import allocate, elect_gateways, render_router_nftables
+from inspect_ranges._compiler import (
+    allocate,
+    elect_gateways,
+    render_egress_nftables,
+    render_router_nftables,
+)
 from inspect_ranges.types import (
     AclRule,
     Attacker,
+    EgressPolicy,
     Host,
     Interface,
     Network,
@@ -63,6 +69,67 @@ def test_gateway_election_implicit_and_explicit() -> None:
         "core": IPv4Address("10.80.20.1"),  # two routers, explicit gateway: r1
         "vault": IPv4Address("10.80.30.1"),  # single attached router, implicit
     }
+
+
+def nat_spec() -> RangeSpec:
+    return RangeSpec(
+        meta=RangeMeta(name="egress-unit", description="scoped egress fixture"),
+        networks=[
+            Network(
+                name="corp",
+                cidr="10.90.10.0/24",
+                mode="nat",
+                egress=EgressPolicy(
+                    allow=["198.51.100.7:tcp/443", "0.0.0.0/0:udp/123"]
+                ),
+            ),
+        ],
+        hosts=[
+            Host(
+                name="workstation",
+                os=Os(type="linux"),
+                image="img",
+                interfaces=[Interface(network="corp")],
+            ),
+        ],
+        attacker=Attacker(
+            interfaces=[Interface(network="corp")], entry="assumed-breach"
+        ),
+    )
+
+
+def test_nat_gateway_reserved_and_elected() -> None:
+    spec = nat_spec()
+    allocation = allocate(spec)
+    assert allocation.nat_gateways == {"corp": IPv4Address("10.90.10.1")}
+    # the reservation precedes guest allocation: attacker lands on .2, host on .10
+    assert allocation.addresses("attacker") == [IPv4Address("10.90.10.2")]
+    assert allocation.addresses("workstation") == [IPv4Address("10.90.10.10")]
+    assert elect_gateways(spec, allocation) == {"corp": IPv4Address("10.90.10.1")}
+
+
+def test_egress_ruleset_scopes_exactly_the_allowlist() -> None:
+    spec = nat_spec()
+    ruleset = render_egress_nftables(spec, allocate(spec))
+    lines = [line.strip() for line in ruleset.splitlines()]
+    # attacker override (egress: none) precedes the network allowlist
+    assert lines[5] == 'ip saddr 10.90.10.2 oifname "eth0" drop'
+    assert (
+        lines[6]
+        == 'iifname "br-corp" oifname "eth0" ip daddr 198.51.100.7/32 tcp dport 443 accept'
+    )
+    assert lines[7] == 'iifname "br-corp" oifname "eth0" udp dport 123 accept'
+    assert 'oifname "eth0" masquerade' in ruleset
+    assert "policy drop" in ruleset
+
+
+def test_no_egress_renders_invariants_only() -> None:
+    spec = two_segment_spec()
+    ruleset = render_egress_nftables(spec, allocate(spec))
+    assert "masquerade" not in ruleset
+    assert "policy drop" in ruleset
+    # the attacker's default egress: none still renders its explicit drop
+    assert 'ip saddr 10.80.10.2 oifname "eth0" drop' in ruleset
 
 
 def test_transit_router_renders_routed_endpoints_as_subnet_matches() -> None:

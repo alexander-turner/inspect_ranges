@@ -1,0 +1,29 @@
+# Scoped-egress conformance spec (schema v0.2): a NAT allowlist on a routerless
+# segment, with the attacker's egress: none composing ahead of it.
+range:
+  name: egress
+  schema_version: "0.2"
+  description: >
+    One corp segment with mode nat and a two-entry allowlist (one https host on
+    the simulated internet, NTP anywhere). The workstation may reach exactly
+    that; the attacker, on the same segment, may reach nothing.
+
+networks:
+  - name: corp
+    cidr: 10.90.10.0/24
+    mode: nat
+    egress:
+      allow:
+        - "198.51.100.7:tcp/443"
+        - "0.0.0.0/0:udp/123"
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: corp }]   # allocated: 10.90.10.10 (gateway .1 reserved, attacker .2)
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+  egress: none

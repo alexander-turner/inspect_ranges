@@ -1,12 +1,12 @@
 """Gateway election: which router carries each network's default route.
 
-Election follows networking-v0.2 §2: an explicit `gateway:` wins; otherwise the single attached router is elected implicitly. Validation rejects the ambiguous case (`ambiguous-gateway`) before compilation, so this stage never guesses. Networks with no attached router have no gateway and are absent from the result.
+Election follows networking-v0.2 §2: an explicit `gateway:` wins; otherwise the single attached router is elected implicitly. Validation rejects the ambiguous case (`ambiguous-gateway`) before compilation, so this stage never guesses. Routerless `mode: nat` networks get the hypervisor bridge address the allocator reserved; networks with neither router nor NAT have no gateway and are absent from the result.
 """
 
 from ipaddress import IPv4Address
 
 from ..types import RangeSpec
-from ._allocate import Allocation
+from .allocate import Allocation
 
 
 def elect_gateways(spec: RangeSpec, allocation: Allocation) -> dict[str, IPv4Address]:
@@ -19,7 +19,7 @@ def elect_gateways(spec: RangeSpec, allocation: Allocation) -> dict[str, IPv4Add
     Returns:
         Gateway addresses for every network with at least one attached router.
     """
-    gateways: dict[str, IPv4Address] = {}
+    gateways: dict[str, IPv4Address] = dict(allocation.nat_gateways)
     for network in spec.networks:
         attached = [
             router

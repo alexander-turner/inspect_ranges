@@ -293,9 +293,20 @@ def issues_from_validation_error(
                 message=f"{value!r} is not a valid IPv4 or IPv6 {kind}",
             )
         )
-    for detail in details:
-        loc: tuple[PathElement, ...] = tuple(detail["loc"])
+    cleaned = [(detail, _clean_loc(detail["loc"])) for detail in details]
+    carried_locs = {
+        loc for detail, loc in cleaned if _carried_issues(detail) is not None
+    }
+    for detail, loc in cleaned:
         carried = _carried_issues(detail)
+        if (
+            carried is None
+            and detail["type"] == "literal_error"
+            and loc in carried_locs
+        ):
+            # union sibling noise: the input matched the model member of a
+            # Literal | Model union, whose carried issues already cover it
+            continue
         if carried is not None:
             if loc:
                 # carried from a nested model's validator, so the root
@@ -333,13 +344,13 @@ def _collapse_ip_union_errors(
         if code is None:
             rest.append(detail)
             continue
-        loc = tuple(
-            part
-            for part in detail["loc"]
-            if not (isinstance(part, str) and "[" in part)
-        )
-        collapsed.setdefault(loc, (code, detail.get("input")))
+        collapsed.setdefault(_clean_loc(detail["loc"]), (code, detail.get("input")))
     return rest, [(loc, code, value) for loc, (code, value) in collapsed.items()]
+
+
+def _clean_loc(raw: tuple[int | str, ...]) -> tuple[PathElement, ...]:
+    """Strip pydantic's machine-generated union-member tags out of an error loc."""
+    return tuple(part for part in raw if not (isinstance(part, str) and "[" in part))
 
 
 def _carried_issues(detail: ErrorDetails) -> list[Issue] | None:

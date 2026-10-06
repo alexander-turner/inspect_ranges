@@ -36,6 +36,7 @@ __all__ = [
     "Attacker",
     "DnsConfig",
     "DnsRecord",
+    "EgressPolicy",
     "Host",
     "Interface",
     "Issue",
@@ -47,6 +48,7 @@ __all__ = [
     "Route",
     "Router",
     "ValidationReport",
+    "parse_egress_entry",
     "semantic_issues",
 ]
 
@@ -121,6 +123,115 @@ class DnsConfig(_StrictModel):
         ) -> None: ...
 
 
+_FQDN = re.compile(
+    r"^(?=.{1,253}$)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$"
+)
+
+
+def _service_issue(field: str, index: int, entry: str, service: str) -> Issue | None:
+    if service == "icmp":
+        return None
+    if service.startswith("icmp"):
+        return Issue(
+            code="invalid-icmp-rule",
+            path=(field, index),
+            message=f"egress entry {entry!r}: icmp takes no port; write it as bare `icmp`",
+        )
+    match = _SERVICE_ENTRY.match(service)
+    if match is None:
+        return Issue(
+            code="invalid-egress-entry",
+            path=(field, index),
+            message=f"egress entry {entry!r} service must be proto/port, proto/lo-hi, or icmp",
+        )
+    low = int(match.group(2))
+    high = int(match.group(3)) if match.group(3) else low
+    if not 0 < low <= high < 65536:
+        return Issue(
+            code="invalid-egress-entry",
+            path=(field, index),
+            message=f"egress entry {entry!r} has an invalid port range",
+        )
+    return None
+
+
+def parse_egress_entry(
+    entry: str,
+) -> tuple[AnyIPNetwork | None, str | None, str | None]:
+    """Split an egress allowlist entry into its target and service.
+
+    Entries are `CIDR[:proto/port]` or `FQDN:proto/port`; a bare address is its `/32`. The service is returned unvalidated (callers validate; the compiler receives only validated specs).
+
+    Returns:
+        `(cidr, fqdn, service)` where exactly one of `cidr`/`fqdn` is set, or `(None, None, None)` when the entry parses as neither.
+    """
+    try:
+        return ip_network(entry), None, None
+    except ValueError:
+        pass
+    target, separator, service = entry.rpartition(":")
+    if not separator:
+        return None, None, None
+    try:
+        return ip_network(target), None, service
+    except ValueError:
+        pass
+    if _FQDN.match(target):
+        return None, target, service
+    return None, None, None
+
+
+class EgressPolicy(_StrictModel):
+    """A scoped egress allowlist: exactly what may leave, nothing else.
+
+    Entries are `CIDR[:proto/port]` (a bare address is its `/32`; omitting the service allows all traffic to the CIDR) or `FQDN:proto/port`. FQDN entries are in the vocabulary but gated by `egress-fqdn-not-realized` until their realization lands (networking-v0.2 §3).
+    """
+
+    allow: list[str]
+    """Allowlist entries, e.g. `198.51.100.7:tcp/443`, `0.0.0.0/0:udp/123`; empty allows nothing."""
+
+    @model_validator(mode="after")
+    def _check_entries(self) -> "EgressPolicy":
+        issues: list[Issue] = []
+        for index, entry in enumerate(self.allow):
+            cidr, fqdn, service = parse_egress_entry(entry)
+            if cidr is None and fqdn is None:
+                issues.append(
+                    Issue(
+                        code="invalid-egress-entry",
+                        path=("allow", index),
+                        message=f"egress entry {entry!r} must be CIDR[:proto/port] or FQDN:proto/port",
+                    )
+                )
+                continue
+            if service is not None:
+                issue = _service_issue("allow", index, entry, service)
+                if issue is not None:
+                    issues.append(issue)
+            if fqdn is not None:
+                if service is None:
+                    issues.append(
+                        Issue(
+                            code="invalid-egress-entry",
+                            path=("allow", index),
+                            message=f"egress entry {entry!r}: FQDN entries require a service, e.g. {entry}:tcp/443",
+                        )
+                    )
+                issues.append(
+                    Issue(
+                        code="egress-fqdn-not-realized",
+                        path=("allow", index),
+                        message=f"egress entry {entry!r}: FQDN targets are not yet realized",
+                        hint="use a CIDR for now; FQDN realization lands behind this gate (networking-v0.2 §3)",
+                    )
+                )
+            if isinstance(cidr, IPv6Network):
+                issues.append(_ipv6_gate(("allow", index), "egress entry target", cidr))
+        if issues:
+            raise IssueError(issues)
+        return self
+
+
 class Network(_StrictModel):
     """A layer-2 segment with its addressing and egress posture."""
 
@@ -142,6 +253,24 @@ class Network(_StrictModel):
     gateway: str | None = None
     """The router that is this network's default gateway; required only when more than one router attaches (a single attached router is elected implicitly)."""
 
+    egress: EgressPolicy | None = None
+    """Scoped egress allowlist; only meaningful with `mode: nat` (the hypervisor NATs exactly these flows out)."""
+
+    @model_validator(mode="after")
+    def _check_egress_mode(self) -> "Network":
+        if self.egress is not None and self.mode != "nat":
+            raise IssueError(
+                [
+                    Issue(
+                        code="egress-requires-nat",
+                        path=("egress",),
+                        message=f"network {self.name!r} declares an egress allowlist but mode is {self.mode!r}",
+                        hint="scoped egress is realized as hypervisor NAT; set mode: nat",
+                    )
+                ]
+            )
+        return self
+
     if TYPE_CHECKING:
         # static signature only: address fields also accept strings (runtime-coerced by pydantic)
         def __init__(
@@ -153,6 +282,7 @@ class Network(_StrictModel):
             dhcp: bool = False,
             dns: DnsConfig | None = None,
             gateway: str | None = None,
+            egress: EgressPolicy | None = None,
         ) -> None: ...
 
 
@@ -355,8 +485,8 @@ class Attacker(_StrictModel):
     entry: Literal["external", "assumed-breach", "operator"]
     """How the attacker arrives: from outside, pre-positioned, or operator-driven."""
 
-    egress: Literal["none", "open"] = "none"
-    """Attacker-reachable egress from the range (default: none)."""
+    egress: Literal["none", "open"] | EgressPolicy = "none"
+    """Attacker-reachable egress from the range: `none` (default), `open`, or a scoped allowlist. Attacker egress composes ahead of network egress: `none` drops the attacker's flows even on a network with an allowlist."""
 
     @model_validator(mode="after")
     def _check_foothold(self) -> "Attacker":
@@ -678,6 +808,15 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
             for router in spec.routers
             if any(interface.network == network.name for interface in router.interfaces)
         ]
+        if network.egress is not None and attached_routers:
+            issues.append(
+                Issue(
+                    code="egress-with-router-not-realized",
+                    path=("networks", network_index, "egress"),
+                    message=f"network {network.name!r} declares an egress allowlist but attaches a router; that combination is not yet realized",
+                    hint="scoped egress is realized as hypervisor NAT on routerless networks for now (networking-v0.2 §3)",
+                )
+            )
         if network.gateway is not None:
             if network.gateway not in attached_routers:
                 issues.append(

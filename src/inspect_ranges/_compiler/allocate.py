@@ -51,6 +51,9 @@ class Allocation(BaseModel):
     guests: list[GuestAllocation]
     """Every guest (hosts, routers, the attacker when it is a dedicated box), in allocation order."""
 
+    nat_gateways: dict[str, IPv4Address] = {}
+    """Hypervisor-side gateway address per routerless `mode: nat` network (the bridge carries it; guests default-route to it)."""
+
     def guest(self, name: str) -> GuestAllocation:
         """Return a guest's allocation by name.
 
@@ -102,6 +105,18 @@ def allocate(spec: RangeSpec) -> Allocation:
                     raise ValueError(f"{interface.ip} is IPv6 (gated upstream)")
                 claimed[interface.network].add(interface.ip)
 
+    # routerless nat networks: the hypervisor bridge is the gateway, so its
+    # address is reserved ahead of guest allocation
+    routed_networks = {
+        interface.network for router in spec.routers for interface in router.interfaces
+    }
+    nat_gateways: dict[str, IPv4Address] = {}
+    for network in spec.networks:
+        if network.mode == "nat" and network.name not in routed_networks:
+            gateway = _next_free(subnets[network.name], 1, claimed[network.name])
+            claimed[network.name].add(gateway)
+            nat_gateways[network.name] = gateway
+
     # CIDs follow spec declaration order (hosts, routers, attacker), independent of
     # the address-allocation order below, so adding a router never renumbers hosts.
     cid_order = [host.name for host in spec.hosts]
@@ -135,7 +150,9 @@ def allocate(spec: RangeSpec) -> Allocation:
             )
         )
 
-    return Allocation(guests=sorted(guests, key=lambda guest: guest.cid))
+    return Allocation(
+        guests=sorted(guests, key=lambda guest: guest.cid), nat_gateways=nat_gateways
+    )
 
 
 def _next_free(
