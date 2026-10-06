@@ -189,7 +189,7 @@ Range startup consists of:
 
 1.  Create the bridges and load the generated firewall invariants.
 2.  Create each guest's overlay and define its domain.
-3.  Boot guests in parallel, in dependency order where a range's provisioning requires it. Ranges with heavy cross-host dependencies (such as Active Directory) are built and converged once, then each sample restores the result.
+3.  Boot guests in parallel, in dependency order where a range's provisioning requires it. Ranges with heavy cross-host dependencies (such as Active Directory) are built and converged once, then each sample starts from the captured result.
 4.  Wait for every guest to finish provisioning: a range is ready only once every guest's configuration has been applied.
 
 ### Range Container
@@ -218,7 +218,7 @@ Disk images for range guests are large (roughly 600 MB for Linux and 10–20 GB 
 - A golden image is itself a small set of additions (the control daemon, settings) layered onto an upstream base image (e.g. Ubuntu's official cloud image, the same disk AWS boots), applied directly to the disk file without booting it. Windows golden images are built once by a scripted install (about 3 minutes) and treated the same way thereafter.
 - Images are published the way Docker publishes containers: as stacks of layers, each stored once and fetched only if a host doesn't already have it. So a base image ships only once, and task-specific images are megabytes in size. Images are pulled from object storage (S3) and verified against their digests before guests boot.
 
-Sharing solves size, but not startup time: a disk image captures a machine that is powered off, so booting one means a full OS startup. These costs are mitigated with memory snapshots: a fully booted and settled VM is captured once, including its memory, and each sample restores it in about a second with a warm cache, resuming exactly where it left off.
+Sharing solves size, but not startup time: a disk image captures a machine that is powered off, so booting one means a full OS startup. The expensive part of startup is handled at build time: complex ranges (e.g. Active Directory) are booted once, provisioned to convergence, and captured as a checkpoint, so each sample cold-boots already-converged disks and passes a health check before it starts. Memory snapshots, which also capture RAM and resume a settled VM in about a second, are available as an optional per-range optimization rather than the default: resuming live operating system state is less predictable than a fresh boot (clocks, tickets, and scheduled tasks all notice), and the boot time saved is small relative to how long these evaluations run.
 
 ### Range Host {#range-host}
 

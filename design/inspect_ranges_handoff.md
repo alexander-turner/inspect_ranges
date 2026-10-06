@@ -155,6 +155,9 @@ L2 fidelity with fast `docker exec`.
   instances (local NVMe) for overlays and memory snapshots. Memory-snapshot restore reads the whole
   RAM image (4 GiB ≈ 30+ s at baseline gp3).
 - Snapshot restore caveats: identical RNG state, clock jumps (force time sync — Kerberos/AD care).
+  Since decided: memory restore is an opt-in optimization, not the default; cold boot from
+  converged disk checkpoints is the default for all range classes
+  (see `inspect-ranges/memory-restore-ad.md`).
 - Memory is not overcommitted; include QEMU per-VM overhead (a few hundred MB) in cgroup limits.
   KSM is reasonable within one sample (cross-sample side channel concern is moot with 1/instance).
 - **Cold start** likely dominates with one sample per instance: EBS volumes from snapshots load
