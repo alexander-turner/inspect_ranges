@@ -64,6 +64,17 @@ def test_revalidate_range_passes_through_a_consistent_spec() -> None:
     assert checked is not spec
 
 
+def test_ipv6_values_are_gated() -> None:
+    # the dual-stack types accept IPv6 structurally (the Network constructs),
+    # but the spec-level gate rejects it until realization lands
+    v6 = Network(name="lab", cidr="fd00::/8", mode="isolated")
+    assert str(v6.cidr) == "fd00::/8"
+    spec = dmz_pivot()
+    spec.networks[0] = Network(name="dmz", cidr="fd00::/8", mode="isolated")
+    with pytest.raises(ValidationError, match="not yet realized"):
+        revalidate_range(spec)
+
+
 def test_revalidate_range_catches_post_construction_mutation() -> None:
     spec = dmz_pivot()
     spec.hosts.append(

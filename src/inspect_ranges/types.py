@@ -2,13 +2,15 @@
 
 These models are the typed form of the sandbox configuration: `sandbox=("libvirt_range", RangeSpec(...))` and `sandbox=("libvirt_range", "range.yaml")` are equally supported, and both surfaces are governed by `schema_version`. Construction reads like the YAML (strings coerce to address types, literals take plain strings, nested dicts are accepted via `model_validate`); the one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
 
+Address fields are dual-stack (`AnyIPAddress`/`AnyIPNetwork`) so the type surface never migrates, but IPv6 values are rejected by the `ipv6-not-realized` gate until each construct's realization lands (networking-v0.2 §4).
+
 Models validate fully at construction (structural and cross-reference checks), and stay mutable for flexible programmatic construction. Validity is therefore a point-in-time property: every consumer boundary revalidates, so a spec mutated after construction is re-checked when it is handed to the sandbox, the compiler, or `revalidate_range`.
 
 v0.1 deliberately covers only the five sections the runtime consumes — `range`, `networks`, `routers`, `hosts`, `attacker` — and rejects everything else loudly. Sections awaiting real design (`attack_path`, `goals`, `variables`, `defense`, `vulnerabilities`, guest configuration, ...) are excluded entirely; see `design/inspect-ranges/schema-v0.1-scope.md` for the deferral rationale.
 """
 
 import re
-from ipaddress import IPv4Address, IPv4Network
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,8 +23,16 @@ from ._diagnostics import (
     did_you_mean,
 )
 
+AnyIPAddress = IPv4Address | IPv6Address
+"""Either address family. IPv6 values validate structurally but are rejected by the `ipv6-not-realized` gate until their realization lands (networking-v0.2 §4)."""
+
+AnyIPNetwork = IPv4Network | IPv6Network
+"""Either address family. IPv6 values validate structurally but are rejected by the `ipv6-not-realized` gate until their realization lands (networking-v0.2 §4)."""
+
 __all__ = [
     "AclRule",
+    "AnyIPAddress",
+    "AnyIPNetwork",
     "Attacker",
     "DnsConfig",
     "DnsRecord",
@@ -57,8 +67,8 @@ class RangeMeta(_StrictModel):
     name: str
     """Short identifier, e.g. `vulhub-zabbix`."""
 
-    schema_version: Literal["0.1"] = "0.1"
-    """Schema version this definition targets (omitted means the current version)."""
+    schema_version: Literal["0.1", "0.2"] = "0.1"
+    """Schema version this definition targets (omitted means `0.1`; `0.2` is landing incrementally per networking-v0.2)."""
 
     description: str
     """What the range is and why it exists."""
@@ -70,13 +80,13 @@ class DnsRecord(_StrictModel):
     name: str
     """Hostname to resolve."""
 
-    ip: IPv4Address | None = None
+    ip: AnyIPAddress | None = None
     """Address, when not derivable from the named guest's interface."""
 
     if TYPE_CHECKING:
         # static signature only: address fields also accept strings (runtime-coerced by pydantic)
         def __init__(
-            self, *, name: str, ip: IPv4Address | str | None = None
+            self, *, name: str, ip: AnyIPAddress | str | None = None
         ) -> None: ...
 
 
@@ -89,13 +99,13 @@ class DnsConfig(_StrictModel):
     records: list[DnsRecord] | None = None
     """Name records served by the range for this network."""
 
-    nameservers: list[IPv4Address] | None = None
+    nameservers: list[AnyIPAddress] | None = None
     """External resolvers handed to guests."""
 
     authoritative: list[str] | None = None
     """Guests that act as this network's DNS servers, in resolution order."""
 
-    forwarder: IPv4Address | None = None
+    forwarder: AnyIPAddress | None = None
     """Upstream forwarder for the authoritative chain."""
 
     if TYPE_CHECKING:
@@ -104,9 +114,9 @@ class DnsConfig(_StrictModel):
             self,
             *,
             records: list[DnsRecord] | None = None,
-            nameservers: list[IPv4Address | str] | None = None,
+            nameservers: list[AnyIPAddress | str] | None = None,
             authoritative: list[str] | None = None,
-            forwarder: IPv4Address | str | None = None,
+            forwarder: AnyIPAddress | str | None = None,
         ) -> None: ...
 
 
@@ -116,8 +126,8 @@ class Network(_StrictModel):
     name: str
     """Segment name, unique within the range."""
 
-    cidr: IPv4Network
-    """Subnet, e.g. `10.10.10.0/24`."""
+    cidr: AnyIPNetwork
+    """Subnet, e.g. `10.10.10.0/24` (IPv6 subnets are gated by `ipv6-not-realized` until realization lands)."""
 
     mode: Literal["isolated", "nat", "routed"]
     """Egress posture: `isolated` (no egress), `nat`, or `routed`."""
@@ -134,7 +144,7 @@ class Network(_StrictModel):
             self,
             *,
             name: str,
-            cidr: IPv4Network | str,
+            cidr: AnyIPNetwork | str,
             mode: Literal["isolated", "nat", "routed"],
             dhcp: bool = False,
             dns: DnsConfig | None = None,
@@ -147,13 +157,13 @@ class Interface(_StrictModel):
     network: str
     """Name of a declared network."""
 
-    ip: IPv4Address | None = None
+    ip: AnyIPAddress | None = None
     """Static address within the network's subnet; omitted means IPAM-allocated."""
 
     if TYPE_CHECKING:
         # static signature only: address fields also accept strings (runtime-coerced by pydantic)
         def __init__(
-            self, *, network: str, ip: IPv4Address | str | None = None
+            self, *, network: str, ip: AnyIPAddress | str | None = None
         ) -> None: ...
 
 
@@ -359,6 +369,17 @@ class RangeSpec(_StrictModel):
         return self
 
 
+def _ipv6_gate(
+    path: tuple[PathElement, ...], label: str, value: IPv6Address | IPv6Network
+) -> Issue:
+    return Issue(
+        code="ipv6-not-realized",
+        path=path,
+        message=f"{label} {value} is IPv6, which is not yet realized",
+        hint="IPv6 lands per construct behind this gate (networking-v0.2 §4); use IPv4 for now",
+    )
+
+
 def semantic_issues(spec: RangeSpec) -> list[Issue]:
     """Run every cross-reference check on a structurally valid spec, collecting all findings.
 
@@ -383,6 +404,41 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 )
             )
         networks.setdefault(network.name, network)
+        if isinstance(network.cidr, IPv6Network):
+            issues.append(
+                _ipv6_gate(
+                    ("networks", index, "cidr"),
+                    f"network {network.name!r} cidr",
+                    network.cidr,
+                )
+            )
+        if network.dns is not None:
+            if isinstance(network.dns.forwarder, IPv6Address):
+                issues.append(
+                    _ipv6_gate(
+                        ("networks", index, "dns", "forwarder"),
+                        f"network {network.name!r} dns forwarder",
+                        network.dns.forwarder,
+                    )
+                )
+            for ns_index, nameserver in enumerate(network.dns.nameservers or []):
+                if isinstance(nameserver, IPv6Address):
+                    issues.append(
+                        _ipv6_gate(
+                            ("networks", index, "dns", "nameservers", ns_index),
+                            f"network {network.name!r} dns nameserver",
+                            nameserver,
+                        )
+                    )
+            for record_index, record in enumerate(network.dns.records or []):
+                if isinstance(record.ip, IPv6Address):
+                    issues.append(
+                        _ipv6_gate(
+                            ("networks", index, "dns", "records", record_index, "ip"),
+                            f"dns record {record.name!r}",
+                            record.ip,
+                        )
+                    )
 
     guests: list[tuple[tuple[PathElement, ...], str, list[Interface]]] = [
         (("hosts", i), host.name, host.interfaces) for i, host in enumerate(spec.hosts)
@@ -406,6 +462,15 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 )
             )
         seen_names.add(name)
+        if name in networks:
+            issues.append(
+                Issue(
+                    code="name-collision",
+                    path=base + ("name",),
+                    message=f"guest {name!r} collides with network {name!r}: networks and guests share one namespace",
+                    hint="rename the guest or the network",
+                )
+            )
 
     used_ips: dict[tuple[str, IPv4Address], str] = {}
     for base, name, interfaces in guests:
@@ -434,6 +499,13 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
             attached.add(interface.network)
             if interface.ip is None:
                 continue
+            if isinstance(interface.ip, IPv6Address):
+                issues.append(
+                    _ipv6_gate(path + ("ip",), f"guest {name!r} address", interface.ip)
+                )
+                continue
+            if isinstance(network_spec.cidr, IPv6Network):
+                continue  # gated at the network; family-dependent checks don't apply
             if interface.ip not in network_spec.cidr:
                 issues.append(
                     Issue(

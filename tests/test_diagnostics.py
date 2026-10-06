@@ -81,10 +81,23 @@ def test_structural_codes(text: str, code: str, tmp_path: Path) -> None:
 
 def test_invalid_schema_version_code(tmp_path: Path) -> None:
     data: dict[str, Any] = yaml.safe_load(MINIMAL)
-    data["range"]["schema_version"] = "0.2"
+    data["range"]["schema_version"] = "0.3"
     report = report_for(yaml.safe_dump(data), tmp_path)
     assert codes(report) == ["invalid-schema-version"]
     assert "'0.1'" in report.issues[0].message
+
+
+def test_schema_version_02_accepted(tmp_path: Path) -> None:
+    data: dict[str, Any] = yaml.safe_load(MINIMAL)
+    data["range"]["schema_version"] = "0.2"
+    report = report_for(yaml.safe_dump(data), tmp_path)
+    assert report.valid
+
+
+def test_dual_stack_union_error_collapses_to_one_issue(tmp_path: Path) -> None:
+    report = report_for(MINIMAL.replace("10.0.0.0/24", "banana"), tmp_path)
+    assert codes(report) == ["invalid-cidr"]
+    assert "IPv4 or IPv6 network" in report.issues[0].message
 
 
 def test_invalid_allow_entry_path_is_rerooted(tmp_path: Path) -> None:
@@ -328,6 +341,48 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "undeclared-attacker-host",
             "attacker.host",
             id="undeclared-attacker-host",
+        ),
+        pytest.param(
+            "networks: [{ name: lab, cidr: 'fd00::/8', mode: isolated }]",
+            "ipv6-not-realized",
+            "networks[0].cidr",
+            id="ipv6-gate-cidr",
+        ),
+        pytest.param(
+            """
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab, ip: 'fd00::1' }]
+            """,
+            "ipv6-not-realized",
+            "hosts[0].interfaces[0].ip",
+            id="ipv6-gate-interface-ip",
+        ),
+        pytest.param(
+            """
+            networks:
+              - name: lab
+                cidr: 10.0.0.0/24
+                mode: isolated
+                dns: { nameservers: ['2606:4700:4700::1111'] }
+            """,
+            "ipv6-not-realized",
+            "networks[0].dns.nameservers[0]",
+            id="ipv6-gate-nameserver",
+        ),
+        pytest.param(
+            """
+            hosts:
+              - name: lab
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+            """,
+            "name-collision",
+            "hosts[0].name",
+            id="guest-network-name-collision",
         ),
         pytest.param(
             """

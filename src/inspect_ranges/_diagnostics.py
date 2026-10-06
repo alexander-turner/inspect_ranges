@@ -247,6 +247,13 @@ _CODES_BY_TYPE = {
     "enum": "invalid-value",
 }
 
+_IP_ERROR_CODES = {
+    "ip_v4_network": "invalid-cidr",
+    "ip_v6_network": "invalid-cidr",
+    "ip_v4_address": "invalid-ip",
+    "ip_v6_address": "invalid-ip",
+}
+
 
 def issues_from_yaml_error(error: yaml.YAMLError) -> list[Issue]:
     """Translate a YAML parse failure into a single `yaml-syntax` issue."""
@@ -272,7 +279,21 @@ def issues_from_validation_error(
     """
     issues: list[Issue] = []
     semantic_checked = True
-    for detail in error.errors(include_url=False):
+    details, ip_errors = _collapse_ip_union_errors(error.errors(include_url=False))
+    for loc, code, value in ip_errors:
+        semantic_checked = False
+        kind = "network" if code == "invalid-cidr" else "address"
+        position = locate(node, loc)
+        issues.append(
+            Issue(
+                code=code,
+                path=loc,
+                line=position[0] if position else None,
+                col=position[1] if position else None,
+                message=f"{value!r} is not a valid IPv4 or IPv6 {kind}",
+            )
+        )
+    for detail in details:
         loc: tuple[PathElement, ...] = tuple(detail["loc"])
         carried = _carried_issues(detail)
         if carried is not None:
@@ -296,6 +317,29 @@ def issues_from_validation_error(
         semantic_checked = False
         issues.append(_structural_issue(detail, loc, root_model, node))
     return issues, semantic_checked
+
+
+def _collapse_ip_union_errors(
+    details: list[ErrorDetails],
+) -> tuple[list[ErrorDetails], list[tuple[tuple[PathElement, ...], str, Any]]]:
+    """Fold the per-family errors a dual-stack address union emits into one entry per field.
+
+    A bad value against `IPv4Network | IPv6Network` produces two pydantic errors whose locs end in machine-generated union-member tags; this strips the tags and keeps one `(loc, code, input)` entry per field, leaving every other error untouched.
+    """
+    rest: list[ErrorDetails] = []
+    collapsed: dict[tuple[PathElement, ...], tuple[str, Any]] = {}
+    for detail in details:
+        code = _IP_ERROR_CODES.get(detail["type"])
+        if code is None:
+            rest.append(detail)
+            continue
+        loc = tuple(
+            part
+            for part in detail["loc"]
+            if not (isinstance(part, str) and "[" in part)
+        )
+        collapsed.setdefault(loc, (code, detail.get("input")))
+    return rest, [(loc, code, value) for loc, (code, value) in collapsed.items()]
 
 
 def _carried_issues(detail: ErrorDetails) -> list[Issue] | None:
