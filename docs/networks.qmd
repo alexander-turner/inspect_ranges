@@ -6,12 +6,12 @@ llms-description: "Tutorial and review guide for the range.yaml networking synta
 
 ## Overview
 
-Ranges are defined in a `range.yaml` file (or the equivalent Python types, shown [below](#python)). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page walks the networking syntax from the simplest possible network to multi-segment enterprise topologies, one construct at a time.
+Ranges are defined in a `range.yaml` file (or the equivalent Python types, shown [below](#python)). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page covers the networking syntax, starting with a single network and adding one construct at a time.
 
 Two properties hold throughout:
 
-1. **Everything is compiled, nothing is configured.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition. There is no second configuration to drift out of sync.
-2. **Everything shown here is enforced and tested.** Each construct on this page is realized by the compiler and verified by a booted conformance battery; every complete example on this page is validated in CI. Constructs the runtime cannot yet realize are rejected at validation with a specific error code, never silently accepted (see [Boundaries](#boundaries)).
+1. **Everything is compiled.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition, so there is no second configuration to drift.
+2. **Everything is tested.** Each construct is verified in a booted range, and every example on this page is validated in CI. Constructs the runtime cannot yet realize are rejected at validation with a specific error code (see [Boundaries](#boundaries)).
 
 ## A flat network
 
@@ -40,7 +40,7 @@ attacker:
 
 Every guest attaches to networks explicitly through `interfaces`. The attacker is an ordinary guest (a dedicated VM with a real NIC in the broadcast domain), declared separately because evaluations treat it specially.
 
-`mode: isolated` means no traffic leaves the range from this network. It is the default posture to reach for; `nat` and `routed` are covered [below](#egress).
+`mode: isolated` means no traffic leaves the range from this network. Use it unless the range needs egress; `nat` and `routed` are covered [below](#egress).
 
 ## Addressing
 
@@ -71,7 +71,7 @@ attacker:
   entry: external
 ```
 
-Networks can also address their guests over DHCP. DHCP is reservation-only: every lease comes from the deterministic allocation by MAC address, so DHCP addressing is exactly as predictable as static addressing while exercising a realistic DHCP service on the wire:
+Networks can also address their guests over DHCP. DHCP is reservation-only: every lease comes from the deterministic allocation by MAC address, so DHCP addressing is as predictable as static addressing while a real DHCP service runs on the segment:
 
 ```yaml
 range:
@@ -97,7 +97,7 @@ attacker:
 
 ## Name resolution
 
-Per-network DNS covers the three shapes real ranges need. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
+A network can declare DNS in three ways. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
 
 ```yaml
 range:
@@ -126,7 +126,7 @@ attacker:
 
 Records networks hand their guests a derived search domain (`<network>.internal`), because modern stub resolvers do not send single-label names like `web` to DNS without one.
 
-`nameservers` points guests at external resolvers, and `authoritative` names guests (such as domain controllers) that are the network's DNS servers, optionally chaining to a `forwarder`. This is the Active Directory pattern, where the DC is the DNS server:
+`nameservers` points guests at external resolvers, and `authoritative` names guests (such as domain controllers) that are the network's DNS servers, optionally chaining to a `forwarder`. This is the Active Directory pattern: the DC is the DNS server:
 
 ```yaml
 range:
@@ -161,7 +161,7 @@ attacker:
 ::: {.callout-warning}
 ## `.local` zones
 
-Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide deliberately:
+Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide whether to keep them:
 
 ```
 ✓ range.yaml  1 warning
@@ -172,7 +172,7 @@ Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux st
 
 ## Segmentation
 
-Routers join segments and carry the inter-segment policy. Rules are default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. This is the classic DMZ pivot:
+Routers join segments and carry the inter-segment policy. Rules are default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
 
 ```yaml
 range:
@@ -212,9 +212,9 @@ attacker:
   entry: external
 ```
 
-Segments are genuinely separate broadcast domains: same-segment L2 tradecraft (ARP, LLMNR poisoning) works within a segment and not across one, and the router is an ordinary guest running an ordinary generated firewall that a defender could inspect in-range.
+Each segment is its own broadcast domain: L2 tradecraft like ARP and LLMNR poisoning works within a segment and stops at the router. The router is an ordinary guest running a generated nftables firewall that a defender inside the range can inspect.
 
-## Richer policy
+## Rules
 
 Rules evaluate first-match in declaration order, and each rule carries exactly one of `allow:` or `deny:`. Endpoints are a network name, a guest name (resolved to its allocated addresses at compile time), or a CIDR (`/32` for a single host, `0.0.0.0/0` for any). Services are `proto/port`, `proto/lo-hi` ranges, or bare `icmp`:
 
@@ -262,7 +262,7 @@ Networks and guests share one namespace (a guest may not take a network's name),
 
 ## Topology
 
-Larger networks chain routers. Each network's default gateway is elected implicitly when exactly one router attaches; a segment with more than one router must declare its `gateway:` (ambiguity is rejected, never guessed). Routers carry static `routes:` to segments they reach through other routers, and their rules may name routed segments, not only attached ones (each transit router enforces its own policy):
+Larger networks chain routers. Each network's default gateway is elected implicitly when exactly one router attaches; a segment with more than one router must declare its `gateway:` (declaring none is an error; the compiler does not guess). Routers carry static `routes:` to segments they reach through other routers, and their rules may name routed segments as well as attached ones (each transit router enforces its own policy):
 
 ```yaml
 range:
@@ -318,9 +318,9 @@ Each network declares its egress posture through `mode`:
 
 - `isolated`: nothing leaves. The default posture.
 - `nat`: traffic leaves through hypervisor NAT, scoped by an explicit allowlist.
-- `routed`: the segment is really routed toward the deployment's uplink, in both directions, with real source addresses and no NAT.
+- `routed`: the segment is routed toward the deployment's uplink, in both directions, with real source addresses and no NAT.
 
-A `nat` network says exactly what may leave, and nothing else does. Entries are `CIDR[:proto/port]` (a bare address is its `/32`; omitting the service allows all traffic to the CIDR):
+A `nat` network lists what may leave; everything else is dropped. Entries are `CIDR[:proto/port]` (a bare address is its `/32`; omitting the service allows all traffic to the CIDR):
 
 ```yaml
 range:
@@ -350,7 +350,7 @@ attacker:
 
 The attacker's own `egress` composes ahead of network policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
 
-Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code rather than silently unenforced:
+Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code:
 
 ```yaml
 # invalid-example: FQDN egress targets are gated until their realization lands
@@ -450,11 +450,11 @@ Three things to know:
 
 - The one spelling divergence from YAML is `AclRule(from_=...)`, since `from` is a Python keyword; the YAML surface keeps `from:`.
 - Models validate fully at construction and stay mutable for programmatic building. Validity is re-established at every consumer boundary (the sandbox revalidates a typed configuration on receipt), so mutating a spec between construction and handoff is safe.
-- Address fields are dual-stack types so IPv6 never requires a migration, but IPv6 values are rejected until their realization lands (see [Boundaries](#boundaries)).
+- Address fields are dual-stack types, so adding IPv6 later will not change them. IPv6 values are rejected until their realization lands (see [Boundaries](#boundaries)).
 
 ## Validation and diagnostics
 
-`inspect-ranges validate` reports every detectable problem at once, with source positions and actionable hints, because the primary authors of these files are often models and every validate/fix round trip counts:
+`inspect-ranges validate` reports every detectable problem at once, with source positions and hints. The authors of these files are often models, so each validate/fix round trip counts:
 
 ```yaml
 # invalid-example: several mistakes at once, for the diagnostics below
@@ -493,7 +493,7 @@ inspect-ranges render range.yaml -o bundle/
 
 ## Boundaries {#boundaries}
 
-The syntax refuses loudly rather than degrading silently. For reviewers, these are the current edges, in three categories:
+Constructs outside the current implementation are rejected with specific error codes. Three categories:
 
 **Gated**: in the vocabulary, rejected with a specific code until their realization lands.
 
@@ -516,5 +516,5 @@ The syntax refuses loudly rather than degrading silently. For reviewers, these a
 ::: {.callout-note}
 ## Status and feedback
 
-The networking syntax is schema v0.2. Every construct on this page is realized by the compiler and held to a booted conformance battery. If a network you want to express does not fit this syntax, that is exactly the feedback we are looking for: please share the topology (ideally as a sketch of the `range.yaml` you wish you could write).
+The networking syntax is schema v0.2. Every construct on this page is enforced in a booted range by a conformance battery. If a network you want to express does not fit this syntax, please share the topology, ideally as a sketch of the `range.yaml` you wish you could write.
 :::

@@ -6,7 +6,7 @@ llms-description: "Tutorial and review guide for the guest side of range.yaml: d
 
 ## Anatomy of a definition
 
-A range definition has five sections. One vocabulary rule holds everywhere: **guests** are the VMs in a range, and they come in three kinds: **hosts** (targets), **routers**, and the **attacker**. The word "host" by itself always means a target in the definition language; the physical machine a range runs on is never called that here.
+A range definition has five sections. One vocabulary rule: **guests** are the VMs in a range, in three kinds: **hosts** (targets), **routers**, and the **attacker**. In the definition language, "host" by itself always means a target, never the physical machine a range runs on.
 
 ```yaml
 range:
@@ -34,7 +34,7 @@ attacker:
   entry: external
 ```
 
-The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for sections that are designed but not yet landed. Two conventions sit outside the schema deliberately: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
+The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for planned sections. Two things stay outside the schema: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
 
 ## Hosts
 
@@ -68,9 +68,9 @@ attacker:
 
 ## Images
 
-Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. Goldens carry the baked-in control daemon (the hypervisor-channel exec/file plane) plus whatever the scenario installed at build time; the definition references them logically, and planning resolves each reference against the local image cache to a sha256 digest.
+Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. A golden carries the baked-in control daemon plus whatever the scenario installed at build time. The definition references images by name; planning resolves each reference against the local image cache to a sha256 digest.
 
-An image that is not in the cache is visible in the plan and refuses at render, because a realization bundle must be self-sufficient:
+A reference missing from the cache shows up in the plan output and is an error at render, because a realization bundle must be self-sufficient:
 
 ```
 ✗ range.yaml  1 error
@@ -95,7 +95,7 @@ Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ra
 
 ## Routers are guests too
 
-A router is an ordinary guest with one interface per joined segment, running an ordinary generated firewall that a defender inside the range could inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used:
+A router is an ordinary guest with one interface per joined segment, running a generated firewall that a defender inside the range can inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used:
 
 ```yaml
 range:
@@ -164,18 +164,18 @@ With `host:`, the attacker declares no machine of its own (the foothold is the m
 
 ## What a guest sees
 
-Realization is deliberately explicit about guest hardware: every device is declared per role, and no tool default decides the attack surface. The standard profile gives a guest virtio disk(s), virtio NICs, a vsock device, a serial console, and a virtio entropy source, and explicitly nothing else (no USB controller, no memory balloon, no video).
+Every device a guest sees is declared per role; no tool default decides the attack surface. The standard profile gives a guest virtio disks, virtio NICs, a vsock device, a serial console, and a virtio entropy source, and nothing else: no USB controller, memory balloon, or video.
 
-Two consequences matter for scenario realism:
+Two consequences:
 
 - **The control plane is invisible in-range.** Guests are driven over the vsock device, a hypervisor channel out of band from every network. There is no management NIC: nothing inside the range can discover, firewall, or connect to the channel that controls the guests.
-- **Readiness means provisioned, not merely booted.** A range is ready only when every guest's configuration has completely applied (a router whose firewall has not loaded yet is an unenforced range, so the runtime waits).
+- **Readiness waits for provisioning.** A range is ready only when every guest's configuration has fully applied. A router whose firewall has not loaded yet is an unenforced range, so the runtime waits.
 
 ## How configuration reaches a guest
 
-The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. The current realization injects over cloud-init (a seed presented as a read-only virtio disk), which covers cloud-style Linux images. The designed menu is wider: configuration baked at build time for images without an agent, unattend plus the Windows guest agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints for complex ranges that need no boot-time configuration at all.
+The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. The current realization injects over cloud-init (a seed presented as a read-only virtio disk), which covers cloud-style Linux images. Other injectors are designed: configuration baked at build time for images without an agent, unattend plus the Windows guest agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints for ranges that need no boot-time configuration at all.
 
-Windows guests are therefore valid to *define* today but refuse at *planning*, loudly, until their injectors land with the build phase:
+Windows guests are valid to define but refuse at planning until their injectors land with the build phase:
 
 ```yaml
 # plan-invalid: valid definition; planning refuses Windows guests until their injectors land
@@ -206,9 +206,9 @@ attacker:
 
 For reviewers, the guest-side edges:
 
-**Gated**: Windows rendering (`windows-render-not-supported`) until the build/checkpoint phase lands its injectors; the Windows control plane itself (the same exec/file protocol over vsock) is already proven.
+**Gated**: Windows rendering (`windows-render-not-supported`) until the build/checkpoint phase lands its injectors. The Windows control plane itself (the same exec/file protocol over vsock) already works.
 
-**Deferred guest content**: what a guest *contains* is deliberately not yet schema. These sections are excluded entirely (rejected with pointers), with their content parked verbatim per range until their designs land:
+**Deferred guest content**: what a guest *contains* is not yet schema. These sections are rejected with pointers, and their content is parked verbatim per range until their designs land:
 
 | Deferred | What it will declare |
 |---|---|
@@ -220,10 +220,10 @@ For reviewers, the guest-side edges:
 | defense toggles | per-host protections on or off |
 | `count:` expansion | stamping out N copies of a host |
 
-The dividing rule: content belongs in the definition language when it is small, typed, and benefits from being visible to randomization, auditing, and scoring; everything larger is build-time work whose output is captured into images and checkpoints.
+The dividing rule: content belongs in the definition language when it is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints.
 
 ::: {.callout-note}
 ## Status and feedback
 
-Guest identity, images, resources, and realization are schema v0.2 and enforced as documented. The deferred table above is where machine-level feedback matters most: if your ranges need to declare guest content this language cannot yet express, tell us what, ideally as the `range.yaml` section you wish you could write.
+Guest identity, images, resources, and realization are schema v0.2 and enforced as documented. If your ranges need to declare guest content this language cannot yet express, tell us what, ideally as the `range.yaml` section you wish you could write.
 :::
