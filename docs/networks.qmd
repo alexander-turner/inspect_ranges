@@ -10,8 +10,8 @@ Ranges are defined in a `range.yaml` file or as the equivalent typed Python; eve
 
 Two properties hold throughout:
 
-1. **Everything is compiled.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition, so there is no second configuration to drift.
-2. **Everything is tested.** Each construct is verified in a booted range, and every example on this page is validated in CI, on both surfaces: the YAML validates, the Python constructs, and each pair is checked for equality. Constructs the runtime cannot yet realize are rejected at validation with a specific error code (see [Boundaries](#boundaries)).
+1.  **Everything is compiled.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition, so there is no second configuration to drift.
+2.  **Everything is tested.** Each construct is verified in a booted range, and every example on this page is validated in CI, on both surfaces: the YAML validates, the Python constructs, and each pair is checked for equality. Constructs the runtime cannot yet realize are rejected at validation with a specific error code (see [Boundaries](#boundaries)).
 
 ## A flat network
 
@@ -20,7 +20,7 @@ The smallest range: one network, one target, and the attacker:
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: flat
   description: One target on one flat network.
@@ -43,7 +43,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 from inspect_ranges.types import (
     Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
 )
@@ -68,7 +68,6 @@ flat = RangeSpec(
     ),
 )
 ```
-
 :::
 
 Every guest attaches to networks explicitly through `interfaces`. The attacker is an ordinary guest (a dedicated VM with a real NIC in the broadcast domain), declared separately because evaluations treat it specially. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it.
@@ -82,7 +81,7 @@ Addresses are optional. When omitted, they are allocated deterministically: the 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: addressing
   description: Explicit and allocated addresses on one segment.
@@ -109,7 +108,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 addressing = RangeSpec(
     meta=RangeMeta(
         name="addressing",
@@ -137,7 +136,6 @@ addressing = RangeSpec(
     ),
 )
 ```
-
 :::
 
 Networks can also address their guests over DHCP. DHCP is reservation-only: every lease comes from the deterministic allocation by MAC address, so DHCP addressing is as predictable as static addressing while a real DHCP service runs on the segment:
@@ -145,7 +143,7 @@ Networks can also address their guests over DHCP. DHCP is reservation-only: ever
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: dhcp
   description: Guests addressed over reservation-only DHCP.
@@ -167,11 +165,11 @@ attacker:
   entry: external
 ```
 
-1. The lease is reserved for web's MAC address.
+1.  The lease is reserved for web's MAC address.
 
 ### Python
 
-```python
+``` python
 dhcp = RangeSpec(
     meta=RangeMeta(
         name="dhcp",
@@ -195,7 +193,6 @@ dhcp = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Name resolution
@@ -205,7 +202,7 @@ A network can declare DNS in three ways. `records` serves names from the range i
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: dns-records
   description: Range-served name records, derived and explicit.
@@ -232,7 +229,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 dns_records = RangeSpec(
     meta=RangeMeta(
         name="dns-records",
@@ -266,7 +263,6 @@ dns_records = RangeSpec(
     ),
 )
 ```
-
 :::
 
 Records networks hand their guests a derived search domain (`<network>.internal`), because modern stub resolvers do not send single-label names like `web` to DNS without one.
@@ -276,7 +272,7 @@ Records networks hand their guests a derived search domain (`<network>.internal`
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: dns-ad
   description: An authoritative guest serves DNS, chaining to an upstream forwarder.
@@ -308,7 +304,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 dns_ad = RangeSpec(
     meta=RangeMeta(
         name="dns-ad",
@@ -344,15 +340,14 @@ dns_ad = RangeSpec(
     ),
 )
 ```
-
 :::
 
-::: {.callout-warning}
+::: callout-warning
 ## `.local` zones
 
 Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide whether to keep them:
 
-```
+```         
 ✓ range.yaml  1 warning
   12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is under '.local', which
                         Linux stub resolvers reserve for mDNS and never send to unicast DNS
@@ -366,7 +361,7 @@ Routers join segments and carry the inter-segment policy. Rules are default-deny
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: dmz-pivot
   description: >
@@ -406,7 +401,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 dmz_pivot = RangeSpec(
     meta=RangeMeta(
         name="dmz-pivot",
@@ -449,7 +444,6 @@ dmz_pivot = RangeSpec(
     ),
 )
 ```
-
 :::
 
 Each segment is its own broadcast domain: L2 tradecraft like ARP and LLMNR poisoning works within a segment and stops at the router. The router is an ordinary guest running a generated nftables firewall that a defender inside the range can inspect.
@@ -461,7 +455,7 @@ Rules evaluate first-match in declaration order, and each rule carries exactly o
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: policy
   description: Ordered rules with carve-outs, guest endpoints, and CIDR endpoints.
@@ -498,13 +492,13 @@ attacker:
   entry: external
 ```
 
-1. A carve-out: ssh to the db host is dropped even though the next rule allows `tcp/22`.
-2. Only the web server may open http into the internal segment.
-3. A literal address range as an endpoint.
+1.  A carve-out: ssh to the db host is dropped even though the next rule allows `tcp/22`.
+2.  Only the web server may open http into the internal segment.
+3.  A literal address range as an endpoint.
 
 ### Python
 
-```python
+``` python
 policy = RangeSpec(
     meta=RangeMeta(
         name="policy",
@@ -560,10 +554,9 @@ policy = RangeSpec(
 )
 ```
 
-1. A carve-out: ssh to the db host is dropped even though the next rule allows `tcp/22`.
-2. Only the web server may open http into the internal segment.
-3. A literal address range as an endpoint.
-
+1.  A carve-out: ssh to the db host is dropped even though the next rule allows `tcp/22`.
+2.  Only the web server may open http into the internal segment.
+3.  A literal address range as an endpoint.
 :::
 
 Networks and guests share one namespace (a guest may not take a network's name), so an endpoint is never ambiguous. Unknown endpoints are rejected at validation with a did-you-mean suggestion.
@@ -575,7 +568,7 @@ Larger networks chain routers. Each network's default gateway is elected implici
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: chained
   description: Three segments chained through two routers.
@@ -625,7 +618,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 chained = RangeSpec(
     meta=RangeMeta(
         name="chained",
@@ -680,7 +673,6 @@ chained = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Leaving the range {#egress}
@@ -696,7 +688,7 @@ A `nat` network lists what may leave; everything else is dropped. Entries are `C
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: egress
   description: A corp segment that may reach one https host and NTP, nothing else.
@@ -724,7 +716,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 egress = RangeSpec(
     meta=RangeMeta(
         name="egress",
@@ -756,14 +748,13 @@ egress = RangeSpec(
     ),
 )
 ```
-
 :::
 
 The attacker's own `egress` composes ahead of network policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
 
 Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code:
 
-```yaml
+``` yaml
 # invalid-example: FQDN egress targets are gated until their realization lands
 range:
   name: egress-fqdn
@@ -784,7 +775,7 @@ attacker:
   entry: assumed-breach
 ```
 
-```
+```         
 ✗ range.yaml  1 error
   9:15  networks[0].egress.allow[0]  egress entry 'updates.example.com:tcp/443': FQDN
                                      targets are not yet realized (use a CIDR for now)
@@ -797,7 +788,7 @@ The attacker either boots as a dedicated attack box (declare `interfaces`, optio
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: foothold
   description: The attacker starts from a foothold on the web server.
@@ -820,7 +811,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 foothold = RangeSpec(
     meta=RangeMeta(
         name="foothold",
@@ -841,7 +832,6 @@ foothold = RangeSpec(
     attacker=Attacker(host="web", entry="assumed-breach"),
 )
 ```
-
 :::
 
 `entry` records how the attacker arrives (`external`, `assumed-breach`, or `operator`) for scorers and dataset builders.
@@ -850,7 +840,7 @@ foothold = RangeSpec(
 
 The Python tabs above are the typed surface. The models live in `inspect_ranges.types`, construction reads like the YAML (strings coerce to address types, including under strict type checking), and a `RangeSpec` object is accepted directly as sandbox configuration:
 
-```python
+``` python
 # fragment
 Task(..., sandbox=("libvirt_range", dmz_pivot))  # typed config
 Task(..., sandbox=("libvirt_range", "range.yaml"))  # file config
@@ -866,7 +856,7 @@ Three things to know:
 
 `inspect-ranges validate` reports every detectable problem at once, with source positions and hints. The authors of these files are often models, so each validate/fix round trip counts:
 
-```yaml
+``` yaml
 # invalid-example: several mistakes at once, for the diagnostics below
 range:
   name: broken
@@ -885,7 +875,7 @@ attacker:
   entry: external
 ```
 
-```
+```         
 ✗ range.yaml  3 errors
    7:11  networks[0].cidr   '10.80.10.0/33' is not a valid IPv4 or IPv6 network
   10:5   hosts[0].image     missing required field
@@ -895,7 +885,7 @@ attacker:
 
 Once a definition validates, `inspect-ranges plan` shows the resolved result (every address, MAC, and control-channel id, plus host requirements and resource totals), and `inspect-ranges render` emits the digest-manifested bundle the runtime realizes:
 
-```{.bash filename="Terminal"}
+``` {.bash filename="Terminal"}
 inspect-ranges validate range.yaml
 inspect-ranges plan range.yaml
 inspect-ranges render range.yaml -o bundle/
@@ -908,22 +898,22 @@ Constructs outside the current implementation are rejected with specific error c
 **Gated**: in the vocabulary, rejected with a specific code until their realization lands.
 
 | Construct | Code |
-|---|---|
+|------------------------------------|------------------------------------|
 | IPv6 values (any field) | `ipv6-not-realized` |
 | FQDN egress targets | `egress-fqdn-not-realized` |
 | Egress allowlists on router-attached networks | `egress-with-router-not-realized` |
 
 **Excluded**: not in the vocabulary; nothing surveyed forces them yet.
 
-| Construct | Status |
-|---|---|
-| VLANs / trunking on shared bridges | reserved code `vlan-not-supported` |
-| Multiple NICs on one network | rejected as `duplicate-attachment` |
+| Construct                           | Status                                |
+|------------------------------------|------------------------------------|
+| VLANs / trunking on shared bridges  | reserved code `vlan-not-supported`    |
+| Multiple NICs on one network        | rejected as `duplicate-attachment`    |
 | Traffic shaping / latency injection | reserved code `shaping-not-supported` |
 
 **Deferred sections**: `attack_path` and operator policy are not networking and are excluded from the schema until their designs land; they are rejected with a pointer to where their content currently lives. Guest content (users, services, weaknesses, defense, Active Directory) and `variables` are covered in [Defining Guests](guests.qmd).
 
-::: {.callout-note}
+::: callout-note
 ## Status and feedback
 
 The networking syntax is schema v0.2. Every construct on this page is enforced in a booted range by a conformance battery. If a network you want to express does not fit this syntax, please share the topology, ideally as a sketch of the `range.yaml` you wish you could write.

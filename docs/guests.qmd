@@ -11,7 +11,7 @@ A range definition has five sections. One vocabulary rule: **guests** are the VM
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: anatomy
   schema_version: "0.3"
@@ -39,7 +39,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 from inspect_ranges.types import (
     Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
     Resources,
@@ -69,7 +69,6 @@ anatomy = RangeSpec(
     ),
 )
 ```
-
 :::
 
 The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for planned sections. Two things stay outside the schema: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
@@ -83,7 +82,7 @@ A host is a target guest:
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: hosts
   description: Host identity fields and what consumes them.
@@ -107,13 +106,13 @@ attacker:
   entry: external
 ```
 
-1. The definition-wide identifier (exec targets, ACL endpoints).
-2. The in-guest hostname, when it differs from `name`.
-3. The fully qualified name, for ranges whose DNS serves it.
+1.  The definition-wide identifier (exec targets, ACL endpoints).
+2.  The in-guest hostname, when it differs from `name`.
+3.  The fully qualified name, for ranges whose DNS serves it.
 
 ### Python
 
-```python
+``` python
 hosts = RangeSpec(
     meta=RangeMeta(
         name="hosts",
@@ -139,10 +138,9 @@ hosts = RangeSpec(
 )
 ```
 
-1. The definition-wide identifier (exec targets, ACL endpoints).
-2. The in-guest hostname, when it differs from `name`.
-3. The fully qualified name, for ranges whose DNS serves it.
-
+1.  The definition-wide identifier (exec targets, ACL endpoints).
+2.  The in-guest hostname, when it differs from `name`.
+3.  The fully qualified name, for ranges whose DNS serves it.
 :::
 
 `name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Defining Networks](networks.qmd).
@@ -153,7 +151,7 @@ Every host names the `image` it boots from. Images are golden qcow2 disks: share
 
 A reference missing from the cache shows up in the plan output and is an error at render, because a realization bundle must be self-sufficient:
 
-```
+```         
 ✗ range.yaml  1 error
   12:5  hosts[0].image  image 'acme/db-golden' for guest 'db' is not in the image
                         cache, so the bundle cannot be self-sufficient (pull or
@@ -167,7 +165,7 @@ Sizing is backend-neutral and optional:
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # fragment
 resources:
   cpus: 2
@@ -177,11 +175,10 @@ resources:
 
 ### Python
 
-```python
+``` python
 # fragment
 Resources(cpus=2, memory_mb=4096, disk_gb=20)
 ```
-
 :::
 
 Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ranges plan` reports the range's totals (guests, vCPUs, memory) so a deployment can admission-check before anything boots.
@@ -193,7 +190,7 @@ A router is an ordinary guest with one interface per joined segment, running a g
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: router-guest
   description: A router with explicit identity, and one with backend defaults.
@@ -228,7 +225,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 router_guest = RangeSpec(
     meta=RangeMeta(
         name="router-guest",
@@ -267,7 +264,6 @@ router_guest = RangeSpec(
     ),
 )
 ```
-
 :::
 
 Policy (`acl`) and routing (`routes`, gateway election) are covered in [Defining Networks](networks.qmd).
@@ -279,7 +275,7 @@ The attacker is a guest like any other, declared separately because evaluations 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 range:
   name: attack-box
   description: A dedicated attack box with explicit sizing.
@@ -305,7 +301,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 attack_box = RangeSpec(
     meta=RangeMeta(
         name="attack-box",
@@ -331,7 +327,6 @@ attack_box = RangeSpec(
     ),
 )
 ```
-
 :::
 
 With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Defining Networks](networks.qmd#egress).
@@ -351,7 +346,7 @@ Until the build phase lands, planning refuses definitions that carry guest conte
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: users
@@ -375,7 +370,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 users = RangeSpec(
     meta=RangeMeta(
@@ -410,7 +405,6 @@ users = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Services
@@ -420,7 +414,7 @@ users = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: services
@@ -447,7 +441,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 services = RangeSpec(
     meta=RangeMeta(
@@ -482,7 +476,6 @@ services = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Vulnerabilities and misconfigurations
@@ -492,7 +485,7 @@ The seeded attack surface is two distinct lists, because real intrusions lean he
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: weaknesses
@@ -523,7 +516,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 weaknesses = RangeSpec(
     meta=RangeMeta(
@@ -566,7 +559,6 @@ weaknesses = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Planted data
@@ -576,7 +568,7 @@ weaknesses = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: planted-data
@@ -600,7 +592,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 planted_data = RangeSpec(
     meta=RangeMeta(
@@ -636,7 +628,6 @@ planted_data = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Defense
@@ -646,7 +637,7 @@ The range-level `defense` section records the defensive posture on the D0 (no de
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: defended
@@ -677,7 +668,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 defended = RangeSpec(
     meta=RangeMeta(
@@ -720,7 +711,6 @@ defended = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Active Directory {#active-directory}
@@ -730,7 +720,7 @@ Identity is range-scoped (accounts exist in the domain, not on a host), so `acti
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: forest
@@ -775,7 +765,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 forest = RangeSpec(
     meta=RangeMeta(
@@ -848,7 +838,6 @@ forest = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects).
@@ -860,7 +849,7 @@ Everything above declares state; `provisioning` names the build-time work that p
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: provisioned
@@ -885,7 +874,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 provisioned = RangeSpec(
     meta=RangeMeta(
@@ -915,7 +904,6 @@ provisioned = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Roles and scheduled activity
@@ -925,7 +913,7 @@ provisioned = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: activity
@@ -950,7 +938,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: guest content is build-phase (see Guest content above)
 activity = RangeSpec(
     meta=RangeMeta(
@@ -983,7 +971,6 @@ activity = RangeSpec(
     ),
 )
 ```
-
 :::
 
 ## Variables
@@ -993,7 +980,7 @@ activity = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: per-instance draws arrive with the generation layer
 range:
   name: randomized
@@ -1021,7 +1008,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: per-instance draws arrive with the generation layer
 def randomized(
     telnet_port: int = 2323, admin_password: str = "changeme123!"
@@ -1061,7 +1048,6 @@ def randomized(
 
 spec = randomized()
 ```
-
 :::
 
 Because defaults are required, every definition validates and realizes concretely today; the per-instance draw arrives with the generation layer (gated at planning as `randomization-not-realized` until then). Unknown references are errors with did-you-mean hints.
@@ -1086,7 +1072,7 @@ Windows guests are valid to define but refuse at planning until their injectors 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-```yaml
+``` yaml
 # plan-invalid: planning refuses Windows guests until injectors land
 range:
   name: windows-gated
@@ -1107,7 +1093,7 @@ attacker:
 
 ### Python
 
-```python
+``` python
 # plan-invalid: planning refuses Windows guests until injectors land
 windows_gated = RangeSpec(
     meta=RangeMeta(
@@ -1131,10 +1117,9 @@ windows_gated = RangeSpec(
     ),
 )
 ```
-
 :::
 
-```
+```         
 ✗ range.yaml  1 error
   10:17  hosts[0].os.type  host 'dc01' is a Windows guest, which render v1 cannot
                            realize (Windows injectors arrive with the build phase)
@@ -1150,7 +1135,7 @@ For reviewers, the guest-side edges:
 
 The dividing rule for what belongs in the definition language: content that is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints and referenced through `provisioning`.
 
-::: {.callout-note}
+::: callout-note
 ## Status and feedback
 
 Guest identity, images, resources, and realization are enforced as documented. Guest content (schema v0.3) is parsed and validated as documented, with build-phase realization in progress behind the planning gate. If your ranges need to declare guest content this language cannot express, tell us what, ideally as the `range.yaml` section you wish you could write. The vocabulary edges (the AD rights set, the defense toggle set) are explicit extension points.
