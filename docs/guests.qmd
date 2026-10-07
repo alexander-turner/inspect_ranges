@@ -1,0 +1,229 @@
+---
+title: "Defining Guests"
+description: "The guest side of a range definition: hosts, routers, the attacker, images, resources, and how configuration reaches a VM."
+llms-description: "Tutorial and review guide for the guest side of range.yaml: definition anatomy, hosts, images, resources, routers, the attacker, the realized device profile, and configuration injection."
+---
+
+## Anatomy of a definition
+
+A range definition has five sections. One vocabulary rule holds everywhere: **guests** are the VMs in a range, and they come in three kinds: **hosts** (targets), **routers**, and the **attacker**. The word "host" by itself always means a target in the definition language; the physical machine a range runs on is never called that here.
+
+```yaml
+range:
+  name: anatomy
+  schema_version: "0.2"
+  description: >
+    The five sections. Identity here; segments in networks; guests in
+    routers, hosts, and attacker.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+
+routers: []           # optional: gateways between segments
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab }]
+
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for sections that are designed but not yet landed. Two conventions sit outside the schema deliberately: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
+
+## Hosts
+
+A host is a target guest:
+
+```yaml
+range:
+  name: hosts
+  description: Host identity fields and what consumes them.
+
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+
+hosts:
+  - name: dc01                     # the definition-wide identifier (exec targets, ACL endpoints)
+    hostname: dc01-nyc             # the in-guest hostname, when it differs from name
+    fqdn: dc01.corp.example        # fully qualified name, for ranges whose DNS serves it
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: acme/dc-golden
+    resources: { cpus: 2, memory_mb: 4096 }
+    interfaces: [{ network: corp, ip: 10.20.0.5 }]
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: external
+```
+
+`name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Defining Networks](networks.qmd).
+
+## Images
+
+Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. Goldens carry the baked-in control daemon (the hypervisor-channel exec/file plane) plus whatever the scenario installed at build time; the definition references them logically, and planning resolves each reference against the local image cache to a sha256 digest.
+
+An image that is not in the cache is visible in the plan and refuses at render, because a realization bundle must be self-sufficient:
+
+```
+✗ range.yaml  1 error
+  12:5  hosts[0].image  image 'acme/db-golden' for guest 'db' is not in the image
+                        cache, so the bundle cannot be self-sufficient (pull or
+                        build the image into the cache)
+```
+
+## Resources
+
+Sizing is backend-neutral and optional:
+
+```yaml
+# fragment
+resources:
+  cpus: 2
+  memory_mb: 4096
+  disk_gb: 20        # only when the image default is not enough
+```
+
+Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ranges plan` reports the range's totals (guests, vCPUs, memory) so a deployment can admission-check before anything boots.
+
+## Routers are guests too
+
+A router is an ordinary guest with one interface per joined segment, running an ordinary generated firewall that a defender inside the range could inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used:
+
+```yaml
+range:
+  name: router-guest
+  description: A router with explicit identity, and one with backend defaults.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: edge
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: acme/router-golden
+    resources: { cpus: 1, memory_mb: 512 }
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      - { from: dmz, to: internal, allow: [tcp/443] }
+
+hosts:
+  - name: app
+    os: { type: linux }
+    image: acme/app-golden
+    interfaces: [{ network: internal }]
+
+attacker:
+  interfaces: [{ network: dmz }]
+  entry: external
+```
+
+Policy (`acl`) and routing (`routes`, gateway election) are covered in [Defining Networks](networks.qmd).
+
+## The attacker guest
+
+The attacker is a guest like any other, declared separately because evaluations treat it specially. Either it boots as a dedicated attack box (declare `interfaces`; `name` defaults to `attacker`, and omitting `image` selects the backend's standard attack image), or it starts from a foothold on a declared host:
+
+```yaml
+range:
+  name: attack-box
+  description: A dedicated attack box with explicit sizing.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: dmz }]
+
+attacker:
+  name: kali
+  image: acme/kali-golden
+  resources: { cpus: 2, memory_mb: 4096 }
+  interfaces: [{ network: dmz }]
+  entry: external
+```
+
+With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Defining Networks](networks.qmd#egress).
+
+## What a guest sees
+
+Realization is deliberately explicit about guest hardware: every device is declared per role, and no tool default decides the attack surface. The standard profile gives a guest virtio disk(s), virtio NICs, a vsock device, a serial console, and a virtio entropy source, and explicitly nothing else (no USB controller, no memory balloon, no video).
+
+Two consequences matter for scenario realism:
+
+- **The control plane is invisible in-range.** Guests are driven over the vsock device, a hypervisor channel out of band from every network. There is no management NIC: nothing inside the range can discover, firewall, or connect to the channel that controls the guests.
+- **Readiness means provisioned, not merely booted.** A range is ready only when every guest's configuration has completely applied (a router whose firewall has not loaded yet is an unenforced range, so the runtime waits).
+
+## How configuration reaches a guest
+
+The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. The current realization injects over cloud-init (a seed presented as a read-only virtio disk), which covers cloud-style Linux images. The designed menu is wider: configuration baked at build time for images without an agent, unattend plus the Windows guest agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints for complex ranges that need no boot-time configuration at all.
+
+Windows guests are therefore valid to *define* today but refuse at *planning*, loudly, until their injectors land with the build phase:
+
+```yaml
+# plan-invalid: valid definition; planning refuses Windows guests until their injectors land
+range:
+  name: windows-gated
+  description: A Windows target, valid to define, gated at planning.
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+hosts:
+  - name: dc01
+    os: { type: windows, version: server-2022 }
+    image: acme/win-golden
+    interfaces: [{ network: corp }]
+attacker:
+  interfaces: [{ network: corp }]
+  entry: external
+```
+
+```
+✗ range.yaml  1 error
+  10:17  hosts[0].os.type  host 'dc01' is a Windows guest, which render v1 cannot
+                           realize (Windows injectors arrive with the build phase)
+```
+
+## Boundaries {#boundaries}
+
+For reviewers, the guest-side edges:
+
+**Gated**: Windows rendering (`windows-render-not-supported`) until the build/checkpoint phase lands its injectors; the Windows control plane itself (the same exec/file protocol over vsock) is already proven.
+
+**Deferred guest content**: what a guest *contains* is deliberately not yet schema. These sections are excluded entirely (rejected with pointers), with their content parked verbatim per range until their designs land:
+
+| Deferred | What it will declare |
+|---|---|
+| `users` | local accounts and credentials |
+| `services` | planted listeners and applications |
+| `vulnerabilities` / `misconfigurations` | the seeded attack surface, as distinct lists |
+| `provisioning` | build-time recipes (large stacks are built once and captured, never re-run per sample) |
+| `data` | planted files |
+| defense toggles | per-host protections on or off |
+| `count:` expansion | stamping out N copies of a host |
+
+The dividing rule: content belongs in the definition language when it is small, typed, and benefits from being visible to randomization, auditing, and scoring; everything larger is build-time work whose output is captured into images and checkpoints.
+
+::: {.callout-note}
+## Status and feedback
+
+Guest identity, images, resources, and realization are schema v0.2 and enforced as documented. The deferred table above is where machine-level feedback matters most: if your ranges need to declare guest content this language cannot yet express, tell us what, ideally as the `range.yaml` section you wish you could write.
+:::

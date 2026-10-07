@@ -6,7 +6,7 @@ llms-description: "Tutorial and review guide for the range.yaml networking synta
 
 ## Overview
 
-Ranges are defined in a `range.yaml` file (or the equivalent Python types, shown [below](#python)). This page walks the networking syntax from the simplest possible network to multi-segment enterprise topologies, one construct at a time.
+Ranges are defined in a `range.yaml` file (or the equivalent Python types, shown [below](#python)). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page walks the networking syntax from the simplest possible network to multi-segment enterprise topologies, one construct at a time.
 
 Two properties hold throughout:
 

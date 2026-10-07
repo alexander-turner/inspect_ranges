@@ -3,35 +3,40 @@ from pathlib import Path
 
 import pytest
 from inspect_ranges import validate_range
+from inspect_ranges._compiler import resolve_plan
+from inspect_ranges.types import IssueError
 
-NETWORKS_QMD = Path(__file__).parent.parent / "docs" / "networks.qmd"
+DOCS = Path(__file__).parent.parent / "docs"
+PAGES = ("networks.qmd", "guests.qmd")
+MIN_BLOCKS = {"networks.qmd": 10, "guests.qmd": 5}
 
 _YAML_BLOCK = re.compile(r"^```yaml\n(.*?)^```", re.MULTILINE | re.DOTALL)
 
 
-def _blocks() -> list[tuple[str, str]]:
-    """Every fenced yaml block on the networks page, labeled by its first line."""
+def _blocks(page: str) -> list[tuple[str, str]]:
+    """Every fenced yaml block on a docs page, labeled by its first line."""
     return [
         (match.splitlines()[0].strip(), match)
-        for match in _YAML_BLOCK.findall(NETWORKS_QMD.read_text())
+        for match in _YAML_BLOCK.findall((DOCS / page).read_text())
     ]
 
 
-def test_page_has_examples() -> None:
-    blocks = _blocks()
-    assert len(blocks) >= 10, "the networks page lost its examples"
-    assert sum("# invalid-example" in first for first, _ in blocks) >= 2
+@pytest.mark.parametrize("page", PAGES)
+def test_pages_have_examples(page: str) -> None:
+    assert len(_blocks(page)) >= MIN_BLOCKS[page], f"{page} lost its examples"
 
 
 @pytest.mark.parametrize(
     ("first_line", "text"),
-    _blocks(),
-    ids=[first.lstrip("# ") or f"block-{i}" for i, (first, _) in enumerate(_blocks())],
+    [block for page in PAGES for block in _blocks(page)],
+    ids=[
+        f"{page.removesuffix('.qmd')}-{first.lstrip('# ').split(':')[0] or index}"
+        for page in PAGES
+        for index, (first, _) in enumerate(_blocks(page))
+    ],
 )
-def test_networks_page_examples_validate(
-    first_line: str, text: str, tmp_path: Path
-) -> None:
-    """Every complete example on the docs page validates (or is marked invalid and fails)."""
+def test_docs_examples_validate(first_line: str, text: str, tmp_path: Path) -> None:
+    """Every complete example in the docs validates; marked blocks fail exactly as documented."""
     if first_line.startswith("# fragment"):
         pytest.skip("fragment, not a complete definition")
     path = tmp_path / "range.yaml"
@@ -39,5 +44,9 @@ def test_networks_page_examples_validate(
     report = validate_range(path)
     if first_line.startswith("# invalid-example"):
         assert not report.valid, "invalid-example block unexpectedly validates"
-    else:
-        assert report.valid, [issue.message for issue in report.issues]
+        return
+    assert report.valid, [issue.message for issue in report.issues]
+    if first_line.startswith("# plan-invalid"):
+        assert report.spec is not None
+        with pytest.raises(IssueError):
+            resolve_plan(report.spec)

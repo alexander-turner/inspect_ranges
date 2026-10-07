@@ -12,6 +12,8 @@ inspect-docs:
   navigation:
     - text: Getting Started
       href: index.qmd
+    - text: Defining Guests
+      href: guests.qmd
     - text: Defining Networks
       href: networks.qmd
   sidebar: unified
