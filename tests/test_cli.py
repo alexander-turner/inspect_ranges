@@ -56,7 +56,10 @@ def test_plan_json_contract(tmp_path: Path) -> None:
 def test_plan_gates_migrated_guest_content() -> None:
     result = CliRunner().invoke(ranges, ["plan", EXAMPLE])
     assert result.exit_code == 1
-    assert "guest-config-not-realized" in result.output or "not yet realized" in result.output
+    assert (
+        "guest-config-not-realized" in result.output
+        or "not yet realized" in result.output
+    )
 
 
 def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
@@ -82,7 +85,10 @@ def test_plan_refuses_windows_examples() -> None:
     )
     result = CliRunner().invoke(ranges, ["plan", goad])
     assert result.exit_code == 1
-    assert "windows-render-not-supported" in result.output or "Windows guest" in result.output
+    assert (
+        "windows-render-not-supported" in result.output
+        or "Windows guest" in result.output
+    )
 
 
 def test_devbox_command_registered() -> None:

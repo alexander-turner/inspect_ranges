@@ -450,7 +450,9 @@ attacker:
   entry: external
 ```
 
-Because defaults are required, every definition validates and realizes concretely today; the per-instance draw arrives with the generation layer (gated at planning as `randomization-not-realized` until then). Unknown references are errors with did-you-mean hints. Python authors do not use references: they draw values and construct concretely, which is the same capability expressed at the language level. Whole-topology generation stays out of the definition language for the same reason in reverse: that really is a program, and the typed Python surface is how to write it.
+Because defaults are required, every definition validates and realizes concretely today; the per-instance draw arrives with the generation layer (gated at planning as `randomization-not-realized` until then). Unknown references are errors with did-you-mean hints.
+
+A validated `RangeSpec` is always a concrete instance: references exist in the YAML text and loading resolves them before validation. The template lives one level up, and each surface has its own: in YAML it is the file, with `{{name}}` marking where values go; in Python it is a function whose parameters play the same role, called with drawn values to produce a concrete spec. The `variables` declaration is shared between the two: it describes what is drawable (type, bounds, choices, default) and travels with the spec as provenance, whichever way the instance was built. A reference string left in a typed spec is a construction mistake and validation rejects it (`unresolved-variable-reference`); braces that name no declared variable stay legal, since scenario content can legitimately contain them. Whole-topology generation stays out of the definition language for the same reason in reverse: that really is a program, and the typed Python surface is how to write it.
 
 ## What a guest sees
 

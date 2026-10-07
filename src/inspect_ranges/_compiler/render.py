@@ -132,6 +132,7 @@ def render_bundle(
     Args:
         spec: A validated range definition.
         out: Bundle directory (created; must be empty or absent).
+        options: Planning options (image cache location, CPU model).
 
     Returns:
         The resolved plan the bundle carries.
@@ -167,7 +168,16 @@ def render_bundle(
     # the measured capability floor (hardened-container spike), widened only by
     # what the plan's services demand, each by an observed failure without it:
     # dnsmasq binding 53/67 needs NET_BIND_SERVICE; DHCP's raw sockets need NET_RAW
-    caps = ["NET_ADMIN", "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETPCAP", "KILL"]
+    caps = [
+        "NET_ADMIN",
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "SETUID",
+        "SETGID",
+        "SETPCAP",
+        "KILL",
+    ]
     if any(network.dhcp or network.search is not None for network in plan.networks):
         caps.append("NET_BIND_SERVICE")
     if any(network.dhcp for network in plan.networks):
@@ -224,7 +234,10 @@ def render_bundle(
         )
         write(
             f"guests/{guest.name}/seed/user-data",
-            "#cloud-config\n" + yaml.safe_dump(_user_data(spec, plan, guest, allocation), sort_keys=False),
+            "#cloud-config\n"
+            + yaml.safe_dump(
+                _user_data(spec, plan, guest, allocation), sort_keys=False
+            ),
         )
 
     write(
@@ -319,9 +332,7 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                     entry["routes"] = static
             else:
                 if network.gateway is not None:
-                    entry["routes"] = [
-                        {"to": "default", "via": str(network.gateway)}
-                    ]
+                    entry["routes"] = [{"to": "default", "via": str(network.gateway)}]
                 nameservers: dict[str, Any] = {}
                 if network.resolvers:
                     nameservers["addresses"] = [
@@ -343,9 +354,7 @@ def _user_data(
         ruleset = "flush ruleset\n" + render_router_nftables(
             spec, guest.name, allocation
         )
-        user_data["write_files"] = [
-            {"path": "/etc/nftables.conf", "content": ruleset}
-        ]
+        user_data["write_files"] = [{"path": "/etc/nftables.conf", "content": ruleset}]
         user_data["runcmd"] = [
             ["sysctl", "-w", "net.ipv4.ip_forward=1"],
             ["systemctl", "enable", "--now", "nftables"],

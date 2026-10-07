@@ -11,7 +11,7 @@ v0.1 deliberately covers only the five sections the runtime consumes — `range`
 
 import re
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_network
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -1419,6 +1419,39 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                         hint=did_you_mean(domain.parent, sorted(domain_names)),
                     )
                 )
+
+    # a constructed spec never contains unresolved references: the YAML path
+    # substitutes {{name}} before validation, so a surviving reference to a
+    # declared variable means a typed author templated a field instead of
+    # placing a value. Braces naming nothing declared are left alone (they may
+    # be legitimate scenario content, e.g. an SSTI payload in a planted file).
+    if spec.variables:
+        import json
+
+        reference = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
+        def _scan(value: Any, path: tuple[PathElement, ...]) -> None:
+            if isinstance(value, str):
+                for match in reference.finditer(value):
+                    if match.group(1) in spec.variables:
+                        issues.append(
+                            Issue(
+                                code="unresolved-variable-reference",
+                                path=path,
+                                message=f"unresolved reference to variable {match.group(1)!r} (references resolve only when loading YAML)",
+                                hint="in typed construction, draw a value and place it directly",
+                            )
+                        )
+            elif isinstance(value, list):
+                for index, item in enumerate(cast(list[Any], value)):
+                    _scan(item, path + (index,))
+            elif isinstance(value, dict):
+                for key, item in cast(dict[Any, Any], value).items():
+                    if path == () and key == "variables":
+                        continue
+                    _scan(item, path + (str(key),))
+
+        _scan(json.loads(spec.model_dump_json(by_alias=True)), ())
 
     host_names = [host.name for host in spec.hosts]
     if spec.attacker.host is not None and spec.attacker.host not in host_names:

@@ -133,9 +133,7 @@ class ResolvedPlan(BaseModel):
 
 def spec_sha256(spec: RangeSpec) -> str:
     """The normalized spec hash: canonical JSON of the validated model, independent of YAML formatting."""
-    normalized = json.dumps(
-        spec.model_dump(mode="json", by_alias=True), sort_keys=True
-    )
+    normalized = json.dumps(spec.model_dump(mode="json", by_alias=True), sort_keys=True)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
@@ -301,9 +299,10 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             )
         )
 
-    egress_uplink = any(
-        network.mode in ("nat", "routed") for network in spec.networks
-    ) or spec.attacker.egress != "none"
+    egress_uplink = (
+        any(network.mode in ("nat", "routed") for network in spec.networks)
+        or spec.attacker.egress != "none"
+    )
 
     return ResolvedPlan(
         range=RangeIdentity(

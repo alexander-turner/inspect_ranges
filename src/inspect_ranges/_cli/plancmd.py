@@ -74,7 +74,9 @@ def plan(
     click.echo("networks:")
     for network in resolved.networks:
         gateway = f" gw {network.gateway}" if network.gateway else ""
-        click.echo(f"  {network.name:<16} {network.cidr}  {network.mode}{gateway}  [{network.bridge}]")
+        click.echo(
+            f"  {network.name:<16} {network.cidr}  {network.mode}{gateway}  [{network.bridge}]"
+        )
     click.echo("guests:")
     for guest in resolved.guests:
         addresses = ", ".join(str(i.ip) for i in guest.interfaces)

@@ -104,6 +104,23 @@ def test_guest_content_typed_construction() -> None:
     assert checked.active_directory.domains[0].acls[0].right == "GenericAll"
 
 
+def test_unresolved_reference_to_declared_variable_is_rejected() -> None:
+    """References resolve only on the YAML path; a typed spec carrying `{{name}}` for a declared variable is a construction mistake, while braces naming nothing declared stay legal scenario content."""
+    from inspect_ranges.types import DataFile, User, Variable
+
+    spec = dmz_pivot()
+    spec.variables = {"admin_password": Variable(default="hunter2")}
+    spec.hosts[0].users = [User(name="admin", password="{{admin_password}}")]
+    with pytest.raises(ValidationError, match="unresolved reference"):
+        revalidate_range(spec)
+
+    spec.hosts[0].users = [User(name="admin", password="hunter2")]
+    spec.hosts[0].data = [
+        DataFile(path="/srv/app/payload.txt", contents="{{secret_key}} and {{7*7}}")
+    ]
+    revalidate_range(spec)
+
+
 def test_ipv6_values_are_gated() -> None:
     # the dual-stack types accept IPv6 structurally (the Network constructs),
     # but the spec-level gate rejects it until realization lands

@@ -59,7 +59,9 @@ def test_plan_resolves_networks_and_guests(cache: Path) -> None:
 
 def test_egress_uplink_derived_from_modes(cache: Path) -> None:
     assert resolve_plan(nat_spec(), options(cache)).requirements.egress_uplink
-    assert not resolve_plan(two_segment_spec(), options(cache)).requirements.egress_uplink
+    assert not resolve_plan(
+        two_segment_spec(), options(cache)
+    ).requirements.egress_uplink
 
 
 def test_image_cache_miss_is_loud(cache: Path, tmp_path: Path) -> None:
