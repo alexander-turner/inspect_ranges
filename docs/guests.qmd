@@ -41,13 +41,7 @@ attacker:
 
 ```python
 from inspect_ranges.types import (
-    Attacker,
-    Host,
-    Interface,
-    Network,
-    Os,
-    RangeMeta,
-    RangeSpec,
+    Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
     Resources,
 )
 
@@ -68,7 +62,7 @@ anatomy = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="lab")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -80,7 +74,7 @@ anatomy = RangeSpec(
 
 The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for planned sections. Two things stay outside the schema: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
 
-Every example on this page shows both surfaces: the YAML definition and the equivalent typed Python. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it. [Defining Networks](networks.qmd#python) covers how typed configuration is consumed.
+Every example on this page shows both surfaces: the YAML definition and the equivalent typed Python. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it. [Defining Networks](networks.qmd#python-definitions) covers how typed configuration is consumed.
 
 ## Hosts
 
@@ -137,7 +131,7 @@ hosts = RangeSpec(
             image="acme/dc-golden",
             resources=Resources(cpus=2, memory_mb=4096),
             interfaces=[Interface(network="corp", ip="10.20.0.5")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="corp")], entry="external"
@@ -258,7 +252,7 @@ router_guest = RangeSpec(
             acl=[
                 AclRule(from_="dmz", to="internal", allow=["tcp/443"])
             ],
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -266,7 +260,7 @@ router_guest = RangeSpec(
             os=Os(type="linux"),
             image="acme/app-golden",
             interfaces=[Interface(network="internal")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="dmz")], entry="external"
@@ -326,7 +320,7 @@ attack_box = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="dmz")],
-        ),
+        )
     ],
     attacker=Attacker(
         name="kali",
@@ -385,8 +379,7 @@ attacker:
 # plan-invalid: guest content is build-phase (see Guest content above)
 users = RangeSpec(
     meta=RangeMeta(
-        name="users",
-        description="Local accounts as converged state.",
+        name="users", description="Local accounts as converged state."
     ),
     networks=[
         Network(name="lab", cidr="10.10.10.0/24", mode="isolated")
@@ -410,7 +403,7 @@ users = RangeSpec(
                     note="service account with sudo",
                 ),
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -482,7 +475,7 @@ services = RangeSpec(
                     ),
                 ),
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -557,16 +550,16 @@ weaknesses = RangeSpec(
                     service="zabbix-web",
                     description="SQL injection in jsrpc.php, "
                     "reachable unauthenticated.",
-                ),
+                )
             ],
             misconfigurations=[
                 Misconfiguration(
                     id="guest-login-enabled",
                     description="The Zabbix guest account is enabled "
                     "with an empty password.",
-                ),
+                )
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -635,7 +628,7 @@ planted_data = RangeSpec(
                     "traffic",
                 ),
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="internal")],
@@ -704,7 +697,7 @@ defended = RangeSpec(
                 source="win",
                 collector="Sysmon/WinEventLog",
                 sink="splunk",
-            ),
+            )
         ],
     ),
     hosts=[
@@ -805,7 +798,7 @@ forest = RangeSpec(
                         name="c.lannister",
                         password="il0vejaime",
                         groups=["Domain Admins"],
-                    ),
+                    )
                 ],
                 acls=[
                     AdAcl(
@@ -831,7 +824,7 @@ forest = RangeSpec(
                         password="TrustN0one",
                         spns=["MSSQLSvc/db.north.corp.example:1433"],
                         note="kerberoastable",
-                    ),
+                    )
                 ],
             ),
         ],
@@ -913,9 +906,9 @@ provisioned = RangeSpec(
                     recipe="acme.telemetry_stack",
                     version="2.1",
                     vars={"splunk_ip": "10.10.10.10"},
-                ),
+                )
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -983,7 +976,7 @@ activity = RangeSpec(
                     note="creates a stealable session",
                 ),
             ],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="corp")], entry="assumed-breach"
@@ -1058,7 +1051,7 @@ def randomized(
                 interfaces=[Interface(network="lab")],
                 users=[User(name="admin", password=admin_password)],
                 services=[Service(name="telnetd", port=telnet_port)],
-            ),
+            )
         ],
         attacker=Attacker(
             interfaces=[Interface(network="lab")], entry="external"
@@ -1131,7 +1124,7 @@ windows_gated = RangeSpec(
             os=Os(type="windows", version="server-2022"),
             image="acme/win-golden",
             interfaces=[Interface(network="corp")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="corp")], entry="external"

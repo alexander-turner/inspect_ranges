@@ -6,7 +6,7 @@ llms-description: "Tutorial and review guide for the range.yaml networking synta
 
 ## Overview
 
-Ranges are defined in a `range.yaml` file or as the equivalent typed Python; every example below shows both (see [Defining ranges in Python](#python) for how typed configuration is consumed). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page covers the networking syntax, starting with a single network and adding one construct at a time.
+Ranges are defined in a `range.yaml` file or as the equivalent typed Python; every example below shows both (see [Defining ranges in Python](#python-definitions) for how typed configuration is consumed). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page covers the networking syntax, starting with a single network and adding one construct at a time.
 
 Two properties hold throughout:
 
@@ -45,13 +45,7 @@ attacker:
 
 ```python
 from inspect_ranges.types import (
-    Attacker,
-    Host,
-    Interface,
-    Network,
-    Os,
-    RangeMeta,
-    RangeSpec,
+    Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
 )
 
 flat = RangeSpec(
@@ -67,7 +61,7 @@ flat = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="lab")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -186,7 +180,7 @@ dhcp = RangeSpec(
     networks=[
         Network(
             name="lab", cidr="10.10.10.0/24", mode="isolated", dhcp=True
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -194,7 +188,7 @@ dhcp = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="lab", ip="10.10.10.80")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -257,7 +251,7 @@ dns_records = RangeSpec(
                     ),
                 ]
             ),
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -265,7 +259,7 @@ dns_records = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="lab")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="lab")], entry="external"
@@ -327,7 +321,7 @@ dns_ad = RangeSpec(
             cidr="10.20.0.0/24",
             mode="isolated",
             dns=DnsConfig(authoritative=["dc01"], forwarder="1.1.1.1"),
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -434,7 +428,7 @@ dmz_pivot = RangeSpec(
             acl=[
                 AclRule(from_="dmz", to="internal", allow=["tcp/5432"])
             ],
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -544,7 +538,7 @@ policy = RangeSpec(
                     allow=["tcp/8080-8090"],
                 ),  # <3>
             ],
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -745,7 +739,7 @@ egress = RangeSpec(
             egress=EgressPolicy(
                 allow=["198.51.100.7:tcp/443", "0.0.0.0/0:udp/123"]
             ),
-        ),
+        )
     ],
     hosts=[
         Host(
@@ -753,7 +747,7 @@ egress = RangeSpec(
             os=Os(type="linux"),
             image="acme/ws-golden",
             interfaces=[Interface(network="corp")],
-        ),
+        )
     ],
     attacker=Attacker(
         interfaces=[Interface(network="corp")],
@@ -842,7 +836,7 @@ foothold = RangeSpec(
             os=Os(type="linux"),
             image="acme/web-golden",
             interfaces=[Interface(network="dmz")],
-        ),
+        )
     ],
     attacker=Attacker(host="web", entry="assumed-breach"),
 )
@@ -852,7 +846,7 @@ foothold = RangeSpec(
 
 `entry` records how the attacker arrives (`external`, `assumed-breach`, or `operator`) for scorers and dataset builders.
 
-## Defining ranges in Python {#python}
+## Defining ranges in Python {#python-definitions}
 
 The Python tabs above are the typed surface. The models live in `inspect_ranges.types`, construction reads like the YAML (strings coerce to address types, including under strict type checking), and a `RangeSpec` object is accepted directly as sandbox configuration:
 
