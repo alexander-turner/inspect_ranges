@@ -18,6 +18,7 @@ from inspect_ranges.types import (
     Os,
     RangeMeta,
     RangeSpec,
+    Service,
 )
 
 from tests.test_compiler import chained_spec, nat_spec, netsvc_spec, two_segment_spec
@@ -91,6 +92,16 @@ def test_windows_guests_refuse_at_planning() -> None:
     issue = excinfo.value.issues[0]
     assert issue.code == "windows-render-not-supported"
     assert issue.path == ("hosts", 0, "os", "type")
+
+
+def test_guest_config_gates_at_planning() -> None:
+    spec = two_segment_spec()
+    spec.hosts[0].services = [Service(name="httpd", port=80)]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    issue = excinfo.value.issues[0]
+    assert issue.code == "guest-config-not-realized"
+    assert issue.path == ("hosts", 0, "services")
 
 
 def test_render_is_byte_deterministic(cache: Path, tmp_path: Path) -> None:

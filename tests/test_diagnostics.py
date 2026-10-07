@@ -81,7 +81,7 @@ def test_structural_codes(text: str, code: str, tmp_path: Path) -> None:
 
 def test_invalid_schema_version_code(tmp_path: Path) -> None:
     data: dict[str, Any] = yaml.safe_load(MINIMAL)
-    data["range"]["schema_version"] = "0.3"
+    data["range"]["schema_version"] = "0.9"
     report = report_for(yaml.safe_dump(data), tmp_path)
     assert codes(report) == ["invalid-schema-version"]
     assert "'0.1'" in report.issues[0].message
@@ -243,11 +243,11 @@ def test_unknown_key_did_you_mean(tmp_path: Path) -> None:
                 os: { type: linux }
                 image: img
                 interfaces: [{ network: lab }]
-                services: []
+                count: 2
             """,
-            "hosts[0].services",
+            "hosts[0].count",
             "deferred.yaml",
-            id="host-services",
+            id="host-count",
         ),
         pytest.param(
             """
@@ -492,6 +492,54 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "undeclared-attacker-host",
             "attacker.host",
             id="undeclared-attacker-host",
+        ),
+        pytest.param(
+            """
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+                services: [{ name: httpd, port: 80 }]
+                vulnerabilities:
+                  - { id: weak-thing, service: htpd, description: typo'd service ref }
+            """,
+            "vulnerability-undeclared-service",
+            "hosts[0].vulnerabilities[0].service",
+            id="vulnerability-undeclared-service",
+        ),
+        pytest.param(
+            """
+            defense:
+              tier: D2
+              telemetry: [{ source: ghost, collector: sysmon, sink: web }]
+            """,
+            "telemetry-undeclared-guest",
+            "defense.telemetry[0].source",
+            id="telemetry-undeclared-guest",
+        ),
+        pytest.param(
+            """
+            active_directory:
+              forest: corp.example
+              domains:
+                - { name: corp.example, netbios: CORP, dc: ghost }
+            """,
+            "ad-undeclared-dc",
+            "active_directory.domains[0].dc",
+            id="ad-undeclared-dc",
+        ),
+        pytest.param(
+            """
+            active_directory:
+              forest: corp.example
+              domains:
+                - { name: corp.example, netbios: CORP, dc: web }
+                - { name: north.corp.example, netbios: NORTH, dc: web, parent: corp.exampel }
+            """,
+            "ad-undeclared-parent",
+            "active_directory.domains[1].parent",
+            id="ad-undeclared-parent",
         ),
         pytest.param(
             """

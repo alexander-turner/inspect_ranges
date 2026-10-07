@@ -31,8 +31,23 @@ AnyIPNetwork = IPv4Network | IPv6Network
 
 __all__ = [
     "AclRule",
+    "ActiveDirectory",
+    "AdAcl",
+    "AdDomain",
+    "AdRight",
+    "AdUser",
     "AnyIPAddress",
     "AnyIPNetwork",
+    "Credentials",
+    "DataFile",
+    "Defense",
+    "HostDefense",
+    "Misconfiguration",
+    "ProvisioningStep",
+    "Service",
+    "Telemetry",
+    "User",
+    "Vulnerability",
     "Attacker",
     "DnsConfig",
     "DnsRecord",
@@ -71,8 +86,8 @@ class RangeMeta(_StrictModel):
     name: str
     """Short identifier, e.g. `vulhub-zabbix`."""
 
-    schema_version: Literal["0.1", "0.2"] = "0.1"
-    """Schema version this definition targets (omitted means `0.1`; `0.2` is landing incrementally per networking-v0.2)."""
+    schema_version: Literal["0.1", "0.2", "0.3"] = "0.1"
+    """Schema version this definition targets (omitted means `0.1`; `0.2` is the networking vocabulary, `0.3` adds guest configuration)."""
 
     description: str
     """What the range is and why it exists."""
@@ -329,6 +344,131 @@ class Resources(_StrictModel):
     """Disk size in GiB, when the image default is not enough."""
 
 
+class User(_StrictModel):
+    """A local account on a guest.
+
+    Scenario credentials are scenario content and belong in the definition in plaintext; per-sample proof material (flags, canaries) never appears here. Domain accounts live in `active_directory`, not on hosts.
+    """
+
+    name: str
+    """Account name."""
+
+    password: str | None = None
+    """Password, when the scenario fixes one."""
+
+    groups: list[str] = []
+    """Local group memberships."""
+
+    note: str | None = None
+    """Free-text intent, e.g. why the account exists or what makes it interesting."""
+
+
+class Credentials(_StrictModel):
+    """A credential pair a service accepts."""
+
+    user: str
+    """Account name."""
+
+    password: str
+    """Password."""
+
+
+class Service(_StrictModel):
+    """An assertion about a guest's converged listening surface.
+
+    Services are declarations, never an install language: the build satisfies them (via a provisioning recipe, content baked into the image, or a checkpoint) and verifies them before the range ships. Installation itself belongs in `provisioning`.
+    """
+
+    name: str
+    """Service name, unique on the host (vulnerabilities reference it)."""
+
+    port: int | None = Field(default=None, ge=1, le=65535)
+    """Listening port, when fixed."""
+
+    version: str | None = None
+    """Expected version, when the scenario depends on it."""
+
+    credentials: Credentials | None = None
+    """Credentials the service accepts, when scenario-relevant."""
+
+    note: str | None = None
+    """Free-text detail."""
+
+
+class Vulnerability(_StrictModel):
+    """A seeded exploitable weakness on a guest.
+
+    Exploitable vulnerabilities and misconfigurations are distinct lists because real intrusions lean heavily on the second; the list itself is the classification.
+    """
+
+    id: str
+    """Stable identifier, ours (e.g. `weak-telnet-password`, `adcs-esc1`)."""
+
+    cve: str | None = None
+    """CVE identifier, when one applies."""
+
+    service: str | None = None
+    """The host service this weakness lives in, by `services[].name`."""
+
+    description: str
+    """What the weakness is and how it is reachable."""
+
+
+class Misconfiguration(_StrictModel):
+    """A seeded misconfiguration on a guest (weak policy, dangerous sudoers line, disabled protection)."""
+
+    id: str
+    """Stable identifier, ours."""
+
+    description: str
+    """What is misconfigured and why it matters."""
+
+
+class DataFile(_StrictModel):
+    """A file planted on a guest as scenario content."""
+
+    path: str
+    """Absolute in-guest path."""
+
+    description: str | None = None
+    """What the file represents."""
+
+    sensitive: bool = False
+    """Whether the file is a scenario target (e.g. data worth exfiltrating)."""
+
+    contents: str | None = None
+    """Small inline contents; larger content is build material referenced by provisioning."""
+
+
+class HostDefense(_StrictModel):
+    """Per-host protection toggles (typed knowns; extended when evidence forces)."""
+
+    defender: bool | None = None
+    """Microsoft Defender on or off."""
+
+    firewall: bool | None = None
+    """Host firewall on or off."""
+
+    windows_update: bool | None = None
+    """Windows Update on or off."""
+
+
+class ProvisioningStep(_StrictModel):
+    """A build-time recipe reference, applied in list order.
+
+    Recipes run at build time and never per sample; their output is captured into images and checkpoints. The recipe language itself is deliberately out of the definition: a step names a recipe and its inputs, nothing more.
+    """
+
+    recipe: str
+    """Recipe reference, e.g. `P4T12ICK.ludus_ar_windows` or `scripts/promote-forest`."""
+
+    version: str | None = None
+    """Recipe version, recorded in the build manifest."""
+
+    vars: dict[str, str | int | bool] = {}
+    """Inputs passed to the recipe."""
+
+
 class AclRule(_StrictModel):
     """One ordered rule on a router, carrying exactly one of `allow:` or `deny:`.
 
@@ -433,6 +573,9 @@ class Router(_StrictModel):
     routes: list[Route] = []
     """Static routes to segments reached through other routers."""
 
+    users: list[User] = []
+    """Local accounts (converged state; applied and verified at build)."""
+
     acl: list[AclRule] = []
     """Inter-segment policy enforced on this router (default-deny, stateful; endpoints may be routed, not only attached)."""
 
@@ -460,6 +603,27 @@ class Host(_StrictModel):
 
     interfaces: list[Interface] = Field(min_length=1)
     """Network attachments (explicit; v0.1 has no implicit attachment)."""
+
+    users: list[User] = []
+    """Local accounts (converged state; applied and verified at build)."""
+
+    services: list[Service] = []
+    """The converged listening surface (assertions, verified at build)."""
+
+    vulnerabilities: list[Vulnerability] = []
+    """Seeded exploitable weaknesses."""
+
+    misconfigurations: list[Misconfiguration] = []
+    """Seeded misconfigurations."""
+
+    data: list[DataFile] = []
+    """Planted scenario files."""
+
+    defense: HostDefense | None = None
+    """Per-host protection toggles."""
+
+    provisioning: list[ProvisioningStep] = []
+    """Build-time recipe references, in order."""
 
 
 class Attacker(_StrictModel):
@@ -521,6 +685,114 @@ class Attacker(_StrictModel):
         return self
 
 
+class Telemetry(_StrictModel):
+    """One telemetry flow: which guest's signals reach which sink."""
+
+    source: str
+    """The observed guest, by name."""
+
+    collector: str
+    """What gathers the signals, e.g. `Sysmon/WinEventLog` or an agent name."""
+
+    sink: str
+    """Where the signals land: a declared guest name, or a description of an external sink."""
+
+
+class Defense(_StrictModel):
+    """The range's defensive posture, on the D0 (no defenders) to D5 (adaptive defender) spectrum."""
+
+    tier: Literal["D0", "D1", "D2", "D3", "D4", "D5"]
+    """How much the environment fights back: D0 none, D1 static hardening, D2 passive detection, D3 scripted response, D4 autonomous EDR, D5 adaptive."""
+
+    description: str | None = None
+    """What the posture consists of."""
+
+    telemetry: list[Telemetry] = []
+    """Telemetry flows, when the range records or forwards signals."""
+
+
+AdRight = Literal[
+    "GenericAll",
+    "GenericWrite",
+    "WriteDacl",
+    "WriteOwner",
+    "ForceChangePassword",
+    "SelfMembership",
+    "AddMember",
+]
+"""Seeded AD ACL rights (the vocabulary observed in surveyed ranges; extended when evidence forces)."""
+
+
+class AdAcl(_StrictModel):
+    """One seeded ACL-abuse edge: `principal` holds `right` over `target`.
+
+    Principals and targets are names as AD knows them (users, groups, OUs, or computer objects) and are not cross-validated against declared users this round.
+    """
+
+    principal: str
+    """Who holds the right."""
+
+    right: AdRight
+    """The right held."""
+
+    target: str
+    """What the right applies to."""
+
+
+class AdUser(_StrictModel):
+    """A domain account."""
+
+    name: str
+    """sAMAccountName."""
+
+    password: str | None = None
+    """Password, when the scenario fixes one."""
+
+    groups: list[str] = []
+    """Group memberships."""
+
+    spns: list[str] = []
+    """Service principal names (kerberoastable surface)."""
+
+    note: str | None = None
+    """Free-text intent, e.g. what makes the account interesting."""
+
+
+class AdDomain(_StrictModel):
+    """One domain in the forest."""
+
+    name: str
+    """DNS name of the domain."""
+
+    netbios: str
+    """NetBIOS name."""
+
+    dc: str
+    """The domain controller, by declared guest name."""
+
+    parent: str | None = None
+    """Parent domain name, for child domains."""
+
+    users: list[AdUser] = []
+    """Domain accounts of note."""
+
+    acls: list[AdAcl] = []
+    """Seeded ACL-abuse edges."""
+
+
+class ActiveDirectory(_StrictModel):
+    """Range-scoped Active Directory identity data.
+
+    Identity is declared here, not on hosts, because accounts exist in the domain. The build realizes it (promotion, joins, account and ACL seeding) and captures the converged result; see `design/inspect-ranges/range-build.md`.
+    """
+
+    forest: str
+    """Forest root domain name."""
+
+    domains: list[AdDomain] = Field(min_length=1)
+    """The forest's domains."""
+
+
 class RangeSpec(_StrictModel):
     """A complete v0.1 range definition."""
 
@@ -538,6 +810,12 @@ class RangeSpec(_StrictModel):
 
     attacker: Attacker
     """The agent's foothold."""
+
+    defense: Defense | None = None
+    """The range's defensive posture (omitted means D0, no defenders)."""
+
+    active_directory: ActiveDirectory | None = None
+    """Active Directory identity data, for domain ranges."""
 
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":
@@ -991,6 +1269,62 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                         code="dns-unattached-guest",
                         path=path,
                         message=f"network {network.name!r} dns.authoritative guest {server!r} is not attached to it",
+                    )
+                )
+
+    # guest-content cross references
+    for host_index, host in enumerate(spec.hosts):
+        service_names = sorted(service.name for service in host.services)
+        for vuln_index, vulnerability in enumerate(host.vulnerabilities):
+            if (
+                vulnerability.service is not None
+                and vulnerability.service not in service_names
+            ):
+                issues.append(
+                    Issue(
+                        code="vulnerability-undeclared-service",
+                        path=(
+                            "hosts",
+                            host_index,
+                            "vulnerabilities",
+                            vuln_index,
+                            "service",
+                        ),
+                        message=f"vulnerability {vulnerability.id!r} references service {vulnerability.service!r}, which host {host.name!r} does not declare",
+                        hint=did_you_mean(vulnerability.service, service_names),
+                    )
+                )
+    if spec.defense is not None:
+        for telemetry_index, telemetry in enumerate(spec.defense.telemetry):
+            if telemetry.source not in guest_networks:
+                issues.append(
+                    Issue(
+                        code="telemetry-undeclared-guest",
+                        path=("defense", "telemetry", telemetry_index, "source"),
+                        message=f"telemetry source {telemetry.source!r} is not a declared guest",
+                        hint=did_you_mean(telemetry.source, sorted(guest_networks)),
+                    )
+                )
+    if spec.active_directory is not None:
+        domain_names = {domain.name for domain in spec.active_directory.domains}
+        declared_hosts = {host.name for host in spec.hosts}
+        for domain_index, domain in enumerate(spec.active_directory.domains):
+            if domain.dc not in declared_hosts:
+                issues.append(
+                    Issue(
+                        code="ad-undeclared-dc",
+                        path=("active_directory", "domains", domain_index, "dc"),
+                        message=f"domain {domain.name!r} names dc {domain.dc!r}, which is not a declared host",
+                        hint=did_you_mean(domain.dc, sorted(declared_hosts)),
+                    )
+                )
+            if domain.parent is not None and domain.parent not in domain_names:
+                issues.append(
+                    Issue(
+                        code="ad-undeclared-parent",
+                        path=("active_directory", "domains", domain_index, "parent"),
+                        message=f"domain {domain.name!r} names parent {domain.parent!r}, which is not a declared domain",
+                        hint=did_you_mean(domain.parent, sorted(domain_names)),
                     )
                 )
 

@@ -179,6 +179,63 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
+    _GUEST_CONTENT_HINT = "guest configuration is applied and verified at range build; the build pipeline is the next phase (see guest-config-v0.3)"
+    for index, host in enumerate(spec.hosts):
+        fields = [
+            "users",
+            "services",
+            "vulnerabilities",
+            "misconfigurations",
+            "data",
+            "provisioning",
+        ]
+        for field_name in fields:
+            if getattr(host, field_name):
+                issues.append(
+                    Issue(
+                        code="guest-config-not-realized",
+                        path=("hosts", index, field_name),
+                        message=f"host {host.name!r} declares {field_name}, which the build phase has not yet realized",
+                        hint=_GUEST_CONTENT_HINT,
+                    )
+                )
+        if host.defense is not None:
+            issues.append(
+                Issue(
+                    code="guest-config-not-realized",
+                    path=("hosts", index, "defense"),
+                    message=f"host {host.name!r} declares defense toggles, which the build phase has not yet realized",
+                    hint=_GUEST_CONTENT_HINT,
+                )
+            )
+    for index, router in enumerate(spec.routers):
+        if router.users:
+            issues.append(
+                Issue(
+                    code="guest-config-not-realized",
+                    path=("routers", index, "users"),
+                    message=f"router {router.name!r} declares users, which the build phase has not yet realized",
+                    hint=_GUEST_CONTENT_HINT,
+                )
+            )
+    if spec.defense is not None:
+        issues.append(
+            Issue(
+                code="guest-config-not-realized",
+                path=("defense",),
+                message="the range declares a defensive posture, which the build phase has not yet realized",
+                hint=_GUEST_CONTENT_HINT,
+            )
+        )
+    if spec.active_directory is not None:
+        issues.append(
+            Issue(
+                code="guest-config-not-realized",
+                path=("active_directory",),
+                message="the range declares Active Directory identity data, which the build phase has not yet realized",
+                hint=_GUEST_CONTENT_HINT,
+            )
+        )
     if issues:
         raise IssueError(issues)
 
