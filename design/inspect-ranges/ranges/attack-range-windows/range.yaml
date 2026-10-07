@@ -15,6 +15,9 @@ range:
     example where telemetry collection is the point, exercising a
     defense/telemetry section no red-only range needs.
 
+variables:
+  attack_range_password: { type: password, default: "changeme123!" }   # the template's single shared credential
+
 networks:
   - name: lab
     cidr: 10.0.2.0/24            # to-verify: hosts are 10.0.2.10/.11 via ip_last_octet;
@@ -29,7 +32,7 @@ hosts:
     resources: { cpus: 4, memory_mb: 16384 }   # default: translated from instance_type t3.xlarge
     interfaces: [{ network: lab, ip: 10.0.2.10 }]   # ip_last_octet: 10
     users:
-      - { name: ubuntu, password: "changeme123!" }  # template default ({{ attack_range_password }}, deferred variables)
+      - { name: ubuntu, password: "{{attack_range_password}}" }
     services:
       - { name: splunk-enterprise, port: 8000, version: 10.2.2,   # default: web UI port not in template
           note: role P4T12ICK.ludus_ar_splunk }
@@ -42,7 +45,7 @@ hosts:
     resources: { cpus: 2, memory_mb: 8192 }    # default: translated from instance_type t3.large
     interfaces: [{ network: lab, ip: 10.0.2.11 }]   # ip_last_octet: 11
     users:
-      - { name: Administrator, password: "changeme123!" }  # template default ({{ attack_range_password }}, deferred variables)
+      - { name: Administrator, password: "{{attack_range_password}}" }
     services:
       - { name: rdp, port: 3389 }
     provisioning:

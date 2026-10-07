@@ -393,6 +393,65 @@ attacker:
   entry: external
 ```
 
+## Roles and scheduled activity
+
+`roles` tags a host's function for the build and for scoring (`domain-controller`, `dns`, `member-server`, ...). `scheduled_activity` declares recurring in-guest behavior simulation: bot scripts and scheduled tasks that create the user and defender activity real tradecraft depends on (and the token-theft surface scheduled tasks bring with them):
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: activity
+  description: Role tags and behavior simulation on a domain controller.
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+hosts:
+  - name: dc01
+    os: { type: linux }
+    image: acme/dc-golden
+    interfaces: [{ network: corp }]
+    roles: [domain-controller, dns]
+    scheduled_activity:
+      - { script: responder.ps1 }
+      - { script: rdp_scheduler.ps1, user: admin.user, note: creates a stealable session }
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+```
+
+## Variables
+
+`variables` declares per-instance values: things that should differ between generated instances of the same range, like randomized ports, passwords, and flag hints. Every variable requires a `default`, and definitions reference variables as `{{name}}` in YAML scalars. Loading substitutes the defaults before validation, so a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text:
+
+```yaml
+# plan-invalid: per-instance draws arrive with the generation layer
+range:
+  name: randomized
+  description: A randomized service port and a templated credential.
+variables:
+  telnet_port: { type: port, min: 1500, default: 2323 }
+  admin_password: { type: password, default: "changeme123!" }
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+hosts:
+  - name: server
+    os: { type: linux }
+    image: acme/server-golden
+    interfaces: [{ network: lab }]
+    users:
+      - { name: admin, password: "{{admin_password}}" }
+    services:
+      - { name: telnetd, port: "{{telnet_port}}" }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+Because defaults are required, every definition validates and realizes concretely today; the per-instance draw arrives with the generation layer (gated at planning as `randomization-not-realized` until then). Unknown references are errors with did-you-mean hints. Python authors do not use references: they draw values and construct concretely, which is the same capability expressed at the language level. Whole-topology generation stays out of the definition language for the same reason in reverse: that really is a program, and the typed Python surface is how to write it.
+
 ## What a guest sees
 
 Every device a guest sees is declared per role; no tool default decides the attack surface. The standard profile gives a guest virtio disks, virtio NICs, a vsock device, a serial console, and a virtio entropy source, and nothing else: no USB controller, memory balloon, or video.
@@ -439,7 +498,7 @@ For reviewers, the guest-side edges:
 
 **Gated at planning** until the build phase lands: Windows rendering (`windows-render-not-supported`; the Windows control plane itself already works) and all guest content (`guest-config-not-realized`). The gates guarantee nothing boots with silently missing content; each is deleted as its realization and verification land.
 
-**Still deferred** (not yet in the schema): `count:` expansion (stamping out N copies of a host), per-instance `variables`, `attack_path`, and operator policy (`management`, `lifecycle`, ingress). Each is rejected with a pointer to where its content currently lives.
+**Still deferred** (not yet in the schema): `count:` expansion (stamping out N copies of a host), `attack_path`, and operator policy (`management`, `lifecycle`, ingress). Each is rejected with a pointer to where its content currently lives. Whole-topology generation is deliberately not a schema feature: the typed Python surface is the generation language.
 
 The dividing rule for what belongs in the definition language: content that is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints and referenced through `provisioning`.
 

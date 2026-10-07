@@ -19,9 +19,12 @@ range:
     for the member server. The exemplar of what AD forces a range format to
     express: static DC addressing, AD-integrated DNS, identity data as config.
 
+variables:
+  ip_range: { default: "192.168.56" }   # default: the VirtualBox host-only convention; provider-dependent upstream
+
 networks:
   - name: lab
-    cidr: 192.168.56.0/24        # default: derived from the upstream ip_range default
+    cidr: "{{ip_range}}.0/24"
     mode: nat                    # to-verify: lab needs internet during install; runtime
                                  # egress posture is an eval decision, not stated upstream
     dhcp: false                  # all hosts statically addressed (AD requirement)
@@ -37,8 +40,9 @@ hosts:
     os: { type: windows, version: server-2019 }
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 3000 }
-    interfaces: [{ network: lab, ip: 192.168.56.10 }]   # {{ip_range}}.10
-    services:                    # upstream roles: domain-controller, dns, adcs (parked in deferred.yaml)
+    interfaces: [{ network: lab, ip: "{{ip_range}}.10" }]
+    roles: [domain-controller, dns, adcs]
+    services:
       - { name: active-directory, note: domain sevenkingdoms.local }
       - { name: adcs, note: certificate authority }
       - { name: dns }
@@ -56,8 +60,9 @@ hosts:
     os: { type: windows, version: server-2019 }
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 3000 }
-    interfaces: [{ network: lab, ip: 192.168.56.11 }]   # {{ip_range}}.11
-    services:                    # upstream roles: domain-controller, dns (parked in deferred.yaml)
+    interfaces: [{ network: lab, ip: "{{ip_range}}.11" }]
+    roles: [domain-controller, dns]
+    services:
       - { name: active-directory, note: domain north.sevenkingdoms.local }
       - { name: dns }
     misconfigurations:
@@ -69,6 +74,14 @@ hosts:
       - { id: sysvol-secret, description: secret.ps1 planted in SYSVOL domain scripts }
       - { id: open-shares, description: shares vuln role }
     defense: { defender: on, windows_update: off }
+    scheduled_activity:          # bot scripts simulating user/defender-relevant behavior
+      - { script: asrep_roasting.ps1 }
+      - { script: constrained_delegation_use_any.ps1 }
+      - { script: constrained_delegation_kerb_only.ps1 }
+      - { script: ntlm_relay.ps1 }
+      - { script: responder.ps1 }
+      - { script: gpo_abuse.ps1 }
+      - { script: rdp_scheduler.ps1 }
 
   - name: srv02
     hostname: castelblack
@@ -76,8 +89,9 @@ hosts:
     os: { type: windows, version: server-2019 }
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 6000 }
-    interfaces: [{ network: lab, ip: 192.168.56.22 }]   # {{ip_range}}.22
-    services:                    # upstream roles: member-server, iis, mssql, webdav (parked in deferred.yaml)
+    interfaces: [{ network: lab, ip: "{{ip_range}}.22" }]
+    roles: [member-server, iis, mssql, webdav]
+    services:
       - { name: iis, port: 80, note: default website with ASP upload directory }
       - { name: mssql, port: 1433, credentials: { user: sa, password: "Sup1_sa_P@ssw0rd!" },
           note: service account sql_svc }

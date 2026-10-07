@@ -15,6 +15,11 @@ range:
     The smallest public example of an explicitly routed, IP-pinned topology
     with a variables/randomization layer.
 
+variables:                       # KYPO APG variables — regenerated per sandbox instance
+  telnet_port: { type: port, min: 1500, default: 2323 }     # default from the role
+  alice_flag:  { type: text, default: Top_Secret_Flag }     # default from the role
+  root_flag:   { type: text, default: Cant_Guess_This }     # default from the role
+
 networks:
   - name: server-switch
     cidr: 192.168.20.0/24
@@ -43,7 +48,7 @@ hosts:
       - { name: alice, password: bacon }        # role defaults; weak, present in passlist
     services:
       - name: telnetd
-        port: 2323             # role default; upstream randomizes per instance ({{ telnet_port }}, deferred variables)
+        port: "{{telnet_port}}"          # randomized per instance; default 2323
         note: /etc/services rewritten; served by xinetd
     vulnerabilities:
       - id: weak-telnet-password
@@ -55,8 +60,8 @@ hosts:
           Sudoers line "alice ALL=(ALL) /usr/bin/less /home/alice/flag.txt" —
           GTFOBins-style escalation from alice to root via less.
     data:
-      - { path: /home/alice/flag.txt, description: "user flag (value randomized per instance; deferred variable alice_flag)", sensitive: true }
-      - { path: /root/flag.txt,       description: "root flag (value randomized per instance; deferred variable root_flag)",  sensitive: true }
+      - { path: /home/alice/flag.txt, description: user flag (randomized per instance), contents: "{{alice_flag}}", sensitive: true }
+      - { path: /root/flag.txt,       description: root flag (randomized per instance), contents: "{{root_flag}}",  sensitive: true }
 
   - name: client
     os: { type: linux, distro: ubuntu-20.04 }

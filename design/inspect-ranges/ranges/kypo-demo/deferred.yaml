@@ -6,11 +6,6 @@
 # also migrated; the per-host /etc/hosts aliases and tool installs below are
 # provisioning/recipe-language material.
 
-variables:                       # KYPO APG variables — regenerated per sandbox instance
-  telnet_port: { type: port, min: 1500 }   # default in role: 2323
-  alice_flag:  { type: text }              # default in role: "Top_Secret_Flag"
-  root_flag:   { type: text }              # default in role: "Cant_Guess_This"
-
 # network accessibility flags (attacker-placement policy, not substrate config)
 networks:
   server-switch:

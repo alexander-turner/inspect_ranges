@@ -25,7 +25,6 @@ _DEFERRED_HINT = f"park it in deferred.yaml (see {SCOPE_DOC})"
 _DEFERRED_SECTIONS: dict[str, dict[str, str]] = {
     "": {
         "attack_path": _DEFERRED_HINT,
-        "variables": _DEFERRED_HINT,
         "goals": "goals belong with the evaluation (challenges.yaml), not the range",
         "management": _DEFERRED_HINT,
         "lifecycle": _DEFERRED_HINT,

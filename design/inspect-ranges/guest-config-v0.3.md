@@ -34,6 +34,9 @@ All sections follow the layer-4 criterion from [range-build](range-build.md): sm
 | `defense` (top level) | `{tier: D0..D5, description?, telemetry: [{source, collector, sink}]}` | attack_range (D2, Sysmon→Splunk triples), vulhub (D0) |
 | `active_directory` (top level) | `{forest, domains: [{name, netbios, dc, parent?, users: [{name, password?, groups, spns, note?}], acls}]}`; identity is range-scoped, so it is not host content | goad (forest, child domain, kerberoastable SPNs) |
 | `AdAcl` edges | `{principal, right, target}` with `right` a Literal of the observed set (GenericAll, GenericWrite, WriteDacl, WriteOwner, ForceChangePassword, SelfMembership, AddMember) | goad's seeded ACL-abuse chain |
+| `hosts[].roles` | functional role tags (`domain-controller`, `dns`, `adcs`, ...) the build realizes | goad per-host roles |
+| `hosts[].scheduled_activity` | `{script, schedule?, user?, note?}`; recurring in-guest behavior simulation (bot scripts, scheduled tasks) | goad dc02 bot scripts |
+| `variables` (top level) | `{name: {default (required), type?, min?, max?, choices?, description?}}`; per-instance values. Referenced as `{{name}}` in YAML scalars, resolved to defaults at load before validation (a whole-scalar reference keeps the variable's type, so `port: "{{telnet_port}}"` validates as an integer; embedded references interpolate). Required defaults mean every definition validates and realizes concretely; the per-instance draw arrives with the generation layer, gated at planning by `randomization-not-realized`. Python authors draw values and construct concretely. The inclusion criterion applied here: randomization is value-level and plausibly declarative, unlike topology generation, which remains "use Python" | kypo APG variables (port/text with role defaults), goad ip_range, attack_range shared password |
 | `hosts[].provisioning` | ordered `{recipe, version?, vars}` references; **the recipe language stays deliberately undecided** — steps name build-time work, the runtime never runs them, versions land in the build manifest | attack_range (Ansible role refs); cyris's inline task verbs stay deferred as recipe-language material |
 
 Cross-validation (collecting, in `semantic_issues`): `vulnerability.service` must name a service on the same host; `telemetry.source` must be a declared guest; `active_directory.domains[].dc` must be a declared host; `parent` must be a declared domain. AD ACL principals and targets stay unvalidated strings this round: they may be users, groups, OUs, or computer objects, and typing that namespace belongs to the attack_path design.
@@ -43,7 +46,7 @@ Cross-validation (collecting, in `semantic_issues`): `vulnerability.service` mus
 | Deferred | Why |
 |---|---|
 | `count:`/`ip_start:` expansion | touches naming and allocation; revisit with the generation layer (mhbench stays hand-unrolled) |
-| `variables` / generation | the L2 layer; its own design effort |
+| topology generation | whole-topology minting is "use Python" (typed construction); value randomization is in (the `variables` section above) |
 | `attack_path` | consumes the AD ACL vocabulary and couples to scoring; its own round |
 | `goals` | decided task-side (`challenges.yaml`) |
 | `management`, `lifecycle`, `replication`, network `ingress`/`user_accessible` | operator/deployment policy, not range semantics |

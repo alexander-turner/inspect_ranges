@@ -818,6 +818,78 @@ def test_yaml_syntax_error_has_position(tmp_path: Path) -> None:
     assert report.issues[0].line is not None
 
 
+def test_variables_substitute_defaults_before_validation(tmp_path: Path) -> None:
+    report = report_with(
+        """
+        variables:
+          telnet_port: { type: port, default: 2323, min: 1500 }
+          greeting: { default: hello }
+        hosts:
+          - name: web
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: lab, ip: 10.0.0.10 }]
+            services:
+              - { name: telnetd, port: "{{telnet_port}}" }
+            data:
+              - { path: /etc/motd, description: "says {{greeting}} to everyone" }
+        """,
+        tmp_path,
+    )
+    assert report.valid, [issue.message for issue in report.issues]
+    assert report.spec is not None
+    host = report.spec.hosts[0]
+    assert host.services[0].port == 2323  # whole-scalar reference keeps the type
+    assert host.data[0].description == "says hello to everyone"  # embedded interpolates
+
+
+def test_undeclared_variable_reference(tmp_path: Path) -> None:
+    report = report_with(
+        """
+        variables:
+          greeting: { default: hello }
+        hosts:
+          - name: web
+            os: { type: linux }
+            image: img
+            interfaces: [{ network: lab, ip: 10.0.0.10 }]
+            data:
+              - { path: /etc/motd, description: "{{greting}}" }
+        """,
+        tmp_path,
+    )
+    assert not report.valid
+    issue = report.issues[0]
+    assert issue.code == "undeclared-variable"
+    assert issue.path_str == "hosts[0].data[0].description"
+    assert issue.hint == "did you mean 'greeting'?"
+    assert issue.line is not None
+
+
+@pytest.mark.parametrize(
+    ("variable", "message_part"),
+    [
+        pytest.param(
+            "{ type: port, default: banana }", "integer default", id="port-text-default"
+        ),
+        pytest.param(
+            "{ type: choice, default: a, choices: [b, c] }",
+            "not one of the choices",
+            id="choice-default-mismatch",
+        ),
+        pytest.param(
+            "{ default: 5, min: 9, max: 3 }", "greater than max", id="min-above-max"
+        ),
+    ],
+)
+def test_invalid_variable_definitions(
+    variable: str, message_part: str, tmp_path: Path
+) -> None:
+    report = report_with(f"variables: {{ v: {variable} }}", tmp_path)
+    issue = next(i for i in report.issues if i.code == "invalid-variable")
+    assert message_part in issue.message
+
+
 def test_dot_local_zone_warns_without_invalidating(tmp_path: Path) -> None:
     report = report_with(
         """

@@ -2,25 +2,9 @@
 # by anything. Guest configuration (active_directory with the typed ACL chain,
 # per-host services/vulnerabilities/misconfigurations/defense toggles, the
 # range-level defense posture) migrated into range.yaml under schema v0.3
-# (2026-10-07, see ../../guest-config-v0.3.md); what remains here is deferred
-# per that record's table, plus two per-host keys the schema does not yet
-# carry (roles, scheduled_activity).
-
-variables:
-  ip_range: "192.168.56"         # default: provider-dependent ({{ip_range}} template var;
-                                 # 192.168.56 is the VirtualBox host-only convention)
-
-# per-host keys without a schema home yet
-hosts:
-  dc01:
-    roles: [domain-controller, dns, adcs]
-  dc02:
-    roles: [domain-controller, dns]
-    scheduled_activity:          # bot scripts simulating user/defender-relevant behavior
-      - [asrep_roasting.ps1, constrained_delegation_use_any.ps1, constrained_delegation_kerb_only.ps1,
-         ntlm_relay.ps1, responder.ps1, gpo_abuse.ps1, rdp_scheduler.ps1]
-  srv02:
-    roles: [member-server, iis, mssql, webdav]
+# (2026-10-07, see ../../guest-config-v0.3.md); variables, roles, and
+# scheduled_activity migrated as well (2026-10-07). What remains here is
+# deferred per that record's table.
 
 goals:
   - id: domain-admin-north       # default: GOAD defines no scoring; goals follow the

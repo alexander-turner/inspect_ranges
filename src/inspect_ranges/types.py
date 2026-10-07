@@ -44,9 +44,11 @@ __all__ = [
     "HostDefense",
     "Misconfiguration",
     "ProvisioningStep",
+    "ScheduledActivity",
     "Service",
     "Telemetry",
     "User",
+    "Variable",
     "Vulnerability",
     "Attacker",
     "DnsConfig",
@@ -469,6 +471,87 @@ class ProvisioningStep(_StrictModel):
     """Inputs passed to the recipe."""
 
 
+class ScheduledActivity(_StrictModel):
+    """Recurring in-guest behavior, simulating users or defenders (bot scripts, scheduled tasks)."""
+
+    script: str
+    """Behavior reference, e.g. `asrep_roasting.ps1` or a recipe-style name."""
+
+    schedule: str | None = None
+    """When it runs, when the scenario fixes it (e.g. a cron expression or an interval)."""
+
+    user: str | None = None
+    """The account the activity runs as, when scenario-relevant (e.g. for token-theft surface)."""
+
+    note: str | None = None
+    """Free-text intent."""
+
+
+class Variable(_StrictModel):
+    """A named per-instance value: drawn fresh for each generated instance, with a required default.
+
+    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely; the per-instance draw arrives with the generation layer (gated at planning by `randomization-not-realized`). Python authors draw values and construct concretely instead of using references.
+    """
+
+    default: str | int | bool
+    """The value used until generation draws one, and the fallback definition of the variable's type."""
+
+    type: Literal["text", "password", "port", "int", "choice"] | None = None
+    """What to draw, when generation lands; omitted means the default's own type."""
+
+    min: int | None = None
+    """Lower bound for numeric draws."""
+
+    max: int | None = None
+    """Upper bound for numeric draws."""
+
+    choices: list[str] | None = None
+    """The candidate set, for `type: choice`."""
+
+    description: str | None = None
+    """What the variable controls."""
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "Variable":
+        issues: list[Issue] = []
+        if self.type in ("port", "int") and not isinstance(self.default, int):
+            issues.append(
+                Issue(
+                    code="invalid-variable",
+                    path=("default",),
+                    message=f"a {self.type} variable needs an integer default, got {self.default!r}",
+                )
+            )
+        if self.type == "choice":
+            if not self.choices:
+                issues.append(
+                    Issue(
+                        code="invalid-variable",
+                        path=("choices",),
+                        message="a choice variable needs a non-empty choices list",
+                    )
+                )
+            elif self.default not in self.choices:
+                issues.append(
+                    Issue(
+                        code="invalid-variable",
+                        path=("default",),
+                        message=f"default {self.default!r} is not one of the choices",
+                    )
+                )
+        if self.min is not None and self.max is not None and self.min > self.max:
+            issues.append(
+                Issue(
+                    code="invalid-variable",
+                    path=("min",),
+                    message=f"min {self.min} is greater than max {self.max}",
+                )
+            )
+        if issues:
+            raise IssueError(issues)
+        return self
+
+
 class AclRule(_StrictModel):
     """One ordered rule on a router, carrying exactly one of `allow:` or `deny:`.
 
@@ -624,6 +707,12 @@ class Host(_StrictModel):
 
     provisioning: list[ProvisioningStep] = []
     """Build-time recipe references, in order."""
+
+    roles: list[str] = []
+    """Functional role tags the build realizes (e.g. `domain-controller`, `dns`, `adcs`)."""
+
+    scheduled_activity: list[ScheduledActivity] = []
+    """Recurring in-guest behavior simulation."""
 
 
 class Attacker(_StrictModel):
@@ -816,6 +905,9 @@ class RangeSpec(_StrictModel):
 
     active_directory: ActiveDirectory | None = None
     """Active Directory identity data, for domain ranges."""
+
+    variables: dict[str, Variable] = {}
+    """Per-instance randomized values, referenced as `{{name}}` in YAML scalars (defaults substitute at load)."""
 
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":

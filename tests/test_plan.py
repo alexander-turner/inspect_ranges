@@ -104,6 +104,18 @@ def test_guest_config_gates_at_planning() -> None:
     assert issue.path == ("hosts", 0, "services")
 
 
+def test_variables_gate_at_planning() -> None:
+    from inspect_ranges.types import Variable
+
+    spec = two_segment_spec()
+    spec.variables = {"flag_hint": Variable(default="warm")}
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    issue = excinfo.value.issues[0]
+    assert issue.code == "randomization-not-realized"
+    assert issue.path == ("variables",)
+
+
 def test_render_is_byte_deterministic(cache: Path, tmp_path: Path) -> None:
     render_bundle(chained_spec(), tmp_path / "a", options(cache))
     render_bundle(chained_spec(), tmp_path / "b", options(cache))

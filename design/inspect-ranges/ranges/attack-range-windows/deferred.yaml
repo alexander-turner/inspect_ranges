@@ -5,8 +5,9 @@
 # ../../guest-config-v0.3.md); what remains here is deferred per that record's
 # table.
 
+# attack_range_password migrated to range.yaml variables (2026-10-07);
+# ip_whitelist stays here with the ingress policy it scopes
 variables:
-  attack_range_password: "changeme123!"   # single shared credential (template default)
   ip_whitelist: 0.0.0.0/0                 # management-plane ingress allowlist
 
 # network-level operator ingress (management plane; references ip_whitelist above)
