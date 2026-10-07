@@ -51,9 +51,9 @@ networks:
     mode: isolated
 
 hosts:
-  - name: dc01                     # the definition-wide identifier (exec targets, ACL endpoints)
-    hostname: dc01-nyc             # the in-guest hostname, when it differs from name
-    fqdn: dc01.corp.example        # fully qualified name, for ranges whose DNS serves it
+  - name: dc01 # <1>
+    hostname: dc01-nyc # <2>
+    fqdn: dc01.corp.example # <3>
     os: { type: linux, distro: ubuntu-24.04 }
     image: acme/dc-golden
     resources: { cpus: 2, memory_mb: 4096 }
@@ -63,6 +63,10 @@ attacker:
   interfaces: [{ network: corp }]
   entry: external
 ```
+
+1. The definition-wide identifier (exec targets, ACL endpoints).
+2. The in-guest hostname, when it differs from `name`.
+3. The fully qualified name, for ranges whose DNS serves it.
 
 `name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Defining Networks](networks.qmd).
 

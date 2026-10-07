@@ -60,14 +60,14 @@ hosts:
   - name: web
     os: { type: linux }
     image: acme/web-golden
-    interfaces: [{ network: lab, ip: 10.10.10.80 }]   # explicit
+    interfaces: [{ network: lab, ip: 10.10.10.80 }]  # explicit
   - name: db
     os: { type: linux }
     image: acme/db-golden
-    interfaces: [{ network: lab }]                    # allocated: 10.10.10.10
+    interfaces: [{ network: lab }]  # allocated: 10.10.10.10
 
 attacker:
-  interfaces: [{ network: lab }]                      # allocated: 10.10.10.2
+  interfaces: [{ network: lab }]  # allocated: 10.10.10.2
   entry: external
 ```
 
@@ -88,12 +88,14 @@ hosts:
   - name: web
     os: { type: linux }
     image: acme/web-golden
-    interfaces: [{ network: lab, ip: 10.10.10.80 }]   # reserved for web's MAC
+    interfaces: [{ network: lab, ip: 10.10.10.80 }] # <1>
 
 attacker:
   interfaces: [{ network: lab }]
   entry: external
 ```
+
+1. The lease is reserved for web's MAC address.
 
 ## Name resolution
 
@@ -110,7 +112,7 @@ networks:
     mode: isolated
     dns:
       records:
-        - { name: web }                               # resolves to web's address
+        - { name: web }  # resolves to web's address
         - { name: files.corp.example, ip: 10.10.10.200 }
 
 hosts:
@@ -235,13 +237,10 @@ routers:
   - name: router
     interfaces: [{ network: dmz }, { network: internal }]
     acl:
-      # carve-out: ssh to the db host is dropped even though the next rule allows tcp/22
-      - { from: dmz, to: db, deny: [tcp/22] }
+      - { from: dmz, to: db, deny: [tcp/22] } # <1>
       - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
-      # only the web server may open http into the internal segment
-      - { from: web, to: internal, allow: [tcp/80] }
-      # a literal address range as an endpoint
-      - { from: 10.80.10.0/28, to: internal, allow: [tcp/8080-8090] }
+      - { from: web, to: internal, allow: [tcp/80] } # <2>
+      - { from: 10.80.10.0/28, to: internal, allow: [tcp/8080-8090] } # <3>
 
 hosts:
   - name: web
@@ -257,6 +256,10 @@ attacker:
   interfaces: [{ network: dmz }]
   entry: external
 ```
+
+1. A carve-out: ssh to the db host is dropped even though the next rule allows `tcp/22`.
+2. Only the web server may open http into the internal segment.
+3. A literal address range as an endpoint.
 
 Networks and guests share one namespace (a guest may not take a network's name), so an endpoint is never ambiguous. Unknown endpoints are rejected at validation with a did-you-mean suggestion.
 
@@ -276,7 +279,7 @@ networks:
   - name: core
     cidr: 10.80.20.0/24
     mode: isolated
-    gateway: r1          # two routers attach here: election must be explicit
+    gateway: r1  # two routers attach here: election must be explicit
   - name: vault
     cidr: 10.80.30.0/24
     mode: isolated
@@ -442,8 +445,8 @@ dmz_pivot = RangeSpec(
 ```
 
 ```python
-Task(..., sandbox=("libvirt_range", dmz_pivot))      # typed configuration
-Task(..., sandbox=("libvirt_range", "range.yaml"))   # file configuration
+Task(..., sandbox=("libvirt_range", dmz_pivot))      # typed config
+Task(..., sandbox=("libvirt_range", "range.yaml"))   # file config
 ```
 
 Three things to know:
