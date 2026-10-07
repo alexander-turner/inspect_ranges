@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import inspect_ranges.types as _types
 import pytest
@@ -10,11 +10,12 @@ from inspect_ranges.schema import revalidate_range
 from inspect_ranges.types import IssueError, RangeSpec
 
 DOCS = Path(__file__).parent.parent / "docs"
-PAGES = ("networks.qmd", "guests.qmd")
-MIN_BLOCKS = {"networks.qmd": 10, "guests.qmd": 5}
+PAGES = ("ranges.qmd", "guests.qmd", "networks.qmd")
+MIN_BLOCKS = {"ranges.qmd": 3, "guests.qmd": 5, "networks.qmd": 10}
 
-_YAML_BLOCK = re.compile(r"^```yaml\n(.*?)^```", re.MULTILINE | re.DOTALL)
-_PYTHON_BLOCK = re.compile(r"^```python\n(.*?)^```", re.MULTILINE | re.DOTALL)
+# the Quarto visual editor writes "``` yaml", hand-written pages "```yaml"
+_YAML_BLOCK = re.compile(r"^``` ?yaml\n(.*?)^```", re.MULTILINE | re.DOTALL)
+_PYTHON_BLOCK = re.compile(r"^``` ?python\n(.*?)^```", re.MULTILINE | re.DOTALL)
 
 # docs Python tabs show the import once per page; the rest assume the models
 _NAMESPACE: dict[str, Any] = {name: getattr(_types, name) for name in _types.__all__}
@@ -37,10 +38,22 @@ def _construct(text: str) -> RangeSpec:
     return specs[0]
 
 
+def _normalize(value: Any) -> Any:
+    """Collapse whitespace in every string leaf (YAML folded scalars rewrap)."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, list):
+        return [_normalize(item) for item in cast("list[Any]", value)]
+    if isinstance(value, dict):
+        return {
+            key: _normalize(item) for key, item in cast("dict[Any, Any]", value).items()
+        }
+    return value
+
+
 def _comparable(spec: RangeSpec) -> dict[str, Any]:
-    """A dump for YAML/Python parity: whitespace-normalized description (YAML folded scalars rewrap)."""
-    dump: dict[str, Any] = spec.model_dump(mode="json", by_alias=True)
-    dump["range"]["description"] = " ".join(dump["range"]["description"].split())
+    """A dump for YAML/Python parity comparison."""
+    dump: dict[str, Any] = _normalize(spec.model_dump(mode="json", by_alias=True))
     return dump
 
 
@@ -95,6 +108,21 @@ def test_docs_python_examples_construct(first_line: str, text: str) -> None:
     if first_line.startswith("# plan-invalid"):
         with pytest.raises(IssueError):
             resolve_plan(spec)
+
+
+def test_embedded_real_example_matches_design_file() -> None:
+    """The vulhub-zabbix block on ranges.qmd is the design example verbatim (marker line aside), so the two cannot drift."""
+    design = (
+        Path(__file__).parent.parent
+        / "design/inspect-ranges/ranges/vulhub-zabbix/range.yaml"
+    ).read_text()
+    block = next(
+        text
+        for first, text in _blocks("ranges.qmd", _YAML_BLOCK)
+        if first.startswith("# plan-invalid") and "vulhub-zabbix" in text
+    )
+    embedded = block.split("\n", 1)[1]
+    assert embedded == design, "ranges.qmd vulhub-zabbix drifted from the design file"
 
 
 @pytest.mark.parametrize("page", PAGES)

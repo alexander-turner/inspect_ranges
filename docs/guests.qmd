@@ -1,79 +1,8 @@
 ---
-title: "Defining Guests"
+title: "Guests"
 description: "The guest side of a range definition: hosts, images, resources, accounts, services, seeded weaknesses, defense, and Active Directory."
-llms-description: "Tutorial and review guide for the guest side of range.yaml: definition anatomy, hosts, images, resources, routers, the attacker, the realized device profile, and configuration injection."
+llms-description: "Tutorial and review guide for the guest side of range.yaml: hosts, images, resources, routers, the attacker, the realized device profile, and configuration injection."
 ---
-
-## Anatomy of a definition
-
-A range definition has five sections. One vocabulary rule: **guests** are the VMs in a range, in three kinds: **hosts** (targets), **routers**, and the **attacker**. In the definition language, "host" by itself always means a target, never the physical machine a range runs on.
-
-::: {.panel-tabset group="definition-language"}
-### YAML
-
-``` yaml
-range:
-  name: anatomy
-  schema_version: "0.3"
-  description: >
-    The five sections. Identity here; segments in networks; guests in
-    routers, hosts, and attacker.
-
-networks:
-  - name: lab
-    cidr: 10.10.10.0/24
-    mode: isolated
-
-routers: []           # optional: gateways between segments
-
-hosts:
-  - name: web
-    os: { type: linux }
-    image: acme/web-golden
-    interfaces: [{ network: lab }]
-
-attacker:
-  interfaces: [{ network: lab }]
-  entry: external
-```
-
-### Python
-
-``` python
-from inspect_ranges.types import (
-    Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
-    Resources,
-)
-
-anatomy = RangeSpec(
-    meta=RangeMeta(
-        name="anatomy",
-        schema_version="0.3",
-        description="The five sections. Identity here; segments in "
-        "networks; guests in routers, hosts, and attacker.",
-    ),
-    networks=[
-        Network(name="lab", cidr="10.10.10.0/24", mode="isolated")
-    ],
-    routers=[],  # optional: gateways between segments
-    hosts=[
-        Host(
-            name="web",
-            os=Os(type="linux"),
-            image="acme/web-golden",
-            interfaces=[Interface(network="lab")],
-        )
-    ],
-    attacker=Attacker(
-        interfaces=[Interface(network="lab")], entry="external"
-    ),
-)
-```
-:::
-
-The schema is strict: unknown keys are errors, with did-you-mean hints and pointers for planned sections. Two things stay outside the schema: upstream provenance lives in a `source.md` next to the definition (the runtime does not consume it), and evaluation goals live in a separate `challenges.yaml` consumed by the task, because one range serves many evaluations.
-
-Every example on this page shows both surfaces: the YAML definition and the equivalent typed Python. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it. [Defining Networks](networks.qmd#python-definitions) covers how typed configuration is consumed.
 
 ## Hosts
 
@@ -113,6 +42,11 @@ attacker:
 ### Python
 
 ``` python
+from inspect_ranges.types import (
+    Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
+    Resources,
+)
+
 hosts = RangeSpec(
     meta=RangeMeta(
         name="hosts",
@@ -143,7 +77,9 @@ hosts = RangeSpec(
 3.  The fully qualified name, for ranges whose DNS serves it.
 :::
 
-`name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Defining Networks](networks.qmd).
+Every example shows both surfaces; the models import from `inspect_ranges.types` (shown once above, later Python tabs omit it), and the [Ranges overview](ranges.qmd#python-definitions) covers how typed configuration is consumed.
+
+`name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Networks](networks.qmd).
 
 ## Images
 
@@ -266,7 +202,7 @@ router_guest = RangeSpec(
 ```
 :::
 
-Policy (`acl`) and routing (`routes`, gateway election) are covered in [Defining Networks](networks.qmd).
+Policy (`acl`) and routing (`routes`, gateway election) are covered in [Networks](networks.qmd).
 
 ## The attacker guest
 
@@ -329,7 +265,7 @@ attack_box = RangeSpec(
 ```
 :::
 
-With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Defining Networks](networks.qmd#egress).
+With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Networks](networks.qmd#egress).
 
 ## Guest content
 

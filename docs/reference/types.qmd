@@ -6,7 +6,7 @@ reference: inspect_ranges.types
 
 The typed form of a range definition. A `RangeSpec` is accepted directly as sandbox configuration (`sandbox=("libvirt_range", RangeSpec(...))`), interchangeably with a `range.yaml` path. Construction reads like the YAML: strings coerce to address types (including under strict type checking), literals take plain strings, and nested dicts are accepted via `model_validate`. The one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
 
-Models validate fully at construction (structural and cross-reference checks) and stay mutable for programmatic building; every consumer boundary revalidates (see `revalidate_range`). See [Defining Networks](../networks.qmd) for a guided tour of the syntax.
+Models validate fully at construction (structural and cross-reference checks) and stay mutable for programmatic building; every consumer boundary revalidates (see `revalidate_range`). See [Defining Ranges](../ranges.qmd) for a guided tour of the syntax.
 
 ## Definition
 

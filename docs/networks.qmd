@@ -1,17 +1,12 @@
 ---
-title: "Defining Networks"
+title: "Networks"
 description: "The range.yaml networking syntax, from a single flat network to multi-router enterprise topologies."
 llms-description: "Tutorial and review guide for the range.yaml networking syntax: addressing, DNS, segmentation, ACLs, routing, and egress."
 ---
 
 ## Overview
 
-Ranges are defined in a `range.yaml` file or as the equivalent typed Python; every example below shows both (see [Defining ranges in Python](#python-definitions) for how typed configuration is consumed). Guest-side fields (images, resources, operating systems, the definition's anatomy) are covered in [Defining Guests](guests.qmd); this page covers the networking syntax, starting with a single network and adding one construct at a time.
-
-Two properties hold throughout:
-
-1.  **Everything is compiled.** Every networking artifact (addresses, bridges, firewall rules, DNS and DHCP services, routing) is generated from the definition, so there is no second configuration to drift.
-2.  **Everything is tested.** Each construct is verified in a booted range, and every example on this page is validated in CI, on both surfaces: the YAML validates, the Python constructs, and each pair is checked for equality. Constructs the runtime cannot yet realize are rejected at validation with a specific error code (see [Boundaries](#boundaries)).
+This page covers the networking half of the definition language, starting with a single network and adding one construct at a time. Every construct here is realized by the compiler and verified in a booted range; every example validates in CI on both surfaces. For the anatomy of a definition, the typed Python surface, and the validation workflow, see the [Ranges overview](ranges.qmd); guest-side fields (images, resources, operating systems) are covered in [Guests](guests.qmd).
 
 ## A flat network
 
@@ -836,61 +831,6 @@ foothold = RangeSpec(
 
 `entry` records how the attacker arrives (`external`, `assumed-breach`, or `operator`) for scorers and dataset builders.
 
-## Defining ranges in Python {#python-definitions}
-
-The Python tabs above are the typed surface. The models live in `inspect_ranges.types`, construction reads like the YAML (strings coerce to address types, including under strict type checking), and a `RangeSpec` object is accepted directly as sandbox configuration:
-
-``` python
-# fragment
-Task(..., sandbox=("libvirt_range", dmz_pivot))  # typed config
-Task(..., sandbox=("libvirt_range", "range.yaml"))  # file config
-```
-
-Three things to know:
-
-- The one spelling divergence from YAML is `AclRule(from_=...)`, since `from` is a Python keyword; the YAML surface keeps `from:`.
-- Models validate fully at construction and stay mutable for programmatic building. Validity is re-established at every consumer boundary (the sandbox revalidates a typed configuration on receipt), so mutating a spec between construction and handoff is safe.
-- Address fields are dual-stack types, so adding IPv6 later will not change them. IPv6 values are rejected until their realization lands (see [Boundaries](#boundaries)).
-
-## Validation and diagnostics
-
-`inspect-ranges validate` reports every detectable problem at once, with source positions and hints. The authors of these files are often models, so each validate/fix round trip counts:
-
-``` yaml
-# invalid-example: several mistakes at once, for the diagnostics below
-range:
-  name: broken
-  description: A definition with several mistakes.
-networks:
-  - name: dmz
-    cidr: 10.80.10.0/33
-    mode: isolated
-hosts:
-  - name: web
-    os: { type: linux }
-    imagee: acme/web-golden
-    interfaces: [{ network: dmz }]
-attacker:
-  interfaces: [{ network: dnz }]
-  entry: external
-```
-
-```         
-✗ range.yaml  3 errors
-   7:11  networks[0].cidr   '10.80.10.0/33' is not a valid IPv4 or IPv6 network
-  10:5   hosts[0].image     missing required field
-  12:5   hosts[0].imagee    unknown key 'imagee' (did you mean 'image'?)
-  (cross-reference checks run once the errors above are fixed)
-```
-
-Once a definition validates, `inspect-ranges plan` shows the resolved result (every address, MAC, and control-channel id, plus host requirements and resource totals), and `inspect-ranges render` emits the digest-manifested bundle the runtime realizes:
-
-``` {.bash filename="Terminal"}
-inspect-ranges validate range.yaml
-inspect-ranges plan range.yaml
-inspect-ranges render range.yaml -o bundle/
-```
-
 ## Boundaries {#boundaries}
 
 Constructs outside the current implementation are rejected with specific error codes. Three categories:
@@ -911,7 +851,7 @@ Constructs outside the current implementation are rejected with specific error c
 | Multiple NICs on one network        | rejected as `duplicate-attachment`    |
 | Traffic shaping / latency injection | reserved code `shaping-not-supported` |
 
-**Deferred sections**: `attack_path` and operator policy are not networking and are excluded from the schema until their designs land; they are rejected with a pointer to where their content currently lives. Guest content (users, services, weaknesses, defense, Active Directory) and `variables` are covered in [Defining Guests](guests.qmd).
+**Deferred sections**: `attack_path` and operator policy are not networking and are excluded from the schema until their designs land; they are rejected with a pointer to where their content currently lives. Guest content (users, services, weaknesses, defense, Active Directory) and `variables` are covered in [Guests](guests.qmd).
 
 ::: callout-note
 ## Status and feedback
