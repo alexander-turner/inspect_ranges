@@ -1,11 +1,14 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (tomcat users/service/vulnerability on both
+# webservers, per-database users and planted datasets, the D0 defense posture)
+# migrated into range.yaml under schema v0.3 (2026-10-07, see
+# ../../guest-config-v0.3.md), with the upstream templated host names made
+# concrete per unrolled host. What remains here is deferred per that record's
+# table, plus one randomized placement the schema cannot yet express.
 #
 # Also parked here: the per-subnet NACL blocks (translated into routers[].acl
 # in range.yaml) and the upstream count:/ip_start: expansion (unrolled by hand
-# in range.yaml; host entries below keep the original templated host names).
+# in range.yaml).
 
 # per-subnet security groups as originally translated (security_rules.tf);
 # superseded by the router ACL translation in range.yaml
@@ -30,40 +33,16 @@ expansion:
   webserver: { count: 2, ip_start: 192.168.200.10 }   # webserver_0, webserver_1
   database:  { count: 4, ip_start: 192.168.201.50 }   # database_0 .. database_3
 
-# host-level guest configuration (keyed by the upstream templated host names)
+# randomized placement the schema cannot yet express (variables/generation
+# territory: the key-holding webserver is chosen per deployment)
 hosts:
   webserver:
-    users:
-      - { name: tomcat }
-    services:
-      - name: tomcat
-        version: 9.0.83          # apache-tomcat-9.0.83.zip, systemd unit "tomcat"
-        port: 8080               # default: Tomcat default port; not stated in playbook
-    vulnerabilities:
-      - id: struts-rce
-        class: exploitable
-        service: tomcat
-        cve: CVE-2017-5638       # to-verify: playbook installs Tomcat; the vulnerable
-                                 # Struts app ships inside the tomcat zip (Equifax-style
-                                 # entry per the Incalmo paper); exact CVE not stated.
     misconfigurations:
       - id: ssh-key-to-corporate
         description: >
           One randomly chosen webserver's tomcat user holds SSH private keys
           authorized on every database host (SetupServerSSHKeys in
           equifax_instance.py). Credential-reuse pivot, not an exploit.
-  database:
-    users:
-      - name: database_N         # per-host user named after the host (underscores stripped)
-        password: ubuntu         # CreateUser(host.ip, user, "ubuntu")
-    data:
-      - path: ~/data_database_N.json
-        description: Faker-generated sensitive dataset (AddData playbook), one per host
-        sensitive: true
-
-defense:
-  tier: D0
-  description: No defenders; no telemetry (MHBench's stated limitation).
 
 goals:
   - id: exfiltrate-data

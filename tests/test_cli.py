@@ -43,12 +43,20 @@ def test_validate_json_contract(tmp_path: Path) -> None:
 
 
 def test_plan_json_contract(tmp_path: Path) -> None:
-    result = CliRunner().invoke(ranges, ["plan", EXAMPLE, "--json"])
+    # a spec without guest content: migrated examples gate at planning by design
+    spec = str(Path(__file__).parent.parent / "design/spikes/acl-v2/spec.yaml")
+    result = CliRunner().invoke(ranges, ["plan", spec, "--json"])
     assert result.exit_code == 0
     plan = json.loads(result.output)
     assert plan["format_version"] == "1"
-    assert plan["range"]["name"] == "vulhub-zabbix"
+    assert plan["range"]["name"] == "acl-v2"
     assert plan["totals"]["guests"] == len(plan["guests"])
+
+
+def test_plan_gates_migrated_guest_content() -> None:
+    result = CliRunner().invoke(ranges, ["plan", EXAMPLE])
+    assert result.exit_code == 1
+    assert "guest-config-not-realized" in result.output or "not yet realized" in result.output
 
 
 def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:

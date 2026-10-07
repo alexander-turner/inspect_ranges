@@ -511,7 +511,7 @@ Constructs outside the current implementation are rejected with specific error c
 | Multiple NICs on one network | rejected as `duplicate-attachment` |
 | Traffic shaping / latency injection | reserved code `shaping-not-supported` |
 
-**Deferred sections**: `attack_path`, `variables`, `defense`, guest configuration, and friends are not networking and are excluded from the schema entirely until their designs land; they are rejected with a pointer to where their content currently lives.
+**Deferred sections**: `attack_path`, `variables`, and operator policy are not networking and are excluded from the schema until their designs land; they are rejected with a pointer to where their content currently lives. Guest content (users, services, weaknesses, defense, Active Directory) is covered in [Defining Guests](guests.qmd).
 
 ::: {.callout-note}
 ## Status and feedback

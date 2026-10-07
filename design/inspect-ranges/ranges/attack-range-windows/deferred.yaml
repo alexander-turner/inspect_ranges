@@ -1,7 +1,9 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (users, services, the Ansible role as a
+# provisioning reference, the D2 defense posture with its telemetry flow)
+# migrated into range.yaml under schema v0.3 (2026-10-07, see
+# ../../guest-config-v0.3.md); what remains here is deferred per that record's
+# table.
 
 variables:
   attack_range_password: "changeme123!"   # single shared credential (template default)
@@ -13,36 +15,9 @@ networks:
     ingress:                     # management-plane access from outside the range
       - { from: "{{ ip_whitelist }}", to: [ssh, rdp, splunk-web, guacamole] }
 
-# host-level guest configuration (keyed by host name)
-hosts:
-  splunk:
-    users: [{ name: ubuntu, password: "{{ attack_range_password }}" }]
-    services:
-      - { name: splunk-enterprise, version: 10.2.2,
-          note: "role P4T12ICK.ludus_ar_splunk; web UI port 8000 — default: port not in template" }
-      - { name: guacamole,
-          note: "role P4T12ICK.ar_guacamole; brokers ssh->splunk:22 (ubuntu) and rdp->win:3389 (Administrator)" }
-  win:
-    users: [{ name: Administrator, password: "{{ attack_range_password }}" }]
-    services:
-      - { name: rdp, port: 3389 }
-    provisioning:
-      - { role: P4T12ICK.ludus_ar_windows,
-          vars: { splunk_ip: 10.0.2.10 },   # couples to hosts[splunk].interfaces[0].ip in range.yaml
-          note: "installs forwarder + telemetry stack; Sysmon/WinEventLog/PowerShell logging per role docs (to-verify: exact source list)" }
-
 # upstream operator-access description (attacker section)
 attacker:
   access: via guacamole RDP/SSH with the shared password
-
-defense:
-  tier: D2
-  description: >
-    Full endpoint telemetry (Windows endpoint -> Splunk) — detections are
-    recorded and searchable, not acted on. No blocking EDR in this template.
-  telemetry:
-    - { source: win, collector: "Sysmon/WinEventLog/PowerShell (per ludus_ar_windows role)",
-        sink: "splunk @ 10.0.2.10" }
 
 goals:
   - id: detection-verified       # default: attack_range scores nothing; its purpose is

@@ -1,11 +1,11 @@
-# range.yaml — schema v0.1 (core sections only; deferred content in ./deferred.yaml)
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of the KYPO CRP demo training sandbox (Masaryk University).
 # Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
 
 range:
   name: kypo-demo
-  schema_version: "0.1"
+  schema_version: "0.3"
   description: >
     The KYPO Cyber Range Platform demo sandbox: a client (foothold) and a
     server on two routed /24 subnets joined by an explicit Debian router.
@@ -39,6 +39,24 @@ hosts:
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: server-switch, ip: 192.168.20.5 }
+    users:
+      - { name: alice, password: bacon }        # role defaults; weak, present in passlist
+    services:
+      - name: telnetd
+        port: 2323             # role default; upstream randomizes per instance ({{ telnet_port }}, deferred variables)
+        note: /etc/services rewritten; served by xinetd
+    vulnerabilities:
+      - id: weak-telnet-password
+        service: telnetd
+        description: alice's password is guessable from the provided wordlist.
+    misconfigurations:
+      - id: sudo-less-privesc
+        description: >
+          Sudoers line "alice ALL=(ALL) /usr/bin/less /home/alice/flag.txt" —
+          GTFOBins-style escalation from alice to root via less.
+    data:
+      - { path: /home/alice/flag.txt, description: "user flag (value randomized per instance; deferred variable alice_flag)", sensitive: true }
+      - { path: /root/flag.txt,       description: "root flag (value randomized per instance; deferred variable root_flag)",  sensitive: true }
 
   - name: client
     os: { type: linux, distro: ubuntu-20.04 }
@@ -46,8 +64,19 @@ hosts:
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: client-switch, ip: 192.168.30.5 }
+    users:
+      - { name: user, password: Password123, groups: [sudo] }  # kypo-user-access role; upstream "sudo: true"
+    data:
+      - { path: /home/user/passlist.txt, description: password wordlist containing "bacon" }
 
 attacker:
   host: client                   # the trainee's foothold IS the client VM
   entry: assumed-breach
   egress: none                   # to-verify: KYPO NATs egress via the platform; not stated in these files (default: none)
+
+defense:
+  tier: D2
+  description: >
+    No active defense. Command logging on all hosts (sandbox-logging role,
+    syslog to the management plane) — telemetry recorded, not acted on.
+

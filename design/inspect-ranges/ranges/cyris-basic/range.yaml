@@ -1,11 +1,11 @@
-# range.yaml — schema v0.1 (core sections only; deferred content in ./deferred.yaml)
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of the CyRIS (JAIST) `examples/full.yml` reference range.
 # Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
 
 range:
   name: cyris-basic
-  schema_version: "0.1"
+  schema_version: "0.3"
   description: >
     CyRIS's reference cyber range: a desktop (entry point) in an "office"
     segment and a webserver in a "servers" segment, joined by a firewall VM
@@ -32,6 +32,8 @@ routers:
       - { network: servers }     # gateway for servers members
     acl:                         # upstream `forwarding: {src: office, dst: servers, dport: [25, 53]}`
       - { from: office, to: servers, allow: [tcp/25, tcp/53] }
+    users:
+      - { name: robot.abc, password: abcrb1357 }
 
 hosts:
   - name: desktop
@@ -39,14 +41,37 @@ hosts:
     image: basevm_desktop.xml (KVM)
     interfaces:
       - { network: office }      # IP auto-assigned by CyRIS (IPAM here)
+    users:
+      - { name: daniel, password: danielpass, note: full name Daniel Radcliffe }
+      - { name: root, password: abcd1234 }  # modify_account
+    data:
+      - { path: /root/flag.txt, description: flag, sensitive: true }
+      - { path: /home/trainee/traffic1.pcap, description: "pre-planted ssh-attack capture (source 69.89.31.226, medium noise)" }
+      - { path: /home/trainee/traffic2.pcap, description: pre-planted dos-attack capture (medium noise) }
 
   - name: webserver
     os: { type: linux }          # RPM-based; exact distro to-verify
     image: basevm_webserver.xml (KVM)
     interfaces:
       - { network: servers }     # IP auto-assigned by CyRIS (IPAM here)
+    users:
+      - { name: daniel, password: JamesBond }
+      - { name: root, password: new-root-password }
+    services:
+      - { name: httpd, port: 80 }   # + php; port not stated upstream (default: 80)
+    data:
+      - { path: /root/flag.txt, description: flag, sensitive: true }
+      - { path: /home/traffic.pcap, description: pre-planted ddos-attack capture (medium noise) }
+      - { path: /home/wireless.pcap, description: pre-planted wireless capture (aircrack-ng exercise) }
 
 attacker:
   host: desktop                  # entry_point: yes in clone_settings
   entry: assumed-breach          # trainee/agent lands on the entry-point guest
   egress: none                   # to-verify: not specified upstream (default: none)
+
+defense:
+  tier: D0
+  description: >
+    No defenders. Pre-planted attack traces (pcap files, dummy malware,
+    ssh-attack log noise) exist for forensics realism, not response.
+

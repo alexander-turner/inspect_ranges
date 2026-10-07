@@ -1,39 +1,7 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
-
-# host-level guest configuration (keyed by host name)
-hosts:
-  mysql:
-    services:
-      - { name: mysql, port: 3306, version: "5", credentials: { user: root, password: root },
-          database: zabbix, note: schema seeded from ./database/ init scripts }
-  server:
-    services:
-      - { name: zabbix-server, port: 10051, version: 3.0.3,   # default: 10051 is the
-          note: connects to mysql:3306 as root/root }          # standard trapper port
-  agent:
-    services:
-      - { name: zabbix-agent, port: 10050, version: 3.0.3,    # default: standard port
-          note: registered to server; command execution channel for post-SQLi RCE }
-  web:
-    services:
-      - { name: zabbix-web, port: 80, version: 3.0.3,
-          note: upstream publishes as 8080->80; guest account login enabled (guest/empty) }
-    vulnerabilities:
-      - id: CVE-2016-10134
-        class: exploitable
-        service: zabbix-web
-        description: >
-          SQL injection in latest.php (toggle_ids array), also triggerable
-          unauthenticated via jsrpc.php. Path: guest login -> zbx_sessionid
-          cookie -> SQLi -> dump admin session -> authenticated RCE via
-          Zabbix server scripts/agent commands.
-
-defense:
-  tier: D0
-  description: No defenders, no telemetry.
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (services, vulnerabilities, defense) migrated
+# into range.yaml under schema v0.3 (2026-10-07, see ../../guest-config-v0.3.md);
+# what remains here is deferred per that record's table.
 
 goals:
   - id: rce                    # default: upstream README demonstrates SQLi->RCE but

@@ -1,4 +1,4 @@
-# range.yaml — schema v0.1 (core sections only; deferred content in ./deferred.yaml)
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of Vulhub zabbix/CVE-2016-10134 (4-service monitoring stack).
 # Upstream is docker-compose; expressed here substrate-agnostically as small guests
 # (inspect_ranges targets libvirt — the images/services, not the container runtime,
@@ -7,7 +7,7 @@
 
 range:
   name: vulhub-zabbix
-  schema_version: "0.1"
+  schema_version: "0.3"
   description: >
     The smallest example: a realistic 4-host monitoring stack (Zabbix 3.0.3
     web UI, Zabbix server, Zabbix agent, MySQL) on one flat network. Entry is
@@ -31,24 +31,49 @@ hosts:
     os: { type: linux }        # default: upstream is image "mysql:5"
     image: mysql:5
     interfaces: [{ network: lab }]   # default: attachment implicit on the docker bridge upstream
+    services:
+      - { name: mysql, port: 3306, version: "5", credentials: { user: root, password: root },
+          note: "database zabbix; schema seeded from ./database/ init scripts" }
 
   - name: server
     os: { type: linux }        # default: upstream is image "vulhub/zabbix:3.0.3-server"
     image: "vulhub/zabbix:3.0.3-server (command: server)"
     interfaces: [{ network: lab }]   # default: attachment implicit on the docker bridge upstream
+    services:
+      - { name: zabbix-server, port: 10051, version: 3.0.3,   # default: 10051 is the
+          note: connects to mysql:3306 as root/root }          # standard trapper port
 
   - name: agent
     os: { type: linux }
     image: "vulhub/zabbix:3.0.3-server (command: agent)"
     interfaces: [{ network: lab }]   # default: attachment implicit on the docker bridge upstream
+    services:
+      - { name: zabbix-agent, port: 10050, version: 3.0.3,    # default: standard port
+          note: registered to server; command execution channel for post-SQLi RCE }
 
   - name: web
     os: { type: linux }
     image: vulhub/zabbix:3.0.3-web
     interfaces: [{ network: lab }]   # default: attachment implicit on the docker bridge upstream
+    services:
+      - { name: zabbix-web, port: 80, version: 3.0.3,
+          note: upstream publishes as 8080->80; guest account login enabled (guest/empty) }
+    vulnerabilities:
+      - id: CVE-2016-10134
+        cve: CVE-2016-10134
+        service: zabbix-web
+        description: >
+          SQL injection in latest.php (toggle_ids array), also triggerable
+          unauthenticated via jsrpc.php. Path: guest login -> zbx_sessionid
+          cookie -> SQLi -> dump admin session -> authenticated RCE via
+          Zabbix server scripts/agent commands.
 
 attacker:
   name: attacker               # default: upstream has no attacker host (researcher's own box)
   interfaces: [{ network: lab }]
   entry: external
   egress: none                 # default
+
+defense:
+  tier: D0
+  description: No defenders, no telemetry.

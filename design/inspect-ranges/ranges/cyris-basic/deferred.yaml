@@ -1,7 +1,10 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (users incl. the firewall router account,
+# the httpd service, planted data files, top-level defense) migrated into
+# range.yaml under schema v0.3 (2026-10-07, see ../../guest-config-v0.3.md).
+# What remains here: the inline CyRIS task lists (recipe-language material,
+# deliberately undecided), deployment plumbing, and the sections deferred per
+# that record's table.
 #
 # Also parked from the core file: the firewall router's upstream NIC pinning
 # (`iface: eth0/eth1` per interface) and `is_host: true` (the firewall is a
@@ -16,18 +19,10 @@ management:
     - { id: host_1, mgmt_addr: localhost, virbr_addr: 192.168.122.1, account: cyuser }
   base_image_ips: { desktop: 192.168.122.50, webserver: 192.168.122.51, firewall: 192.168.122.10 }
 
-# router-level guest configuration (keyed by router name)
-routers:
-  firewall:
-    users:
-      - { name: robot.abc, password: abcrb1357 }
-
-# host-level guest configuration (keyed by host name)
+# CyRIS per-guest task lists (recipe-language material; the data files these
+# tasks plant are declared in range.yaml hosts[].data)
 hosts:
   desktop:
-    users:
-      - { name: daniel, password: danielpass, full_name: Daniel Radcliffe }
-      - { name: root, password: abcd1234 }  # modify_account
     provisioning:                # CyRIS tasks, in order
       - install_package: { manager: yum, packages: ["wireshark=1.8.10", GeoIP, nmap] }
       - emulate_attack: { type: ssh_attack, target_account: daniel, attempts: 200, date: 2017-11-18 }
@@ -44,14 +39,7 @@ hosts:
       - firewall_rules:
           - /home/cyuser/cyris-development/database/firewall_ruleset_forwarding
           - /home/cyuser/cyris-development/database/firewall_ruleset_inputoutput
-    data:
-      - { path: /root/flag.txt, description: flag, sensitive: true }
   webserver:
-    users:
-      - { name: daniel, password: JamesBond }
-      - { name: root, password: new-root-password }
-    services:
-      - { name: httpd }          # + php; ports not stated (default: 80)
     provisioning:
       - install_package: { manager: yum, packages: [httpd, php] }
       - emulate_traffic_capture_file:
@@ -66,14 +54,6 @@ hosts:
           - { program: /bin/cyberrange/aircrack-ng.sh, interpreter: bash }
       - firewall_rules:
           - /home/cyuser/database/firewall_ruleset_webserver
-    data:
-      - { path: /root/flag.txt, description: flag, sensitive: true }
-
-defense:
-  tier: D0
-  description: >
-    No defenders. Pre-planted attack traces (pcap files, dummy malware,
-    ssh-attack log noise) exist for forensics realism, not response.
 
 goals:                           # default: full.yml plants flags but defines no scoring;
   - id: flags                    # flag capture is the conventional CyRIS training goal

@@ -37,7 +37,7 @@ def test_examples_validate() -> None:
     assert len(EXAMPLES) == 6
     for path in EXAMPLES:
         spec = load_range(path)
-        assert spec.meta.schema_version == "0.1"
+        assert spec.meta.schema_version in {"0.1", "0.2", "0.3"}
 
 
 def test_minimal_spec_validates() -> None:

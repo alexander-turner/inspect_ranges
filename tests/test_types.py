@@ -64,6 +64,46 @@ def test_revalidate_range_passes_through_a_consistent_spec() -> None:
     assert checked is not spec
 
 
+def test_guest_content_typed_construction() -> None:
+    """Guest content constructs and validates through the typed surface."""
+    from inspect_ranges.types import (
+        ActiveDirectory,
+        AdAcl,
+        AdDomain,
+        AdUser,
+        Defense,
+        Service,
+        Telemetry,
+        User,
+        Vulnerability,
+    )
+
+    spec = dmz_pivot().model_copy(deep=True)
+    spec.hosts[0].users = [User(name="alice", password="bacon")]
+    spec.hosts[0].services = [Service(name="httpd", port=80)]
+    spec.hosts[0].vulnerabilities = [
+        Vulnerability(id="weak-thing", service="httpd", description="seeded")
+    ]
+    spec.defense = Defense(
+        tier="D2", telemetry=[Telemetry(source="web", collector="agent", sink="db")]
+    )
+    spec.active_directory = ActiveDirectory(
+        forest="corp.example",
+        domains=[
+            AdDomain(
+                name="corp.example",
+                netbios="CORP",
+                dc="web",
+                users=[AdUser(name="svc", spns=["HTTP/web.corp.example"])],
+                acls=[AdAcl(principal="a", right="GenericAll", target="b")],
+            )
+        ],
+    )
+    checked = revalidate_range(spec)
+    assert checked.active_directory is not None
+    assert checked.active_directory.domains[0].acls[0].right == "GenericAll"
+
+
 def test_ipv6_values_are_gated() -> None:
     # the dual-stack types accept IPv6 structurally (the Network constructs),
     # but the spec-level gate rejects it until realization lands

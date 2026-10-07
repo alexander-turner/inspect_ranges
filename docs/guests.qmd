@@ -1,6 +1,6 @@
 ---
 title: "Defining Guests"
-description: "The guest side of a range definition: hosts, routers, the attacker, images, resources, and how configuration reaches a VM."
+description: "The guest side of a range definition: hosts, images, resources, accounts, services, seeded weaknesses, defense, and Active Directory."
 llms-description: "Tutorial and review guide for the guest side of range.yaml: definition anatomy, hosts, images, resources, routers, the attacker, the realized device profile, and configuration injection."
 ---
 
@@ -11,7 +11,7 @@ A range definition has five sections. One vocabulary rule: **guests** are the VM
 ```yaml
 range:
   name: anatomy
-  schema_version: "0.2"
+  schema_version: "0.3"
   description: >
     The five sections. Identity here; segments in networks; guests in
     routers, hosts, and attacker.
@@ -162,6 +162,237 @@ attacker:
 
 With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Defining Networks](networks.qmd#egress).
 
+## Guest content
+
+Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. One stance governs all of it: **declarations describe the converged state of a guest, not boot-time actions**. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample. Declaring a misconfiguration and baking it into an image are not alternatives: the declaration is the source of truth that randomization, auditing, and scoring consume, and baking is one of its realizations.
+
+Two rules about secrets. Scenario credentials belong in the definition in plaintext; they are scenario content, visible by design. Per-sample proof material (flags, canaries) never appears in a definition; it is generated fresh at instantiation.
+
+Until the build phase lands, planning refuses definitions that carry guest content (`guest-config-not-realized`), so nothing boots with silently missing content. The examples below validate and are marked with that planning status.
+
+## Users
+
+`users` declares a guest's local accounts (routers can carry them too). Domain accounts belong in [`active_directory`](#active-directory), not here:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: users
+  description: Local accounts as converged state.
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+hosts:
+  - name: server
+    os: { type: linux }
+    image: acme/server-golden
+    interfaces: [{ network: lab }]
+    users:
+      - { name: alice, password: bacon, note: "weak password, present in the provided wordlist" }
+      - { name: backup, groups: [sudo], note: service account with sudo }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+## Services
+
+`services` entries are assertions about the guest's converged listening surface, never an install language. The build satisfies them (through a recipe, the image, or a checkpoint) and verifies them: the named service is listening on the declared port at the declared version. Installation itself belongs in [`provisioning`](#provisioning-references):
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: services
+  description: The converged listening surface, asserted and build-verified.
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/zabbix-golden
+    interfaces: [{ network: lab }]
+    services:
+      - { name: zabbix-web, port: 80, version: 3.0.3 }
+      - name: mysql
+        port: 3306
+        version: "5"
+        credentials: { user: root, password: root }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+## Vulnerabilities and misconfigurations
+
+The seeded attack surface is two distinct lists, because real intrusions lean heavily on misconfigurations. The list is the classification, so entries carry no class field. A vulnerability's `id` is a stable name of ours; `cve:` is an attribute when one applies, and `service:` ties the weakness to a declared service on the same host:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: weaknesses
+  description: A CVE-backed vulnerability and a misconfiguration, as distinct lists.
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/zabbix-golden
+    interfaces: [{ network: lab }]
+    services:
+      - { name: zabbix-web, port: 80, version: 3.0.3 }
+    vulnerabilities:
+      - id: zabbix-jsrpc-sqli
+        cve: CVE-2016-10134
+        service: zabbix-web
+        description: SQL injection in jsrpc.php, reachable unauthenticated.
+    misconfigurations:
+      - id: guest-login-enabled
+        description: The Zabbix guest account is enabled with an empty password.
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+## Planted data
+
+`data` declares scenario files: targets worth finding or exfiltrating, supporting material, captures. Flags never appear here:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: planted-data
+  description: Scenario files on a database host.
+networks:
+  - name: internal
+    cidr: 10.20.0.0/24
+    mode: isolated
+hosts:
+  - name: db
+    os: { type: linux }
+    image: acme/db-golden
+    interfaces: [{ network: internal }]
+    data:
+      - { path: /srv/data/customers.db, description: the exfiltration target, sensitive: true }
+      - { path: /home/trainee/traffic.pcap, description: packet capture with planted attack traffic }
+attacker:
+  interfaces: [{ network: internal }]
+  entry: assumed-breach
+```
+
+## Defense
+
+The range-level `defense` section records the defensive posture on the D0 (no defenders) to D5 (adaptive defender) spectrum, with telemetry flows where signals are recorded or forwarded. Per-host toggles turn individual protections on or off:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: defended
+  description: Passive detection, with per-host protection toggles.
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+defense:
+  tier: D2
+  description: Endpoint telemetry is recorded and searchable, no blocking response.
+  telemetry:
+    - { source: win, collector: Sysmon/WinEventLog, sink: splunk }
+hosts:
+  - name: splunk
+    os: { type: linux }
+    image: acme/splunk-golden
+    interfaces: [{ network: lab }]
+  - name: win
+    os: { type: linux }
+    image: acme/endpoint-golden
+    interfaces: [{ network: lab }]
+    defense: { defender: true, firewall: false }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
+## Active Directory {#active-directory}
+
+Identity is range-scoped (accounts exist in the domain, not on a host), so `active_directory` is a top-level section: the forest, its domains, each domain's controller (a declared host), accounts of note with groups and SPNs, and the seeded ACL-abuse chain as typed edges:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: forest
+  description: A parent and child domain with seeded identity attack surface.
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+active_directory:
+  forest: corp.example
+  domains:
+    - name: corp.example
+      netbios: CORP
+      dc: dc01
+      users:
+        - { name: c.lannister, password: il0vejaime, groups: [Domain Admins] }
+      acls:
+        - { principal: t.lannister, right: ForceChangePassword, target: j.lannister }
+        - { principal: j.lannister, right: GenericWrite, target: j.baratheon }
+    - name: north.corp.example
+      netbios: NORTH
+      dc: dc02
+      parent: corp.example
+      users:
+        - name: sql_svc
+          password: TrustN0one
+          spns: [MSSQLSvc/db.north.corp.example:1433]
+          note: kerberoastable
+hosts:
+  - name: dc01
+    os: { type: linux }
+    image: acme/dc-golden
+    interfaces: [{ network: corp, ip: 10.20.0.5 }]
+  - name: dc02
+    os: { type: linux }
+    image: acme/dc-golden
+    interfaces: [{ network: corp, ip: 10.20.0.6 }]
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+```
+
+ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects).
+
+## Provisioning references {#provisioning-references}
+
+Everything above declares state; `provisioning` names the build-time work that produces it when the image alone does not. Steps reference recipes by name and version, in order. The recipe language itself is deliberately outside the definition: recipes run once at range build, their versions land in the build manifest, and the runtime never runs them:
+
+```yaml
+# plan-invalid: guest content is build-phase (see Guest content above)
+range:
+  name: provisioned
+  description: A build recipe referenced by name, with inputs.
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+hosts:
+  - name: endpoint
+    os: { type: linux }
+    image: acme/endpoint-golden
+    interfaces: [{ network: lab }]
+    provisioning:
+      - recipe: acme.telemetry_stack
+        version: "2.1"
+        vars: { splunk_ip: "10.10.10.10" }
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external
+```
+
 ## What a guest sees
 
 Every device a guest sees is declared per role; no tool default decides the attack surface. The standard profile gives a guest virtio disks, virtio NICs, a vsock device, a serial console, and a virtio entropy source, and nothing else: no USB controller, memory balloon, or video.
@@ -206,24 +437,14 @@ attacker:
 
 For reviewers, the guest-side edges:
 
-**Gated**: Windows rendering (`windows-render-not-supported`) until the build/checkpoint phase lands its injectors. The Windows control plane itself (the same exec/file protocol over vsock) already works.
+**Gated at planning** until the build phase lands: Windows rendering (`windows-render-not-supported`; the Windows control plane itself already works) and all guest content (`guest-config-not-realized`). The gates guarantee nothing boots with silently missing content; each is deleted as its realization and verification land.
 
-**Deferred guest content**: what a guest *contains* is not yet schema. These sections are rejected with pointers, and their content is parked verbatim per range until their designs land:
+**Still deferred** (not yet in the schema): `count:` expansion (stamping out N copies of a host), per-instance `variables`, `attack_path`, and operator policy (`management`, `lifecycle`, ingress). Each is rejected with a pointer to where its content currently lives.
 
-| Deferred | What it will declare |
-|---|---|
-| `users` | local accounts and credentials |
-| `services` | planted listeners and applications |
-| `vulnerabilities` / `misconfigurations` | the seeded attack surface, as distinct lists |
-| `provisioning` | build-time recipes (large stacks are built once and captured, never re-run per sample) |
-| `data` | planted files |
-| defense toggles | per-host protections on or off |
-| `count:` expansion | stamping out N copies of a host |
-
-The dividing rule: content belongs in the definition language when it is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints.
+The dividing rule for what belongs in the definition language: content that is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints and referenced through `provisioning`.
 
 ::: {.callout-note}
 ## Status and feedback
 
-Guest identity, images, resources, and realization are schema v0.2 and enforced as documented. If your ranges need to declare guest content this language cannot yet express, tell us what, ideally as the `range.yaml` section you wish you could write.
+Guest identity, images, resources, and realization are enforced as documented. Guest content (schema v0.3) is parsed and validated as documented, with build-phase realization in progress behind the planning gate. If your ranges need to declare guest content this language cannot express, tell us what, ideally as the `range.yaml` section you wish you could write. The vocabulary edges (the AD rights set, the defense toggle set) are explicit extension points.
 :::

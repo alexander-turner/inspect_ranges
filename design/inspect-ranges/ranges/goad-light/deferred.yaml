@@ -1,96 +1,26 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (active_directory with the typed ACL chain,
+# per-host services/vulnerabilities/misconfigurations/defense toggles, the
+# range-level defense posture) migrated into range.yaml under schema v0.3
+# (2026-10-07, see ../../guest-config-v0.3.md); what remains here is deferred
+# per that record's table, plus two per-host keys the schema does not yet
+# carry (roles, scheduled_activity).
 
 variables:
   ip_range: "192.168.56"         # default: provider-dependent ({{ip_range}} template var;
                                  # 192.168.56 is the VirtualBox host-only convention)
 
-active_directory:
-  forest: sevenkingdoms.local
-  domains:
-    - name: sevenkingdoms.local
-      netbios: SEVENKINGDOMS
-      dc: dc01
-      # ACL-abuse chain seeded via domain ACLs (config.json "acls"):
-      # tywin -ForceChangePassword-> jaime -GenericWrite-> joffrey -WriteDacl->
-      # tyron -SelfMembership-> Small Council -AddMember-> DragonStone
-      # -WriteOwner-> KingsGuard -GenericAll-> stannis -GenericAll-> DC computer
-      # object; plus lord.varys GenericAll on Domain Admins + AdminSDHolder,
-      # renly WriteDacl on OU=Crownlands, anonymous RPC read on the domain.
-      users_of_note:
-        - { name: cersei.lannister, groups: [Domain Admins], password: il0vejaime }
-        - { name: robert.baratheon, groups: [Domain Admins, Protected Users] }
-        - { name: renly.baratheon, note: marked account_is_sensitive on dc01 }
-    - name: north.sevenkingdoms.local
-      netbios: NORTH
-      dc: dc02
-      parent: sevenkingdoms.local
-      users_of_note:
-        - { name: eddard.stark, groups: [Stark, Domain Admins] }
-        - { name: sql_svc, password: YouWillNotKerboroast1ngMeeeeee,
-            spns: [MSSQLSvc/castelblack.north.sevenkingdoms.local:1433], note: kerberoastable }
-        - { name: sansa.stark, password: 345ertdfg, spns: [HTTP/eyrie.north.sevenkingdoms.local] }
-        - { name: jon.snow, spns: [HTTP/thewall.north.sevenkingdoms.local], note: MSSQL sysadmin }
-        - { name: hodor, password: hodor, note: trivially weak }
-        - { name: robb.stark, password: sexywolfy, note: autologon + saved TERMSRV credential on dc02 }
-
-# host-level guest configuration (keyed by host name)
+# per-host keys without a schema home yet
 hosts:
   dc01:
     roles: [domain-controller, dns, adcs]
-    services:
-      - { name: active-directory, domain: sevenkingdoms.local }
-      - { name: adcs, note: certificate authority }
-      - { name: dns }
-    vulnerabilities:
-      - { id: adcs-esc1, class: exploitable, service: adcs, description: ESC1 vulnerable certificate template }
-    misconfigurations:
-      - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
-      - { id: acl-chain, description: seeded ACL-abuse chain (see active_directory.domains) }
-    defense: { defender: on, windows_update: off }
   dc02:
     roles: [domain-controller, dns]
-    services:
-      - { name: active-directory, domain: north.sevenkingdoms.local }
-      - { name: dns }
-    vulnerabilities: []
-    misconfigurations:
-      - { id: firewall-disabled }
-      - { id: llmnr-enabled, description: LLMNR + NBT-NS enabled (poisoning/relay surface) }
-      - { id: ntlm-downgrade, description: NTLM downgrade applied }
-      - { id: saved-credential, description: "TERMSRV/castelblack saved credential: north\\robb.stark / sexywolfy" }
-      - { id: autologon, description: robb.stark autologon (creds in registry) }
-      - { id: sysvol-secret, description: secret.ps1 planted in SYSVOL domain scripts }
-      - { id: open-shares, description: shares vuln role }
     scheduled_activity:          # bot scripts simulating user/defender-relevant behavior
       - [asrep_roasting.ps1, constrained_delegation_use_any.ps1, constrained_delegation_kerb_only.ps1,
          ntlm_relay.ps1, responder.ps1, gpo_abuse.ps1, rdp_scheduler.ps1]
-    defense: { defender: on, windows_update: off }
   srv02:
     roles: [member-server, iis, mssql, webdav]
-    services:
-      - { name: iis, port: 80, note: default website with ASP upload directory }
-      - { name: mssql, port: 1433, sa_password: Sup1_sa_P@ssw0rd!, svc_account: sql_svc }
-      - { name: webdav }
-      - { name: smb, note: open share C:\shares\all (contains arya.txt) }
-    vulnerabilities:
-      - { id: iis-asp-upload, class: exploitable, service: iis,
-          description: IIS_IUSRS FullControl on C:\inetpub\wwwroot\upload — webshell upload to RCE }
-      - { id: mssql-impersonation, class: exploitable, service: mssql,
-          description: "executeaslogin: samwell.tarly->sa, brandon.stark->jon.snow; executeasuser: arya.stark->dbo" }
-    misconfigurations:
-      - { id: firewall-disabled }
-      - { id: open-shares, description: C:\shares\all world-readable }
-    defense: { defender: off, windows_update: on }
-
-defense:
-  tier: D4                       # real EDR (Microsoft Defender) on dc01/dc02; D1-style
-  description: >                 # static hardening absent (firewalls disabled by design)
-    Windows Defender autonomous on both DCs, disabled on srv02; account
-    lockout policy active in the cochise evaluation. No SOC/telemetry sink
-    in GOAD-Light itself (ELK inventory groups are empty).
 
 goals:
   - id: domain-admin-north       # default: GOAD defines no scoring; goals follow the

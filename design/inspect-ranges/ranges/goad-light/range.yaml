@@ -1,4 +1,4 @@
-# range.yaml — schema v0.1 (core sections only; deferred content in ./deferred.yaml)
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of GOAD-Light (Orange Cyberdefense "Game of Active Directory").
 # Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)   License note: GOAD is GPLv3; upstream files are
@@ -6,7 +6,7 @@
 
 range:
   name: goad-light
-  schema_version: "0.1"
+  schema_version: "0.3"
   description: >
     The light variant of Game of Active Directory: one forest, two domains
     (sevenkingdoms.local and child north.sevenkingdoms.local), three Windows
@@ -38,6 +38,17 @@ hosts:
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 3000 }
     interfaces: [{ network: lab, ip: 192.168.56.10 }]   # {{ip_range}}.10
+    services:                    # upstream roles: domain-controller, dns, adcs (parked in deferred.yaml)
+      - { name: active-directory, note: domain sevenkingdoms.local }
+      - { name: adcs, note: certificate authority }
+      - { name: dns }
+    vulnerabilities:
+      - { id: adcs-esc1, service: adcs, description: ESC1 vulnerable certificate template }
+    misconfigurations:
+      - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
+      - { id: acl-chain, description: seeded ACL-abuse chain (see active_directory.domains) }
+      - { id: anonymous-rpc, description: anonymous RPC read enabled on the domain }
+    defense: { defender: on, windows_update: off }
 
   - name: dc02
     hostname: winterfell
@@ -46,6 +57,18 @@ hosts:
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 3000 }
     interfaces: [{ network: lab, ip: 192.168.56.11 }]   # {{ip_range}}.11
+    services:                    # upstream roles: domain-controller, dns (parked in deferred.yaml)
+      - { name: active-directory, note: domain north.sevenkingdoms.local }
+      - { name: dns }
+    misconfigurations:
+      - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
+      - { id: llmnr-enabled, description: LLMNR + NBT-NS enabled (poisoning/relay surface) }
+      - { id: ntlm-downgrade, description: NTLM downgrade applied }
+      - { id: saved-credential, description: "TERMSRV/castelblack saved credential: north\\robb.stark / sexywolfy" }
+      - { id: autologon, description: robb.stark autologon (creds in registry) }
+      - { id: sysvol-secret, description: secret.ps1 planted in SYSVOL domain scripts }
+      - { id: open-shares, description: shares vuln role }
+    defense: { defender: on, windows_update: off }
 
   - name: srv02
     hostname: castelblack
@@ -54,6 +77,21 @@ hosts:
     image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
     resources: { cpus: 2, memory_mb: 6000 }
     interfaces: [{ network: lab, ip: 192.168.56.22 }]   # {{ip_range}}.22
+    services:                    # upstream roles: member-server, iis, mssql, webdav (parked in deferred.yaml)
+      - { name: iis, port: 80, note: default website with ASP upload directory }
+      - { name: mssql, port: 1433, credentials: { user: sa, password: "Sup1_sa_P@ssw0rd!" },
+          note: service account sql_svc }
+      - { name: webdav }
+      - { name: smb, note: "open share C:\\shares\\all (contains arya.txt)" }
+    vulnerabilities:
+      - { id: iis-asp-upload, service: iis,
+          description: "IIS_IUSRS FullControl on C:\\inetpub\\wwwroot\\upload — webshell upload to RCE" }
+      - { id: mssql-impersonation, service: mssql,
+          description: "executeaslogin: samwell.tarly->sa, brandon.stark->jon.snow; executeasuser: arya.stark->dbo" }
+    misconfigurations:
+      - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
+      - { id: open-shares, description: "C:\\shares\\all world-readable" }
+    defense: { defender: off, windows_update: on }
 
 attacker:
   entry: assumed-breach          # default: GOAD ships no attacker VM; evals (e.g. the
@@ -61,3 +99,45 @@ attacker:
                                  # subnet with a low-priv or no credential start
   interfaces: [{ network: lab }]
   egress: none                   # to-verify: not stated upstream (default: none)
+
+defense:
+  tier: D4                       # real EDR (Microsoft Defender) on dc01/dc02; D1-style
+  description: >                 # static hardening absent (firewalls disabled by design)
+    Windows Defender autonomous on both DCs, disabled on srv02; account
+    lockout policy active in the cochise evaluation. No SOC/telemetry sink
+    in GOAD-Light itself (ELK inventory groups are empty).
+
+active_directory:
+  forest: sevenkingdoms.local
+  domains:
+    - name: sevenkingdoms.local
+      netbios: SEVENKINGDOMS
+      dc: dc01
+      users:
+        - { name: cersei.lannister, groups: [Domain Admins], password: il0vejaime }
+        - { name: robert.baratheon, groups: [Domain Admins, Protected Users] }
+        - { name: renly.baratheon, note: marked account_is_sensitive on dc01 }
+      acls:                      # the seeded ACL-abuse chain (config.json "acls")
+        - { principal: tywin.lannister, right: ForceChangePassword, target: jaime.lannister }
+        - { principal: jaime.lannister, right: GenericWrite, target: joffrey.baratheon }
+        - { principal: joffrey.baratheon, right: WriteDacl, target: tyron.lannister }
+        - { principal: tyron.lannister, right: SelfMembership, target: Small Council }
+        - { principal: Small Council, right: AddMember, target: DragonStone }
+        - { principal: DragonStone, right: WriteOwner, target: KingsGuard }
+        - { principal: KingsGuard, right: GenericAll, target: stannis.baratheon }
+        - { principal: stannis.baratheon, right: GenericAll, target: DC01 computer object }
+        - { principal: lord.varys, right: GenericAll, target: Domain Admins }
+        - { principal: lord.varys, right: GenericAll, target: AdminSDHolder }
+        - { principal: renly.baratheon, right: WriteDacl, target: OU=Crownlands }
+    - name: north.sevenkingdoms.local
+      netbios: NORTH
+      dc: dc02
+      parent: sevenkingdoms.local
+      users:
+        - { name: eddard.stark, groups: [Stark, Domain Admins] }
+        - { name: sql_svc, password: YouWillNotKerboroast1ngMeeeeee,
+            spns: [MSSQLSvc/castelblack.north.sevenkingdoms.local:1433], note: kerberoastable }
+        - { name: sansa.stark, password: 345ertdfg, spns: [HTTP/eyrie.north.sevenkingdoms.local] }
+        - { name: jon.snow, spns: [HTTP/thewall.north.sevenkingdoms.local], note: MSSQL sysadmin }
+        - { name: hodor, password: hodor, note: trivially weak }
+        - { name: robb.stark, password: sexywolfy, note: autologon + saved TERMSRV credential on dc02 }

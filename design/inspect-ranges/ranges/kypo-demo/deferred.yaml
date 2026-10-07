@@ -1,7 +1,10 @@
-# Sections awaiting schema design — NOT valid range.yaml and not consumed by
-# anything. Carved verbatim from range.yaml (2026-10-01) when schema v0.1 was
-# narrowed to its runtime core; migrate back when the corresponding schema
-# sections are designed (see ../../schema-v0.1-scope.md).
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (users, services, vulnerabilities,
+# misconfigurations, data) migrated into range.yaml under schema v0.3
+# (2026-10-07, see ../../guest-config-v0.3.md); what remains here is deferred
+# per that record's table. Note: top-level defense (tier D2, command logging)
+# also migrated; the per-host /etc/hosts aliases and tool installs below are
+# provisioning/recipe-language material.
 
 variables:                       # KYPO APG variables — regenerated per sandbox instance
   telnet_port: { type: port, min: 1500 }   # default in role: 2323
@@ -15,43 +18,16 @@ networks:
   client-switch:
     user_accessible: true        # KYPO default
 
-# host-level guest configuration (keyed by host name)
+# recipe-language material (per-host)
 hosts:
   server:
-    users:
-      - { name: alice, password: bacon }        # role defaults; weak, present in passlist
-    services:
-      - name: telnetd
-        port: "{{ telnet_port }}"               # /etc/services rewritten; served by xinetd
-    vulnerabilities:
-      - id: weak-telnet-password
-        class: exploitable
-        service: telnetd
-        description: alice's password is guessable from the provided wordlist.
-    misconfigurations:
-      - id: sudo-less-privesc
-        description: >
-          Sudoers line "alice ALL=(ALL) /usr/bin/less /home/alice/flag.txt" —
-          GTFOBins-style escalation from alice to root via less.
-    data:
-      - { path: /home/alice/flag.txt, description: "user flag ({{ alice_flag }})", sensitive: true }
-      - { path: /root/flag.txt,       description: "root flag ({{ root_flag }})",  sensitive: true }
     dns:
       hosts_entries: [{ name: client, ip: 192.168.30.5 }]  # /etc/hosts alias
   client:
-    users:
-      - { name: user, password: Password123, sudo: true }  # kypo-user-access role
     provisioning:
-      - tools: [nmap, hydra, medusa]
-      - { path: /home/user/passlist.txt, description: password wordlist containing "bacon" }
+      - tools: [nmap, hydra, medusa]   # package installs; recipe language undecided
     dns:
       hosts_entries: [{ name: server, ip: 192.168.20.5 }]
-
-defense:
-  tier: D2
-  description: >
-    No active defense. Command logging on all hosts (sandbox-logging role,
-    syslog to the management plane) — telemetry recorded, not acted on.
 
 goals:
   - id: user-flag
