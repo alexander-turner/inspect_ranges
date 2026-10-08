@@ -749,7 +749,7 @@ The attacker's own `egress` composes ahead of network policy: `none` (the defaul
 
 Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code:
 
-``` yaml
+``` {.yaml .invalid-example}
 range:
   name: egress-fqdn
   description: FQDN entries are in the vocabulary but gated.
