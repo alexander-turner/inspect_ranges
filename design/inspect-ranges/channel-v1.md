@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Channel v1: protocol v3, the vsock daemons, and the RangeChannel client, landed in slices"
-status: proposed
+status: accepted
 tags: [inspect-ranges, channel, vsockd, protocol, conformance, plan, decision]
 timestamp: 2026-10-08
 ---
@@ -58,9 +58,10 @@ Slices 1 to 3 are fully CI: codec properties, state machine, mock conformance ru
 - No bridged or connectionless transports; vsock is the only transport implemented, behind an interface that already forbids callers from knowing that.
 - No qemu-ga runtime path; it remains a build-time image tool per guest-exec-lessons.
 
-## Open questions for review
+## Decisions (resolved 2026-10-08)
 
-1. Linux daemon runtime: stay a stdlib-Python single file (the proven v2 shape, assumes python3 in Linux goldens) or move to a compiled binary now. Recommendation: stay Python for v1, revisit when an image without python3 forces it.
-2. v2 coexistence: should goldens carry both protocols during the transition, or v3 only with spikes pinned to their own assets. Recommendation: v3 only.
-3. Connection model: per-operation connect with retry, backoff, and pacing (proven, and what the wedge analysis recommends) versus a pooled persistent connection. Recommendation: per-operation for v1, pooling as a measured optimization later.
-4. Where the daemon artifact digest is recorded on the image side: in the golden derivation metadata consumed by the build manifest (recommended), or tracked only in the channel package.
+1. **The Linux daemon stays a stdlib-Python single file.** The proven v2 shape; a compiled binary arrives when an image without python3 forces it, per the forced-by discipline.
+2. **Goldens carry v3 only.** No dual-protocol surface; spikes stay pinned to their own assets.
+3. **Per-operation connect with retry, backoff, and pacing.** The proven model and what the wedge analysis recommends; connection pooling is a later, measured optimization.
+4. **The daemon artifact digest is recorded in golden derivation metadata** and flows into the build manifest, alongside the channel package's own record. One digest, visible from both sides.
+5. **The driver sample state machine lives in this track** (slice 2), exercised against mocks; the provider phase wires Inspect onto it and adds nothing to its semantics. Transport-level lifecycle belongs with the channel, Inspect wiring with the provider.

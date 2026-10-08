@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Realizer v1: bundle to running range as a product, in six slices"
-status: proposed
+status: accepted
 tags: [inspect-ranges, runtime, realizer, apply, images, decision]
 timestamp: 2026-10-08
 ---
@@ -53,6 +53,14 @@ The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `
 - No guest-content realization: the planning gates (`guest-config-not-realized`, `randomization-not-realized`, `windows-render-not-supported`) stand unchanged.
 - No checkpoint instantiation and no memory restore; cold boot from rendered bundles only.
 - No separated-topology transport (`HostProvider`); v1 realizes locally, honoring the seam by consuming only digest-verified bundles.
+
+## Decisions (resolved 2026-10-08)
+
+1. **CLI verbs are `up` and `down`** (plus `down --all`). They match the compose substrate and the Docker-sandbox lineage; "apply" remains the name of the stage in design prose, not the command. `apply`/`destroy` invited Terraform comparisons and state-management expectations v1 does not have.
+2. **CID partitioning is a plan-time input**: `PlanOptions.cid_base`, confirmed. CIDs are render inputs per [host-provider](host-provider.md); the applier never probes or rewrites them.
+3. **`images derive` v1 scope is Ubuntu noble only.** The spike fleet is noble; further distros arrive when a range forces them, each behind the same battery.
+4. **`up` hard-requires the hardened range image, no bypass flag.** Containment is the product promise; the prototype profile remains available in the spike harnesses, never in the product path.
+5. **A second `up` of an identical bundle refuses**, naming the running project and the exact `down` command. Supersede hides teardown inside a boot command. Parallel instances of one range are a provider-phase concern and arrive as per-sample renders with distinct `cid_base` (distinct bundles, distinct projects), so the refusal is correct, not a limitation.
 
 ## Ledger
 
