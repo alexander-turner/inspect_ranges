@@ -37,7 +37,7 @@ _DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 )
 @click.option(
     "--cid-base",
-    type=int,
+    type=click.IntRange(min=3),
     default=3,
     show_default=True,
     help="First vsock CID when rendering --from-spec (plan-time input).",

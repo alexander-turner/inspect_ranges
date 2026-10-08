@@ -54,7 +54,7 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
 @click.option(
     "--cid-base",
-    type=int,
+    type=click.IntRange(min=3),
     default=3,
     show_default=True,
     help="First vsock CID (plan-time input; realizer batteries use 3000+).",
@@ -128,7 +128,7 @@ def plan(
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
 @click.option(
     "--cid-base",
-    type=int,
+    type=click.IntRange(min=3),
     default=3,
     show_default=True,
     help="First vsock CID (plan-time input; realizer batteries use 3000+).",

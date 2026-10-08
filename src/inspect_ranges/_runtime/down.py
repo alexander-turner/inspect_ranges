@@ -27,9 +27,13 @@ def _ids(run: Runner, argv: list[str]) -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
-def _remove(run: Runner, argv: list[str]) -> None:
+def _remove(run: Runner, argv: list[str], relist: list[str]) -> None:
     result = run(argv)
     if result.returncode != 0:
+        # a resource that vanished between the listing and the removal (an
+        # auto-removed container, a parallel down) is success, not failure
+        if not _ids(run, relist):
+            return
         raise DownError(f"{' '.join(argv[:3])} failed: {result.stderr.strip()[-400:]}")
 
 
@@ -76,8 +80,16 @@ def down(
             f"label=com.docker.compose.project={project}",
         ],
     )
+    container_query = [
+        "docker",
+        "ps",
+        "-a",
+        "-q",
+        "--filter",
+        f"label=com.docker.compose.project={project}",
+    ]
     if containers:
-        _remove(run, ["docker", "rm", "-f", *containers])
+        _remove(run, ["docker", "rm", "-f", *containers], container_query)
     volumes = _ids(
         run,
         [
@@ -89,8 +101,16 @@ def down(
             f"label=com.docker.compose.project={project}",
         ],
     )
+    volume_query = [
+        "docker",
+        "volume",
+        "ls",
+        "-q",
+        "--filter",
+        f"label=com.docker.compose.project={project}",
+    ]
     if volumes:
-        _remove(run, ["docker", "volume", "rm", "-f", *volumes])
+        _remove(run, ["docker", "volume", "rm", "-f", *volumes], volume_query)
     networks = _ids(
         run,
         [
@@ -102,8 +122,16 @@ def down(
             f"label=com.docker.compose.project={project}",
         ],
     )
+    network_query = [
+        "docker",
+        "network",
+        "ls",
+        "-q",
+        "--filter",
+        f"label=com.docker.compose.project={project}",
+    ]
     if networks:
-        _remove(run, ["docker", "network", "rm", *networks])
+        _remove(run, ["docker", "network", "rm", *networks], network_query)
     if not keep_state:
         remove_project(state, project)
     return DownResult(
@@ -135,10 +163,25 @@ def discover_projects(state_dir: Path, runner: Runner) -> list[str]:
 def down_all(
     state_dir: Path | None = None, runner: Runner | None = None
 ) -> list[DownResult]:
-    """Tear down every discovered `ir-` project; other prefixes are never touched."""
+    """Tear down every discovered `ir-` project; other prefixes are never touched.
+
+    Every project is attempted even when one fails; failures aggregate into one `DownError` raised after the sweep, so a single stuck project cannot shield the rest.
+
+    Raises:
+        DownError: One or more projects failed to tear down (each named, with its error).
+    """
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
-    return [
-        down(project, state_dir=state, runner=run)
-        for project in discover_projects(state, run)
-    ]
+    results: list[DownResult] = []
+    failures: list[str] = []
+    for project in discover_projects(state, run):
+        try:
+            results.append(down(project, state_dir=state, runner=run))
+        except DownError as error:
+            failures.append(f"{project}: {error}")
+    if failures:
+        raise DownError(
+            "some projects failed to tear down (the rest were swept):\n  "
+            + "\n  ".join(failures)
+        )
+    return results

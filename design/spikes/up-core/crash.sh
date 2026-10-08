@@ -41,26 +41,35 @@ LOG="$STATE/$PROJECT/stages.jsonl"
 nothing_left() {
   [[ -z "$(docker ps -aq --filter label=com.docker.compose.project=$PROJECT)" ]] \
   && [[ -z "$(docker volume ls -q --filter label=com.docker.compose.project=$PROJECT)" ]] \
+  && [[ -z "$(docker network ls -q --filter label=com.docker.compose.project=$PROJECT)" ]] \
   && [[ ! -d "$STATE/$PROJECT" ]]
 }
 
+resources_exist() {
+  [[ -n "$(docker ps -aq --filter label=com.docker.compose.project=$PROJECT)" ]] \
+  || [[ -n "$(docker volume ls -q --filter label=com.docker.compose.project=$PROJECT)" ]]
+}
+
 kill_at_stage() {
+  # waits for the stage's start line AND for project resources to exist, so
+  # the kill provably lands mid-realization, never before anything was created
   local stage="$1"
   rm -rf "$STATE/$PROJECT"
   setsid $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >/dev/null 2>&1 &
   local pid=$!
   for _ in $(seq 1 240); do
-    if [[ -f "$LOG" ]] && grep -q "\"stage\": \"$stage\", \"status\": \"start\"" "$LOG"; then
+    if [[ -f "$LOG" ]] && grep -q "\"stage\": \"$stage\", \"status\": \"start\"" "$LOG" && resources_exist; then
       kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
+      resources_exist || { bad "kill during $stage was vacuous (no resources at kill time)"; return; }
       $IR down "$PROJECT" >/dev/null
-      if nothing_left; then ok "kill -9 during $stage, then down, leaves nothing"; else bad "kill during $stage left residue"; fi
+      if nothing_left; then ok "kill -9 during $stage (resources live), then down, leaves nothing"; else bad "kill during $stage left residue"; fi
       return
     fi
     sleep 0.5
   done
   kill -9 -- "-$pid" 2>/dev/null || true
-  bad "kill during $stage: stage never observed"
+  bad "kill during $stage: stage never observed with live resources"
 }
 
 echo "=== C1-C3 kill-mid-up matrix (stage-log synchronized) ==="
@@ -73,27 +82,33 @@ OUT=$($IR down "$PROJECT")
 echo "$OUT" | grep -q "containers=0 volumes=0 networks=0" \
   && ok "double down is a no-op" || bad "double down ($OUT)"
 
+rm -rf "$STATE/$PROJECT"
 echo "=== C5 pkill-the-harness recovery (e2e-provider finding 5) ==="
 setsid $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >/dev/null 2>&1 &
 UPPID=$!
+REACHED=0
 for _ in $(seq 1 240); do
-  [[ -f "$LOG" ]] && grep -q '"stage": "readiness", "status": "start"' "$LOG" && break
+  [[ -f "$LOG" ]] && grep -q '"stage": "readiness", "status": "start"' "$LOG" && REACHED=1 && break
   sleep 0.5
 done
+[[ "$REACHED" == "1" ]] || { bad "C5 vacuous: up never reached readiness"; kill -9 -- "-$UPPID" 2>/dev/null || true; }
 pkill -9 -g "$UPPID" 2>/dev/null || kill -9 "$UPPID" 2>/dev/null || true
 wait "$UPPID" 2>/dev/null || true
 # the range is still running headless; a fresh process recovers it by name
 $IR down "$PROJECT" >/dev/null
 nothing_left && ok "pkill recovery: fresh-process down leaves nothing" || bad "pkill recovery"
 
+rm -rf "$STATE/$PROJECT"
 echo "=== C6 down --all sweeps ir- only (chan- decoy untouched) ==="
 docker volume create --label com.docker.compose.project=chan-decoy chan-decoy_scratch >/dev/null
 setsid $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >/dev/null 2>&1 &
 UPPID=$!
+REACHED=0
 for _ in $(seq 1 240); do
-  [[ -f "$LOG" ]] && grep -q '"stage": "guest-boot", "status": "start"' "$LOG" && break
+  [[ -f "$LOG" ]] && grep -q '"stage": "guest-boot", "status": "start"' "$LOG" && REACHED=1 && break
   sleep 0.5
 done
+[[ "$REACHED" == "1" ]] || bad "C6 vacuous: up never reached guest-boot"
 kill -9 -- "-$UPPID" 2>/dev/null || true; wait "$UPPID" 2>/dev/null || true
 $IR down --all >/dev/null
 if nothing_left && docker volume inspect chan-decoy_scratch >/dev/null 2>&1; then

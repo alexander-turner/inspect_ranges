@@ -87,11 +87,19 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         raise UpError("verify-bundle", f"{bundle} has no manifest.json")
     try:
         manifest = cast(dict[str, Any], json.loads(manifest_path.read_text()))
-        files = cast(dict[str, dict[str, Any]], manifest["files"])
-        range_name = cast(str, manifest["range"])
-        spec_sha = cast(str, manifest["spec_sha256"])
-        assert isinstance(files, dict) and range_name and spec_sha
-    except (OSError, ValueError, KeyError, AssertionError) as error:
+        raw_files: object = manifest["files"]
+        range_name: object = manifest["range"]
+        spec_sha: object = manifest["spec_sha256"]
+        if not (
+            isinstance(raw_files, dict)
+            and isinstance(range_name, str)
+            and range_name
+            and isinstance(spec_sha, str)
+            and spec_sha
+        ):
+            raise ValueError("manifest fields have the wrong shape")
+        files = cast(dict[str, dict[str, Any]], raw_files)
+    except (OSError, ValueError, KeyError) as error:
         raise UpError(
             "verify-bundle", f"manifest.json is unreadable or malformed: {error}"
         ) from error
@@ -256,9 +264,21 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
             # pull them first, they are the first artifact of boot debugging
             _pull_consoles(run, project, bundle, env, options, consoles)
         if not options.keep_on_failure:
+            from .down import DownError
             from .down import down as teardown
 
-            teardown(project, state_dir=options.state_dir, runner=run, keep_state=True)
+            try:
+                teardown(
+                    project, state_dir=options.state_dir, runner=run, keep_state=True
+                )
+            except DownError as teardown_error:
+                # the diagnosed failure stays primary; a sick docker daemon
+                # during cleanup is appended, never substituted
+                log.log("teardown", "fail", error=str(teardown_error))
+                message = (
+                    f"{message} (teardown also failed, project left behind: "
+                    f"{teardown_error}; retry with: inspect-ranges down {project})"
+                )
         return UpError(stage, message, guest=guest)
 
     log.log("range-container", "start")

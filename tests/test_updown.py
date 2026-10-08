@@ -390,3 +390,35 @@ def test_cid_base_below_reserved_range_is_rejected() -> None:
 
     with pytest.raises(pydantic.ValidationError):
         PlanOptions(cid_base=2)
+
+
+def test_down_all_continues_past_a_failing_project(tmp_path: Path) -> None:
+    """One stuck project cannot shield the rest of the sweep; failures aggregate."""
+    import subprocess as sp
+
+    from inspect_ranges._runtime.down import DownError
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    state = tmp_path / "state"
+    for name in ("ir-bad", "ir-good"):
+        write_owner(state, owner_record(name, name, "0" * 64, tmp_path))
+    calls: list[list[str]] = []
+
+    def scripted(
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        input: str | None = None,
+    ) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        joined = " ".join(argv)
+        if "project=ir-bad" in joined and argv[:3] == ["docker", "ps", "-a"]:
+            return sp.CompletedProcess(argv, 0, "stuck\n", "")
+        if argv[:3] == ["docker", "rm", "-f"] and "stuck" in argv:
+            return sp.CompletedProcess(argv, 1, "", "removal in progress")
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(DownError, match=r"(?s)the rest were swept.*ir-bad"):
+        down_all(state_dir=state, runner=scripted)
+    assert list_projects(state) == ["ir-bad"], (
+        "the good project was swept, the stuck one kept"
+    )
