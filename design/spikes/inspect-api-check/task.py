@@ -1,16 +1,13 @@
-"""Smoke task for the API checkpoint: asserts sandbox resolution inside a real eval."""
+"""Probe solver for the API checkpoint: asserts sandbox resolution inside a real eval (tasks are built by `run_check.py`, which supplies the sandbox config under test)."""
 
-from inspect_ai import Task, task
-from inspect_ai.dataset import Sample
-from inspect_ai.scorer import includes
-from inspect_ai.solver import Generate, TaskState, solver
+from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 
-from provider import ApiCheckSandboxEnvironment, record
+from provider import record
 
 
 @solver
-def probe():
+def probe() -> Solver:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         default = sandbox()
         web = sandbox("web")
@@ -29,12 +26,3 @@ def probe():
         return state
 
     return solve
-
-
-@task
-def api_check() -> Task:
-    return Task(
-        dataset=[Sample(input="probe", target="resolved")],
-        solver=probe(),
-        scorer=includes(),
-    )

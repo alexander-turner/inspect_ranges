@@ -9,6 +9,7 @@ Models validate fully at construction (structural and cross-reference checks), a
 v0.1 deliberately covers only the five sections the runtime consumes — `range`, `networks`, `routers`, `hosts`, `attacker` — and rejects everything else loudly. Sections awaiting real design (`attack_path`, `goals`, `variables`, `defense`, `vulnerabilities`, guest configuration, ...) are excluded entirely; see `design/inspect-ranges/schema-v0.1-scope.md` for the deferral rationale.
 """
 
+import json
 import re
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_network
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -919,9 +920,11 @@ class RangeSpec(_StrictModel):
     def __hash__(self) -> int:
         """Content hash, consistent with pydantic field equality.
 
-        Inspect's sandbox resolution caches on the sandbox spec, which requires the config object to be hashable; non-frozen pydantic models are not. Specs stay mutable by design, so the hash is recomputed from current content on each call: equal specs always hash equal, and a spec mutated while held as a dict key simply misses the cache.
+        Inspect's sandbox resolution caches on the sandbox spec, which requires the config object to be hashable; non-frozen pydantic models are not. Specs stay mutable by design, so the hash is recomputed from current content on each call: equal specs always hash equal, and a spec mutated while held as a dict key simply misses the cache. The dump is rendered with sorted keys because pydantic equality is insertion-order-insensitive for dict fields (`variables`, `vars`) while serialization is not.
         """
-        return hash(self.model_dump_json(by_alias=True))
+        return hash(
+            json.dumps(self.model_dump(mode="json", by_alias=True), sort_keys=True)
+        )
 
 
 EndpointKind = Literal["network", "guest", "cidr", "unknown"]

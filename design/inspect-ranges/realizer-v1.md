@@ -73,19 +73,21 @@ The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `
 
 ## Slice 0 findings (Inspect 0.3.272, checked 2026-10-08)
 
-The checkpoint stub lives in [inspect-api-check](../spikes/inspect-api-check/README.md); `run_check.py` passes 9/9. Confirmed as assumed: `@sandboxenv(name="libvirt_range")` registration; the four lifecycle hooks fire in order (`task_init`, `sample_init`, solver, `sample_cleanup`, `task_cleanup`); `sample_init` returns the environment dict with `default` as the attacker box and named guests resolvable via `sandbox("web")`; `config_files()` is consulted for discovery; the `inspect_ai` entry point imports `inspect_ranges._registry` in a fresh process, so the real provider registers there and users never import anything.
+The checkpoint stub lives in [inspect-api-check](../spikes/inspect-api-check/README.md); `run_check.py` passes 10/10. Scope note: the checkpoint exercises the hook/config/registration contract only (its exec/file surface is deliberately unimplemented); the exec plane against a booted guest was already proven by the e2e-provider spike and returns with the provider phase. Confirmed: `@sandboxenv(name="libvirt_range")` registration, including fully end to end through the entry-point mechanism (a provider registered only by an entry-point module drives a fresh `inspect eval` that never imports it); the four lifecycle hooks fire in order (`task_init`, `sample_init`, solver, `sample_cleanup`, `task_cleanup`); `sample_init` returns the environment dict with `default` as the attacker box and named guests resolvable via `sandbox("web")`; `config_files()` is consulted for discovery.
 
 Three contract surprises, none requiring a re-plan:
 
 1. **Typed config requires a hashable `RangeSpec`.** Inspect caches sandbox resolution on the sandbox spec, hashing the config object; non-frozen pydantic models are unhashable, so `Task(sandbox=("libvirt_range", spec))` crashed resolution. Fixed in this slice: `RangeSpec.__hash__` is an eq-consistent content hash (specs stay mutable; a spec mutated while held as a cache key just misses).
 2. **Solvers receive a `SandboxEnvironmentProxy`, not the provider class.** `sandbox()` identity and attribute access do not reach the provider object. Provider-phase consequence: nothing user-facing may depend on provider attributes or `isinstance`; everything goes through the `SandboxEnvironment` method surface.
-3. **`config_deserialize` is load-bearing for typed config** (the hook postdates the e2e-provider spike): the eval log stores the config as a by-alias dict and calls the hook on read. `RangeSpec.model_validate` suffices; the typed config round-trips the log intact.
+3. **`config_deserialize` is load-bearing for typed config** (the hook postdates the e2e-provider spike): the eval log stores the config as a by-alias dict and calls the hook on read. `RangeSpec.model_validate` suffices; the checkpoint asserts the reread config is a `RangeSpec` equal to the original and that the hook fired.
+
+The fresh-context review of this slice surfaced one real bug fixed before close: the first `__hash__` used insertion-ordered serialization while pydantic equality is dict-order-insensitive, so equal specs could hash unequal; the hash now renders the dump with sorted keys, and the test covers the dict-order case.
 
 ## Ledger
 
 | Slice | Status |
 |---|---|
-| 0 Inspect API checkpoint | planned |
+| 0 Inspect API checkpoint | done 2026-10-08: 10/10, findings above; fresh-context review: 9 findings (1 bug, 2 battery gaps, rest conventions), all fixed |
 | 1 image derivation | planned |
 | 2 `up` applier core | planned |
 | 3 `down` and crash cleanup | planned |

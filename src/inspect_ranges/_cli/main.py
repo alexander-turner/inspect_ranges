@@ -3,6 +3,7 @@ import click
 from .. import __version__
 from .._devbox import devbox_group
 from .doctor import doctor
+from .imagescmd import images
 from .plancmd import plan, render
 from .schema import schema
 from .validate import validate
@@ -16,6 +17,7 @@ def ranges() -> None:
 
 ranges.add_command(devbox_group)
 ranges.add_command(doctor)
+ranges.add_command(images)
 ranges.add_command(plan)
 ranges.add_command(render)
 ranges.add_command(schema)

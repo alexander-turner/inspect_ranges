@@ -117,25 +117,33 @@ results.append(
         str([e.get("config") for e in evts if e["event"] == "sample_init"]),
     )
 )
-solver_evt = next(e for e in evts if e["event"] == "solver")
+solver_evt = next((e for e in evts if e["event"] == "solver"), None)
 results.append(
     check(
         "named sandbox resolution",
-        solver_evt["web_guest"] == "web"
+        solver_evt is not None
+        and solver_evt["web_guest"] == "web"
         and solver_evt["default_guest"] == "attacker"
         and solver_evt["distinct"] is True,
+        "no solver event recorded" if solver_evt is None else "",
     )
 )
 
-# 3. eval-log round trip of the typed config (exercises config_deserialize on read)
+# 3. eval-log round trip of the typed config: the reread config must BE a
+# RangeSpec equal to the original, and config_deserialize must have fired
 log_file = logs[0].location
 reread = read_eval_log(log_file)
 sb = reread.eval.sandbox
+deserialized = any(e["event"] == "config_deserialize" for e in events())
 results.append(
     check(
         "typed config survives the eval log",
-        sb is not None and sb.type == "libvirt_range" and sb.config is not None,
-        f"type={type(sb.config).__name__ if sb else None}",
+        sb is not None
+        and sb.type == "libvirt_range"
+        and isinstance(sb.config, RangeSpec)
+        and sb.config == spec()
+        and deserialized,
+        f"type={type(sb.config).__name__ if sb else None} deserialize_fired={deserialized}",
     )
 )
 
@@ -161,6 +169,51 @@ results.append(
         "entry-point discovery imports _registry",
         out.stdout.strip() == "True",
         (out.stdout + out.stderr).strip()[:200],
+    )
+)
+
+# 6. end to end: a provider registered ONLY by an entry-point module is
+# discovered by a fresh eval process that never imports it. A throwaway
+# dist-info supplies the entry point; the shim module imports the stub.
+import shutil  # noqa: E402
+
+site = SPIKE / "tmp" / "ep-site"
+shutil.rmtree(site, ignore_errors=True)
+dist_info = site / "apicheck_ep-0.0.0.dist-info"
+dist_info.mkdir(parents=True)
+(dist_info / "METADATA").write_text(
+    "Metadata-Version: 2.1\nName: apicheck-ep\nVersion: 0.0.0\n"
+)
+(dist_info / "entry_points.txt").write_text("[inspect_ai]\napicheck_ep = apicheck_ep\n")
+(site / "apicheck_ep.py").write_text(
+    f"import sys\nsys.path.insert(0, {str(SPIKE)!r})\nimport provider  # noqa: F401  registers libvirt_range\n"
+)
+eval_script = site / "run_eval.py"
+eval_script.write_text(
+    "from inspect_ai import Task, eval as inspect_eval\n"
+    "from inspect_ai.dataset import Sample\n"
+    "from inspect_ai.solver import generate\n"
+    f"task = Task(dataset=[Sample(input='x')], solver=generate(), sandbox=('libvirt_range', {str(SPIKE / 'range.yaml')!r}), name='ep_check')\n"
+    f"log = inspect_eval(task, model='mockllm/model', log_dir={str(SPIKE / 'tmp' / 'logs')!r}, log_level='warning')[0]\n"
+    "print('STATUS:' + log.status)\n"
+)
+ep_log = SPIKE / "tmp" / "ep-check.jsonl"
+ep_log.unlink(missing_ok=True)
+env = dict(os.environ, PYTHONPATH=str(site), API_CHECK_LOG=str(ep_log))
+out = subprocess.run(
+    [sys.executable, str(eval_script)], capture_output=True, text=True, env=env
+)
+ep_events = (
+    [json.loads(line) for line in ep_log.read_text().splitlines()]
+    if ep_log.exists()
+    else []
+)
+results.append(
+    check(
+        "entry-point-registered provider drives a fresh eval",
+        "STATUS:success" in out.stdout
+        and any(e["event"] == "sample_init" for e in ep_events),
+        (out.stdout + out.stderr).strip()[-200:],
     )
 )
 

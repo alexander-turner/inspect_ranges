@@ -7,7 +7,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Literal, Union, overload
+from typing import Any, Literal, overload
 
 from inspect_ai.util import (
     ExecResult,
@@ -111,5 +111,5 @@ class ApiCheckSandboxEnvironment(SandboxEnvironment):
     async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
     @overload
     async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
-    async def read_file(self, file: str, text: bool = True) -> Union[str, bytes]:
+    async def read_file(self, file: str, text: bool = True) -> str | bytes:
         raise NotImplementedError("api-check stub boots nothing")

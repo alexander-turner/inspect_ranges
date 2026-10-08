@@ -6,7 +6,7 @@
 
 ## Verdict
 
-**9/9 checks pass.** Registration, the four lifecycle hooks in order, both config forms (`range.yaml` path and a typed `RangeSpec` object), named-sandbox resolution, `config_files()` discovery, eval-log round-trip of the typed config, and entry-point discovery of `inspect_ranges._registry` all behave as the realizer-v1 record assumes.
+**10/10 checks pass.** Registration (including fully end to end: a provider registered only by an entry-point module drives a fresh `inspect eval` that never imports it), the four lifecycle hooks in order, both config forms (`range.yaml` path and a typed `RangeSpec` object), named-sandbox resolution, `config_files()` discovery, and the typed config's eval-log round trip (reread as an equal `RangeSpec`, `config_deserialize` fired) all behave as the realizer-v1 record assumes. Scope: hook/config/registration contract only; the exec plane returns with the provider phase.
 
 ## Findings
 
@@ -15,6 +15,6 @@ Recorded in [realizer-v1](../../inspect-ranges/realizer-v1.md) (Slice 0 findings
 ## Files
 
 - `provider.py` — stub `@sandboxenv(name="libvirt_range")` provider; hooks record to JSONL, exec/file deliberately unimplemented
-- `task.py` — probe solver asserting `sandbox()`/`sandbox("web")` resolution through the proxy
+- `task.py` — probe solver asserting `sandbox()`/`sandbox("web")` resolution through the proxy (tasks are built by `run_check.py`)
 - `range.yaml` — minimal valid spec for the path-config form
-- `run_check.py` — the 9-check battery; run logs under `tmp/` (gitignored)
+- `run_check.py` — the 10-check battery; run logs under `tmp/` (gitignored)
