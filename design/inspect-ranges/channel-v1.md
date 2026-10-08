@@ -57,7 +57,7 @@ vsock CIDs are host-global and both tracks run VM batteries on shared dev hosts.
 
 ## Module layout
 
-Host-side code under `src/inspect_ranges/_channel/` (files inside the underscored package drop the leading underscore): `protocol.py` (message types), `codec.py`, `channel.py` (the `RangeChannel` protocol, state machine, loopback), `mocks.py`, `vsock.py` (the transport), `bundle.py` (the daemon artifact builder). Guest daemon sources under `src/inspect_ranges/_channel/daemon/` (`linux/` as a small Go module, `windows/VsockDaemon.cs`, installers); the Go toolchain version is pinned and `daemon-bundle` builds reproducibly. No imports from the realizer's `_runtime/` in either direction; the daemon artifact digest is the only coupling. CI-runnable tests in `tests/`; the VM batteries live as a harness under `design/spikes/channel-v1/` per spike convention, with run logs in `tmp/`.
+Host-side code under `src/inspect_ranges/_channel/` (files inside the underscored package drop the leading underscore): `protocol.py` (message types), `codec.py`, `channel.py` (the `RangeChannel` protocol, state machine, loopback), `mocks.py`, `vsock.py` (the transport), `bundle.py` (the daemon artifact builder). Guest daemon sources under `src/inspect_ranges/_channel/daemon/` (`linux/` as a small Go module, `windows/` as C# 5 sources `Wire.cs`/`Store.cs`/`Exec.cs`/`Daemon.cs`/`Program.cs`, installers); the Go toolchain version is pinned and `daemon-bundle` builds reproducibly. No imports from the realizer's `_runtime/` in either direction; the daemon artifact digest is the only coupling. CI-runnable tests in `tests/`; the VM batteries live as a harness under `design/spikes/channel-v1/` per spike convention, with run logs in `tmp/`.
 
 ## Verification
 

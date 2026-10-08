@@ -36,6 +36,26 @@ namespace VsockD
         public const long ReceiveBulkCap = 256L * 1024 * 1024; // pinned by the vectors
         public const long DefaultUntimedMs = 14400000;
 
+        // strict-side-wins caps and literal sets, adopted from the Python
+        // schema and pinned by the shared rejection table
+        public const int MaxDaemonLen = 128;
+        public const int MaxMessageLen = 4096;
+        public const int MaxStageDetailLen = 4096;
+        public const int MaxEventLen = 128;
+        public const int MaxDiagDetailLen = 2048;
+        public const int MaxRequestIdLen = 64;
+        public const int MaxGrants = 64;
+        public const int MaxDiagEntries = 1000;
+
+        static readonly HashSet<string> StageLiterals =
+            new HashSet<string> { "fetch", "construct", "boot", "verify", "ready", "failed" };
+        static readonly HashSet<string> LayerLiterals =
+            new HashSet<string> { "command", "channel", "untimed", "transport" };
+        static readonly HashSet<string> LevelLiterals =
+            new HashSet<string> { "info", "warn", "error" };
+        static readonly HashSet<string> GuestStateLiterals =
+            new HashSet<string> { "pending", "booting", "ready", "failed" };
+
         public const byte FrameControl = 0x43;
         public const byte FrameData = 0x44;
         public const byte FrameEnd = 0x45;
@@ -502,7 +522,7 @@ namespace VsockD
             { "ok", new string[0] },
             { "pending", new string[0] },
             { "forward_ok", new string[0] },
-            { "diag_result", new[] { "entries" } },
+            { "diag_result", new[] { "entries", "listener_restarts" } },
             { "error", new[] { "layer" } },
             { "realize", new[] { "grants" } },
             { "teardown", new string[0] },
@@ -528,6 +548,14 @@ namespace VsockD
             string s = v as string;
             if (s == null) throw new DecodeException(key + " must be a string");
             return s;
+        }
+
+        static bool? GetBool(Dictionary<string, object> m, string key)
+        {
+            object v;
+            if (!m.TryGetValue(key, out v)) return null;
+            if (!(v is bool)) throw new DecodeException(key + " must be a boolean");
+            return (bool)v;
         }
 
         static long RequireLong(Dictionary<string, object> m, string key)
@@ -564,11 +592,18 @@ namespace VsockD
             if (dataSize.HasValue && (dataSize.Value < 0 || dataSize.Value > MaxBulkDeclarable))
                 throw new DecodeException(kind + ": data_size out of bounds");
 
-            foreach (string f in new[] { "elapsed_ms", "uptime_ms", "max_bytes", "size", "stdout_size", "stderr_size" })
+            foreach (string f in new[] { "elapsed_ms", "uptime_ms", "listener_restarts" })
             {
                 long? v = GetLong(m, f);
                 if (v.HasValue && (v.Value < 0 || v.Value > MaxWireInt))
                     throw new DecodeException(kind + ": integer field out of bounds");
+            }
+            // byte-count fields adopt Python's tighter cap (strict side wins)
+            foreach (string f in new[] { "max_bytes", "size", "stdout_size", "stderr_size" })
+            {
+                long? v = GetLong(m, f);
+                if (v.HasValue && (v.Value < 0 || v.Value > MaxBulkDeclarable))
+                    throw new DecodeException(kind + ": byte-count field out of bounds");
             }
 
             object budgetObj;
@@ -588,6 +623,8 @@ namespace VsockD
                     if (f == "untimed_bound_ms" && v.HasValue) outer = v.Value;
                 }
                 long? command = GetLong(budget, "command_ms");
+                if (command.HasValue && command.Value > DefaultUntimedMs)
+                    throw new DecodeException(kind + ": command_ms above the cap");
                 if (command.HasValue && command.Value > outer)
                     throw new DecodeException(kind + ": untimed_bound_ms must cover command_ms");
             }
@@ -630,20 +667,25 @@ namespace VsockD
                     long declared = dataSize.HasValue ? dataSize.Value : 0;
                     if (RequireLong(m, "stdout_size") + RequireLong(m, "stderr_size") != declared)
                         throw new DecodeException("exec_result: sizes do not match data_size");
+                    GetBool(m, "stdout_truncated");
+                    GetBool(m, "stderr_truncated");
                     break;
                 case "file_data":
                     long fdDeclared = dataSize.HasValue ? dataSize.Value : 0;
                     if (RequireLong(m, "size") != fdDeclared)
                         throw new DecodeException("file_data: size does not match data_size");
+                    GetBool(m, "truncated");
                     break;
                 case "error":
                     if (!ErrnoRe.IsMatch(GetString(m, "errno")))
                         throw new DecodeException("error: bad errno shape");
-                    GetString(m, "message");
+                    if (GetString(m, "message").Length > MaxMessageLen)
+                        throw new DecodeException("error: message too long");
                     string errno = (string)m["errno"];
                     if ((errno == "ETIME" || errno == "ETIMEDOUT") && !m.ContainsKey("layer"))
                         throw new DecodeException("error: budget errors must name their layer");
-                    if (m.ContainsKey("layer")) GetString(m, "layer");
+                    if (m.ContainsKey("layer") && !LayerLiterals.Contains(GetString(m, "layer")))
+                        throw new DecodeException("error: unknown layer");
                     break;
                 case "forward":
                     long port = RequireLong(m, "port");
@@ -651,13 +693,28 @@ namespace VsockD
                     GetString(m, "host");
                     break;
                 case "pong":
-                    GetString(m, "daemon");
+                    if (GetString(m, "daemon").Length > MaxDaemonLen)
+                        throw new DecodeException("pong: daemon too long");
+                    long? pongProtocol = GetLong(m, "protocol");
+                    if (pongProtocol.HasValue && pongProtocol.Value != ProtocolVersion)
+                        throw new DecodeException("pong: protocol must be " + ProtocolVersion);
                     break;
                 case "forward_ok":
                     GetString(m, "handle");
                     break;
                 case "stage":
-                    GetString(m, "stage");
+                    if (!StageLiterals.Contains(GetString(m, "stage")))
+                        throw new DecodeException("stage: unknown stage");
+                    string stageDetail = GetString(m, "detail");
+                    if (stageDetail != null && stageDetail.Length > MaxStageDetailLen)
+                        throw new DecodeException("stage: detail too long");
+                    ValidateGuests(m);
+                    break;
+                case "heartbeat":
+                    ValidateGuests(m);
+                    break;
+                case "diag_result":
+                    ValidateDiagEntries(m);
                     break;
                 case "diag":
                     long? maxEntries = GetLong(m, "max_entries");
@@ -667,7 +724,66 @@ namespace VsockD
                 case "realize":
                     if (!Sha256Re.IsMatch(GetString(m, "bundle_digest")))
                         throw new DecodeException("realize: bad bundle digest");
+                    object grantsObj;
+                    if (m.TryGetValue("grants", out grantsObj))
+                    {
+                        List<object> grants = grantsObj as List<object>;
+                        if (grants == null) throw new DecodeException("realize: grants must be a list");
+                        if (grants.Count > MaxGrants) throw new DecodeException("realize: too many grants");
+                        foreach (object grant in grants)
+                            if (!(grant is string))
+                                throw new DecodeException("realize: grants must be strings");
+                    }
                     break;
+            }
+        }
+
+        static void ValidateGuests(Dictionary<string, object> m)
+        {
+            object guestsObj;
+            if (!m.TryGetValue("guests", out guestsObj)) return;
+            Dictionary<string, object> guests = guestsObj as Dictionary<string, object>;
+            if (guests == null) throw new DecodeException("guests must be an object");
+            foreach (object state in guests.Values)
+            {
+                string name = state as string;
+                if (name == null || !GuestStateLiterals.Contains(name))
+                    throw new DecodeException("unknown guest state");
+            }
+        }
+
+        static readonly HashSet<string> DiagEntryFields =
+            new HashSet<string> { "ts_ms", "level", "event", "request_id", "detail" };
+
+        static void ValidateDiagEntries(Dictionary<string, object> m)
+        {
+            object entriesObj;
+            if (!m.TryGetValue("entries", out entriesObj)) return;
+            List<object> entries = entriesObj as List<object>;
+            if (entries == null) throw new DecodeException("diag_result: entries must be a list");
+            if (entries.Count > MaxDiagEntries) throw new DecodeException("diag_result: too many entries");
+            foreach (object entryObj in entries)
+            {
+                Dictionary<string, object> entry = entryObj as Dictionary<string, object>;
+                if (entry == null) throw new DecodeException("diag_result: entries must be objects");
+                foreach (string key in entry.Keys)
+                    if (!DiagEntryFields.Contains(key))
+                        throw new DecodeException("diag_result: field \"" + key + "\" does not belong to an entry");
+                long ts = RequireLong(entry, "ts_ms");
+                if (ts < 0 || ts > MaxWireInt)
+                    throw new DecodeException("diag_result: ts_ms out of bounds");
+                string level = GetString(entry, "level");
+                if (level == null || !LevelLiterals.Contains(level))
+                    throw new DecodeException("diag_result: unknown level");
+                string evt = GetString(entry, "event");
+                if (evt == null || evt.Length == 0 || evt.Length > MaxEventLen)
+                    throw new DecodeException("diag_result: bad event");
+                string requestId = GetString(entry, "request_id");
+                if (requestId != null && requestId.Length > MaxRequestIdLen)
+                    throw new DecodeException("diag_result: request_id too long");
+                string detail = GetString(entry, "detail");
+                if (detail != null && detail.Length > MaxDiagDetailLen)
+                    throw new DecodeException("diag_result: detail too long");
             }
         }
     }

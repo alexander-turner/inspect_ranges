@@ -11,8 +11,10 @@
 // TerminateJobObject immediately (job = whole tree); the shared grace
 // constants (KillGraceMs + WaitDelayMs, pinned by the wire vectors) bound
 // the post-kill reaping instead, matching the host's 12 s observation grace.
-// A process that breaks out of the Job (explicit breakaway) survives, the
-// Windows analog of the documented Linux setsid escape.
+// Plain jobs deny CREATE_BREAKAWAY_FROM_JOB, so a child cannot simply opt
+// out; the real escape is an out-of-job intermediary (WMI, schtasks, the
+// service manager) spawning on the caller's behalf, the Windows analog of
+// the documented Linux setsid escape.
 //
 // Listener supervision: the accept loop is watched; accept failures AND the
 // wedge signature (listener readable but never acceptable) both recreate
@@ -140,139 +142,6 @@ namespace VsockD
         }
     }
 
-    // ------------------------------------------------------------- store
-
-    sealed class StoredReply
-    {
-        public Dictionary<string, object> Message;
-        public byte[] Bulk;
-        public StoredReply(Dictionary<string, object> message, byte[] bulk)
-        {
-            Message = message; Bulk = bulk;
-        }
-    }
-
-    sealed class RunningEntry
-    {
-        public long StartTicks = DateTime.UtcNow.Ticks;
-        public ManualResetEvent Done = new ManualResetEvent(false);
-    }
-
-    // Dedupe + durability + tombstones, mirroring the Go Store: every request
-    // kind stores its reply by id until acked (bounded FIFO); evicted-unacked
-    // ids tombstone and answer ESTALE so a resend can never double-run.
-    sealed class Store
-    {
-        public const int StoredBound = 256;
-        public const int TombstoneBound = 4096;
-
-        private readonly object _lock = new object();
-        private readonly Dictionary<string, StoredReply> _replies = new Dictionary<string, StoredReply>();
-        private readonly LinkedList<string> _order = new LinkedList<string>();
-        private readonly Dictionary<string, LinkedListNode<string>> _nodes = new Dictionary<string, LinkedListNode<string>>();
-        private readonly Dictionary<string, RunningEntry> _running = new Dictionary<string, RunningEntry>();
-        private readonly HashSet<string> _tombs = new HashSet<string>();
-        private readonly LinkedList<string> _tombOrder = new LinkedList<string>();
-
-        public StoredReply Get(string id)
-        {
-            lock (_lock)
-            {
-                StoredReply reply;
-                return _replies.TryGetValue(id, out reply) ? reply : null;
-            }
-        }
-
-        public bool Tombstoned(string id)
-        {
-            lock (_lock) { return _tombs.Contains(id); }
-        }
-
-        public void Put(string id, StoredReply reply)
-        {
-            lock (_lock)
-            {
-                if (!_replies.ContainsKey(id))
-                    _nodes[id] = _order.AddLast(id);
-                _replies[id] = reply;
-                while (_order.Count > StoredBound)
-                {
-                    string oldest = _order.First.Value;
-                    _order.RemoveFirst();
-                    _nodes.Remove(oldest);
-                    _replies.Remove(oldest);
-                    // evicted UNACKED: the effect ran, the result is lost
-                    if (_tombs.Add(oldest)) _tombOrder.AddLast(oldest);
-                    while (_tombs.Count > TombstoneBound && _tombOrder.Count > 0)
-                    {
-                        // acked ids leave stale order nodes: skip them so the
-                        // bound governs LIVE tombstones, not residue
-                        string candidate = _tombOrder.First.Value;
-                        _tombOrder.RemoveFirst();
-                        _tombs.Remove(candidate);
-                    }
-                }
-            }
-        }
-
-        public void Ack(string id)
-        {
-            lock (_lock)
-            {
-                LinkedListNode<string> node;
-                if (_nodes.TryGetValue(id, out node))
-                {
-                    _order.Remove(node);
-                    _nodes.Remove(id);
-                    _replies.Remove(id);
-                }
-                _tombs.Remove(id); // an ack means the client consumed it
-            }
-        }
-
-        // Acquire is the ONE atomic dedupe step for durable ids: under a
-        // single lock it returns the stored reply, the tombstone verdict, or
-        // the running entry to attach to, or registers a fresh run. Separate
-        // Get/Tombstoned/Begin calls would race a completing first attempt
-        // (the TOCTOU the review caught, fixed in the Go daemon too).
-        public RunningEntry Acquire(string id, out StoredReply stored, out bool tombstoned, out bool isNew)
-        {
-            lock (_lock)
-            {
-                tombstoned = false;
-                isNew = false;
-                if (_replies.TryGetValue(id, out stored)) return null;
-                if (_tombs.Contains(id)) { tombstoned = true; return null; }
-                RunningEntry entry;
-                if (_running.TryGetValue(id, out entry)) return entry;
-                entry = new RunningEntry();
-                _running[id] = entry;
-                isNew = true;
-                return entry;
-            }
-        }
-
-        public void Finish(string id, StoredReply reply)
-        {
-            Put(id, reply);
-            RunningEntry entry = null;
-            lock (_lock)
-            {
-                if (_running.TryGetValue(id, out entry)) _running.Remove(id);
-            }
-            if (entry != null) entry.Done.Set();
-        }
-
-        public RunningEntry Running(string id)
-        {
-            lock (_lock)
-            {
-                RunningEntry entry;
-                return _running.TryGetValue(id, out entry) ? entry : null;
-            }
-        }
-    }
-
     // ------------------------------------------------------------- diag ring
 
     sealed class Diag
@@ -322,6 +191,9 @@ namespace VsockD
         public static string BaseDir = "C:\\vsockd";
         public static readonly Store Replies = new Store();
         public static readonly Diag Ring = new Diag();
+        // supervised listener recoveries since start; surfaced in diag_result
+        // so the storm battery can assert the accept loop never wedged
+        static long _listenerRestarts;
         public static string Version = "vsockd 3.0.0 (windows)";
 
         public static void Log(string msg)
@@ -364,6 +236,7 @@ namespace VsockD
                 Ring.Add("info", "listening", null, "vsock port " + PORT);
                 AcceptLoop(listener);
                 try { listener.Close(); } catch (Exception) { }
+                Interlocked.Increment(ref _listenerRestarts);
                 Ring.Add("error", "listener-restarted", null, "accept loop died");
                 Thread.Sleep(100);
             }
@@ -392,7 +265,10 @@ namespace VsockD
                     if (se.SocketErrorCode == SocketError.WouldBlock)
                     {
                         // readable said yes, accept says no: the wedge
-                        // signature; sustained means the listener is dead
+                        // signature; sustained means the listener is dead.
+                        // A false positive (five races in a row, e.g. peers
+                        // resetting before accept) costs one harmless rebind
+                        // ~100 ms later, so misdetection is bounded.
                         wedgeSignals++;
                         if (wedgeSignals >= 5)
                         {
@@ -453,7 +329,17 @@ namespace VsockD
                 string id = (string)request["id"];
                 Ring.Add("info", "request", id, (string)request["kind"]);
                 StoredReply reply = Dispatch(request, bulk);
-                byte[] wire = Wire.EncodeMessage(reply.Message, reply.Bulk);
+                byte[] wire;
+                try { wire = Wire.EncodeMessage(reply.Message, reply.Bulk); }
+                catch (InvalidOperationException e)
+                {
+                    // a reply the codec refuses (e.g. a lone surrogate that
+                    // slipped into a message string) must not strand the
+                    // client in silence: degrade to a safe ASCII error
+                    Ring.Add("error", "encode-failed", id, e.Message);
+                    wire = Wire.EncodeMessage(
+                        ErrorReply(id, "EIO", "reply could not be encoded", null).Message, null);
+                }
                 Io.SendAll(conn, wire, 0, wire.Length);
             }
             catch (Exception e) { Log("conn: " + e.GetType().Name + ": " + e.Message); }
@@ -508,6 +394,7 @@ namespace VsockD
                 if (request.TryGetValue("max_entries", out maxEntries)) limit = (long)maxEntries;
                 Dictionary<string, object> result = Base(id, "diag_result");
                 result["entries"] = Ring.Tail(limit);
+                result["listener_restarts"] = Interlocked.Read(ref _listenerRestarts);
                 return new StoredReply(result, null);
             }
 
@@ -525,6 +412,10 @@ namespace VsockD
                 entry.Done.WaitOne();
                 StoredReply attached = Replies.Get(id);
                 if (attached != null) return attached;
+                // the result can be evicted between Finish and this wake-up;
+                // the tombstone then holds the truth (executed, result lost)
+                if (Replies.Tombstoned(id))
+                    return ErrorReply(id, "ESTALE", "executed, result lost before acknowledgement", null);
                 return ErrorReply(id, "EPROTO", "request finished without a stored result", null);
             }
             StoredReply reply = null;
@@ -598,7 +489,7 @@ namespace VsockD
             {
                 Ring.Add("warn", "exec-budget-killed", id, argv[0]);
                 return ErrorReply(id, "ETIME",
-                    "command budget expired after " + commandMs + " ms (job-object kill; breakaway processes survive)",
+                    "command budget expired after " + commandMs + " ms (job-object kill; out-of-job children survive)",
                     "command");
             }
             Dictionary<string, object> result = Base(id, "exec_result");

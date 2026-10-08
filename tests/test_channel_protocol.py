@@ -16,7 +16,9 @@ from inspect_ranges._channel import protocol as p
 from pydantic import ValidationError
 
 VECTORS_PATH = Path(__file__).parent / "wire_vectors" / "v3.json"
-VECTORS: list[dict[str, Any]] = json.loads(VECTORS_PATH.read_text())["vectors"]
+VECTOR_DOC: dict[str, Any] = json.loads(VECTORS_PATH.read_text())
+VECTORS: list[dict[str, Any]] = VECTOR_DOC["vectors"]
+SHARED_REJECTS: list[dict[str, str]] = VECTOR_DOC["rejects"]
 
 RID = "a" * 32
 
@@ -209,6 +211,24 @@ def test_malformed_input_raises_typed_decode_error(
 ) -> None:
     with pytest.raises(expected):
         codec.decode_frames(data, bulk_cap=p.DEFAULT_BULK_CAP)
+
+
+def test_shared_reject_table_is_substantial() -> None:
+    """A shrinking table means a codec lost its parity pins; refuse quietly small docs."""
+    assert len(SHARED_REJECTS) >= 50
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [case["payload"] for case in SHARED_REJECTS],
+    ids=[case["name"] for case in SHARED_REJECTS],
+)
+def test_shared_reject_table_refused(payload: str) -> None:
+    """Cross-codec rejection corpus: all three codecs must refuse every payload here."""
+    raw = payload.encode()
+    frame = struct.pack(">IB", len(raw), codec.FrameType.CONTROL) + raw
+    with pytest.raises(codec.DecodeError):
+        codec.decode_frames(frame, bulk_cap=p.DEFAULT_BULK_CAP)
 
 
 def test_bulk_reader_cap_enforced_before_declared_size() -> None:

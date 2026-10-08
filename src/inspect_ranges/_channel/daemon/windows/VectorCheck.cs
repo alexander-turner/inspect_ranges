@@ -1,6 +1,8 @@
 // The third-codec drift guard: decode every shared wire vector from its
-// pinned frame bytes, validate, re-encode, and demand byte equality, plus a
-// hardening table mirroring Python's and Go's rejection cases. Runs on any
+// pinned frame bytes, validate, re-encode, and demand byte equality; refuse
+// every payload in the SHARED rejection table (doc-driven, so a new table
+// entry pins all three codecs at once); pin the daemon grace constants; and
+// hammer the Store dedupe core (the TOCTOU regression pin). Runs on any
 // .NET (built with the pinned SDK via vsockd-win.csproj); the daemon itself
 // never compiles this file in-guest.
 //
@@ -9,6 +11,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 
 namespace VsockD
 {
@@ -56,6 +59,14 @@ namespace VsockD
                 Console.Error.WriteLine("inbound bulk cap drifted from the vector pin");
                 return 1;
             }
+            // grace constants: the host's 12 s observation grace is computed
+            // from these pins, so daemon drift would silently break budgets
+            if ((long)daemonPins["kill_grace_ms"] != Daemon.KillGraceMs ||
+                (long)daemonPins["wait_delay_ms"] != Daemon.WaitDelayMs)
+            {
+                Console.Error.WriteLine("grace constants drifted from the vector pins");
+                return 1;
+            }
 
             int failures = 0;
             List<object> vectors = (List<object>)doc["vectors"];
@@ -97,47 +108,92 @@ namespace VsockD
                 }
             }
 
-            // decode hardening: the shared rejection table
-            string rid = new string('a', 32);
-            string[][] rejects = new string[][]
+            // decode hardening: the SHARED rejection table, doc-driven so
+            // every parity fix lands in all three codecs at once
+            List<object> rejects = (List<object>)doc["rejects"];
+            if (rejects.Count < 50)
             {
-                new[] { "missing-v", "{\"id\":\"" + rid + "\",\"kind\":\"ping\"}" },
-                new[] { "wrong-v", "{\"id\":\"" + rid + "\",\"kind\":\"ping\",\"v\":2}" },
-                new[] { "explicit-null", "{\"cmd\":[\"true\"],\"cwd\":null,\"id\":\"" + rid + "\",\"kind\":\"exec\",\"v\":3}" },
-                new[] { "duplicate-key", "{\"id\":\"" + rid + "\",\"kind\":\"ping\",\"kind\":\"ping\",\"v\":3}" },
-                new[] { "unknown-kind", "{\"id\":\"" + rid + "\",\"kind\":\"evil\",\"v\":3}" },
-                new[] { "cross-kind-field", "{\"cmd\":[\"x\"],\"id\":\"" + rid + "\",\"kind\":\"ping\",\"v\":3}" },
-                new[] { "pending-missing-elapsed", "{\"id\":\"" + rid + "\",\"kind\":\"pending\",\"target_id\":\"" + rid + "\",\"v\":3}" },
-                new[] { "etime-without-layer", "{\"errno\":\"ETIME\",\"id\":\"" + rid + "\",\"kind\":\"error\",\"message\":\"x\",\"v\":3}" },
-                new[] { "bulk-on-bulkless", "{\"data_size\":4,\"id\":\"" + rid + "\",\"kind\":\"ok\",\"v\":3}" },
-                new[] { "non-integer-number", "{\"id\":\"" + rid + "\",\"kind\":\"heartbeat\",\"uptime_ms\":1.5,\"v\":3}" },
-                new[] { "negative-max-entries", "{\"id\":\"" + rid + "\",\"kind\":\"diag\",\"max_entries\":-1,\"v\":3}" },
-                new[] { "rc-outside-int32", "{\"id\":\"" + rid + "\",\"kind\":\"exec_result\",\"rc\":2147483648,\"stderr_size\":0,\"stdout_size\":0,\"v\":3}" },
-                new[] { "bad-u-escape-0x", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\u0x41\",\"v\":3}" },
-                new[] { "bad-u-escape-nonhex", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\uzzzz\",\"v\":3}" },
-                new[] { "lone-high-surrogate", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\ud800\",\"v\":3}" },
-                new[] { "wrong-typed-port", "{\"host\":\"h\",\"id\":\"" + rid + "\",\"kind\":\"forward\",\"port\":\"80\",\"v\":3}" },
-                new[] { "wrong-typed-target", "{\"id\":\"" + rid + "\",\"kind\":\"ack\",\"target_id\":5,\"v\":3}" },
-            };
-            foreach (string[] reject in rejects)
+                Console.Error.WriteLine("shared reject table suspiciously small: " + rejects.Count);
+                return 1;
+            }
+            foreach (object rejectObj in rejects)
             {
+                Dictionary<string, object> reject = (Dictionary<string, object>)rejectObj;
+                string rejectName = (string)reject["name"];
+                string payload = (string)reject["payload"];
                 bool refused = false;
-                try { Wire.ParseControl(System.Text.Encoding.UTF8.GetBytes(reject[1])); }
+                try { Wire.ParseControl(System.Text.Encoding.UTF8.GetBytes(payload)); }
                 catch (DecodeException) { refused = true; }
                 if (!refused)
                 {
                     failures++;
-                    Console.WriteLine("  FAIL hardening/" + reject[0] + ": accepted dishonest payload");
+                    Console.WriteLine("  FAIL reject/" + rejectName + ": accepted dishonest payload");
                 }
                 else
                 {
-                    Console.WriteLine("  PASS hardening/" + reject[0]);
+                    Console.WriteLine("  PASS reject/" + rejectName);
                 }
             }
+
+            int hammerFailures = StoreHammer();
+            if (hammerFailures == 0) Console.WriteLine("  PASS store-hammer (2000 rounds)");
+            else Console.WriteLine("  FAIL store-hammer: " + hammerFailures + " violations");
+            failures += hammerFailures;
 
             Console.WriteLine("vectors: " + vectors.Count + ", kinds covered: " + kinds.Count +
                 ", failures: " + failures);
             return failures == 0 ? 0 : 1;
+        }
+
+        // The TOCTOU regression pin, ported from the Go daemon_test hammer:
+        // racing acquires for one id must yield exactly one fresh run, and
+        // every other caller must land on the stored reply (or tombstone).
+        static int StoreHammer()
+        {
+            Store store = new Store();
+            int totalFailures = 0;
+            for (int round = 0; round < 2000; round++)
+            {
+                string id = round.ToString("x32");
+                object stateLock = new object();
+                int fresh = 0;
+                int errors = 0;
+                Thread[] workers = new Thread[8];
+                for (int w = 0; w < workers.Length; w++)
+                {
+                    workers[w] = new Thread(delegate ()
+                    {
+                        StoredReply stored;
+                        bool tombstoned, isNew;
+                        RunningEntry entry = store.Acquire(id, out stored, out tombstoned, out isNew);
+                        if (tombstoned)
+                        {
+                            lock (stateLock) { errors++; }
+                            return;
+                        }
+                        if (isNew)
+                        {
+                            lock (stateLock) { fresh++; }
+                            Dictionary<string, object> ok = new Dictionary<string, object>();
+                            ok["v"] = (long)Wire.ProtocolVersion;
+                            ok["id"] = id;
+                            ok["kind"] = "ok";
+                            store.Finish(id, new StoredReply(ok, null));
+                            return;
+                        }
+                        if (stored != null) return;
+                        entry.Done.WaitOne();
+                        if (store.Get(id) == null && !store.Tombstoned(id))
+                            lock (stateLock) { errors++; }
+                    });
+                    workers[w].IsBackground = true;
+                }
+                foreach (Thread worker in workers) worker.Start();
+                foreach (Thread worker in workers) worker.Join();
+                if (fresh != 1 || errors != 0) totalFailures++;
+                store.Ack(id);
+            }
+            return totalFailures;
         }
 
         static bool BytesEqual(byte[] a, byte[] b)

@@ -7,8 +7,9 @@ set -euxo pipefail
 CID="${CID:-2048}"
 
 rm -rf /tmp/payload && mkdir -p /tmp/payload
-cp /payload-src/Wire.cs /payload-src/Exec.cs /payload-src/Daemon.cs \
-   /payload-src/Program.cs /payload-src/install-daemon.ps1 /tmp/payload/
+cp /payload-src/Wire.cs /payload-src/Store.cs /payload-src/Exec.cs \
+   /payload-src/Daemon.cs /payload-src/Program.cs \
+   /payload-src/install-daemon.ps1 /tmp/payload/
 [ -f /images/busybox.exe ] && cp /images/busybox.exe /tmp/payload/
 genisoimage -quiet -o /scratch/payload.iso -J -R -V PAYLOAD /tmp/payload
 

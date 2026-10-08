@@ -1,6 +1,6 @@
 """The daemon artifact: `inspect-ranges daemon-bundle` builds the versioned, byte-deterministic tarball the realizer bakes into goldens.
 
-Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon placeholder (source arrives with channel-v1 slice 6), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest.
+Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon C# sources with their installer (compiled in-guest by the .NET Framework 4.8 csc.exe), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest.
 
 Trust model: the sidecar written beside the tarball is a convenience copy. A consumer that must trust the artifact (the realizer, the build manifest) pins `bundle_sha256` out of band and passes the pinned `DaemonBundleInfo` to `verify_daemon_bundle`; verifying against a sidecar fetched from the same directory as the tarball proves only internal consistency, which an attacker controlling both files can fake.
 
@@ -45,6 +45,7 @@ WantedBy=multi-user.target
 _WINDOWS_DIR = Path(__file__).parent / "daemon" / "windows"
 _WINDOWS_SOURCES = (
     "Wire.cs",
+    "Store.cs",
     "Exec.cs",
     "Daemon.cs",
     "Program.cs",

@@ -80,6 +80,9 @@ namespace VsockD
         public static extern bool TerminateJobObject(IntPtr job, uint exitCode);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         public static extern uint ResumeThread(IntPtr thread);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -273,11 +276,16 @@ namespace VsockD
             }
 
             IntPtr job = Native.CreateJobObject(IntPtr.Zero, null);
-            if (job == IntPtr.Zero || !Native.AssignProcessToJobObject(job, pi.hProcess))
+            bool assigned = job != IntPtr.Zero && Native.AssignProcessToJobObject(job, pi.hProcess);
+            if (!assigned)
             {
+                // capture the cause FIRST: every cleanup call below overwrites
+                // the thread's last-error slot
+                int jobErr = Marshal.GetLastWin32Error();
                 // without a Job the budget kill would be a silent no-op:
-                // refuse the exec rather than run an unbudgetable process
-                Native.TerminateJobObject(job, 1);
+                // kill the still-suspended child (it never joined the job,
+                // so TerminateJobObject reaches nothing) and refuse the exec
+                Native.TerminateProcess(pi.hProcess, 1);
                 Native.CloseHandle(pi.hThread);
                 Native.CloseHandle(pi.hProcess);
                 if (job != IntPtr.Zero) Native.CloseHandle(job);
@@ -285,7 +293,7 @@ namespace VsockD
                 Native.CloseHandle(stdoutR); Native.CloseHandle(stdoutW);
                 Native.CloseHandle(stderrR); Native.CloseHandle(stderrW);
                 return ExecOutcome.Error("EIO",
-                    "job object unavailable (error " + Marshal.GetLastWin32Error() +
+                    "job object unavailable (error " + jobErr +
                     "); refusing an unbudgetable exec");
             }
             Native.ResumeThread(pi.hThread);
@@ -319,13 +327,17 @@ namespace VsockD
                 timedOut = true;
             if (!timedOut)
             {
-                // the process exited: pipe reaping is bounded by WaitDelay
-                // (the cmd.WaitDelay analog), never the command budget; a
-                // background child holding stdout gets its handle severed
-                // instead of converting a clean exit into ETIME + job kill
-                if (!outReader.Thread.Join(Daemon.WaitDelayMs))
+                // the process exited: pipe reaping gets ONE shared WaitDelay
+                // budget across BOTH joins (the cmd.WaitDelay analog), never
+                // the command budget. Closing our FileStream does NOT cancel
+                // a blocked anonymous-pipe read; the real guarantee is that
+                // the reply returns now, and a lingering reader is a bounded
+                // background thread that dies with the pipe's write handles.
+                long reapDeadline = DateTime.UtcNow.Ticks +
+                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                if (!outReader.Thread.Join(RemainingJoinMs(reapDeadline)))
                     outReader.ForceClose();
-                if (!errReader.Thread.Join(Daemon.WaitDelayMs))
+                if (!errReader.Thread.Join(RemainingJoinMs(reapDeadline)))
                     errReader.ForceClose();
                 outReader.Thread.Join(1000);
                 errReader.Thread.Join(1000);
@@ -336,12 +348,15 @@ namespace VsockD
             {
                 // Windows has no TERM analog: the budget kills the Job (the
                 // whole tree) immediately; the shared grace constants bound
-                // the post-kill reaping, matching the host's 12 s observation
-                // grace (kill grace + wait delay + margin)
+                // the post-kill reaping. Worst case here is KillGraceMs (5 s)
+                // + ONE shared WaitDelayMs across both joins (5 s) + the 1 s
+                // stdin join = 11 s, inside the host's 12 s observation grace.
                 Native.TerminateJobObject(job, 1);
                 Native.WaitForSingleObject(pi.hProcess, (uint)Daemon.KillGraceMs);
-                outReader.Thread.Join(Daemon.WaitDelayMs);
-                errReader.Thread.Join(Daemon.WaitDelayMs);
+                long killReapDeadline = DateTime.UtcNow.Ticks +
+                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                outReader.Thread.Join(RemainingJoinMs(killReapDeadline));
+                errReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 outcome.TimedOut = true;
             }
             else

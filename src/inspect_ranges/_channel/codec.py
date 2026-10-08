@@ -99,9 +99,12 @@ class BulkMismatch(DecodeError):
 
 def canonical_json(payload: dict[str, Any]) -> bytes:
     """Encode `payload` as canonical JSON: sorted keys, compact separators, UTF-8 (never ASCII-escaped); null-valued optional fields are omitted by the message encoder."""
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()
+    try:
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+    except UnicodeEncodeError as error:
+        raise EncodeError(f"unencodable string (lone surrogate): {error}") from None
 
 
 def _frame(frame_type: FrameType, payload: bytes) -> bytes:
@@ -365,6 +368,21 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _contains_lone_surrogate(value: Any) -> bool:
+    # surrogate code points can only arrive via \uD800-\uDFFF escapes (raw
+    # invalid UTF-8 is rejected earlier); an honest encoder never emits them
+    if isinstance(value, str):
+        return any(0xD800 <= ord(c) <= 0xDFFF for c in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_lone_surrogate(k) or _contains_lone_surrogate(v)
+            for k, v in cast(dict[Any, Any], value).items()
+        )
+    if isinstance(value, list):
+        return any(_contains_lone_surrogate(item) for item in cast(list[Any], value))
+    return False
+
+
 def _contains_null(value: Any) -> bool:
     if value is None:
         return True
@@ -391,10 +409,14 @@ def _parse_control(payload: bytes) -> Message:
     version: object = (
         cast(dict[Any, Any], data).get("v") if isinstance(data, dict) else None
     )
-    if version != PROTOCOL_VERSION:
+    # strict-side-wins: v is the INTEGER 3; a float 3.0 is something an honest
+    # encoder cannot emit (shared rejection table: v-float)
+    if not (type(version) is int and version == PROTOCOL_VERSION):
         raise InvalidMessage(
-            f"control payload must carry v={PROTOCOL_VERSION}, got {version!r}"
+            f"control payload must carry v={PROTOCOL_VERSION} (int), got {version!r}"
         )
+    if _contains_lone_surrogate(data):
+        raise InvalidMessage("lone surrogate in control payload")
     try:
         return MESSAGE_ADAPTER.validate_python(data)
     except ValidationError as error:

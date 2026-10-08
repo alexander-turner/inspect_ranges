@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -14,6 +16,61 @@ func execMessage(id string, argv ...string) *Message {
 }
 
 func rid(n int) string { return fmt.Sprintf("%032x", n) }
+
+// TestAcquireFinishHammer pins the TOCTOU fix: under racing acquires for
+// the same id, exactly one caller wins the fresh run and every other caller
+// gets the stored reply (or the tombstone truth), never a second run.
+func TestAcquireFinishHammer(t *testing.T) {
+	store := NewStore()
+	for round := 0; round < 2000; round++ {
+		id := rid(round)
+		const workers = 8
+		var fresh atomic.Int64
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				stored, tombstoned, run, isNew := store.Acquire(id)
+				if tombstoned {
+					t.Errorf("round %d: unexpected tombstone", round)
+					return
+				}
+				if isNew {
+					fresh.Add(1)
+					store.Finish(id, okReply(id))
+					return
+				}
+				if stored != nil {
+					return
+				}
+				<-run.done
+				if _, ok := store.Get(id); !ok && !store.Tombstoned(id) {
+					t.Errorf("round %d: finished without stored result or tombstone", round)
+				}
+			}()
+		}
+		wg.Wait()
+		if fresh.Load() != 1 {
+			t.Fatalf("round %d: %d fresh acquisitions, want exactly 1", round, fresh.Load())
+		}
+		store.Ack(id)
+	}
+}
+
+// TestHugeBudgetDoesNotWrap pins the deadline clamp: a 13e12 ms budget
+// overflows time.Duration nanoseconds if converted naively, firing the
+// budget timer immediately and failing a healthy command with ETIME.
+func TestHugeBudgetDoesNotWrap(t *testing.T) {
+	daemon := NewDaemon()
+	message := execMessage(rid(9077), "true")
+	huge := int64(13_000_000_000_000)
+	message.Budget = &Budget{UntimedBoundMs: &huge}
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "exec_result" {
+		t.Fatalf("huge budget: got %s (%s)", reply.message.Kind, reply.message.Message)
+	}
+}
 
 func TestTombstoneForbidsDoubleRun(t *testing.T) {
 	daemon := NewDaemon()

@@ -171,7 +171,7 @@ class RangeChannel(Protocol):
     async def write_file(self, guest: str, path: str, data: bytes) -> None: ...
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply: ...
     async def ping(self, guest: str) -> PongReply: ...
-    async def diag(self, guest: str, *, max_entries: int = 100) -> list[DiagEntry]: ...
+    async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply: ...
     async def teardown(self) -> None: ...
 
 
@@ -681,11 +681,11 @@ class MessageChannel:
             "schema is wire-stable (ForwardRequest/ForwardReply) and capability-gated"
         )
 
-    async def diag(self, guest: str, *, max_entries: int = 100) -> list[DiagEntry]:
-        """Read the daemon's in-guest diagnostic ring buffer."""
+    async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply:
+        """Read the daemon's diagnostics: the in-guest ring buffer tail plus the supervised listener-restart count."""
         request = DiagRequest(id=request_id(), max_entries=max_entries)
         reply, _ = await self._exchange(guest, request)
-        return self._expect(reply, DiagReply, request, guest).entries
+        return self._expect(reply, DiagReply, request, guest)
 
     # -- host lifecycle plane -----------------------------------------------
 

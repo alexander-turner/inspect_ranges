@@ -4,10 +4,11 @@ required to leave the v3 daemon's listener alive with bounded retries.
 
 Three rounds of: (a) 1000 unpaced ping round trips (raw AF_VSOCK, no client
 pacing), (b) 1000 bare connect/close cycles as fast as the kernel allows,
-(c) a liveness gate (channel ping with bounded retries). After the storm, the
-diag ring is read: `listener-restarted` events are reported (supervised
-recovery is acceptable; a dead listener is not), and the final gate must pass
-without Restart-Service.
+(c) a liveness gate (channel ping with bounded retries). After the storm, a
+diag exchange reads the daemon's `listener_restarts` counter (it survives
+ring-buffer wrap, unlike counting `listener-restarted` events) and the storm
+fails unless it is exactly zero: the listener must survive without even a
+supervised recovery, and without Restart-Service.
 
 Usage: IR_VSOCK_BATTERY_CID=<cid> uv run python design/spikes/channel-v1/windows/storm_v3.py
 """
@@ -73,10 +74,14 @@ async def liveness_gate(label: str) -> None:
     assert pong.protocol == 3, "liveness gate failed"
 
 
-async def read_restarts() -> int:
+async def read_restarts() -> tuple[int, int]:
+    """Return (daemon restart counter, restart/wedge events in the ring tail)."""
     channel = MessageChannel(VsockTransport({"guest": CID}), label="storm-diag")
-    entries = await channel.diag("guest", max_entries=1000)
-    return sum(1 for entry in entries if entry.event in ("listener-restarted", "listener-wedged"))
+    reply = await channel.diag("guest", max_entries=1000)
+    events = sum(
+        1 for entry in reply.entries if entry.event in ("listener-restarted", "listener-wedged")
+    )
+    return reply.listener_restarts, events
 
 
 async def main() -> int:
@@ -98,11 +103,11 @@ async def main() -> int:
         await liveness_gate(f"round{round_index}")
         print(f"round {round_index}: liveness gate PASS")
 
-    restarts = await read_restarts()
+    restarts, restart_events = await read_restarts()
     print(
         f"\nstorm: {ROUNDS * PINGS_PER_ROUND} pings ({total_ping_failures} dropped), "
         f"{ROUNDS * BARE_CYCLES_PER_ROUND} bare cycles ({total_bare_failures} refused), "
-        f"supervised listener recoveries: {restarts}"
+        f"supervised listener recoveries: {restarts} (ring events: {restart_events})"
     )
     # bounded transient drops are the storm's nature; a DEAD listener is the
     # failure. The gates above already proved it alive; cap drop rates too.
@@ -110,7 +115,12 @@ async def main() -> int:
     if total_ping_failures > budget:
         print(f"FAIL: ping drop rate above 10% ({total_ping_failures} > {budget})")
         return 1
-    print("storm: PASS (listener alive through every round, no Restart-Service)")
+    # the counter survives ring-buffer wrap, so this is the storm's real
+    # evidence: the listener never needed a supervised recovery at all
+    if restarts != 0:
+        print(f"FAIL: listener needed {restarts} supervised recoveries during the storm")
+        return 1
+    print("storm: PASS (listener alive through every round, zero supervised recoveries)")
     return 0
 
 

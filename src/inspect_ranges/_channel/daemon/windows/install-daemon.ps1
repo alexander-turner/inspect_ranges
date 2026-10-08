@@ -22,7 +22,7 @@ $dev = Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'DEV_105
 if ($dev.Status -ne 'OK') { throw "viosock device not OK: $($dev.Status)" }
 
 New-Item -ItemType Directory -Force -Path C:\vsockd, C:\vsockd\work | Out-Null
-foreach ($src in 'Wire.cs', 'Exec.cs', 'Daemon.cs', 'Program.cs') {
+foreach ($src in 'Wire.cs', 'Store.cs', 'Exec.cs', 'Daemon.cs', 'Program.cs') {
     Copy-Item "${payload}:\$src" C:\vsockd\
 }
 
@@ -30,7 +30,7 @@ foreach ($src in 'Wire.cs', 'Exec.cs', 'Daemon.cs', 'Program.cs') {
 $csc = "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 & $csc /nologo /optimize /target:exe /out:C:\vsockd\vsockd.exe `
   /r:System.ServiceProcess.dll `
-  C:\vsockd\Wire.cs C:\vsockd\Exec.cs C:\vsockd\Daemon.cs C:\vsockd\Program.cs
+  C:\vsockd\Wire.cs C:\vsockd\Store.cs C:\vsockd\Exec.cs C:\vsockd\Daemon.cs C:\vsockd\Program.cs
 if ($LASTEXITCODE -ne 0) { throw "csc failed: $LASTEXITCODE" }
 
 if (Test-Path "${payload}:\busybox.exe") {

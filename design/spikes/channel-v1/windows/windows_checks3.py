@@ -117,8 +117,8 @@ async def main() -> int:
     ok("tree-kill: no surviving descendants (incl. detached)", "PING" not in r.stdout.upper(), repr(r.stdout))
 
     # v3 addition: the diag ring is reachable and carries the storm/exec events
-    entries = await env.channel.diag("guest", max_entries=50)
-    ok("diag ring readable with entries", len(entries) > 0, repr(len(entries)))
+    diag_reply = await env.channel.diag("guest", max_entries=50)
+    ok("diag ring readable with entries", len(diag_reply.entries) > 0, repr(len(diag_reply.entries)))
 
     print(f"\nnative supplement: {len(PASS)}/{len(PASS)} passed")
     return 0

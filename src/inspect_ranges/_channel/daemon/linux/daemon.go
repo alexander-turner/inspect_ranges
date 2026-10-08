@@ -14,11 +14,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -215,17 +218,35 @@ func (d *Diag) Tail(limit int64) []DiagEntry {
 	return tail
 }
 
-func truncateString(s string, max int) string {
-	if len(s) > max {
-		return s[:max]
+// msDuration converts a millisecond budget to time.Duration, clamping
+// values whose nanosecond count overflows int64 (e.g. 13e12 ms): the
+// wrapped negative Duration would fire the budget timer immediately.
+func msDuration(ms int64) time.Duration {
+	const maxMs = math.MaxInt64 / int64(time.Millisecond)
+	if ms > maxMs {
+		ms = maxMs
 	}
-	return s
+	return time.Duration(ms) * time.Millisecond
+}
+
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // Daemon ties the store, diag, and handlers together.
 type Daemon struct {
 	store *Store
 	diag  *Diag
+	// supervised listener recoveries since start; surfaced in diag_result
+	// so batteries can assert the storm never wedged the accept loop
+	listenerRestarts atomic.Int64
 }
 
 func NewDaemon() *Daemon { return &Daemon{store: NewStore(), diag: NewDiag()} }
@@ -245,8 +266,15 @@ func (d *Daemon) Serve(conn io.ReadWriteCloser) {
 	reply := d.dispatch(request, bulk)
 	frames, err := EncodeMessage(reply.message, reply.bulk)
 	if err != nil {
+		// a stored reply the codec refuses (e.g. invalid UTF-8 smuggled
+		// past truncation) must not strand the client in silence: degrade
+		// to a safe ASCII error reply instead
 		d.diag.Add("error", "encode-failed", &request.ID, err.Error())
-		return
+		fallback := errorReply(request.ID, "EIO", "reply could not be encoded", nil)
+		frames, err = EncodeMessage(fallback.message, nil)
+		if err != nil {
+			return
+		}
 	}
 	if _, err := conn.Write(frames); err != nil {
 		d.diag.Add("warn", "reply-write-failed", &request.ID, err.Error())
@@ -272,7 +300,8 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 		}
 		return &storedReply{message: &Message{
 			V: ProtocolVersion, ID: request.ID, Kind: "diag_result",
-			Entries: d.diag.Tail(limit),
+			Entries:          d.diag.Tail(limit),
+			ListenerRestarts: i64(d.listenerRestarts.Load()),
 		}}
 	}
 	// durable kinds: dedupe, tombstones, and attach-to-in-flight in ONE
@@ -289,6 +318,10 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 		<-run.done
 		if attached, ok := d.store.Get(request.ID); ok {
 			return attached
+		}
+		if d.store.Tombstoned(request.ID) {
+			return errorReply(request.ID, "ESTALE",
+				"executed, result lost before acknowledgement", nil)
 		}
 		return errorReply(request.ID, "EPROTO", "request finished without a stored result", nil)
 	}
@@ -395,7 +428,7 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	} else if request.Budget != nil && request.Budget.UntimedBoundMs != nil {
 		commandMs = *request.Budget.UntimedBoundMs
 	}
-	timer := time.NewTimer(time.Duration(commandMs) * time.Millisecond)
+	timer := time.NewTimer(msDuration(commandMs))
 	defer timer.Stop()
 	budget = timer.C
 

@@ -1,8 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Host-side build of the vector check only (Wire.cs + VectorCheck.cs).
-       The daemon itself (Daemon.cs, Program.cs) compiles IN-GUEST with the
-       in-box .NET Framework 4.8 csc.exe; LangVersion 5 keeps every file
-       within that compiler's reach. -->
+  <!-- Host-side build of the vector check: the codec plus the daemon core
+       (Store, Exec engine, Daemon) so the drift guard can pin the real
+       grace constants and hammer the real dedupe Store. Program.cs stays
+       out (ServiceBase is .NET Framework-only); the daemon itself compiles
+       IN-GUEST with the in-box .NET Framework 4.8 csc.exe; LangVersion 5
+       keeps every file within that compiler's reach. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
@@ -14,6 +16,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Wire.cs" />
+    <Compile Include="Store.cs" />
+    <Compile Include="Exec.cs" />
+    <Compile Include="Daemon.cs" />
     <Compile Include="VectorCheck.cs" />
   </ItemGroup>
 </Project>

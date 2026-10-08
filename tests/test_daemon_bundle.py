@@ -86,6 +86,7 @@ def test_sidecar_carries_the_contract(tmp_path: Path) -> None:
         "linux/install.sh",
         "linux/vsockd.service",
         "windows/Wire.cs",
+        "windows/Store.cs",
         "windows/Exec.cs",
         "windows/Daemon.cs",
         "windows/Program.cs",
