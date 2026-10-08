@@ -32,10 +32,15 @@
 4. The native supplement 16/16 (the spike's 15 plus the diag ring).
 5. **The wedge regression**: three rounds of 1000 unpaced raw pings + 1000 bare connect/close cycles (~850 conn/s): zero drops, zero supervised recoveries needed, listener alive with no Restart-Service, on metal. The nested re-run on devbox-b is the recorded follow-up.
 
+## The realizer convergence run (slice 7, `realizer/`, latest run: 14/14)
+
+`realizer/run.sh` re-runs the slice 4 components against a REALIZER-BOOTED range instead of the compose harness: `daemon-bundle` -> `images derive` with the pinned daemon sha256 -> `render realizer/spec.yaml --cid-base 3000` (`ir-` project; this is the realizer path, so the realizer's conventions apply) -> `up`, then the conformance suite + soak, `self_check` (same 41/44 pinned xfails), the hostile shim (3/3), and the wedge storm asserting `listener_restarts == 0` over diag. The storm's one new datapoint: 160/3000 bare connect/close cycles refused-fast by the accept backlog under unpaced flood (pings 0/3000 dropped, zero recoveries); refusal-fast is the designed bound. It then proves CID and pacing coordination: the compose battery (band 2048) runs to completion (6/6) while the realizer range (band 3000+) stays up under continuous channel load (`realizer/load_loop.py`: 2302 ops, zero failures, both windows persisted in `tmp/realizer/logs/overlap.log`). The orchestrator holds the shared flock for the entire run and invokes the compose battery with `IR_BATTERY_LOCK_HELD=1`, so both bands run concurrently under the one lock owner and no third battery's exclusive section can interfere mid-proof. Windows re-ran through `windows/run-win.sh` with slice 6 results (Windows-through-realizer waits on the build phase's Windows render support).
+
 ## Files
 
 - `run.sh` — the Linux battery; `compose.yaml` — the range container (net-compile recipe)
 - `windows/` — the Windows battery (`run-win.sh`, `boot-win.sh`, `storm_v3.py`, `windows_checks3.py`)
+- `realizer/` — the slice 7 convergence run (`run.sh`, `spec.yaml`, `load_loop.py`)
 - `tests/test_channel_vsock.py` (repo tests, env-gated by `IR_VSOCK_BATTERY_CID`)
 - `self_check3.py` — Inspect sandbox self_check over a v3 adapter
 - `hostile_shim_check.py`, `guest/shim.py` — the hostile-daemon shim

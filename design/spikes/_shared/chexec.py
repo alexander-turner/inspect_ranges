@@ -60,15 +60,24 @@ def main() -> int:
     parser.add_argument("--cid", type=int, default=None)
     parser.add_argument("--boot", default=None)
     parser.add_argument("--guest", default=GUEST)
-    parser.add_argument("op", choices=["wait", "exec"])
+    parser.add_argument("op", choices=["wait", "exec", "diag"])
     parser.add_argument("arg", nargs="?")
     args = parser.parse_args()
     cids, guest = cid_map(args)
     channel = MessageChannel(VsockTransport(cids), label="battery")
 
+    async def diag() -> int:
+        reply = await channel.diag(guest, max_entries=1000)
+        print(
+            f"listener_restarts={reply.listener_restarts} entries={len(reply.entries)}"
+        )
+        return 0
+
     async def dispatch() -> int:
         if args.op == "wait":
             return await wait(channel, guest, float(args.arg or 180))
+        if args.op == "diag":
+            return await diag()
         assert args.arg is not None, "exec needs a command"
         return await run_exec(channel, guest, args.arg)
 

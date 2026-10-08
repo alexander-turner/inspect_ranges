@@ -27,9 +27,14 @@ PASS=0; FAIL=0
 ok()  { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
 
-# exclusive battery: serialize on the shared host lock (realizer runs at 3000+)
-exec 9>/tmp/inspect-ranges-battery.lock
-flock 9
+# exclusive battery: serialize on the shared host lock (realizer runs at
+# 3000+). The slice 7 orchestrator (realizer/run.sh) invokes this battery
+# INSIDE its own lock for the concurrency check; it sets IR_BATTERY_LOCK_HELD
+# so we do not deadlock on the lock our caller already holds.
+if [[ "${IR_BATTERY_LOCK_HELD:-}" != "1" ]]; then
+  exec 9>/tmp/inspect-ranges-battery.lock
+  flock 9
+fi
 
 docker compose -p "$PROJECT" down -v >/dev/null 2>&1 || true
 mkdir -p tmp/images tmp/render tmp/logs
