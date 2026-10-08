@@ -20,7 +20,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from .._channel.bundle import BundleError, DaemonBundleInfo, verify_daemon_bundle
+from .._channel.bundle import (
+    BundleError,
+    DaemonBundleInfo,
+    bundle_file_name,
+    verify_daemon_bundle,
+)
 from .._channel.protocol import PROTOCOL_VERSION
 from .._compiler.plan import image_file_name
 
@@ -103,15 +108,18 @@ def resolve_daemon_bundle(
         raise DeriveError(
             "resolve-daemon", f"daemon.json is unreadable or malformed: {error}"
         ) from error
-    bundle_path = artifact_dir / f"vsockd-bundle-{info.version}.tar"
+    bundle_path = artifact_dir / bundle_file_name(info.version)
     if not bundle_path.is_file():
-        raise DeriveError("resolve-daemon", f"daemon bundle missing: {bundle_path}")
+        raise DeriveError(
+            "resolve-daemon",
+            f"daemon bundle missing: {bundle_path} (republish: inspect-ranges daemon-bundle -o {artifact_dir})",
+        )
     if expected_sha256 is not None:
         pin = expected_sha256.removeprefix("sha256:").lower()
         if info.bundle_sha256 != pin:
             raise DeriveError(
                 "resolve-daemon",
-                f"daemon bundle digest {info.bundle_sha256} does not match the pin {pin}",
+                f"daemon bundle digest {info.bundle_sha256} does not match the pin {pin} (republish: inspect-ranges daemon-bundle -o {artifact_dir})",
             )
     if info.protocol != PROTOCOL_VERSION:
         raise DeriveError(
@@ -121,7 +129,10 @@ def resolve_daemon_bundle(
     try:
         verify_daemon_bundle(bundle_path, info)
     except BundleError as error:
-        raise DeriveError("resolve-daemon", str(error)) from error
+        raise DeriveError(
+            "resolve-daemon",
+            f"{error} (republish: inspect-ranges daemon-bundle -o {artifact_dir})",
+        ) from error
     return bundle_path, info
 
 

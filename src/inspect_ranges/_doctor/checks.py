@@ -46,11 +46,26 @@ def run_checks() -> list[CheckResult]:
     else:
         results.append(_skip(NETWORKING, "all checks", "requires Linux x86_64"))
         results.append(_skip(IMAGE_TOOLING, "all checks", "requires Linux x86_64"))
-    results += check_realizer(
-        image_inspect=_run(
-            ["docker", "image", "inspect", _range_image_tag(), "--format", "ok"]
-        ),
-    )
+    if host.status != "ok":
+        results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
+    else:
+        docker_probe = _run(["docker", "version", "--format", "ok"])
+        results += check_realizer(
+            image_inspect=(
+                _run(
+                    [
+                        "docker",
+                        "image",
+                        "inspect",
+                        _range_image_tag(),
+                        "--format",
+                        "ok",
+                    ]
+                )
+                if docker_probe is not None and docker_probe.returncode == 0
+                else None
+            ),
+        )
     return results
 
 
@@ -61,14 +76,23 @@ def _range_image_tag() -> str:
 
 
 def check_realizer(
-    image_inspect: "subprocess.CompletedProcess[str] | None",
+    image_inspect: subprocess.CompletedProcess[str] | None,
 ) -> list[CheckResult]:
     """Realizer host surface: the hardened range image, the daemon artifact, and the Go toolchain that builds it (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact)."""
     from .._channel.bundle import GO_PIN, locate_go
     from .._runtime.images import DEFAULT_ARTIFACT_DIR
 
     results: list[CheckResult] = []
-    if image_inspect is not None and image_inspect.returncode == 0:
+    if image_inspect is None:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "skip",
+                "docker unreachable, cannot tell whether the image exists",
+            )
+        )
+    elif image_inspect.returncode == 0:
         results.append(CheckResult(REALIZER, "range image", "ok", _range_image_tag()))
     else:
         results.append(

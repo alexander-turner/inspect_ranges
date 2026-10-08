@@ -150,8 +150,9 @@ def _tar_bytes(members: dict[str, bytes]) -> bytes:
     return tar_buffer.getvalue()
 
 
-def bundle_file_name() -> str:
-    return f"vsockd-bundle-{DAEMON_VERSION}.tar"
+def bundle_file_name(version: str = DAEMON_VERSION) -> str:
+    """The bundle tarball's file name for a daemon version (the single naming scheme producers and consumers share)."""
+    return f"vsockd-bundle-{version}.tar"
 
 
 def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
@@ -200,7 +201,7 @@ def write_bundle(
         bundle_sha256=hashlib.sha256(blob).hexdigest(),
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"vsockd-bundle-{version}.tar").write_bytes(blob)
+    (out_dir / bundle_file_name(version)).write_bytes(blob)
     (out_dir / "daemon.json").write_text(info.model_dump_json(indent=2) + "\n")
     return info
 
