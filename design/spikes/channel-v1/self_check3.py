@@ -71,7 +71,9 @@ class V3Sandbox(SandboxEnvironment):
     """exec/read/write over the v3 channel against one booted guest (no lifecycle: the harness boots it)."""
 
     @classmethod
-    async def sample_init(cls, task_name, config, metadata):  # pragma: no cover - unused
+    async def sample_init(
+        cls, task_name, config, metadata
+    ):  # pragma: no cover - unused
         raise NotImplementedError("the battery harness boots the guest")
 
     @classmethod
@@ -179,12 +181,18 @@ async def main() -> int:
     )
     for name, reason in failed:
         print(f"  - {name}: {reason}")
-    # the gate pins the xfail NAMES: a traded regression (a documented xfail
-    # starts passing while something else breaks) fails even at equal counts
-    unexpected = {name for name, _ in failed} - DOCUMENTED_XFAILS
+    # the gate pins the xfail NAMES in both directions: a new failure fails,
+    # and a documented xfail that starts passing (an xpass) fails too, so a
+    # traded regression cannot slip through at equal counts and any delta
+    # from the recorded result is a finding, never a silent rerun-green
+    failed_names = {name for name, _ in failed}
+    unexpected = failed_names - DOCUMENTED_XFAILS
+    xpasses = DOCUMENTED_XFAILS - failed_names
     if unexpected:
         print(f"UNEXPECTED failures: {sorted(unexpected)}")
-    return len(unexpected)
+    if xpasses:
+        print(f"UNEXPECTED passes of documented xfails: {sorted(xpasses)}")
+    return len(unexpected) + len(xpasses)
 
 
 if __name__ == "__main__":

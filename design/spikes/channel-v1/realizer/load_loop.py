@@ -16,14 +16,18 @@ from inspect_ranges._channel.vsock import VsockTransport
 CID = int(os.environ["IR_VSOCK_BATTERY_CID"])
 
 
+MAX_DURATION_S = 3600.0  # orphan safety: never outlive a dead orchestrator
+
+
 async def main(stop_file: Path, log_file: Path) -> int:
     channel = MessageChannel(
         VsockTransport({"guest": CID}), label="concurrency-load", channel_budget_s=15.0
     )
+    started = time.time()
     ops = 0
     failures = 0
     with log_file.open("w") as log:
-        while not stop_file.exists():
+        while not stop_file.exists() and time.time() - started < MAX_DURATION_S:
             try:
                 if ops % 2 == 0:
                     pong = await channel.ping("guest")
@@ -45,6 +49,10 @@ async def main(stop_file: Path, log_file: Path) -> int:
             log.flush()
             ops += 1
             await asyncio.sleep(0.25)
+        # final line AFTER observing the stop file: the overlap gate compares
+        # this against the orchestrator's compose-end timestamp, so coverage
+        # through the touch is proven by construction, not by sleep phasing
+        log.write(f"{time.time():.3f} stop\n")
     print(f"load: {ops} operations, {failures} failures")
     return 1 if failures else 0
 
