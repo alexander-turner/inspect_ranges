@@ -99,9 +99,9 @@ virt-install --connect qemu:///system --name guest --memory 1024 --vcpus 1 --cpu
 "
 $C $CID wait 240 && ok "daemon answers on vsock (CID $CID)" || bad "daemon answers on vsock"
 
-LISTENERS=$($C $CID exec "ss -tln state listening | tail -n +2 | wc -l")
-[[ "$LISTENERS" == "0" ]] && ok "zero TCP listeners in the booted golden" \
-  || { bad "zero TCP listeners (got $LISTENERS)"; $C $CID exec "ss -tlnp" || true; }
+LISTENERS=$($C $CID exec "ss -tuln | tail -n +2 | wc -l")
+[[ "$LISTENERS" == "0" ]] && ok "zero TCP/UDP listeners in the booted golden" \
+  || { bad "zero TCP/UDP listeners (got $LISTENERS)"; $C $CID exec "ss -tulnp" || true; }
 
 SSH_STATE=$($C $CID exec "systemctl is-enabled ssh 2>&1 || true")
 [[ "$SSH_STATE" == *masked* ]] && ok "ssh masked" || bad "ssh masked (got: $SSH_STATE)"

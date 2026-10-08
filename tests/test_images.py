@@ -107,6 +107,84 @@ def test_failed_customize_leaves_no_cache_residue(
     assert residue == [], residue
 
 
+def test_daemon_pin_mismatch_refuses(
+    tmp_path: Path, vendor: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tampered daemon artifact refuses at resolve-daemon, before any derivation work."""
+    import inspect_ranges._runtime.images as images_module
+
+    image, digest = vendor
+    monkeypatch.setattr(
+        images_module,
+        "PINNED_DAEMON",
+        images_module.PINNED_DAEMON.model_copy(update={"sha256": "f" * 64}),
+    )
+    with pytest.raises(DeriveError, match=r"\[resolve-daemon\].*digest mismatch"):
+        derive_golden(image, digest, tmp_path / "cache", runner=fake_runner)
+
+
+def test_missing_host_tool_is_stage_named(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    image, digest = vendor
+
+    def no_tool(argv: list[str], cwd: Path) -> None:
+        raise FileNotFoundError(argv[0])
+
+    with pytest.raises(DeriveError, match=r"\[create-overlay\].*not found"):
+        derive_golden(image, digest, tmp_path / "cache", runner=no_tool)
+
+
+def test_corrupt_sidecar_recovers_and_lists_as_unmanaged(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    """A truncated sidecar never crashes list or derive: list flags the image unmanaged, derive re-derives."""
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    metadata, _ = derive_golden(image, digest, cache, runner=fake_runner)
+    sidecar = cache / "noble-server-cloudimg-amd64-golden.json"
+    sidecar.write_text("{not json")
+    managed, unmanaged = list_images(cache)
+    assert managed == []
+    assert metadata.file in unmanaged
+    repaired, hit = derive_golden(image, digest, cache, runner=fake_runner)
+    assert not hit
+    assert repaired.golden_sha256 == metadata.golden_sha256
+
+
+def test_sidecar_without_golden_is_repaired_not_refused(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    """The crash window (sidecar renamed, golden rename lost) self-heals on the next derive."""
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    metadata, _ = derive_golden(image, digest, cache, runner=fake_runner)
+    (cache / metadata.file).unlink()
+    repaired, hit = derive_golden(image, digest, cache, runner=fake_runner)
+    assert not hit
+    assert (cache / metadata.file).is_file()
+    assert repaired.golden_sha256 == metadata.golden_sha256
+
+
+def test_dotted_names_map_to_distinct_files_and_sidecars(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    first, _ = derive_golden(
+        image, digest, cache, name="ubuntu-24.04", runner=fake_runner
+    )
+    second, _ = derive_golden(
+        image, digest, cache, name="ubuntu-24.10", runner=fake_runner
+    )
+    assert first.file == "ubuntu-24.04.qcow2"
+    assert second.file == "ubuntu-24.10.qcow2"
+    assert (cache / "ubuntu-24.04.json").is_file()
+    assert (cache / "ubuntu-24.10.json").is_file()
+    managed, _ = list_images(cache)
+    assert {m.file for m in managed} >= {"ubuntu-24.04.qcow2", "ubuntu-24.10.qcow2"}
+
+
 def test_list_images_separates_managed_and_unmanaged(
     tmp_path: Path, vendor: tuple[Path, str]
 ) -> None:

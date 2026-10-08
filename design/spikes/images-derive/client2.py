@@ -36,12 +36,17 @@ def main() -> int:
             try:
                 if request(cid, {"op": "ping"}).get("ok"):
                     return 0
-            except OSError:
+            except (OSError, ValueError):
+                # connect refused, reset mid-reply, or an empty/partial reply
+                # during boot: all mean "not ready yet"
                 time.sleep(1.0)
         print(f"cid {cid}: daemon did not answer", file=sys.stderr)
         return 1
     if op == "exec":
         reply = request(cid, {"op": "exec", "cmd": ["sh", "-c", sys.argv[3]]})
+        if "error" in reply:
+            print(f"daemon error: {reply}", file=sys.stderr)
+            return 1
         stdout = base64.b64decode(str(reply.get("stdout", ""))).decode(errors="replace")
         stderr = base64.b64decode(str(reply.get("stderr", ""))).decode(errors="replace")
         sys.stdout.write(stdout)

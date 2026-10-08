@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-RECIPE_VERSION = "1"
+RECIPE_VERSION = "2"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 Runner = Callable[[list[str], Path], None]
@@ -71,7 +71,7 @@ Restart=always
 WantedBy=multi-user.target
 """
 
-_RESOLVED_DROPIN = "[Resolve]\nDNSStubListener=no\n"
+_RESOLVED_DROPIN = "[Resolve]\nDNSStubListener=no\nLLMNR=no\nMulticastDNS=no\n"
 
 
 def sha256_file(path: Path) -> str:
@@ -110,15 +110,21 @@ def _run(argv: list[str], cwd: Path) -> None:
 
 
 def _cache_file_name(name: str) -> str:
-    return (
-        (name if "." in Path(name).name else f"{name}.qcow2")
-        .replace("/", "-")
-        .replace(":", "-")
-    )
+    normalized = name.replace("/", "-").replace(":", "-")
+    return normalized if normalized.endswith(".qcow2") else f"{normalized}.qcow2"
 
 
 def _metadata_path(cache: Path, file: str) -> Path:
-    return cache / (Path(file).stem + ".json")
+    # full name, not Path.stem: golden names may contain dots
+    return cache / (file.removesuffix(".qcow2") + ".json")
+
+
+def _load_metadata(path: Path) -> "ImageMetadata | None":
+    """A sidecar's metadata, or None when it is unreadable (treated as stale)."""
+    try:
+        return ImageMetadata.model_validate_json(path.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def derive_golden(
@@ -143,9 +149,18 @@ def derive_golden(
         The golden's metadata and whether the cache already satisfied the request (hit skips all work).
 
     Raises:
-        DeriveError: Stage-named failure: vendor missing or digest mismatch, daemon pin mismatch, an unmanaged file squatting on the target name, or a failed derivation command (nothing is left behind in the cache).
+        DeriveError: Stage-named failure: vendor missing or digest mismatch, daemon pin mismatch, an unmanaged file squatting on the target name, a missing host tool, or a failed derivation command (nothing is left behind in the cache).
     """
-    run = runner or _run
+    base_run = runner or _run
+
+    def run(stage: str, argv: list[str], cwd: Path) -> None:
+        try:
+            base_run(argv, cwd)
+        except FileNotFoundError as error:
+            raise DeriveError(stage, f"{argv[0]} not found on this host") from error
+        except subprocess.CalledProcessError as error:
+            raise DeriveError(stage, f"{argv[0]} failed: {error.stderr}") from error
+
     expected = vendor_sha256.removeprefix("sha256:").lower()
 
     if not vendor.is_file():
@@ -159,7 +174,7 @@ def derive_golden(
 
     daemon = daemon_source()
 
-    golden_name = name or f"{vendor.name.split('.')[0]}-golden"
+    golden_name = name or f"{Path(vendor.name).stem}-golden"
     file = _cache_file_name(golden_name)
     key_material = (
         f"recipe:{RECIPE_VERSION}|vendor:{expected}|daemon:{PINNED_DAEMON.sha256}"
@@ -170,15 +185,15 @@ def derive_golden(
     golden_path = cache / file
     metadata_path = _metadata_path(cache, file)
 
-    if metadata_path.is_file():
-        existing = ImageMetadata.model_validate_json(metadata_path.read_text())
+    existing = _load_metadata(metadata_path) if metadata_path.is_file() else None
+    if existing is not None:
         if (
             existing.derivation_key == key
             and golden_path.is_file()
             and sha256_file(golden_path) == existing.golden_sha256
         ):
             return existing, True
-    elif golden_path.exists():
+    elif not metadata_path.is_file() and golden_path.exists():
         raise DeriveError(
             "prepare",
             f"{golden_path} exists without metadata (unmanaged); refusing to overwrite",
@@ -195,68 +210,61 @@ def derive_golden(
             shutil.copy2(vendor, vendor_in_cache)
 
     temp = cache / f".{file}.deriving"
+    metadata_temp = metadata_path.with_suffix(".json.deriving")
     try:
-        try:
-            run(
-                [
-                    "qemu-img",
-                    "create",
-                    "-f",
-                    "qcow2",
-                    "-F",
-                    "qcow2",
-                    "-b",
-                    vendor.name,
-                    temp.name,
-                    "10G",
-                ],
-                cache,
-            )
-        except subprocess.CalledProcessError as error:
-            raise DeriveError(
-                "create-overlay", f"qemu-img failed for {file}: {error.stderr}"
-            ) from error
+        run(
+            "create-overlay",
+            [
+                "qemu-img",
+                "create",
+                "-f",
+                "qcow2",
+                "-F",
+                "qcow2",
+                "-b",
+                vendor.name,
+                temp.name,
+                "10G",
+            ],
+            cache,
+        )
 
         with tempfile.TemporaryDirectory() as staging_dir:
             staging = Path(staging_dir)
             (staging / "vsockd.service").write_text(_UNIT)
             (staging / "no-stub.conf").write_text(_RESOLVED_DROPIN)
-            try:
-                run(
-                    [
-                        "virt-customize",
-                        "-a",
-                        temp.name,
-                        "--no-network",
-                        "--mkdir",
-                        "/opt/inspect-ranges",
-                        "--copy-in",
-                        f"{daemon}:/opt/inspect-ranges",
-                        "--chmod",
-                        "0755:/opt/inspect-ranges/vsockd2.py",
-                        "--copy-in",
-                        f"{staging / 'vsockd.service'}:/etc/systemd/system",
-                        "--link",
-                        "/etc/systemd/system/vsockd.service:/etc/systemd/system/multi-user.target.wants/vsockd.service",
-                        "--link",
-                        "/dev/null:/etc/systemd/system/systemd-networkd-wait-online.service",
-                        "--link",
-                        "/dev/null:/etc/systemd/system/ssh.service",
-                        "--link",
-                        "/dev/null:/etc/systemd/system/ssh.socket",
-                        "--mkdir",
-                        "/etc/systemd/resolved.conf.d",
-                        "--copy-in",
-                        f"{staging / 'no-stub.conf'}:/etc/systemd/resolved.conf.d",
-                        "--link",
-                        "/run/systemd/resolve/resolv.conf:/etc/resolv.conf",
-                    ],
-                    cache,
-                )
-            except subprocess.CalledProcessError as error:
-                raise DeriveError(
-                    "customize", f"virt-customize failed for {file}: {error.stderr}"
-                ) from error
+            run(
+                "customize",
+                [
+                    "virt-customize",
+                    "-a",
+                    temp.name,
+                    "--no-network",
+                    "--mkdir",
+                    "/opt/inspect-ranges",
+                    "--copy-in",
+                    f"{daemon}:/opt/inspect-ranges",
+                    "--chmod",
+                    "0755:/opt/inspect-ranges/vsockd2.py",
+                    "--copy-in",
+                    f"{staging / 'vsockd.service'}:/etc/systemd/system",
+                    "--link",
+                    "/etc/systemd/system/vsockd.service:/etc/systemd/system/multi-user.target.wants/vsockd.service",
+                    "--link",
+                    "/dev/null:/etc/systemd/system/systemd-networkd-wait-online.service",
+                    "--link",
+                    "/dev/null:/etc/systemd/system/ssh.service",
+                    "--link",
+                    "/dev/null:/etc/systemd/system/ssh.socket",
+                    "--mkdir",
+                    "/etc/systemd/resolved.conf.d",
+                    "--copy-in",
+                    f"{staging / 'no-stub.conf'}:/etc/systemd/resolved.conf.d",
+                    "--link",
+                    "/run/systemd/resolve/resolv.conf:/etc/resolv.conf",
+                ],
+                cache,
+            )
 
         metadata = ImageMetadata(
             name=golden_name,
@@ -269,13 +277,16 @@ def derive_golden(
             golden_sha256=sha256_file(temp),
             created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
-        temp.replace(golden_path)
-        metadata_temp = metadata_path.with_suffix(".json.deriving")
+        # sidecar lands first: a crash between the two renames leaves metadata
+        # pointing at a missing or stale golden, which the next derive repairs,
+        # never a provenance-less golden the tool would refuse as unmanaged
         metadata_temp.write_text(metadata.model_dump_json(indent=2) + "\n")
         metadata_temp.replace(metadata_path)
+        temp.replace(golden_path)
         return metadata, False
     finally:
         temp.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
 
 
 def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
@@ -292,7 +303,9 @@ def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
     managed: list[ImageMetadata] = []
     managed_files: set[str] = set()
     for sidecar in sorted(cache.glob("*.json")):
-        metadata = ImageMetadata.model_validate_json(sidecar.read_text())
+        metadata = _load_metadata(sidecar)
+        if metadata is None:
+            continue  # corrupt sidecar: its image surfaces as unmanaged below
         managed.append(metadata)
         managed_files.add(metadata.file)
         managed_files.add(metadata.vendor_file)
