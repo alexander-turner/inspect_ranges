@@ -71,6 +71,11 @@ def derive(
         raise click.ClickException(str(error)) from error
     except OSError as error:
         raise click.ClickException(f"derive failed on this host: {error}") from error
+    if daemon_sha256 is None:
+        click.echo(
+            "daemon artifact unpinned: sidecar-only verification; "
+            "pass --daemon-sha256 for out-of-band pinning"
+        )
     verb = "cache hit" if hit else "derived"
     click.echo(f"{verb}: {metadata.file}  sha256:{metadata.golden_sha256}")
     click.echo(
@@ -101,7 +106,15 @@ def list_cmd(image_cache: Path) -> None:
         if not (image_cache / metadata.file).is_file():
             flags += "  MISSING GOLDEN (interrupted derive; re-run derive)"
         if metadata.recipe_version != RECIPE_VERSION:
-            flags += f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
+            try:
+                cache_newer = int(metadata.recipe_version) > int(RECIPE_VERSION)
+            except ValueError:
+                cache_newer = False
+            flags += (
+                f"  RECIPE MISMATCH (cache v{metadata.recipe_version} vs tool v{RECIPE_VERSION}; upgrade the tool or re-derive)"
+                if cache_newer
+                else f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
+            )
         click.echo(
             f"{metadata.file}  sha256:{metadata.golden_sha256[:12]}  "
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "

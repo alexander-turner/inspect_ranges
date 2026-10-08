@@ -601,3 +601,24 @@ def test_range_image_rebuilds_on_content_mismatch() -> None:
     assert any(argv[:2] == ["docker", "build"] for argv in calls), (
         "a tag whose content label mismatches must rebuild"
     )
+
+
+def test_make_channel_uses_the_readiness_allowance() -> None:
+    """One wedged accept-but-never-reply guest must cost seconds per attempt, not the channel default."""
+    channel = up_module().make_channel({"web": 3000})
+    assert channel._channel_budget_s == 10.0  # noqa: SLF001 - the tuned allowance is the contract
+
+
+def test_readiness_failure_logs_the_swallowed_cause(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_channel(monkeypatch, FakeChannel(ping_ok=True, exec_rc=2))
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(bundle, options(cache, tmp_path), runner=docker)
+    state_root = tmp_path / "state"
+    project = next(entry.name for entry in state_root.iterdir())
+    events = StageLog(state_root, project).events()
+    fails = [e for e in events if e["stage"] == "readiness" and e["status"] == "fail"]
+    assert fails and any("exited 2" in str(e.get("cause", "")) for e in fails)

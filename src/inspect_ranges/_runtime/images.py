@@ -114,6 +114,10 @@ def resolve_daemon_bundle(
             "resolve-daemon",
             f"daemon bundle missing: {bundle_path} (republish: inspect-ranges daemon-bundle -o {artifact_dir})",
         )
+    if expected_sha256 is None:
+        logger.warning(
+            "daemon artifact unpinned: sidecar-only verification; pass --daemon-sha256 for out-of-band pinning"
+        )
     if expected_sha256 is not None:
         pin = expected_sha256.removeprefix("sha256:").lower()
         if info.bundle_sha256 != pin:

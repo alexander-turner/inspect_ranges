@@ -75,6 +75,23 @@ def _range_image_tag() -> str:
     return RANGE_IMAGE_TAG
 
 
+def _artifact_state(sidecar: Path) -> str:
+    """`ok`, `tar-missing`, or `absent`: the sidecar names the tarball that must exist beside it."""
+    from .._channel.bundle import DaemonBundleInfo, bundle_file_name
+
+    if not sidecar.is_file():
+        return "absent"
+    try:
+        info = DaemonBundleInfo.model_validate_json(sidecar.read_text())
+    except (OSError, ValueError):
+        return "absent"
+    return (
+        "ok"
+        if (sidecar.parent / bundle_file_name(info.version)).is_file()
+        else "tar-missing"
+    )
+
+
 def check_realizer(
     image_inspect: subprocess.CompletedProcess[str] | None,
 ) -> list[CheckResult]:
@@ -104,9 +121,20 @@ def check_realizer(
             )
         )
     sidecar = DEFAULT_ARTIFACT_DIR / "daemon.json"
-    if sidecar.is_file():
+    artifact_state = _artifact_state(sidecar)
+    if artifact_state == "ok":
         results.append(
             CheckResult(REALIZER, "daemon artifact", "ok", str(DEFAULT_ARTIFACT_DIR))
+        )
+    elif artifact_state == "tar-missing":
+        results.append(
+            CheckResult(
+                REALIZER,
+                "daemon artifact",
+                "warn",
+                f"sidecar present but its bundle tar is missing at {DEFAULT_ARTIFACT_DIR}; republish",
+                fix=f"inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+            )
         )
     else:
         results.append(

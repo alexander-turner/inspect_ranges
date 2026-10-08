@@ -245,15 +245,15 @@ async def _await_ready(
     readiness: str,
     deadline: float,
     min_window: float = 10.0,
-) -> bool:
-    """One guest's readiness: daemon answering, then the cloud-init gate; any failure or malformed behavior is not-ready, never an escape."""
+) -> tuple[bool, str | None]:
+    """One guest's readiness and, when unready, the swallowed cause for the stage log: daemon answering, then the cloud-init gate; any failure or malformed behavior is not-ready, never an escape."""
     while True:
         try:
             await channel.ping(guest)
             break
-        except Exception:
+        except Exception as error:
             if time.monotonic() >= deadline:
-                return False
+                return False, f"daemon never answered: {error!r}"
             await asyncio.sleep(1.0)
     if readiness == "cloud-init":
         remaining_ms = max(
@@ -268,10 +268,12 @@ async def _await_ready(
                     budget=Budget(command_ms=min(remaining_ms, 3_600_000)),
                 ),
             )
-            return outcome.rc == 0
-        except Exception:
-            return False
-    return True
+            if outcome.rc == 0:
+                return True, None
+            return False, f"cloud-init status --wait exited {outcome.rc}"
+        except Exception as error:
+            return False, f"readiness exec failed: {error!r}"
+    return True, None
 
 
 def project_containers(runner: Runner, project: str) -> list[str]:
@@ -428,7 +430,7 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
             guest_deadline = max(
                 deadline, time.monotonic() + options.readiness_min_window
             )
-            ready = await _await_ready(
+            ready, cause = await _await_ready(
                 channel,
                 guest.name,
                 guest.readiness,
@@ -436,7 +438,12 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
                 min_window=options.readiness_min_window,
             )
             collected.append(GuestState(name=guest.name, cid=guest.cid, ready=ready))
-            log.log("readiness", "ok" if ready else "fail", guest=guest.name)
+            log.log(
+                "readiness",
+                "ok" if ready else "fail",
+                guest=guest.name,
+                **({"cause": cause} if cause else {}),
+            )
         return collected
 
     states = asyncio.run(_readiness())

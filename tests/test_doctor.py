@@ -285,3 +285,39 @@ def test_render_fix_script_with_nothing_to_fix() -> None:
     script = render_fix_script([CheckResult("G", "fine", "ok", "x")])
     assert "no runnable fixes needed" in script
     assert "id -u" not in script
+
+
+def test_check_realizer_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker-gated image check (skip vs ok vs warn) and the artifact check verifying the tarball the sidecar names."""
+    import inspect_ranges._runtime.images as images_module
+    from inspect_ranges._channel.bundle import write_bundle
+    from inspect_ranges._doctor.checks import check_realizer
+
+    artifact = tmp_path / "artifacts"
+    monkeypatch.setattr(images_module, "DEFAULT_ARTIFACT_DIR", artifact)
+
+    def status_of(results: "list[CheckResult]", name: str) -> str:
+        return next(r.status for r in results if r.name == name)
+
+    # docker unreachable: skip, never 'not built yet'
+    results = check_realizer(image_inspect=None)
+    assert status_of(results, "range image") == "skip"
+    # image present
+    ok_proc = subprocess.CompletedProcess(["docker"], 0, "ok\n", "")
+    assert status_of(check_realizer(image_inspect=ok_proc), "range image") == "ok"
+    # image absent (docker reachable)
+    warn_proc = subprocess.CompletedProcess(["docker"], 1, "", "no such image")
+    assert status_of(check_realizer(image_inspect=warn_proc), "range image") == "warn"
+    # artifact absent entirely
+    assert status_of(check_realizer(image_inspect=ok_proc), "daemon artifact") == "warn"
+    # sidecar present but the tarball it names is missing
+    write_bundle(artifact, b"fake", version="9.9.9-test")
+    (artifact / "vsockd-bundle-9.9.9-test.tar").unlink()
+    results = check_realizer(image_inspect=ok_proc)
+    assert status_of(results, "daemon artifact") == "warn"
+    assert "republish" in next(r.detail for r in results if r.name == "daemon artifact")
+    # full artifact present
+    write_bundle(artifact, b"fake", version="9.9.9-test")
+    assert status_of(check_realizer(image_inspect=ok_proc), "daemon artifact") == "ok"
