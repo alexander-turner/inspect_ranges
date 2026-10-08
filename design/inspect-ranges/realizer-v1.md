@@ -1,0 +1,66 @@
+---
+type: decision
+title: "Realizer v1: bundle to running range as a product, in six slices"
+status: proposed
+tags: [inspect-ranges, runtime, realizer, apply, images, decision]
+timestamp: 2026-10-08
+---
+
+# Realizer v1: bundle to running range as a product, in six slices
+
+*Phase plan for the realizer track of the provider arc: the production `apply` stage that turns a rendered realization bundle into a running, ready range on one host, plus the golden-image derivation it needs and the teardown story it owes. It executes the applier contract already specified by the render stage (`render.py` module docstring) and demonstrated spike-grade in the [bundle spike](../spikes/bundle/README.md), under the seam rules of [host-provider](host-provider.md) (digest-verified bundle in, self-sufficiency, no mid-flight driver round trips) and the container/vsock rules of [agent-containment](agent-containment.md). It runs in parallel with the channel track (vsockd v3 + `RangeChannel`); the shared surface between the tracks is `inspect_ranges.types`, the compiler's plan/bundle, and a pinned daemon artifact. Checkpoint instantiation stays out: v1 realizes cold-boot bundles only, per [memory-restore-ad](memory-restore-ad.md) and [range-build](range-build.md).*
+
+## What the spikes already proved versus what is new
+
+Proven, spike-grade: a generic applier realizes a range purely from bundle contents under the hardened container profile (bundle spike: tamper refusal, 47.3 s to enforced-ready, 13/13 combined battery); every networking construct holds on the wire (acl-v2 11/11, routing 9/9, egress 8/8, netsvc 8/8, routed 7/7); parallel boot with readiness gating scales (boot-storm, 96 VMs); the Inspect provider chain closes end to end (e2e-provider, 41/44 `self_check`). New productization: the applier as package code with failure modes and crash cleanup instead of `apply.sh`; image derivation as a command instead of hand-prepared spike images; the non-root-QEMU hardened range image (the bundle spike's recorded honest residue); teardown that survives the death of the process that booted the range.
+
+## Module layout and track isolation
+
+New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored package carry no leading underscore: `up.py`, `down.py`, `images.py`, `netns.py`, `ownership.py`). The realizer imports `inspect_ranges.types` and `inspect_ranges._compiler` (plan, bundle) and nothing from the channel track's `_channel/`; the channel track imports nothing from `_runtime/`. The one artifact crossing the tracks is the guest control daemon, consumed here as a pinned artifact (version plus sha256 digest, published by the channel track into the artifact cache); the realizer bakes it by digest and never builds it. Until the channel track publishes v3, slice 1 pins the current v2 spike daemon under the same mechanism, so the tracks never block each other.
+
+## Concurrency discipline (shared devbox, parallel tracks)
+
+vsock CIDs are host-kernel-global ([agent-containment](agent-containment.md)), so two concurrently booted ranges, or this track's battery beside the channel track's VM harness, can collide. Three rules: `PlanOptions` gains `cid_base` so CIDs are partitioned at plan time (CIDs are render inputs per host-provider, never apply-time probes; boot-storm already ran per-range CID bases); the tracks take documented disjoint partitions (realizer batteries 3000 and up, channel harness below 3000); and batteries that assume an otherwise-quiet host serialize on a host flock (`/tmp/inspect-ranges-battery.lock`). Compose project names are per-range and deterministic (`ir-<range>-<spec-digest-prefix>`), so stale projects from one track are visible and attributable to the other.
+
+## Review discipline
+
+Every slice closes with a fresh-context code review: a reviewer with no shared session context with the author (not a fork of the authoring session) reads the slice diff against this record's acceptance criteria, the house rules, and the seam contracts, hunting specifically for silent-failure paths, battery gaps against the slice's failure-mode list, and containment-posture drift. Blocking findings are fixed before the slice is declared done; the slice ledger records the review outcome.
+
+## The slices
+
+Lockstep rule throughout: implementation plus failure modes plus conformance battery plus docs plus fresh-context review, or the slice is not done.
+
+**Slice 0: Inspect API checkpoint (half day, throwaway).** A stub `SandboxEnvironment` registered through the entry-point mechanism, exercised against a hand-booted VM, purely to confirm the current Inspect contract before three slices assume it: `@sandboxenv` registration and discovery, the lifecycle hooks (`task_init`, `sample_init`, `sample_cleanup`, `task_cleanup`), config plumbing for both forms of `Task(sandbox=("libvirt_range", ...))` (a YAML path and a `RangeSpec` object; the typed form postdates the e2e-provider spike), named-sandbox resolution (`sandbox("web")`), and `config_files()` semantics. Acceptance: a one-page findings note recorded in this file's ledger; any contract surprise re-plans slice 5 of the provider phase before it is built. No battery; this is a checkpoint, not a deliverable.
+
+**Slice 1: golden image derivation.** `inspect-ranges images derive <vendor-image>` takes a digest-pinned vendor cloud image and the pinned daemon artifact and produces a daemon-baked golden qcow2 in the image cache (`virt-customize`: install daemon unit, disable sshd and every socket-activated listener, record provenance). `images list` shows the cache with digests. Failure modes: daemon artifact digest mismatch refuses; derivation is idempotent (same inputs, same golden digest, cache hit skips work). Battery: the derived golden boots under libvirt, the daemon answers on vsock from CID 2, `ss -tlnp` is empty at boot (agent-containment backlog item 9, closing the spike-image sshd residue), and a corrupted vendor image refuses before any write to the cache.
+
+**Slice 2: `inspect-ranges up`, the applier core.** Consumes a rendered bundle only: verify every manifest digest and refuse on mismatch or unlisted files, then execute the render contract in order (compose project up under the hardened profile, bridges, addresses, dnsmasq, `range.nft`, per-guest overlays and seed ISOs, define and start per `boot.json`, wait on every readiness probe), then exit reporting the project name and per-guest state. `up --from-spec range.yaml` is a convenience that composes render into a temp bundle plus `up`, weakening nothing. This slice also ships the production range image, closing the bundle spike's residue: QEMU as a non-root user, libvirt mount namespaces off, docker-default AppArmor enforced, the render-emitted capability floor and nothing more. Failure modes: tampered bundle, missing image digest in cache, readiness timeout (fails with per-guest diagnostics, then tears down unless `--keep`), partial boot. Battery: the bundle spike's 13 checks pass with `up` replacing `apply.sh`, tamper refusal holds, readiness-timeout and missing-image paths produce their specific errors, and zero range artifacts are visible on the host during a running range.
+
+**Slice 3: `inspect-ranges down`, ownership, crash cleanup.** Teardown keyed off recorded ownership (the compose project and deterministic names), never off live process state: `down` is idempotent, works from a process that did not run `up`, and ports the cleanup-registry pattern from [docker-provider-reuse](docker-provider-reuse.md). Failure modes are the point: `kill -9` on `up` mid-boot followed by `down` leaves nothing (no project, volumes, domains, or stale ready markers; netns death already guarantees no host bridges); double `down` is a no-op; `down --all` sweeps every `ir-*` project on the host. Battery: the kill-mid-up matrix (during fetch, during boot, during readiness wait), the e2e-provider finding 5 scenario (`pkill` the harness, then recover with `down`), and a stale-project collision test (second `up` of the same bundle refuses or supersedes explicitly, never silently reuses).
+
+**Slice 4: repoint the conformance batteries.** The acl-v2, routing, egress, netsvc, and routed spike batteries run against realizer-booted ranges through one shared runner (`up` the spec's bundle, run checks over the vsock client, `down`), retiring each spike's private apply glue. Acceptance: all five batteries green via the realizer on the same specs, under the hardened image, with the CID partition and battery lock from the concurrency rules. This is the regression harness the channel track will also point at once v3 lands.
+
+**Slice 5: docs and operator surface.** The CLI page documents `images derive/list`, `up`, `down` with the failure modes above; `doctor` gains the realizer's host checks (daemon artifact present, range image present, `/dev/vhost-vsock`). Acceptance: docs render, `doctor --json` reflects the new checks, and the realizer section states the v1 boundary honestly (cold-boot bundles only, guest content still gated at planning).
+
+## Verification (the phase proves itself)
+
+The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `make check` and the unit suite are green; slices 1 through 4's batteries pass in one scripted run (derive goldens, then the five repointed batteries, then the crash-cleanup matrix) under the host flock; the bundle spike's `apply.sh` is retired to historical reference with its README noting the realizer as the production path; and a cold start from a fresh host (doctor-fixed, empty caches) reaches a ready range with exactly three commands (`images derive`, `render`, `up`).
+
+## Non-goals
+
+- No Inspect provider beyond the slice 0 stub; the provider phase builds on this one.
+- No channel protocol work: daemon v3, retry, listener supervision, and `RangeChannel` belong to the parallel channel track; the realizer only bakes the pinned daemon artifact.
+- No guest-content realization: the planning gates (`guest-config-not-realized`, `randomization-not-realized`, `windows-render-not-supported`) stand unchanged.
+- No checkpoint instantiation and no memory restore; cold boot from rendered bundles only.
+- No separated-topology transport (`HostProvider`); v1 realizes locally, honoring the seam by consuming only digest-verified bundles.
+
+## Ledger
+
+| Slice | Status |
+|---|---|
+| 0 Inspect API checkpoint | planned |
+| 1 image derivation | planned |
+| 2 `up` applier core | planned |
+| 3 `down` and crash cleanup | planned |
+| 4 battery repointing | planned |
+| 5 docs and doctor | planned |
