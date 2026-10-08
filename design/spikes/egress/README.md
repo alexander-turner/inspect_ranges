@@ -1,5 +1,7 @@
 # Spike: scoped-egress conformance — the NAT battery for networking-v0.2 §3
 
+> **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
+
 *The lockstep conformance leg for slice 4 of [networking-v0.2](../../inspect-ranges/networking-v0.2.md), and the queued NAT-conformance item from [architecture.md](../../inspect-ranges/architecture.md) §13: `EgressPolicy` lives in the schema with its validators (`invalid-egress-entry`, `egress-requires-nat`, `egress-with-router-not-realized`, the `egress-fqdn-not-realized` and IPv6 gates), the allocator reserves a hypervisor gateway on routerless `mode: nat` networks, and `render_egress_nftables` realizes the allowlist in the range netns, where no guest can reach it. The hardened-container spike proved the no-egress case; this proves the granted case is exactly the allowlist. Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down.*
 
 ## Verdict

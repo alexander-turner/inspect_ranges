@@ -1,5 +1,7 @@
 # Spike: ACL v2 conformance — the booted battery for networking-v0.2 §1
 
+> **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
+
 *The lockstep conformance leg for slice 2 of [networking-v0.2](../../inspect-ranges/networking-v0.2.md): the schema and semantic validation live in the package (`inspect_ranges.types`), allocation and the router ruleset come from the production compiler (`inspect_ranges._compiler`: `allocate`, `render_router_nftables`), and this spike proves the rendered policy on the wire. Seeds, bridges, and the boot plan are spike-grade glue carried over from [net-compile](../net-compile/README.md). Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces (needs the net-compile guest image once); `./run.sh down` tears down.*
 
 ## Verdict

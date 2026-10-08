@@ -1,5 +1,7 @@
 # Spike: network-services conformance — DHCP and DNS realization (networking-v0.2 §9, slices 5 and 7)
 
+> **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
+
 *Two of the three v0.1-legacy ledger rows: `dhcp: true` and the `dns` shapes, realized by the production compiler (`inspect_ranges._compiler.render_dnsmasq_conf`, `resolvers_for`, and the hypervisor-address reservation in `allocate`) and proven in a booted range. Machinery carried from the earlier conformance spikes; the range image adds dnsmasq. Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down. The authoritative clean run is `tmp/run4.log` (8/8).*
 
 ## Verdict
