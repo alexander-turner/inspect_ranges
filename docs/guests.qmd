@@ -115,8 +115,7 @@ Sizing is backend-neutral and optional:
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
-# fragment
+``` {.yaml .fragment}
 resources:
   cpus: 2
   memory_mb: 4096
@@ -125,8 +124,7 @@ resources:
 
 ### Python
 
-``` python
-# fragment
+``` {.python .fragment}
 Resources(cpus=2, memory_mb=4096, disk_gb=20)
 ```
 :::
@@ -292,8 +290,7 @@ Beyond identity and sizing, a definition declares what a guest contains: account
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
+``` {.yaml .plan-invalid}
 range:
   name: users
   description: Local accounts as converged state.
@@ -316,7 +313,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 users = RangeSpec(
     meta=RangeMeta(
         name="users", description="Local accounts as converged state."
@@ -358,7 +355,7 @@ users = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: services
   description: The converged listening surface, asserted and build-verified.
@@ -384,7 +381,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 services = RangeSpec(
     meta=RangeMeta(
         name="services",
@@ -427,7 +424,7 @@ The seeded attack surface is two distinct lists, because real intrusions lean he
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: weaknesses
   description: A CVE-backed vulnerability and a misconfiguration, as distinct lists.
@@ -457,7 +454,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 weaknesses = RangeSpec(
     meta=RangeMeta(
         name="weaknesses",
@@ -508,7 +505,7 @@ weaknesses = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: planted-data
   description: Scenario files on a database host.
@@ -531,7 +528,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 planted_data = RangeSpec(
     meta=RangeMeta(
         name="planted-data",
@@ -575,7 +572,7 @@ The range-level `defense` section records the defensive posture on the D0 (no de
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: defended
   description: Passive detection, with per-host protection toggles.
@@ -605,7 +602,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 defended = RangeSpec(
     meta=RangeMeta(
         name="defended",
@@ -656,7 +653,7 @@ Identity is range-scoped (accounts exist in the domain, not on a host), so `acti
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: forest
   description: A parent and child domain with seeded identity attack surface.
@@ -700,7 +697,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 forest = RangeSpec(
     meta=RangeMeta(
         name="forest",
@@ -783,7 +780,7 @@ Everything above declares state; `provisioning` names the build-time work that p
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: provisioned
   description: A build recipe referenced by name, with inputs.
@@ -807,7 +804,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 provisioned = RangeSpec(
     meta=RangeMeta(
         name="provisioned",
@@ -845,7 +842,7 @@ provisioned = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: activity
   description: Behavior simulation on a domain controller.
@@ -868,7 +865,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 activity = RangeSpec(
     meta=RangeMeta(
         name="activity",
@@ -907,7 +904,7 @@ activity = RangeSpec(
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: randomized
   description: A randomized service port and a templated credential.
@@ -934,7 +931,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 def randomized(
     telnet_port: int = 2323, admin_password: str = "changeme123!"
 ) -> RangeSpec:
@@ -982,7 +979,7 @@ The compiler emits each guest's desired configuration (addressing, resolvers, ho
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: windows-gated
   description: A Windows target, valid to define, gated at planning.
@@ -1002,7 +999,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 windows_gated = RangeSpec(
     meta=RangeMeta(
         name="windows-gated",

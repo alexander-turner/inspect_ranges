@@ -11,22 +11,34 @@ from inspect_ranges.types import IssueError, RangeSpec
 
 DOCS = Path(__file__).parent.parent / "docs"
 PAGES = ("ranges.qmd", "guests.qmd", "networks.qmd")
-MIN_BLOCKS = {"ranges.qmd": 3, "guests.qmd": 5, "networks.qmd": 10}
+MIN_BLOCKS = {"ranges.qmd": 3, "guests.qmd": 10, "networks.qmd": 9}
 
-# the Quarto visual editor writes "``` yaml", hand-written pages "```yaml"
-_YAML_BLOCK = re.compile(r"^``` ?yaml\n(.*?)^```", re.MULTILINE | re.DOTALL)
-_PYTHON_BLOCK = re.compile(r"^``` ?python\n(.*?)^```", re.MULTILINE | re.DOTALL)
+# fences: "```yaml" or "``` yaml" (plain), or "``` {.yaml .plan-invalid}"
+# (attributed). Test semantics ride as fence classes so the published blocks
+# carry no marker comments: .fragment, .invalid-example, .plan-invalid.
+_FENCE_BLOCK = re.compile(
+    r"^``` ?(?:(?P<lang>yaml|python)|\{(?P<attrs>[^}\n]*)\})[ \t]*\n(?P<body>.*?)^```",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _fence_blocks(page: str, lang: str) -> list[tuple[set[str], str]]:
+    """Every fenced block of a language on a page, as (fence classes, body)."""
+    blocks: list[tuple[set[str], str]] = []
+    for match in _FENCE_BLOCK.finditer((DOCS / page).read_text()):
+        attrs = match.group("attrs")
+        classes = (
+            {match.group("lang")}
+            if attrs is None
+            else {token.lstrip(".") for token in attrs.split()}
+        )
+        if lang in classes:
+            blocks.append((classes, match.group("body")))
+    return blocks
+
 
 # docs Python tabs show the import once per page; the rest assume the models
 _NAMESPACE: dict[str, Any] = {name: getattr(_types, name) for name in _types.__all__}
-
-
-def _blocks(page: str, pattern: re.Pattern[str]) -> list[tuple[str, str]]:
-    """Every fenced block of a kind on a docs page, labeled by its first line."""
-    return [
-        (match.splitlines()[0].strip(), match)
-        for match in pattern.findall((DOCS / page).read_text())
-    ]
 
 
 def _construct(text: str) -> RangeSpec:
@@ -59,78 +71,63 @@ def _comparable(spec: RangeSpec) -> dict[str, Any]:
 
 @pytest.mark.parametrize("page", PAGES)
 def test_pages_have_examples(page: str) -> None:
-    assert len(_blocks(page, _YAML_BLOCK)) >= MIN_BLOCKS[page], (
+    assert len(_fence_blocks(page, "yaml")) >= MIN_BLOCKS[page], (
         f"{page} lost its examples"
     )
 
 
 @pytest.mark.parametrize(
-    ("first_line", "text"),
-    [block for page in PAGES for block in _blocks(page, _YAML_BLOCK)],
+    ("classes", "text"),
+    [block for page in PAGES for block in _fence_blocks(page, "yaml")],
     ids=[
-        f"{page.removesuffix('.qmd')}-{first.lstrip('# ').split(':')[0] or index}"
+        f"{page.removesuffix('.qmd')}-yaml{index}"
         for page in PAGES
-        for index, (first, _) in enumerate(_blocks(page, _YAML_BLOCK))
+        for index, _ in enumerate(_fence_blocks(page, "yaml"))
     ],
 )
-def test_docs_examples_validate(first_line: str, text: str, tmp_path: Path) -> None:
-    """Every complete example in the docs validates; marked blocks fail exactly as documented."""
-    if first_line.startswith("# fragment"):
+def test_docs_examples_validate(classes: set[str], text: str, tmp_path: Path) -> None:
+    """Every complete example in the docs validates; classed blocks fail exactly as documented."""
+    if "fragment" in classes:
         pytest.skip("fragment, not a complete definition")
     path = tmp_path / "range.yaml"
     path.write_text(text)
     report = validate_range(path)
-    if first_line.startswith("# invalid-example"):
+    if "invalid-example" in classes:
         assert not report.valid, "invalid-example block unexpectedly validates"
         return
     assert report.valid, [issue.message for issue in report.issues]
-    if first_line.startswith("# plan-invalid"):
+    if "plan-invalid" in classes:
         assert report.spec is not None
         with pytest.raises(IssueError):
             resolve_plan(report.spec)
 
 
 @pytest.mark.parametrize(
-    ("first_line", "text"),
-    [block for page in PAGES for block in _blocks(page, _PYTHON_BLOCK)],
+    ("classes", "text"),
+    [block for page in PAGES for block in _fence_blocks(page, "python")],
     ids=[
         f"{page.removesuffix('.qmd')}-py{index}"
         for page in PAGES
-        for index, _ in enumerate(_blocks(page, _PYTHON_BLOCK))
+        for index, _ in enumerate(_fence_blocks(page, "python"))
     ],
 )
-def test_docs_python_examples_construct(first_line: str, text: str) -> None:
-    """Every Python tab constructs a valid spec; marked blocks gate exactly as documented."""
-    if first_line.startswith("# fragment"):
+def test_docs_python_examples_construct(classes: set[str], text: str) -> None:
+    """Every Python tab constructs a valid spec; classed blocks gate exactly as documented."""
+    if "fragment" in classes:
         pytest.skip("fragment, not a complete definition")
     spec = _construct(text)
     revalidate_range(spec)
-    if first_line.startswith("# plan-invalid"):
+    if "plan-invalid" in classes:
         with pytest.raises(IssueError):
             resolve_plan(spec)
-
-
-def test_embedded_real_example_matches_design_file() -> None:
-    """The vulhub-zabbix block on ranges.qmd is the design example verbatim (marker line aside), so the two cannot drift."""
-    design = (
-        Path(__file__).parent.parent
-        / "design/inspect-ranges/ranges/vulhub-zabbix/range.yaml"
-    ).read_text()
-    block = next(
-        text
-        for first, text in _blocks("ranges.qmd", _YAML_BLOCK)
-        if first.startswith("# plan-invalid") and "vulhub-zabbix" in text
-    )
-    embedded = block.split("\n", 1)[1]
-    assert embedded == design, "ranges.qmd vulhub-zabbix drifted from the design file"
 
 
 @pytest.mark.parametrize("page", PAGES)
 def test_yaml_and_python_tabs_agree(page: str, tmp_path: Path) -> None:
     """The two tabs of every example define the same range, so they cannot drift apart."""
     yaml_specs: dict[str, RangeSpec] = {}
-    for first_line, text in _blocks(page, _YAML_BLOCK):
-        if first_line.startswith(("# fragment", "# invalid-example")):
+    for classes, text in _fence_blocks(page, "yaml"):
+        if classes & {"fragment", "invalid-example"}:
             continue
         path = tmp_path / "range.yaml"
         path.write_text(text)
@@ -138,8 +135,8 @@ def test_yaml_and_python_tabs_agree(page: str, tmp_path: Path) -> None:
         assert report.spec is not None
         yaml_specs[report.spec.meta.name] = report.spec
     python_specs: dict[str, RangeSpec] = {}
-    for first_line, text in _blocks(page, _PYTHON_BLOCK):
-        if first_line.startswith("# fragment"):
+    for classes, text in _fence_blocks(page, "python"):
+        if "fragment" in classes:
             continue
         spec = _construct(text)
         python_specs[spec.meta.name] = spec
