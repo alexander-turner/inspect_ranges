@@ -92,6 +92,7 @@ func main() {
 		daemon.diag.Add("info", "listening", nil, fmt.Sprintf("port %d", *port))
 		acceptLoop(fd, daemon, limiter)
 		unix.Close(fd)
+		daemon.listenerRestarts.Add(1)
 		daemon.diag.Add("error", "listener-restarted", nil, "accept loop died")
 		time.Sleep(100 * time.Millisecond)
 	}

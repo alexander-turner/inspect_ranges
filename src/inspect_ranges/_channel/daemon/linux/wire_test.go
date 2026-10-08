@@ -27,6 +27,10 @@ type vectorDoc struct {
 		BulkHex   *string         `json:"bulk_hex"`
 		FramesHex []string        `json:"frames_hex"`
 	} `json:"vectors"`
+	Rejects []struct {
+		Name    string `json:"name"`
+		Payload string `json:"payload"`
+	} `json:"rejects"`
 }
 
 func loadVectors(t *testing.T) *vectorDoc {
@@ -112,6 +116,23 @@ func TestDecodeHardening(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := ParseControl([]byte(c.payload)); err == nil {
 				t.Fatalf("accepted dishonest payload %s", c.name)
+			}
+		})
+	}
+}
+
+// TestSharedRejectTable drives the cross-codec rejection corpus: every
+// payload here must be refused by all three codecs, so any parity break
+// becomes a missing table entry rather than a silent divergence.
+func TestSharedRejectTable(t *testing.T) {
+	doc := loadVectors(t)
+	if len(doc.Rejects) < 50 {
+		t.Fatalf("shared reject table suspiciously small: %d entries", len(doc.Rejects))
+	}
+	for _, reject := range doc.Rejects {
+		t.Run(reject.Name, func(t *testing.T) {
+			if _, err := ParseControl([]byte(reject.Payload)); err == nil {
+				t.Fatalf("accepted shared-reject payload %s: %s", reject.Name, reject.Payload)
 			}
 		})
 	}

@@ -256,7 +256,7 @@ class ForwardReply(_MessageBase):
 class DiagEntry(_WireModel):
     ts_ms: int = Field(ge=0, le=MAX_WIRE_INT)
     level: Literal["info", "warn", "error"]
-    event: str = Field(max_length=128)
+    event: str = Field(min_length=1, max_length=128)
     request_id: str | None = Field(default=None, max_length=64)
     detail: str = Field(default="", max_length=2048)
 
@@ -264,6 +264,8 @@ class DiagEntry(_WireModel):
 class DiagReply(_MessageBase):
     kind: Literal["diag_result"] = "diag_result"
     entries: list[DiagEntry] = Field(max_length=1000)
+    listener_restarts: int = Field(default=0, ge=0, le=MAX_WIRE_INT)
+    """Supervised listener recreations since daemon start: the storm battery asserts it stays 0."""
 
 
 class ErrorReply(_MessageBase):

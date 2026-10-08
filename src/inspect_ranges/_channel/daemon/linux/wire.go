@@ -21,6 +21,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"unicode/utf8"
 )
 
 const (
@@ -81,8 +82,9 @@ type Message struct {
 	Handle    string `json:"handle,omitempty"`
 
 	// diag
-	MaxEntries *int64      `json:"max_entries,omitempty"`
-	Entries    []DiagEntry `json:"entries,omitempty"`
+	MaxEntries       *int64      `json:"max_entries,omitempty"`
+	Entries          []DiagEntry `json:"entries,omitempty"`
+	ListenerRestarts *int64      `json:"listener_restarts,omitempty"`
 
 	// pong
 	Daemon   string `json:"daemon,omitempty"`
@@ -212,6 +214,9 @@ func (m *Message) controlMap() (map[string]any, error) {
 		if _, ok := out["entries"]; !ok {
 			out["entries"] = []any{}
 		}
+		if _, ok := out["listener_restarts"]; !ok {
+			out["listener_restarts"] = 0
+		}
 	}
 	if budget, ok := out["budget"].(map[string]any); ok {
 		if _, set := budget["untimed_bound_ms"]; !set {
@@ -231,6 +236,9 @@ func EncodeMessage(m *Message, bulk []byte) ([]byte, error) {
 	}
 	control, err := m.controlMap()
 	if err != nil {
+		return nil, err
+	}
+	if err := validEncodable(control); err != nil {
 		return nil, err
 	}
 	payload, err := canonicalJSON(control)
@@ -261,6 +269,34 @@ func EncodeMessage(m *Message, bulk []byte) ([]byte, error) {
 		writeFrame(&out, FrameEnd, endPayload)
 	}
 	return out.Bytes(), nil
+}
+
+// validEncodable refuses strings encoding/json would silently mangle to
+// U+FFFD (invalid UTF-8, e.g. a truncation that split a rune): byte parity
+// over silence, mirroring the Python and C# encoders.
+func validEncodable(value any) error {
+	switch v := value.(type) {
+	case string:
+		if !utf8.ValidString(v) {
+			return fmt.Errorf("unencodable string (invalid UTF-8)")
+		}
+	case map[string]any:
+		for key, item := range v {
+			if !utf8.ValidString(key) {
+				return fmt.Errorf("unencodable key (invalid UTF-8)")
+			}
+			if err := validEncodable(item); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if err := validEncodable(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func writeFrame(out *bytes.Buffer, frameType byte, payload []byte) {
@@ -361,6 +397,12 @@ func ReadMessage(fr *FrameReader, bulkCap int64) (*Message, []byte, error) {
 
 // ParseControl parses and strictly validates a control payload.
 func ParseControl(payload []byte) (*Message, error) {
+	if !utf8.Valid(payload) {
+		return nil, decodeErrf("control payload is not valid UTF-8")
+	}
+	if err := scanSurrogateEscapes(payload); err != nil {
+		return nil, err
+	}
 	if err := scanStrict(payload); err != nil {
 		return nil, err
 	}
@@ -415,7 +457,7 @@ var kindFields = map[string]kindSpec{
 	"ok":          {},
 	"pending":     {required: []string{"target_id", "elapsed_ms"}},
 	"forward_ok":  {required: []string{"handle"}},
-	"diag_result": {optional: []string{"entries"}},
+	"diag_result": {optional: []string{"entries", "listener_restarts"}},
 	"error":       {required: []string{"errno", "message"}, optional: []string{"layer"}},
 	"realize":     {required: []string{"bundle_digest"}, optional: []string{"grants"}},
 	"teardown":    {},
@@ -509,6 +551,78 @@ func scanStrict(payload []byte) error {
 	return nil
 }
 
+// scanSurrogateEscapes walks the raw JSON text and rejects unpaired
+// \uD800-\uDFFF escapes: encoding/json would silently decode them to
+// U+FFFD, breaking three-codec byte parity (shared table: lone-surrogate).
+func scanSurrogateEscapes(payload []byte) error {
+	inString := false
+	for i := 0; i < len(payload); i++ {
+		c := payload[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		if c == '"' {
+			inString = false
+			continue
+		}
+		if c != '\\' {
+			continue
+		}
+		if i+1 >= len(payload) {
+			return decodeErrf("unterminated escape")
+		}
+		next := payload[i+1]
+		if next != 'u' {
+			i++ // any simple escape: skip the escaped char
+			continue
+		}
+		code, ok := hex4(payload, i+2)
+		if !ok {
+			return decodeErrf("bad unicode escape")
+		}
+		i += 5
+		if code >= 0xDC00 && code <= 0xDFFF {
+			return decodeErrf("lone low surrogate escape")
+		}
+		if code >= 0xD800 && code <= 0xDBFF {
+			if i+6 >= len(payload) || payload[i+1] != '\\' || payload[i+2] != 'u' {
+				return decodeErrf("lone high surrogate escape")
+			}
+			low, ok := hex4(payload, i+3)
+			if !ok || low < 0xDC00 || low > 0xDFFF {
+				return decodeErrf("lone high surrogate escape")
+			}
+			i += 6
+		}
+	}
+	return nil
+}
+
+func hex4(payload []byte, at int) (int, bool) {
+	if at+4 > len(payload) {
+		return 0, false
+	}
+	value := 0
+	for _, c := range payload[at : at+4] {
+		var digit int
+		switch {
+		case c >= '0' && c <= '9':
+			digit = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			digit = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			digit = int(c-'A') + 10
+		default:
+			return 0, false
+		}
+		value = value<<4 | digit
+	}
+	return value, true
+}
+
 func parseEnd(payload []byte) (string, int64, error) {
 	if err := scanStrict(payload); err != nil {
 		return "", 0, err
@@ -531,6 +645,30 @@ func parseEnd(payload []byte) (string, int64, error) {
 // ---------------------------------------------------------------------------
 // validation (mirrors the pydantic schema rules the vectors pin)
 // ---------------------------------------------------------------------------
+
+// strict-side-wins literal sets and length caps, adopted from the Python
+// schema and pinned by the shared rejection table
+var stageLiterals = map[string]bool{
+	"fetch": true, "construct": true, "boot": true, "verify": true,
+	"ready": true, "failed": true,
+}
+var layerLiterals = map[string]bool{
+	"command": true, "channel": true, "untimed": true, "transport": true,
+}
+var levelLiterals = map[string]bool{"info": true, "warn": true, "error": true}
+var guestStateLiterals = map[string]bool{
+	"pending": true, "booting": true, "ready": true, "failed": true,
+}
+
+const (
+	maxDaemonLen  = 128
+	maxMessageLen = 4096
+	maxDetailLen  = 4096
+	maxEventLen   = 128
+	maxDiagDetail = 2048
+	maxReqIDLen   = 64
+	maxCommandMs  = DefaultUntimedMs
+)
 
 var bulkKinds = map[string]bool{
 	"exec": true, "write_file": true, "exec_result": true, "file_data": true,
@@ -559,9 +697,15 @@ func (m *Message) validate() error {
 			return decodeErrf("%s: data_size out of bounds", m.Kind)
 		}
 	}
-	for _, bounded := range []*int64{m.ElapsedMs, m.UptimeMs, m.MaxBytes, m.Size, m.StdoutSize, m.StderrSize} {
+	for _, bounded := range []*int64{m.ElapsedMs, m.UptimeMs, m.ListenerRestarts} {
 		if bounded != nil && (*bounded < 0 || *bounded > MaxWireInt) {
 			return decodeErrf("%s: integer field out of bounds", m.Kind)
+		}
+	}
+	// byte-count fields adopt Python's tighter cap (strict side wins)
+	for _, bounded := range []*int64{m.MaxBytes, m.Size, m.StdoutSize, m.StderrSize} {
+		if bounded != nil && (*bounded < 0 || *bounded > MaxBulkDeclarable) {
+			return decodeErrf("%s: byte-count field out of bounds", m.Kind)
 		}
 	}
 	if m.Budget != nil {
@@ -618,6 +762,12 @@ func (m *Message) validate() error {
 		if !errnoRe.MatchString(m.Errno) {
 			return decodeErrf("error: bad errno shape")
 		}
+		if len(m.Message) > maxMessageLen {
+			return decodeErrf("error: message too long")
+		}
+		if m.Layer != nil && !layerLiterals[*m.Layer] {
+			return decodeErrf("error: unknown layer")
+		}
 		if (m.Errno == "ETIME" || m.Errno == "ETIMEDOUT") && m.Layer == nil {
 			return decodeErrf("error: budget errors must name their layer")
 		}
@@ -629,6 +779,57 @@ func (m *Message) validate() error {
 		if !sha256Re.MatchString(m.BundleDigest) {
 			return decodeErrf("realize: bad bundle digest")
 		}
+	case "pong":
+		if len(m.Daemon) > maxDaemonLen {
+			return decodeErrf("pong: daemon too long")
+		}
+		if m.Protocol != nil && *m.Protocol != ProtocolVersion {
+			return decodeErrf("pong: protocol must be %d", ProtocolVersion)
+		}
+	case "stage":
+		if !stageLiterals[m.Stage] {
+			return decodeErrf("stage: unknown stage %q", m.Stage)
+		}
+		if m.Detail != nil && len(*m.Detail) > maxDetailLen {
+			return decodeErrf("stage: detail too long")
+		}
+		if err := validGuests(m.Guests); err != nil {
+			return err
+		}
+	case "heartbeat":
+		if err := validGuests(m.Guests); err != nil {
+			return err
+		}
+	case "diag_result":
+		if len(m.Entries) > 1000 {
+			return decodeErrf("diag_result: too many entries")
+		}
+		for _, entry := range m.Entries {
+			if !levelLiterals[entry.Level] {
+				return decodeErrf("diag_result: unknown level %q", entry.Level)
+			}
+			if entry.Event == "" || len(entry.Event) > maxEventLen {
+				return decodeErrf("diag_result: bad event")
+			}
+			if entry.TsMs < 0 || entry.TsMs > MaxWireInt {
+				return decodeErrf("diag_result: ts_ms out of bounds")
+			}
+			if len(entry.Detail) > maxDiagDetail {
+				return decodeErrf("diag_result: detail too long")
+			}
+			if entry.RequestID != nil && len(*entry.RequestID) > maxReqIDLen {
+				return decodeErrf("diag_result: request_id too long")
+			}
+		}
+	}
+	return nil
+}
+
+func validGuests(guests map[string]string) error {
+	for _, state := range guests {
+		if !guestStateLiterals[state] {
+			return decodeErrf("unknown guest state %q", state)
+		}
 	}
 	return nil
 }
@@ -638,6 +839,9 @@ func (b *Budget) validate() error {
 		if bounded != nil && (*bounded < 1 || *bounded > MaxWireInt) {
 			return fmt.Errorf("budget field out of bounds")
 		}
+	}
+	if b.CommandMs != nil && *b.CommandMs > maxCommandMs {
+		return fmt.Errorf("command_ms above the cap")
 	}
 	outer := int64(DefaultUntimedMs)
 	if b.UntimedBoundMs != nil {

@@ -22,9 +22,20 @@
 - **Evicted-after-confirmation is `TransportFailure`**: once delivery was confirmed (a pending observed), a missing stored result is an infrastructure loss; the effect ran and is never retried.
 - **`ESTALE` is the at-most-once sentinel**: the daemon tombstones evicted-unacked result ids (bounded FIFO, 4096) and answers polls/resends for them with `ESTALE` ("executed, result lost"); clients surface it as `TransportFailure` and never resend. An unconfirmed `ENOENT` resend is legal only while the request provably never left (connect failed).
 
+## The Windows battery (slice 6, `windows/`, latest run: 5/5)
+
+`windows/run-win.sh` reuses the vsockd-win spike machinery (range container, ~3 min unattended Server 2022 golden, qemu-ga bootstrap) at CID 2049 (chan band), project `chan-v1-win`, with the PRODUCTION daemon sources riding the payload ISO and compiled in-guest by the in-box csc.exe. Results:
+
+1. The v3 daemon answers on vsock reporting `windows`.
+2. `tests/test_channel_vsock_win.py` green (21 tests): the portable suite over busybox vocabulary, dedupe/durability/pending pins, the ESTALE eviction pin against the real daemon, and the 520-operation soak at zero flake.
+3. Inspect `self_check` **41/44** with the windows xfail NAMES pinned (read-permission bit, adduser provisioning, POSIX signals): one better than the v2 spike, because the wrapper-script path turns the 1 MiB argv into a busybox-sh builtin.
+4. The native supplement 16/16 (the spike's 15 plus the diag ring).
+5. **The wedge regression**: three rounds of 1000 unpaced raw pings + 1000 bare connect/close cycles (~850 conn/s): zero drops, zero supervised recoveries needed, listener alive with no Restart-Service, on metal. The nested re-run on devbox-b is the recorded follow-up.
+
 ## Files
 
-- `run.sh` — the battery; `compose.yaml` — the range container (net-compile recipe)
+- `run.sh` — the Linux battery; `compose.yaml` — the range container (net-compile recipe)
+- `windows/` — the Windows battery (`run-win.sh`, `boot-win.sh`, `storm_v3.py`, `windows_checks3.py`)
 - `tests/test_channel_vsock.py` (repo tests, env-gated by `IR_VSOCK_BATTERY_CID`)
 - `self_check3.py` — Inspect sandbox self_check over a v3 adapter
 - `hostile_shim_check.py`, `guest/shim.py` — the hostile-daemon shim

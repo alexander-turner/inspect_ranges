@@ -85,7 +85,12 @@ def test_sidecar_carries_the_contract(tmp_path: Path) -> None:
         "linux/vsockd",
         "linux/install.sh",
         "linux/vsockd.service",
-        "windows/PLACEHOLDER.md",
+        "windows/Wire.cs",
+        "windows/Store.cs",
+        "windows/Exec.cs",
+        "windows/Daemon.cs",
+        "windows/Program.cs",
+        "windows/install-daemon.ps1",
     }
     assert sidecar["bundle_sha256"] == info.bundle_sha256
 

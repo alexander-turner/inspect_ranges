@@ -57,7 +57,7 @@ vsock CIDs are host-global and both tracks run VM batteries on shared dev hosts.
 
 ## Module layout
 
-Host-side code under `src/inspect_ranges/_channel/` (files inside the underscored package drop the leading underscore): `protocol.py` (message types), `codec.py`, `channel.py` (the `RangeChannel` protocol, state machine, loopback), `mocks.py`, `vsock.py` (the transport), `bundle.py` (the daemon artifact builder). Guest daemon sources under `src/inspect_ranges/_channel/daemon/` (`linux/` as a small Go module, `windows/VsockDaemon.cs`, installers); the Go toolchain version is pinned and `daemon-bundle` builds reproducibly. No imports from the realizer's `_runtime/` in either direction; the daemon artifact digest is the only coupling. CI-runnable tests in `tests/`; the VM batteries live as a harness under `design/spikes/channel-v1/` per spike convention, with run logs in `tmp/`.
+Host-side code under `src/inspect_ranges/_channel/` (files inside the underscored package drop the leading underscore): `protocol.py` (message types), `codec.py`, `channel.py` (the `RangeChannel` protocol, state machine, loopback), `mocks.py`, `vsock.py` (the transport), `bundle.py` (the daemon artifact builder). Guest daemon sources under `src/inspect_ranges/_channel/daemon/` (`linux/` as a small Go module, `windows/` as C# 5 sources `Wire.cs`/`Store.cs`/`Exec.cs`/`Daemon.cs`/`Program.cs`, installers); the Go toolchain version is pinned and `daemon-bundle` builds reproducibly. No imports from the realizer's `_runtime/` in either direction; the daemon artifact digest is the only coupling. CI-runnable tests in `tests/`; the VM batteries live as a harness under `design/spikes/channel-v1/` per spike convention, with run logs in `tmp/`.
 
 ## Verification
 
@@ -70,6 +70,22 @@ Slices 1 to 3 are fully CI: codec properties, state machine, mock conformance ru
 - No evidence streaming; evidence as a declared output stays with the host-provider seam work.
 - No bridged or connectionless transports; vsock is the only transport implemented, behind an interface that already forbids callers from knowing that.
 - No qemu-ga runtime path; it remains a build-time image tool per guest-exec-lessons.
+
+## Ledger
+
+| Slice | Status |
+|---|---|
+| 1 protocol v3 messages and codec | done (chunk 1; 25 shared wire vectors) |
+| 2 RangeChannel, state machine, loopback | done (chunk 1) |
+| 3 mock channels and conformance suite | done (chunk 1) |
+| 4 Go daemon v3 and the vsock transport | done (chunk 2; battery 6/6, soak 520/520, self_check 41/44 pinned) |
+| 5 daemon artifact publication | done (chunk 2; deterministic tar, now carrying the Windows sources) |
+| 6 Windows daemon v3 (C#) | done (chunk 3a; see the slice 6 notes below) |
+| 7 realizer integration | blocked on the realizer's chunk 3; launches separately |
+
+## Slice 6 notes (added 2026-10-09)
+
+The Windows daemon stays C# (integrator decision: viosock winsock interop from Go is unproven; the spike port is proven at 40/44 with the codec seam isolated). The v3 codec is a fresh strict implementation (`Wire.cs`): hand-rolled canonical JSON (the in-box JavaScriptSerializer can neither reject duplicate keys nor emit canonical bytes), the per-kind field table ported from `wire.go`, and the full decode-hardening set; the drift guard (`VectorCheck.cs`, driven by `tests/test_cs_codec.py` under the pinned .NET SDK 8.0.404) round-trips every shared vector byte-exactly, making three codecs pinned to one byte stream. Daemon semantics mirror the Go daemon: dedupe for every kind with attach-to-in-flight, durable results until acked, ESTALE tombstones, poll/pending, the diag ring. Kill semantics are documented platform-honest: no TERM analog, `TerminateJobObject` at the budget with the shared grace constants bounding post-kill reaping; Job breakaway is the Windows analog of the setsid escape. Listener supervision detects both accept-exception storms and the wedge signature (poll-readable but unacceptable) and recreates the socket, so recovery never needs `Restart-Service`; the unpaced reconnect-storm battery pins it on metal, with the nested re-run recorded as a devbox-b follow-up. The C# drift guard is gated by `INSPECT_RANGES_REQUIRE_DOTNET` (the Windows-runner story); Linux CI skips it explicitly, and wiring a runner with the pinned SDK is the recorded follow-up.
 
 ## Decisions (resolved 2026-10-08)
 

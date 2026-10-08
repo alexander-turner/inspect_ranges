@@ -1,6 +1,6 @@
 """The daemon artifact: `inspect-ranges daemon-bundle` builds the versioned, byte-deterministic tarball the realizer bakes into goldens.
 
-Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon placeholder (source arrives with channel-v1 slice 6), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest.
+Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon C# sources with their installer (compiled in-guest by the .NET Framework 4.8 csc.exe), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest.
 
 Trust model: the sidecar written beside the tarball is a convenience copy. A consumer that must trust the artifact (the realizer, the build manifest) pins `bundle_sha256` out of band and passes the pinned `DaemonBundleInfo` to `verify_daemon_bundle`; verifying against a sidecar fetched from the same directory as the tarball proves only internal consistency, which an attacker controlling both files can fake.
 
@@ -42,10 +42,15 @@ Restart=always
 WantedBy=multi-user.target
 """
 
-_WINDOWS_PLACEHOLDER = """The Windows daemon (C# codec swap plus listener supervision) arrives with
-channel-v1 slice 6; this placeholder reserves the bundle layout. The protocol
-contract it must satisfy is pinned by tests/wire_vectors/v3.json.
-"""
+_WINDOWS_DIR = Path(__file__).parent / "daemon" / "windows"
+_WINDOWS_SOURCES = (
+    "Wire.cs",
+    "Store.cs",
+    "Exec.cs",
+    "Daemon.cs",
+    "Program.cs",
+    "install-daemon.ps1",
+)
 
 
 class BundleError(Exception):
@@ -188,8 +193,11 @@ def write_bundle(
         "linux/vsockd": binary,
         "linux/install.sh": _INSTALL_SH.encode(),
         "linux/vsockd.service": _UNIT.encode(),
-        "windows/PLACEHOLDER.md": _WINDOWS_PLACEHOLDER.encode(),
     }
+    for source in _WINDOWS_SOURCES:
+        # the Windows daemon ships as source + installer: it compiles
+        # in-guest with the in-box csc.exe (daemon/windows/README.md)
+        members[f"windows/{source}"] = (_WINDOWS_DIR / source).read_bytes()
     blob = _tar_bytes(members)
     info = DaemonBundleInfo(
         name="vsockd",
