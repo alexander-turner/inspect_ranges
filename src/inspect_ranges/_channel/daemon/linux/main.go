@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -22,13 +23,10 @@ func (c *vsockConn) Read(p []byte) (int, error) {
 			continue
 		}
 		if n == 0 && err == nil {
-			return 0, fmt.Errorf("EOF")
-		}
-		if n == 0 && err != nil {
-			return 0, err
+			return 0, io.EOF // clean peer close: Serve stays quiet on it
 		}
 		if n == 0 {
-			return 0, os.ErrClosed
+			return 0, err
 		}
 		return n, err
 	}
@@ -121,8 +119,11 @@ func acceptLoop(fd int, daemon *Daemon, limiter chan struct{}) {
 			unix.Close(connFd) // only the hypervisor host may speak to us
 			continue
 		}
-		limiter <- struct{}{}
+		// acquire INSIDE the goroutine: a saturated limiter (long execs hold
+		// their connection by design) must never block the accept loop, or
+		// liveness polls would starve and healthy guests look silent
 		go func(fd int) {
+			limiter <- struct{}{}
 			defer func() { <-limiter }()
 			daemon.Serve(&vsockConn{fd: fd})
 		}(connFd)

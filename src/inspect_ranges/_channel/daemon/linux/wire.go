@@ -515,6 +515,10 @@ func (m *Message) validate() error {
 		if m.Kind == "write_file" && m.DataSize == nil {
 			return decodeErrf("write_file requires data_size")
 		}
+	case "diag":
+		if m.MaxEntries != nil && (*m.MaxEntries < 1 || *m.MaxEntries > 1000) {
+			return decodeErrf("diag: max_entries out of bounds")
+		}
 	case "poll", "ack", "pending":
 		if !requestIDRe.MatchString(m.TargetID) {
 			return decodeErrf("%s: bad target id", m.Kind)

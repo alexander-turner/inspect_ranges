@@ -26,7 +26,7 @@ const (
 	StoredBound    = 256              // durable replies held bounded until acked
 	DiagBound      = 256
 	KillGrace      = 5 * time.Second // SIGTERM, then SIGKILL after grace
-	MaxConnActive  = 64
+	MaxConnActive  = 512             // resource bound against floods; polls must outlive held exec slots
 	DaemonVersion  = "vsockd 3.0.0 (go)"
 	DefaultPort    = 5000
 	TrustedPeerCID = 2
@@ -97,10 +97,11 @@ func (s *Store) Ack(id string) {
 	}
 }
 
-// BeginExec registers an exec id. Returns (running, isNew): when isNew is
-// false the caller must wait on running.done and read the stored reply
-// (attach semantics: the command runs exactly once per id).
-func (s *Store) BeginExec(id string) (*runningExec, bool) {
+// Begin registers an in-flight durable request id. Returns (running, isNew):
+// when isNew is false the caller must wait on running.done and read the
+// stored reply (attach semantics: the effect runs exactly once per id, even
+// when a retransmit arrives while the first attempt is still executing).
+func (s *Store) Begin(id string) (*runningExec, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if run, ok := s.running[id]; ok {
@@ -111,7 +112,7 @@ func (s *Store) BeginExec(id string) (*runningExec, bool) {
 	return run, true
 }
 
-func (s *Store) FinishExec(id string, reply *storedReply) {
+func (s *Store) Finish(id string, reply *storedReply) {
 	s.Put(id, reply)
 	s.mu.Lock()
 	run := s.running[id]
@@ -157,6 +158,9 @@ func (d *Diag) Add(level, event string, requestID *string, detail string) {
 func (d *Diag) Tail(limit int64) []DiagEntry {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if limit < 0 {
+		limit = 0 // defense in depth: decode already rejects negatives
+	}
 	if limit > int64(len(d.entries)) {
 		limit = int64(len(d.entries))
 	}
@@ -225,14 +229,23 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 			Entries: d.diag.Tail(limit),
 		}}
 	}
-	// durable kinds: dedupe on id before executing any effect
+	// durable kinds: dedupe on id before executing any effect; attach to an
+	// in-flight first attempt rather than racing it (exactly-once per id)
 	if stored, ok := d.store.Get(request.ID); ok {
 		return stored
+	}
+	run, isNew := d.store.Begin(request.ID)
+	if !isNew {
+		<-run.done
+		if stored, ok := d.store.Get(request.ID); ok {
+			return stored
+		}
+		return errorReply(request.ID, "EPROTO", "request finished without a stored result", nil)
 	}
 	var reply *storedReply
 	switch request.Kind {
 	case "exec":
-		return d.execRequest(request, bulk)
+		reply = d.runCommand(request, bulk)
 	case "read_file":
 		reply = d.readFile(request)
 	case "write_file":
@@ -240,7 +253,7 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 	default:
 		reply = errorReply(request.ID, "EPROTO", fmt.Sprintf("unsupported request %s", request.Kind), nil)
 	}
-	d.store.Put(request.ID, reply)
+	d.store.Finish(request.ID, reply)
 	return reply
 }
 
@@ -256,21 +269,6 @@ func (d *Daemon) poll(request *Message) *storedReply {
 		}}
 	}
 	return errorReply(request.ID, "ENOENT", "no stored result", nil)
-}
-
-// execRequest runs (or attaches to) the command for request.ID.
-func (d *Daemon) execRequest(request *Message, stdin []byte) *storedReply {
-	run, isNew := d.store.BeginExec(request.ID)
-	if !isNew {
-		<-run.done
-		if stored, ok := d.store.Get(request.ID); ok {
-			return stored
-		}
-		return errorReply(request.ID, "EPROTO", "exec finished without a stored result", nil)
-	}
-	reply := d.runCommand(request, stdin)
-	d.store.FinishExec(request.ID, reply)
-	return reply
 }
 
 type limitedBuffer struct {
@@ -317,6 +315,11 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	stderr := &limitedBuffer{}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+
+	// a killed process group can leave a descendant holding the stdout pipe
+	// (setsid daemonizer): WaitDelay bounds Wait's pipe-copier wait after the
+	// process exits, so runCommand can never hang a slot forever
+	cmd.WaitDelay = KillGrace
 
 	if err := cmd.Start(); err != nil {
 		return execStartFailure(request.ID, argv[0], err)

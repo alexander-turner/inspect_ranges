@@ -468,9 +468,13 @@ class MessageChannel:
         self._log(
             logging.DEBUG, "request", rid=request.id, endpoint=guest, detail="exec"
         )
-        liveness = False
+        last_pending_at: float | None = None
         polling = False
         losses = 0
+        # liveness must be RECENT to blame the command layer: a pending seen
+        # once at the start must not convert a later transport stall into a
+        # guest-failed-to-kill verdict
+        recent_window_s = max(allowance_s, _POLL_INTERVAL_S) * 2 + self._grace_s
         while True:
             now = time.monotonic()
             if now >= outer_deadline:
@@ -478,15 +482,19 @@ class MessageChannel:
                     "untimed", f"exec id={request.id}: operation total bound expired"
                 )
             if now >= exec_deadline:
-                layer: BudgetLayer = "command" if liveness else "channel"
+                recent_liveness = (
+                    last_pending_at is not None
+                    and now - last_pending_at <= recent_window_s
+                )
+                layer: BudgetLayer = "command" if recent_liveness else "channel"
                 self._dump_trace(request, guest, f"exec deadline ({layer})")
                 raise ChannelBudgetError(
                     layer,
                     f"exec id={request.id}: no result by the exec deadline "
                     + (
-                        "despite observed liveness (the guest failed to kill)"
-                        if liveness
-                        else "and no observed liveness (transport stall)"
+                        "despite recently observed liveness (the guest failed to kill)"
+                        if recent_liveness
+                        else "without recent liveness (transport stall)"
                     ),
                 )
             window = min(allowance_s, exec_deadline - now, outer_deadline - now)
@@ -524,14 +532,31 @@ class MessageChannel:
                 and reply.id == probe.id
                 and reply.target_id == request.id
             ):
-                liveness = True
+                last_pending_at = time.monotonic()
                 await asyncio.sleep(
                     min(_POLL_INTERVAL_S, max(0.0, exec_deadline - time.monotonic()))
                 )
                 continue
             if polling and isinstance(reply, ErrorReply) and reply.id == probe.id:
-                # the poll itself failed honestly (e.g. daemon restarted and
-                # lost state): errno-tagged, not tamper
+                if reply.errno == "ENOENT" and last_pending_at is None:
+                    # the daemon never saw the exec (the initial attempt
+                    # stalled before delivery): fall back to resending it,
+                    # bounded like any other loss
+                    losses += 1
+                    if losses > _RETRY_ATTEMPTS:
+                        raise TransportFailure(
+                            f"exec id={request.id}: undeliverable after {losses - 1} attempts"
+                        )
+                    polling = False
+                    continue
+                if reply.errno == "ENOENT":
+                    # delivery was confirmed (pending seen), so the stored
+                    # result was evicted before we could ack: an infra loss,
+                    # never retried with the effect already run
+                    raise TransportFailure(
+                        f"exec id={request.id}: result evicted before acknowledgement"
+                    )
+                # any other poll failure is an honest errno-tagged error
                 raise GuestError(reply.errno, reply.message, reply.layer)
             if reply.id != request.id:
                 self._tamper(

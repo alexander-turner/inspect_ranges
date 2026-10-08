@@ -84,9 +84,15 @@ class VsockTransport:
             sock.setblocking(False)
             try:
                 await asyncio.get_running_loop().sock_connect(sock, (cid, self._port))
-                return VsockStream(sock)
             except OSError as failure:
                 sock.close()
                 last = failure
                 await asyncio.sleep(_CONNECT_BACKOFF_S * attempt)
+                continue
+            except BaseException:
+                # cancellation (an allowance timeout mid-connect) must not
+                # leak the fd: the exec liveness loop reconnects every window
+                sock.close()
+                raise
+            return VsockStream(sock)
         raise ConnectionError(f"vsock connect to {endpoint} (cid {cid}) failed: {last}")

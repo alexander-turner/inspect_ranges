@@ -308,6 +308,92 @@ def test_divergent_resume_replay_is_tamper() -> None:
     asyncio.run(scenario_run())
 
 
+class SwallowFirstConnects:
+    """Wraps a transport: the first N connections accept but never serve (undelivered requests)."""
+
+    def __init__(self, inner: LoopbackTransport, swallow: int) -> None:
+        self._inner = inner
+        self.swallow = swallow
+
+    async def connect(self, endpoint: str):  # noqa: ANN201 - Transport protocol
+        from inspect_ranges._channel.channel import stream_pair
+
+        if self.swallow > 0:
+            self.swallow -= 1
+            client_side, _server = stream_pair()
+            return client_side  # nothing ever serves: the request is undelivered
+        return await self._inner.connect(endpoint)
+
+
+def test_undelivered_exec_falls_back_from_poll_to_resend() -> None:
+    """ENOENT on poll with no delivery confirmation means resend the exec, not fail (review finding)."""
+    from inspect_ranges._channel.protocol import ExecRequest
+
+    fleet = LoopbackTransport(["web"])
+    transport = SwallowFirstConnects(fleet, swallow=1)
+    channel = MessageChannel(transport, label="undelivered", channel_budget_s=0.15)
+
+    async def scenario_run() -> None:
+        outcome = await channel.exec(
+            "web", ExecRequest(id=request_id(), cmd=["echo", "late"])
+        )
+        assert outcome.stdout == b"late\n"
+        assert fleet.guest("web").exec_count == 1
+
+    asyncio.run(scenario_run())
+
+
+class SilentAfterNConnects:
+    """Serves the first N connections honestly, then every later one is silent."""
+
+    def __init__(self, inner: LoopbackTransport, honest: int) -> None:
+        self._inner = inner
+        self.honest = honest
+
+    async def connect(self, endpoint: str):  # noqa: ANN201 - Transport protocol
+        from inspect_ranges._channel.channel import stream_pair
+
+        if self.honest > 0:
+            self.honest -= 1
+            return await self._inner.connect(endpoint)
+        client_side, _server = stream_pair()
+        return client_side
+
+    # a liveness check needs the pending path: expose the fleet for setup
+    @property
+    def fleet(self) -> LoopbackTransport:
+        return self._inner
+
+
+def test_stale_liveness_does_not_blame_the_command_layer() -> None:
+    """One early pending then silence: the deadline verdict is channel, not command (review finding)."""
+    from inspect_ranges._channel.protocol import Budget, ExecRequest
+
+    fleet = LoopbackTransport(["web"])
+    fleet.guest("web").ignore_command_budget = True
+    # connection 1: the exec (held, never replies within allowance);
+    # connection 2: one honest poll -> pending (liveness observed once);
+    # then silence for the rest of the window
+    transport = SilentAfterNConnects(fleet, honest=2)
+    channel = MessageChannel(
+        transport, label="stale-liveness", channel_budget_s=0.15, grace_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec(
+                "web",
+                ExecRequest(
+                    id=request_id(),
+                    cmd=["sleep-ms", "30000"],
+                    budget=Budget(command_ms=2500),
+                ),
+            )
+        assert failure.value.layer == "channel", str(failure.value)
+
+    asyncio.run(scenario_run())
+
+
 # -- the chatty reference bug ----------------------------------------------------
 
 

@@ -101,6 +101,7 @@ func TestDecodeHardening(t *testing.T) {
 		{"bulk-on-bulkless", `{"v":3,"data_size":4,"id":"` + rid + `","kind":"ok"}`},
 		{"etime-without-layer", `{"v":3,"errno":"ETIME","id":"` + rid + `","kind":"error","message":"x"}`},
 		{"empty-cmd", `{"v":3,"cmd":[],"id":"` + rid + `","kind":"exec"}`},
+		{"negative-max-entries", `{"id":"` + rid + `","kind":"diag","max_entries":-1,"v":3}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
