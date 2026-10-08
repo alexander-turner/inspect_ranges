@@ -30,8 +30,9 @@ $IR down --all >/dev/null 2>&1 || true
 echo "=== prepare: golden + bundle (reused from run.sh when present) ==="
 if [[ ! -f "$SPIKE/tmp/bundle/manifest.json" ]]; then
   mkdir -p "$SPIKE/tmp"
+  $IR daemon-bundle -o "$SPIKE/tmp/artifacts" >/dev/null
   VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-  $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" >/dev/null
+  $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" >/dev/null
   $IR render design/spikes/up-core/spec.yaml -o "$SPIKE/tmp/bundle" --image-cache "$CACHE" --cid-base 3000
 fi
 SPEC_SHA=$(python3 -c "import json;print(json.load(open('$SPIKE/tmp/bundle/manifest.json'))['spec_sha256'][:12])")

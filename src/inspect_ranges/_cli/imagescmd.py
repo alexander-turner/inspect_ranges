@@ -33,15 +33,28 @@ def images() -> None:
     show_default="~/.cache/inspect-ranges/images",
     help="Image cache the golden is derived into.",
 )
+@click.option(
+    "--daemon-bundle",
+    "daemon_bundle",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory holding the daemon-bundle artifact and its daemon.json (default: the shared artifact cache; publish one with `inspect-ranges daemon-bundle`).",
+)
 def derive(
-    vendor: Path, vendor_sha256: str, name: str | None, image_cache: Path
+    vendor: Path,
+    vendor_sha256: str,
+    name: str | None,
+    image_cache: Path,
+    daemon_bundle: Path | None,
 ) -> None:
     """Derive a daemon-baked golden from a digest-pinned vendor cloud image.
 
     Offline derivation (Ubuntu noble vendor images in v1): verifies the vendor digest, bakes the pinned control daemon, disables ssh and the resolved stub listener, and records provenance beside the golden. Idempotent: re-running with the same inputs is a cache hit.
     """
     try:
-        metadata, hit = derive_golden(vendor, vendor_sha256, image_cache, name=name)
+        metadata, hit = derive_golden(
+            vendor, vendor_sha256, image_cache, name=name, artifact_dir=daemon_bundle
+        )
     except DeriveError as error:
         raise click.ClickException(str(error)) from error
     except OSError as error:

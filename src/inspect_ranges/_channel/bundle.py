@@ -163,6 +163,9 @@ def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
     Raises:
         BundleError: Toolchain, build, or write failure.
     """
+    # the go build runs with its own cwd, so a relative out_dir (including
+    # the CLI default dist/daemon) must resolve before the build writes to it
+    out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     binary_path = out_dir / ".vsockd-build"
     try:

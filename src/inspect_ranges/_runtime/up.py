@@ -3,6 +3,7 @@
 The applier consumes a digest-verified bundle and nothing else: every manifest digest verifies before anything runs (mismatch, missing, or unlisted files refuse), then the render contract executes in order (hardened range container on the bundle's own compose project, guest overlays and seed ISOs, define and start per `boot.json`, wait on every readiness probe). Ownership registers before the first docker resource so teardown never depends on this process surviving. Every stage transition lands in the project's JSONL stage log; failures name their stage and guest; on readiness failure the affected guests' serial console logs are pulled into the project state directory before teardown (kept with `keep_on_failure`).
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,7 +16,9 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import probe
+from .._channel.channel import MessageChannel, request_id
+from .._channel.protocol import Budget, ExecRequest
+from .._channel.vsock import VsockTransport
 from .ownership import (
     PROJECT_PREFIX,
     StageLog,
@@ -56,6 +59,7 @@ class UpOptions(BaseModel):
     image_cache: Path
     state_dir: Path = Field(default_factory=default_state_dir)
     readiness_timeout: float = 300.0
+    readiness_min_window: float = 10.0
     keep_on_failure: bool = False
     uplink_network: str | None = None
 
@@ -221,6 +225,44 @@ def boot_script(boot: BootPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+CLOUD_INIT_PROBE = ["sh", "-c", "cloud-init status --wait >/dev/null 2>&1"]
+"""The readiness exec: the exit status of `cloud-init status --wait` IS the signal (0 done; nonzero error or degraded, both meaning the declared configuration did not fully apply)."""
+
+
+def make_channel(cids: "dict[str, int]") -> MessageChannel:
+    """The readiness channel to this range's guests (a test seam; built inside the event loop)."""
+    return MessageChannel(VsockTransport(cids), label="up-readiness")
+
+
+async def _await_ready(
+    channel: MessageChannel, guest: str, readiness: str, deadline: float
+) -> bool:
+    """One guest's readiness: daemon answering, then the cloud-init gate; any failure or malformed behavior is not-ready, never an escape."""
+    while True:
+        try:
+            await channel.ping(guest)
+            break
+        except Exception:
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(1.0)
+    if readiness == "cloud-init":
+        remaining_ms = max(10_000, int((deadline - time.monotonic()) * 1000))
+        try:
+            outcome = await channel.exec(
+                guest,
+                ExecRequest(
+                    id=request_id(),
+                    cmd=CLOUD_INIT_PROBE,
+                    budget=Budget(command_ms=min(remaining_ms, 3_600_000)),
+                ),
+            )
+            return outcome.rc == 0
+        except Exception:
+            return False
+    return True
+
+
 def project_containers(runner: Runner, project: str) -> list[str]:
     """Container ids carrying the project's compose label (live or exited)."""
     result = runner(
@@ -363,31 +405,26 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
         )
     log.log("guest-boot", "ok")
 
-    states: list[GuestState] = []
-    deadline = time.monotonic() + options.readiness_timeout
-    for guest in guests:
-        name = guest.name
-        cid = guest.cid
-        log.log("readiness", "start", guest=name, cid=cid)
-        # a hung guest must not consume later guests' diagnostics: every guest
-        # gets a minimum probe window even after the shared deadline passes,
-        # so the failure report names only genuinely unready guests
-        guest_deadline = max(deadline, time.monotonic() + 10.0)
-        ready = probe.wait_daemon(cid, guest_deadline)
-        if ready and guest.readiness == "cloud-init":
-            remaining = max(10.0, guest_deadline - time.monotonic())
-            try:
-                # the exit status of `cloud-init status --wait` IS the signal:
-                # 0 done, nonzero error or degraded, both of which mean the
-                # guest's declared configuration did not fully apply
-                rc, _, _ = probe.guest_exec(
-                    cid, "cloud-init status --wait >/dev/null 2>&1", remaining
-                )
-                ready = rc == 0
-            except (OSError, ValueError):
-                ready = False
-        states.append(GuestState(name=name, cid=cid, ready=ready))
-        log.log("readiness", "ok" if ready else "fail", guest=name)
+    async def _readiness() -> list[GuestState]:
+        channel = make_channel({g.name: g.cid for g in guests})
+        deadline = time.monotonic() + options.readiness_timeout
+        collected: list[GuestState] = []
+        for guest in guests:
+            log.log("readiness", "start", guest=guest.name, cid=guest.cid)
+            # a hung guest must not consume later guests' diagnostics: every
+            # guest gets a minimum probe window even after the shared deadline
+            # passes, so the failure report names only genuinely unready guests
+            guest_deadline = max(
+                deadline, time.monotonic() + options.readiness_min_window
+            )
+            ready = await _await_ready(
+                channel, guest.name, guest.readiness, guest_deadline
+            )
+            collected.append(GuestState(name=guest.name, cid=guest.cid, ready=ready))
+            log.log("readiness", "ok" if ready else "fail", guest=guest.name)
+        return collected
+
+    states = asyncio.run(_readiness())
     failed = [state.name for state in states if not state.ready]
     if failed:
         raise fail(

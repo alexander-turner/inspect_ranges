@@ -2,7 +2,7 @@
 
 A golden is a qcow2 overlay on a digest-pinned vendor cloud image with the guest control daemon baked in and every network listener disabled. Derivation is offline-only (`virt-customize --no-network`; package installation belongs to the build pipeline, per the net-compile spike) and idempotent: the derivation key hashes the recipe version, the vendor digest, and the daemon digest, and a cache hit skips all work. Nothing is written to the cache before the vendor image verifies.
 
-The daemon arrives as a pinned artifact (name, version, sha256). Until the channel track publishes its v3 `daemon-bundle`, the pin is the spike v2 daemon vendored as package data; consumption is digest-based either way, so the swap is a pin update.
+The daemon arrives as the channel track's `daemon-bundle` artifact: a byte-deterministic tarball verified against its `daemon.json` sidecar by bundle digest before any member is extracted (`inspect-ranges daemon-bundle` builds it). The bake uses the bundle's own binary and unit file, and the bundle digest lands in the derivation key and the golden's provenance, per the chunk-1 decision.
 """
 
 import fcntl
@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
@@ -19,11 +20,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from .._channel.bundle import BundleError, DaemonBundleInfo, verify_daemon_bundle
 from .._compiler.plan import image_file_name
 
 logger = logging.getLogger(__name__)
 
-RECIPE_VERSION = "2"
+RECIPE_VERSION = "3"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 Runner = Callable[[list[str], Path], None]
@@ -40,12 +42,8 @@ class DaemonPin(BaseModel):
     sha256: str
 
 
-PINNED_DAEMON = DaemonPin(
-    name="vsockd",
-    version="2",
-    sha256="3657f7855fcc660c870fe5e3018bdd9c84e72ef0d951f362e89ef9a30d1e75b7",
-)
-"""The spike v2 daemon, pinned until the channel track's Go daemon-bundle replaces it."""
+DEFAULT_ARTIFACT_DIR = Path.home() / ".cache" / "inspect-ranges" / "artifacts"
+"""Where `inspect-ranges daemon-bundle -o` conventionally publishes, and where derive looks by default."""
 
 
 class ImageMetadata(BaseModel):
@@ -70,15 +68,6 @@ class DeriveError(Exception):
         super().__init__(f"[{stage}] {message}")
 
 
-_UNIT = """[Unit]
-Description=inspect-ranges guest control daemon
-[Service]
-ExecStart=/usr/bin/python3 /opt/inspect-ranges/vsockd2.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-"""
-
 _RESOLVED_DROPIN = "[Resolve]\nDNSStubListener=no\nLLMNR=no\nMulticastDNS=no\n"
 
 
@@ -91,22 +80,46 @@ def sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def daemon_source() -> Path:
-    """Path of the pinned daemon, verified against `PINNED_DAEMON` before every use.
+def resolve_daemon_bundle(artifact_dir: Path) -> tuple[Path, DaemonBundleInfo]:
+    """Locate and fully verify the daemon-bundle artifact (sidecar digest, member safety).
 
     Raises:
-        DeriveError: The packaged daemon does not match the pin (corrupt or tampered install).
+        DeriveError: The artifact or its sidecar is absent, unreadable, or fails verification; the hint names the command that publishes it.
     """
-    path = Path(__file__).parent / "daemon" / "vsockd2.py"
-    if not path.is_file():
-        raise DeriveError("resolve-daemon", f"pinned daemon missing at {path}")
-    actual = sha256_file(path)
-    if actual != PINNED_DAEMON.sha256:
+    sidecar = artifact_dir / "daemon.json"
+    if not sidecar.is_file():
         raise DeriveError(
             "resolve-daemon",
-            f"daemon artifact digest mismatch: pinned {PINNED_DAEMON.sha256}, found {actual}",
+            f"no daemon artifact at {artifact_dir} (build one: inspect-ranges daemon-bundle -o {artifact_dir})",
         )
-    return path
+    try:
+        info = DaemonBundleInfo.model_validate_json(sidecar.read_text())
+    except (OSError, ValueError) as error:
+        raise DeriveError(
+            "resolve-daemon", f"daemon.json is unreadable or malformed: {error}"
+        ) from error
+    bundle_path = artifact_dir / f"vsockd-bundle-{info.version}.tar"
+    if not bundle_path.is_file():
+        raise DeriveError("resolve-daemon", f"daemon bundle missing: {bundle_path}")
+    try:
+        verify_daemon_bundle(bundle_path, info)
+    except BundleError as error:
+        raise DeriveError("resolve-daemon", str(error)) from error
+    return bundle_path, info
+
+
+def _extract_daemon(bundle_path: Path, staging: Path) -> tuple[Path, Path]:
+    """Extract the verified bundle's binary and unit into `staging`; returns their paths."""
+    with tarfile.open(bundle_path, mode="r:") as tar:
+        for member in ("linux/vsockd", "linux/vsockd.service"):
+            handle = tar.extractfile(member)
+            if handle is None:
+                raise DeriveError(
+                    "resolve-daemon", f"bundle member unreadable: {member}"
+                )
+            target = staging / Path(member).name
+            target.write_bytes(handle.read())
+    return staging / "vsockd", staging / "vsockd.service"
 
 
 def _run(argv: list[str], cwd: Path) -> None:
@@ -141,6 +154,7 @@ def derive_golden(
     cache: Path,
     name: str | None = None,
     runner: Runner | None = None,
+    artifact_dir: Path | None = None,
 ) -> tuple[ImageMetadata, bool]:
     """Derive a daemon-baked golden overlay from a digest-pinned vendor image.
 
@@ -152,6 +166,7 @@ def derive_golden(
         cache: The image cache directory (created if absent).
         name: Golden name; defaults to `<vendor stem>-golden`.
         runner: Command executor, injectable for tests; defaults to `subprocess.run` with check.
+        artifact_dir: Where the daemon-bundle artifact lives; defaults to the shared artifact cache.
 
     Returns:
         The golden's metadata and whether the cache already satisfied the request. A hit requires the recorded golden digest and the in-cache vendor pin to both verify; a tampered in-cache vendor logs a warning and re-derives.
@@ -180,12 +195,14 @@ def derive_golden(
             f"vendor image digest mismatch for {vendor.name}: expected {expected}, found {actual}",
         )
 
-    daemon = daemon_source()
+    bundle_path, daemon_info = resolve_daemon_bundle(
+        artifact_dir if artifact_dir is not None else DEFAULT_ARTIFACT_DIR
+    )
 
     golden_name = name or f"{Path(vendor.name).stem}-golden"
     file = _cache_file_name(golden_name)
     key_material = (
-        f"recipe:{RECIPE_VERSION}|vendor:{expected}|daemon:{PINNED_DAEMON.sha256}"
+        f"recipe:{RECIPE_VERSION}|vendor:{expected}|daemon:{daemon_info.bundle_sha256}"
     )
     key = hashlib.sha256(key_material.encode()).hexdigest()
 
@@ -204,7 +221,8 @@ def derive_golden(
             key,
             golden_path,
             metadata_path,
-            daemon,
+            bundle_path,
+            daemon_info,
         )
 
 
@@ -230,7 +248,8 @@ def _derive_locked(
     key: str,
     golden_path: Path,
     metadata_path: Path,
-    daemon: Path,
+    bundle_path: Path,
+    daemon_info: DaemonBundleInfo,
 ) -> tuple[ImageMetadata, bool]:
     # a crashed prior derive of this name may have left temps; we hold the lock
     temp = cache / f".{file}.deriving"
@@ -302,7 +321,7 @@ def _derive_locked(
 
         with tempfile.TemporaryDirectory() as staging_dir:
             staging = Path(staging_dir)
-            (staging / "vsockd.service").write_text(_UNIT)
+            daemon_binary, daemon_unit = _extract_daemon(bundle_path, staging)
             (staging / "no-stub.conf").write_text(_RESOLVED_DROPIN)
             run(
                 "customize",
@@ -314,11 +333,11 @@ def _derive_locked(
                     "--mkdir",
                     "/opt/inspect-ranges",
                     "--copy-in",
-                    f"{daemon}:/opt/inspect-ranges",
+                    f"{daemon_binary}:/opt/inspect-ranges",
                     "--chmod",
-                    "0755:/opt/inspect-ranges/vsockd2.py",
+                    "0755:/opt/inspect-ranges/vsockd",
                     "--copy-in",
-                    f"{staging / 'vsockd.service'}:/etc/systemd/system",
+                    f"{daemon_unit}:/etc/systemd/system",
                     "--link",
                     "/etc/systemd/system/vsockd.service:/etc/systemd/system/multi-user.target.wants/vsockd.service",
                     "--link",
@@ -344,7 +363,11 @@ def _derive_locked(
             derivation_key=key,
             vendor_file=vendor.name,
             vendor_sha256=expected,
-            daemon=PINNED_DAEMON,
+            daemon=DaemonPin(
+                name=daemon_info.name,
+                version=daemon_info.version,
+                sha256=daemon_info.bundle_sha256,
+            ),
             golden_sha256=sha256_file(temp),
             created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )

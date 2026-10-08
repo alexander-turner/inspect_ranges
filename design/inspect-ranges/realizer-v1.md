@@ -16,7 +16,7 @@ Proven, spike-grade: a generic applier realizes a range purely from bundle conte
 
 ## Module layout and track isolation
 
-New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored package carry no leading underscore: `up.py`, `down.py`, `images.py`, `netns.py`, `ownership.py`). The realizer imports `inspect_ranges.types` and `inspect_ranges._compiler` (plan, bundle) and nothing from the channel track's `_channel/`; the channel track imports nothing from `_runtime/`. The one artifact crossing the tracks is the guest control daemon, consumed here as a pinned artifact (version plus sha256 digest, published by the channel track into the artifact cache); the realizer bakes it by digest and never builds it. Until the channel track publishes v3, slice 1 pins the current v2 spike daemon under the same mechanism, so the tracks never block each other.
+New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored package carry no leading underscore: `up.py`, `down.py`, `images.py`, `ownership.py`, `rangeimage.py`). Isolation, as amended at convergence (integrator policy, chunk 3): `_runtime/` MAY import from `_channel/` (the realizer consumes the channel's client and the daemon-bundle artifact); `_channel/` must never import `_runtime/`. The guest control daemon is consumed as the channel track's `daemon-bundle` artifact, verified by bundle digest against its `daemon.json` sidecar before any member is used; the realizer bakes it and never builds it (the pinned Go toolchain is a `daemon-bundle` concern). During the parallel phase, slice 1 pinned the v2 spike daemon under the same digest-based interface, which is exactly what made this swap a pin update.
 
 ## Concurrency discipline (shared devbox, parallel tracks)
 

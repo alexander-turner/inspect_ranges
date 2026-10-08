@@ -12,7 +12,7 @@ ROOT="$(cd ../../.. && pwd)"
 VENDOR="${VENDOR:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"   # project state isolated to the battery
 IR="uv run inspect-ranges"
-C="python3 $SPIKE/../images-derive/client2.py"
+C() { (cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --cid "$1" "$2" "${3-}"); }
 WEB=3000 DB=3001 ROUTER=3002 AGENT=3003
 CACHE="$SPIKE/tmp/cache"
 
@@ -27,7 +27,7 @@ grep -q vhost_vsock /proc/modules || { echo "need: sudo modprobe vhost_vsock"; e
 PASS=0; FAIL=0
 ok()  { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
-guest() { $C "$1" exec "$2"; }
+guest() { C "$1" exec "$2"; }
 
 exec 9>/tmp/inspect-ranges-battery.lock
 flock 9
@@ -36,9 +36,11 @@ cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp"
 
-echo "=== derive the battery golden (v2 daemon) and render at CID 3000+ ==="
+echo "=== build the daemon artifact and derive the battery golden (v3) ==="
+$IR daemon-bundle -o "$SPIKE/tmp/artifacts" >/dev/null \
+  || { echo "daemon-bundle build failed (install the pinned Go toolchain)"; exit 1; }
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" >/dev/null
+$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" >/dev/null
 $IR render design/spikes/up-core/spec.yaml -o "$SPIKE/tmp/bundle" --image-cache "$CACHE" --cid-base 3000
 
 echo "=== U1 tamper refusal ==="
