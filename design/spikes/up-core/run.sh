@@ -44,11 +44,13 @@ $IR render design/spikes/up-core/spec.yaml -o "$SPIKE/tmp/bundle" --image-cache 
 echo "=== U1 tamper refusal ==="
 cp -r "$SPIKE/tmp/bundle" "$SPIKE/tmp/tampered"
 printf ' ' >> "$SPIKE/tmp/tampered/netns/range.nft"
+SPEC_SHA=$(python3 -c "import json;print(json.load(open('$SPIKE/tmp/bundle/manifest.json'))['spec_sha256'][:12])")
+EXPECTED_PROJECT="ir-up-core-$SPEC_SHA"
 if $IR up "$SPIKE/tmp/tampered" --image-cache "$CACHE" >"$SPIKE/tmp/u1.txt" 2>&1; then
   bad "tamper refusal"
 else
   grep -q "verify-bundle" "$SPIKE/tmp/u1.txt" \
-    && [[ -z "$(docker ps -aq --filter label=com.docker.compose.project=ir-up-core 2>/dev/null)" ]] \
+    && [[ -z "$(docker ps -aq --filter label=com.docker.compose.project=$EXPECTED_PROJECT 2>/dev/null)" ]] \
     && ok "tamper refused before acting" || bad "tamper refused before acting"
 fi
 
@@ -92,8 +94,13 @@ guest $AGENT 'getent hosts files.corp.example | grep -q 10.80.10.200 && echo rec
   && ok "U9c explicit DNS record resolves" || bad "U9c"
 
 echo "=== U10 zero range artifacts on the host ==="
+# bridges, named netns, and dnsmasq processes serving this bundle's confs must
+# all be absent host-side (everything lives in the container's netns); host
+# nft requires root, so the nft surface is covered by the bridge/netns checks
 [[ "$(ip -o link | grep -c 'br-dmz\|br-internal')" -eq 0 ]] \
-  && ok "U10 no range bridges on the host" || bad "U10"
+  && [[ -z "$(ip netns list 2>/dev/null | grep ir- || true)" ]] \
+  && ! pgrep -f "netns/dnsmasq.*up-core" >/dev/null \
+  && ok "U10 no range bridges, netns, or dnsmasq on the host" || bad "U10"
 
 echo "=== U11 duplicate up refuses, naming the running project and the down command ==="
 if $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >"$SPIKE/tmp/u11.txt" 2>&1; then

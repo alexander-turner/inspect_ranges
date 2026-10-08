@@ -256,9 +256,9 @@ def test_up_compose_failure_is_stage_named(
 
 
 def test_boot_script_realizes_boot_json(bundle: Path) -> None:
-    import json
+    from inspect_ranges._runtime.up import load_boot
 
-    boot = json.loads((bundle / "boot.json").read_text())
+    boot = load_boot(bundle)
     script = boot_script(boot)
     assert "qemu-img create -f qcow2 -F qcow2 -b /images/tiny-golden.qcow2" in script
     assert "virsh -c qemu:///system start web" in script
@@ -421,4 +421,176 @@ def test_down_all_continues_past_a_failing_project(tmp_path: Path) -> None:
         down_all(state_dir=state, runner=scripted)
     assert list_projects(state) == ["ir-bad"], (
         "the good project was swept, the stuck one kept"
+    )
+
+
+def test_verify_bundle_refuses_traversal_and_absolute_members(bundle: Path) -> None:
+    """Member names must stay inside the bundle: no .. segments, no absolute paths, no resolving outside the root (hashing host files would make the mismatch error a digest oracle)."""
+    import json
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    for member in ("../outside.txt", "/etc/hostname", "netns/../../escape.txt"):
+        crafted = dict(manifest)
+        crafted["files"] = dict(manifest["files"])
+        crafted["files"][member] = {"sha256": "0" * 64, "size": 1}
+        (bundle / "manifest.json").write_text(json.dumps(crafted))
+        with pytest.raises(
+            UpError, match=r"(?s)\[verify-bundle\].*escapes the bundle root"
+        ):
+            verify_bundle(bundle)
+
+
+def test_verify_bundle_refuses_nonobject_shapes(bundle: Path) -> None:
+    import json
+
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    crafted = dict(manifest)
+    crafted["files"] = dict(manifest["files"])
+    crafted["files"]["boot.json"] = "not-an-object"
+    (bundle / "manifest.json").write_text(json.dumps(crafted))
+    with pytest.raises(
+        UpError, match=r"(?s)boot.json: manifest entry is not an object"
+    ):
+        verify_bundle(bundle)
+    (bundle / "manifest.json").write_text("[1, 2, 3]")
+    with pytest.raises(UpError, match=r"unreadable or malformed"):
+        verify_bundle(bundle)
+
+
+def test_boot_json_shape_is_enforced(bundle: Path) -> None:
+    """A crafted boot.json (shell metacharacters in names, unknown readiness, unknown keys) refuses before anything interpolates it."""
+    import json
+
+    from inspect_ranges._runtime.up import load_boot
+
+    boot = json.loads((bundle / "boot.json").read_text())
+    plan = load_boot(bundle)
+    assert [g.name for g in plan.guests] == ["web", "attacker"]
+    for mutation in (
+        {"name": "web; rm -rf /"},
+        {"image_file": "$(reboot).qcow2"},
+        {"readiness": "none"},
+        {"overlay_gb": 0},
+        {"cid": 2},
+    ):
+        crafted = json.loads(json.dumps(boot))
+        crafted["guests"][0].update(mutation)
+        (bundle / "boot.json").write_text(json.dumps(crafted))
+        with pytest.raises(UpError, match=r"boot.json is unreadable or malformed"):
+            load_boot(bundle)
+
+
+def test_boot_script_shell_quotes_values(bundle: Path) -> None:
+    from inspect_ranges._runtime.up import BootGuest, BootPlan
+    from inspect_ranges._runtime.up import boot_script as script
+
+    plan = BootPlan(
+        parallel=True,
+        verify={},
+        guests=[
+            BootGuest(
+                name="we.b-1",
+                cid=3000,
+                image_file="img.qcow2",
+                image_digest=None,
+                overlay_gb=10,
+                readiness="cloud-init",
+            )
+        ],
+    )
+    text = script(plan)
+    assert "we.b-1" in text and ";" not in text.replace(";\n", "")
+
+
+def test_cloud_init_probe_command_behaves(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe command is executed for real against a stubbed cloud-init: a nonzero status MUST mean not ready (pins the historically-regressed '; echo done' bug behaviorally)."""
+    import os
+    import subprocess as sp
+
+    monkeypatch.setattr(up_module().probe, "wait_daemon", _always_ready)
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    stub = stub_bin / "cloud-init"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+
+    def sh_exec(cid: int, command: str, timeout: float) -> tuple[int, str, str]:
+        env = dict(os.environ, PATH=f"{stub_bin}:{os.environ['PATH']}")
+        proc = sp.run(["sh", "-c", command], capture_output=True, text=True, env=env)
+        return (proc.returncode, proc.stdout, proc.stderr)
+
+    monkeypatch.setattr(up_module().probe, "guest_exec", sh_exec)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(bundle, options(cache, tmp_path), runner=docker)
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    docker2 = FakeDocker()
+    result = up(bundle, options(cache, tmp_path), runner=docker2)
+    assert all(guest.ready for guest in result.guests)
+
+
+def test_teardown_failure_never_masks_the_diagnosed_error(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(up_module().probe, "wait_daemon", _never_ready)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n", "c1\n"]
+    docker.fail_rm = True
+    with pytest.raises(UpError) as excinfo:
+        up(bundle, options(cache, tmp_path), runner=docker)
+    message = str(excinfo.value)
+    assert "[readiness]" in message and "not ready" in message
+    assert "teardown also failed" in message
+
+
+def test_probe_fails_closed_on_nonobject_reply() -> None:
+    from inspect_ranges._runtime import probe as probe_module
+
+    class FakeSock:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self) -> "FakeSock":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def settimeout(self, t: float) -> None: ...
+        def connect(self, addr: object) -> None: ...
+        def sendall(self, data: bytes) -> None: ...
+        def recv(self, n: int) -> bytes:
+            data, self.payload = self.payload, b""
+            return data
+
+    import socket as socket_module
+
+    original = socket_module.socket
+    try:
+        socket_module.socket = lambda *a, **k: FakeSock(b"[1, 2]\n")  # type: ignore[assignment]
+        with pytest.raises(ValueError, match="not an object"):
+            probe_module.guest_exec(3000, "true", 5.0)
+    finally:
+        socket_module.socket = original
+
+
+def test_range_image_rebuilds_on_content_mismatch() -> None:
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import ensure_range_image
+
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return sp.CompletedProcess(argv, 0, "stale-content-hash\n", "")
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    ensure_range_image(scripted)
+    assert any(argv[:2] == ["docker", "build"] for argv in calls), (
+        "a tag whose content label mismatches must rebuild"
     )

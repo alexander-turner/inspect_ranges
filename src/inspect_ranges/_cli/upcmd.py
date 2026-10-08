@@ -8,6 +8,7 @@ import click
 from .._compiler import PlanOptions, render_bundle
 from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
+from .._runtime.ownership import default_state_dir
 from .._runtime.up import UpError, UpOptions
 from .._runtime.up import up as run_up
 from ..schema import load_range
@@ -78,7 +79,13 @@ def up(
     )
     try:
         if from_spec is not None:
-            with tempfile.TemporaryDirectory(prefix="ir-bundle-") as temp:
+            # staged under the state root, not /tmp: a SIGKILL mid-up leaves
+            # the staging dir where `down --all` sweeps it, not as a leak
+            staging_root = default_state_dir().parent / "staging"
+            staging_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="ir-bundle-", dir=staging_root
+            ) as temp:
                 spec = load_range(from_spec)
                 render_bundle(
                     spec,

@@ -6,13 +6,14 @@ The applier consumes a digest-verified bundle and nothing else: every manifest d
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import probe
 from .ownership import (
@@ -86,7 +87,10 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise UpError("verify-bundle", f"{bundle} has no manifest.json")
     try:
-        manifest = cast(dict[str, Any], json.loads(manifest_path.read_text()))
+        parsed: object = json.loads(manifest_path.read_text())
+        if not isinstance(parsed, dict):
+            raise ValueError("manifest is not a JSON object")
+        manifest = cast(dict[str, Any], parsed)
         raw_files: object = manifest["files"]
         range_name: object = manifest["range"]
         spec_sha: object = manifest["spec_sha256"]
@@ -98,16 +102,32 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
             and spec_sha
         ):
             raise ValueError("manifest fields have the wrong shape")
-        files = cast(dict[str, dict[str, Any]], raw_files)
-    except (OSError, ValueError, KeyError) as error:
+        files = cast(dict[str, Any], raw_files)
+    except (OSError, ValueError, KeyError, TypeError) as error:
         raise UpError(
             "verify-bundle", f"manifest.json is unreadable or malformed: {error}"
         ) from error
+    bundle_root = bundle.resolve()
     failures: list[str] = []
     for required in ("boot.json", "compose.yaml", "plan.json"):
         if required not in files:
             failures.append(f"{required}: required render file not listed in manifest")
     for relative, meta in files.items():
+        member = Path(relative)
+        # member names must stay inside the bundle: traversal or absolute
+        # names would hash arbitrary host files (and the mismatch error would
+        # become a digest oracle for them)
+        if (
+            member.is_absolute()
+            or ".." in member.parts
+            or not (bundle_root / member).resolve().is_relative_to(bundle_root)
+        ):
+            failures.append(f"{relative}: escapes the bundle root")
+            continue
+        if not isinstance(meta, dict):
+            failures.append(f"{relative}: manifest entry is not an object")
+            continue
+        meta_dict = cast(dict[str, Any], meta)
         path = bundle / relative
         if not path.is_file():
             failures.append(f"{relative}: missing")
@@ -117,7 +137,7 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         except OSError as error:
             failures.append(f"{relative}: unreadable ({error})")
             continue
-        if digest != meta.get("sha256"):
+        if digest != meta_dict.get("sha256"):
             failures.append(f"{relative}: sha256 mismatch")
     listed = set(files) | {"manifest.json"}
     on_disk: set[str] = set()
@@ -139,14 +159,55 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     return manifest
 
 
-def boot_script(boot: dict[str, Any]) -> str:
-    """The in-container realization script for `boot.json` (overlays, seeds, define, start)."""
+_SAFE_NAME = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+
+
+class BootGuest(BaseModel):
+    """One guest in `boot.json`, shape-validated before anything interpolates it anywhere."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=_SAFE_NAME)
+    cid: int = Field(ge=3)
+    image_file: str = Field(pattern=_SAFE_NAME)
+    image_digest: str | None = None
+    overlay_gb: int = Field(ge=1)
+    readiness: Literal["cloud-init"]
+
+
+class BootPlan(BaseModel):
+    """`boot.json` as the applier consumes it; unknown keys or shapes refuse."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parallel: bool
+    guests: list[BootGuest] = Field(min_length=1)
+    verify: dict[str, Any]
+
+
+def load_boot(bundle: Path) -> BootPlan:
+    """Parse and shape-validate the bundle's `boot.json`.
+
+    Raises:
+        UpError: The file is unreadable or its shape does not match what render emits.
+    """
+    try:
+        return BootPlan.model_validate_json((bundle / "boot.json").read_text())
+    except (OSError, ValueError) as error:
+        raise UpError(
+            "verify-bundle", f"boot.json is unreadable or malformed: {error}"
+        ) from error
+
+
+def boot_script(boot: BootPlan) -> str:
+    """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway."""
     lines = ["#!/bin/bash", "set -euo pipefail"]
-    for guest in cast(list[dict[str, Any]], boot["guests"]):
-        name = guest["name"]
+    for guest in boot.guests:
+        name = shlex.quote(guest.name)
+        image = shlex.quote(guest.image_file)
         lines.append(
-            f"qemu-img create -f qcow2 -F qcow2 -b /images/{guest['image_file']} "
-            f"/scratch/{name}.qcow2 {guest['overlay_gb']}G >/dev/null"
+            f"qemu-img create -f qcow2 -F qcow2 -b /images/{image} "
+            f"/scratch/{name}.qcow2 {guest.overlay_gb}G >/dev/null"
         )
         lines.append(
             f"cloud-localds -N /render/guests/{name}/seed/network-config "
@@ -202,7 +263,7 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
     options = options.model_copy(update={"image_cache": options.image_cache.resolve()})
 
     manifest = verify_bundle(bundle)
-    boot = cast(dict[str, Any], json.loads((bundle / "boot.json").read_text()))
+    boot = load_boot(bundle)
     range_name = cast(str, manifest["range"])
     spec_sha = cast(str, manifest["spec_sha256"])
     project = options.project or f"{PROJECT_PREFIX}{range_name}-{spec_sha[:12]}"
@@ -214,23 +275,22 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
             f"Tear it down first: inspect-ranges down {project}",
         )
 
-    guests = cast(list[dict[str, Any]], boot["guests"])
+    guests = boot.guests
     for guest in guests:
-        image = options.image_cache / cast(str, guest["image_file"])
+        image = options.image_cache / guest.image_file
         if not image.is_file():
             raise UpError(
                 "verify-images",
-                f"image {guest['image_file']} is not in the cache {options.image_cache}",
-                guest=cast(str, guest["name"]),
+                f"image {guest.image_file} is not in the cache {options.image_cache}",
+                guest=guest.name,
             )
-        digest = cast("str | None", guest.get("image_digest"))
-        if digest is not None:
+        if guest.image_digest is not None:
             actual = f"sha256:{_sha256(image)}"
-            if actual != digest:
+            if actual != guest.image_digest:
                 raise UpError(
                     "verify-images",
-                    f"image {guest['image_file']} digest {actual} does not match the bundle's {digest}",
-                    guest=cast(str, guest["name"]),
+                    f"image {guest.image_file} digest {actual} does not match the bundle's {guest.image_digest}",
+                    guest=guest.name,
                 )
 
     try:
@@ -264,14 +324,13 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
             # pull them first, they are the first artifact of boot debugging
             _pull_consoles(run, project, bundle, env, options, consoles)
         if not options.keep_on_failure:
-            from .down import DownError
             from .down import down as teardown
 
             try:
                 teardown(
                     project, state_dir=options.state_dir, runner=run, keep_state=True
                 )
-            except DownError as teardown_error:
+            except Exception as teardown_error:
                 # the diagnosed failure stays primary; a sick docker daemon
                 # during cleanup is appended, never substituted
                 log.log("teardown", "fail", error=str(teardown_error))
@@ -289,7 +348,7 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
         )
     log.log("range-container", "ok")
 
-    log.log("guest-boot", "start", guests=[g["name"] for g in guests])
+    log.log("guest-boot", "start", guests=[g.name for g in guests])
     boot_result = run(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
         env=env,
@@ -300,22 +359,22 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
             "guest-boot",
             f"guest boot failed: {boot_result.stderr.strip()[-800:]} "
             f"(consoles of already-booted guests under {project_dir(options.state_dir, project) / 'consoles'})",
-            consoles=[cast(str, g["name"]) for g in guests],
+            consoles=[g.name for g in guests],
         )
     log.log("guest-boot", "ok")
 
     states: list[GuestState] = []
     deadline = time.monotonic() + options.readiness_timeout
     for guest in guests:
-        name = cast(str, guest["name"])
-        cid = cast(int, guest["cid"])
+        name = guest.name
+        cid = guest.cid
         log.log("readiness", "start", guest=name, cid=cid)
         # a hung guest must not consume later guests' diagnostics: every guest
         # gets a minimum probe window even after the shared deadline passes,
         # so the failure report names only genuinely unready guests
         guest_deadline = max(deadline, time.monotonic() + 10.0)
         ready = probe.wait_daemon(cid, guest_deadline)
-        if ready and cast(str, guest["readiness"]) == "cloud-init":
+        if ready and guest.readiness == "cloud-init":
             remaining = max(10.0, guest_deadline - time.monotonic())
             try:
                 # the exit status of `cloud-init status --wait` IS the signal:

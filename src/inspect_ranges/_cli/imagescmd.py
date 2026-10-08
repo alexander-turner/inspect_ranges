@@ -83,9 +83,15 @@ def list_cmd(image_cache: Path) -> None:
             f"recipe=v{metadata.recipe_version}  created={metadata.created}{flags}"
         )
     for file in unmanaged:
-        note = (
-            "stale derivation temp; a locked derive sweeps its own, remove by hand"
-            if file.endswith(".deriving")
-            else "unmanaged: no provenance metadata"
-        )
+        if file.endswith(".deriving"):
+            note = (
+                "stale derivation temp; a locked derive sweeps its own, remove by hand"
+            )
+        elif file.endswith((".img.qcow2", ".iso.qcow2")):
+            note = (
+                "legacy naming from before the image-name unification: "
+                "references now resolve without the double suffix; re-derive or rename"
+            )
+        else:
+            note = "unmanaged: no provenance metadata"
         click.echo(f"{file}  ({note})")

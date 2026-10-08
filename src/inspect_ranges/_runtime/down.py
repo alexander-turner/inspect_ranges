@@ -172,6 +172,13 @@ def down_all(
     """
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
+    # sweep --from-spec staging leftovers (a SIGKILLed up cannot clean its own)
+    staging = state.parent / "staging"
+    if staging.is_dir():
+        import shutil
+
+        for leftover in staging.iterdir():
+            shutil.rmtree(leftover, ignore_errors=True)
     results: list[DownResult] = []
     failures: list[str] = []
     for project in discover_projects(state, run):

@@ -24,7 +24,12 @@ def _request(cid: int, header: dict[str, Any], timeout: float) -> dict[str, Any]
             if not chunk:
                 break
             buffer += chunk
-    return cast(dict[str, Any], json.loads(buffer.partition(b"\n")[0]))
+    reply: object = json.loads(buffer.partition(b"\n")[0])
+    if not isinstance(reply, dict):
+        # fail closed on any malformed reply shape: callers treat ValueError
+        # as not-ready/not-ok, so a broken daemon can never crash the applier
+        raise ValueError(f"daemon reply is not an object: {reply!r}")
+    return cast(dict[str, Any], reply)
 
 
 def wait_daemon(cid: int, deadline: float) -> bool:
