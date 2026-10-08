@@ -150,8 +150,9 @@ def _tar_bytes(members: dict[str, bytes]) -> bytes:
     return tar_buffer.getvalue()
 
 
-def bundle_file_name() -> str:
-    return f"vsockd-bundle-{DAEMON_VERSION}.tar"
+def bundle_file_name(version: str = DAEMON_VERSION) -> str:
+    """The bundle tarball's file name for a daemon version (the single naming scheme producers and consumers share)."""
+    return f"vsockd-bundle-{version}.tar"
 
 
 def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
@@ -163,29 +164,44 @@ def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
     Raises:
         BundleError: Toolchain, build, or write failure.
     """
+    # the go build runs with its own cwd, so a relative out_dir (including
+    # the CLI default dist/daemon) must resolve before the build writes to it
+    out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     binary_path = out_dir / ".vsockd-build"
     try:
         build_daemon_binary(binary_path)
-        members = {
-            "linux/vsockd": binary_path.read_bytes(),
-            "linux/install.sh": _INSTALL_SH.encode(),
-            "linux/vsockd.service": _UNIT.encode(),
-            "windows/PLACEHOLDER.md": _WINDOWS_PLACEHOLDER.encode(),
-        }
+        binary = binary_path.read_bytes()
     finally:
         binary_path.unlink(missing_ok=True)
+    return write_bundle(out_dir, binary)
+
+
+def write_bundle(
+    out_dir: Path, binary: bytes, version: str = DAEMON_VERSION
+) -> DaemonBundleInfo:
+    """Assemble and write the bundle tar and sidecar from a daemon binary's bytes.
+
+    The one place that knows the bundle member layout; `build_daemon_bundle` calls it with the real build, and tests call it with stand-in bytes so fixtures cannot drift from the layout production emits.
+    """
+    members = {
+        "linux/vsockd": binary,
+        "linux/install.sh": _INSTALL_SH.encode(),
+        "linux/vsockd.service": _UNIT.encode(),
+        "windows/PLACEHOLDER.md": _WINDOWS_PLACEHOLDER.encode(),
+    }
     blob = _tar_bytes(members)
     info = DaemonBundleInfo(
         name="vsockd",
-        version=DAEMON_VERSION,
+        version=version,
         protocol=PROTOCOL_VERSION,
         files={
             name: hashlib.sha256(data).hexdigest() for name, data in members.items()
         },
         bundle_sha256=hashlib.sha256(blob).hexdigest(),
     )
-    (out_dir / bundle_file_name()).write_bytes(blob)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / bundle_file_name(version)).write_bytes(blob)
     (out_dir / "daemon.json").write_text(info.model_dump_json(indent=2) + "\n")
     return info
 

@@ -16,7 +16,7 @@ Proven, spike-grade: a generic applier realizes a range purely from bundle conte
 
 ## Module layout and track isolation
 
-New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored package carry no leading underscore: `up.py`, `down.py`, `images.py`, `netns.py`, `ownership.py`). The realizer imports `inspect_ranges.types` and `inspect_ranges._compiler` (plan, bundle) and nothing from the channel track's `_channel/`; the channel track imports nothing from `_runtime/`. The one artifact crossing the tracks is the guest control daemon, consumed here as a pinned artifact (version plus sha256 digest, published by the channel track into the artifact cache); the realizer bakes it by digest and never builds it. Until the channel track publishes v3, slice 1 pins the current v2 spike daemon under the same mechanism, so the tracks never block each other.
+New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored package carry no leading underscore: `up.py`, `down.py`, `images.py`, `ownership.py`, `rangeimage.py`). Isolation, as amended at convergence (integrator policy, chunk 3): `_runtime/` MAY import from `_channel/` (the realizer consumes the channel's client and the daemon-bundle artifact); `_channel/` must never import `_runtime/`. The guest control daemon is consumed as the channel track's `daemon-bundle` artifact, verified by bundle digest against its `daemon.json` sidecar before any member is used; the realizer bakes it and never builds it (the pinned Go toolchain is a `daemon-bundle` concern). During the parallel phase, slice 1 pinned the v2 spike daemon under the same digest-based interface, which is exactly what made this swap a pin update.
 
 ## Concurrency discipline (shared devbox, parallel tracks)
 
@@ -57,7 +57,7 @@ Lockstep rule throughout: implementation plus failure modes plus conformance bat
 
 ## Verification (the phase proves itself)
 
-The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `make check` and the unit suite are green; slices 1 through 4's batteries pass in one scripted run (derive goldens, then the five repointed batteries, then the crash-cleanup matrix) under the host flock; the bundle spike's `apply.sh` is retired to historical reference with its README noting the realizer as the production path; and a cold start from a fresh host (doctor-fixed, empty caches) reaches a ready range with exactly three commands (`images derive`, `render`, `up`).
+The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `make check` and the unit suite are green; slices 1 through 4's batteries pass in one scripted run (derive goldens, then the five repointed batteries, then the crash-cleanup matrix) under the host flock; the bundle spike's `apply.sh` is retired to historical reference with its README noting the realizer as the production path; and a cold start from a fresh host (doctor-fixed, empty caches) reaches a ready range with exactly three commands (`images derive`, `render`, `up`). Executed 2026-10-08 with one recorded deviation: the run covered the m6i.metal devbox only (see Phase exit below); devbox-b coverage carries to the provider phase.
 
 ## Non-goals
 
@@ -87,6 +87,10 @@ Three contract surprises, none requiring a re-plan:
 
 The fresh-context review of this slice surfaced one real bug fixed before close: the first `__hash__` used insertion-ordered serialization while pydantic equality is dict-order-insensitive, so equal specs could hash unequal; the hash now renders the dump with sorted keys, and the test covers the dict-order case.
 
+## Phase exit (2026-10-08)
+
+One scripted run ([phase-exit.sh](../spikes/realizer-batteries/phase-exit.sh)): images-derive 8/8, up-core 17/17, crash cleanup 6/6, the five conformance batteries 43/43 (74 checks, zero failures), then the three-command cold start on fresh caches (daemon-bundle digest pinned through derive; a genuinely fresh host runs `daemon-bundle` first, making it four) reaching an enforced-ready range in 55 s and tearing down clean. `apply.sh` is retired to reference in the bundle spike. Residual honesty: the cold start's range image and Go build cache are warm host state; a genuinely fresh host adds their one-time builds. The phase ran on the m6i.metal devbox; the record's both-devboxes criterion carries to the provider phase alongside devbox-b work.
+
 ## Ledger
 
 | Slice | Status |
@@ -95,5 +99,5 @@ The fresh-context review of this slice surfaced one real bug fixed before close:
 | 1 image derivation | done 2026-10-08: battery 8/8 ([images-derive](../spikes/images-derive/README.md)); fresh-context review: 8 findings (crash-window provenance ordering, corrupt-sidecar handling, daemon-mismatch coverage, dotted names, tool-missing errors, client robustness, UDP in the listener check, ledger process), all fixed and re-batteried |
 | 2 `up` applier core | done 2026-10-08: battery 17/17 ([up-core](../spikes/up-core/README.md), 52.3 s to enforced-ready under the hardened image); fresh-context review: 10 findings (dead cloud-init check, teardown exit-status honesty, consoles lost on boot failure, manifest/symlink verification gaps, probe spin, cid floor, state-dir factory), all fixed and both batteries re-run green |
 | 3 `down` and crash cleanup | done 2026-10-08: battery 6/6 ([up-core crash.sh](../spikes/up-core/README.md): kill matrix, double down, --all sweeps ir- only, pkill recovery); fresh-context review: 9 findings (teardown error masking the diagnosed failure, battery vacuity: networks unchecked, kills before resources existed, silent wait fallthroughs; sweep aborting at first failure; TOCTOU on auto-removed resources; CLI cid floor; committed scratch file), all fixed and both batteries re-run green |
-| 4 battery repointing | planned |
-| 5 docs and doctor | planned |
+| 4 battery repointing | done 2026-10-08: 43/43 via the shared runner ([realizer-batteries](../spikes/realizer-batteries/README.md)); includes the v3 convergence (daemon-bundle goldens with the out-of-band --daemon-sha256 pin, channel readiness with a readiness-tuned allowance, probe retired); fresh-context review: 9 findings (committed binary dropping, trust pin regression, budget overshoot, runner transparency and vacuity, fixture seam), all fixed |
+| 5 docs and doctor | done 2026-10-08: Running Ranges page (docs/cli.qmd, workflow + per-command failure modes + the v1 boundary callout); doctor gains the Realizer group (range image, daemon artifact with fix command, Go toolchain); fresh-context review: 9 findings (docs trust overclaim, doctor docker/platform gating, phase-exit honesty and robustness, naming single-source, error-hint consistency), all fixed |

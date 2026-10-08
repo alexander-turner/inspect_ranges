@@ -11,7 +11,8 @@ CID=3000                       # realizer battery band (3000+) per realizer-v1.m
 export BATTERY_CACHE="$PWD/tmp/cache"
 VENDOR="${VENDOR:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
 IR="uv run inspect-ranges"
-C="python3 client2.py"
+ROOT="$(cd ../../.. && pwd)"
+C() { (cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --cid "$1" "$2" "${3-}"); }
 V="virsh --connect qemu:///system"
 
 if [[ "${1:-}" == "down" ]]; then
@@ -35,12 +36,18 @@ flock 9
 
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
 
-echo "=== host checks ==="
+echo "=== build the daemon-bundle artifact (pinned Go toolchain) ==="
 cd ../../..   # repo root for uv
+DB_OUT=$($IR daemon-bundle -o "$PWD/design/spikes/images-derive/tmp/artifacts") \
+  || { echo "daemon-bundle build failed (install the pinned Go toolchain)"; exit 1; }
+DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
+ARTIFACTS="$PWD/design/spikes/images-derive/tmp/artifacts"
+
+echo "=== host checks ==="
 
 # 1. digest mismatch refuses before cache writes
 if $IR images derive "$VENDOR" --sha256 "$(printf '0%.0s' {1..64})" \
-     --image-cache "$BATTERY_CACHE" >design/spikes/images-derive/tmp/mismatch.txt 2>&1; then
+     --image-cache "$BATTERY_CACHE" --daemon-bundle "$ARTIFACTS" --daemon-sha256 "$DAEMON_SHA" >design/spikes/images-derive/tmp/mismatch.txt 2>&1; then
   bad "digest mismatch refused"
 else
   grep -q "verify-vendor" design/spikes/images-derive/tmp/mismatch.txt \
@@ -51,14 +58,14 @@ fi
 
 # 2. derive succeeds and records provenance
 $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name range-guest \
-  --image-cache "$BATTERY_CACHE" | tee design/spikes/images-derive/tmp/derive1.txt
+  --image-cache "$BATTERY_CACHE" --daemon-bundle "$ARTIFACTS" --daemon-sha256 "$DAEMON_SHA" | tee design/spikes/images-derive/tmp/derive1.txt
 grep -q "derived: range-guest.qcow2" design/spikes/images-derive/tmp/derive1.txt \
   && [[ -f "$BATTERY_CACHE/range-guest.json" ]] \
   && ok "derive writes golden and provenance" || bad "derive writes golden and provenance"
 
 # 3. idempotence: second run is a cache hit with the same digest
 $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name range-guest \
-  --image-cache "$BATTERY_CACHE" | tee design/spikes/images-derive/tmp/derive2.txt
+  --image-cache "$BATTERY_CACHE" --daemon-bundle "$ARTIFACTS" --daemon-sha256 "$DAEMON_SHA" | tee design/spikes/images-derive/tmp/derive2.txt
 D1=$(grep -o 'sha256:[0-9a-f]*' design/spikes/images-derive/tmp/derive1.txt | head -1)
 D2=$(grep -o 'sha256:[0-9a-f]*' design/spikes/images-derive/tmp/derive2.txt | head -1)
 grep -q "cache hit" design/spikes/images-derive/tmp/derive2.txt && [[ "$D1" == "$D2" ]] \
@@ -67,7 +74,7 @@ grep -q "cache hit" design/spikes/images-derive/tmp/derive2.txt && [[ "$D1" == "
 # 4. unmanaged files are never clobbered
 touch "$BATTERY_CACHE/handmade.qcow2"
 if $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name handmade \
-     --image-cache "$BATTERY_CACHE" >design/spikes/images-derive/tmp/unmanaged.txt 2>&1; then
+     --image-cache "$BATTERY_CACHE" --daemon-bundle "$ARTIFACTS" --daemon-sha256 "$DAEMON_SHA" >design/spikes/images-derive/tmp/unmanaged.txt 2>&1; then
   bad "unmanaged file refused"
 else
   grep -q "unmanaged" design/spikes/images-derive/tmp/unmanaged.txt \
@@ -102,13 +109,13 @@ virt-install --connect qemu:///system --name guest --memory 1024 --vcpus 1 --cpu
   --network none \
   --vsock cid.address=$CID --osinfo ubuntu24.04 --import --graphics none --noautoconsole >/dev/null
 "
-$C $CID wait 240 && ok "daemon answers on vsock (CID $CID)" || bad "daemon answers on vsock"
+C $CID wait 240 && ok "daemon answers on vsock (CID $CID)" || bad "daemon answers on vsock"
 
-LISTENERS=$($C $CID exec "ss -tuln | tail -n +2 | wc -l")
+LISTENERS=$(C $CID exec "ss -tuln | tail -n +2 | wc -l")
 [[ "$LISTENERS" == "0" ]] && ok "zero TCP/UDP listeners in the booted golden" \
-  || { bad "zero TCP/UDP listeners (got $LISTENERS)"; $C $CID exec "ss -tulnp" || true; }
+  || { bad "zero TCP/UDP listeners (got $LISTENERS)"; C $CID exec "ss -tulnp" || true; }
 
-SSH_STATE=$($C $CID exec "systemctl is-enabled ssh 2>&1 || true")
+SSH_STATE=$(C $CID exec "systemctl is-enabled ssh 2>&1 || true")
 [[ "$SSH_STATE" == *masked* ]] && ok "ssh masked" || bad "ssh masked (got: $SSH_STATE)"
 
 docker compose exec -T range sh -c "$V destroy guest >/dev/null 2>&1 || true; $V undefine guest >/dev/null 2>&1 || true"

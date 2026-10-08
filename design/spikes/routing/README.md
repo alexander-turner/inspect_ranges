@@ -1,5 +1,7 @@
 # Spike: routing conformance — the booted battery for networking-v0.2 §2
 
+> **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
+
 *The lockstep conformance leg for slice 3 of [networking-v0.2](../../inspect-ranges/networking-v0.2.md): `gateway:` election and `routes:` live in the schema with their validators (`ambiguous-gateway`, `undeclared-gateway`, `unreachable-route`), election is a production compiler stage (`inspect_ranges._compiler.elect_gateways`), transit-router ACL endpoints relax from attachment-checked to reachability-checked, and this spike proves the chained topology on the wire. Machinery carried from [acl-v2](../acl-v2/README.md). Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down.*
 
 ## Verdict

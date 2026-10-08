@@ -33,19 +33,49 @@ def images() -> None:
     show_default="~/.cache/inspect-ranges/images",
     help="Image cache the golden is derived into.",
 )
+@click.option(
+    "--daemon-bundle",
+    "daemon_bundle",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory holding the daemon-bundle artifact and its daemon.json (default: the shared artifact cache; publish one with `inspect-ranges daemon-bundle`).",
+)
+@click.option(
+    "--daemon-sha256",
+    "daemon_sha256",
+    default=None,
+    help="Out-of-band pin for the daemon bundle digest (printed by `inspect-ranges daemon-bundle` at publish). Without it, the sidecar proves internal consistency only.",
+)
 def derive(
-    vendor: Path, vendor_sha256: str, name: str | None, image_cache: Path
+    vendor: Path,
+    vendor_sha256: str,
+    name: str | None,
+    image_cache: Path,
+    daemon_bundle: Path | None,
+    daemon_sha256: str | None,
 ) -> None:
     """Derive a daemon-baked golden from a digest-pinned vendor cloud image.
 
     Offline derivation (Ubuntu noble vendor images in v1): verifies the vendor digest, bakes the pinned control daemon, disables ssh and the resolved stub listener, and records provenance beside the golden. Idempotent: re-running with the same inputs is a cache hit.
     """
     try:
-        metadata, hit = derive_golden(vendor, vendor_sha256, image_cache, name=name)
+        metadata, hit = derive_golden(
+            vendor,
+            vendor_sha256,
+            image_cache,
+            name=name,
+            artifact_dir=daemon_bundle,
+            daemon_sha256=daemon_sha256,
+        )
     except DeriveError as error:
         raise click.ClickException(str(error)) from error
     except OSError as error:
         raise click.ClickException(f"derive failed on this host: {error}") from error
+    if daemon_sha256 is None:
+        click.echo(
+            "daemon artifact unpinned: sidecar-only verification; "
+            "pass --daemon-sha256 for out-of-band pinning"
+        )
     verb = "cache hit" if hit else "derived"
     click.echo(f"{verb}: {metadata.file}  sha256:{metadata.golden_sha256}")
     click.echo(
@@ -76,7 +106,15 @@ def list_cmd(image_cache: Path) -> None:
         if not (image_cache / metadata.file).is_file():
             flags += "  MISSING GOLDEN (interrupted derive; re-run derive)"
         if metadata.recipe_version != RECIPE_VERSION:
-            flags += f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
+            try:
+                cache_newer = int(metadata.recipe_version) > int(RECIPE_VERSION)
+            except ValueError:
+                cache_newer = False
+            flags += (
+                f"  RECIPE MISMATCH (cache v{metadata.recipe_version} vs tool v{RECIPE_VERSION}; upgrade the tool or re-derive)"
+                if cache_newer
+                else f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
+            )
         click.echo(
             f"{metadata.file}  sha256:{metadata.golden_sha256[:12]}  "
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "

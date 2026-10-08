@@ -1,0 +1,54 @@
+---
+title: "Running Ranges"
+description: "The operator workflow: derive golden images, render a definition into a bundle, bring the range up, tear it down."
+llms-description: "CLI reference for the realizer workflow: daemon-bundle, images derive/list, render, up, down, doctor, with failure modes."
+---
+
+## The workflow
+
+A definition becomes a running range in three commands on a prepared host:
+
+```{.bash filename="Terminal"}
+inspect-ranges images derive noble-server-cloudimg-amd64.img \
+  --sha256 <vendor-digest> --daemon-sha256 <bundle-digest>
+inspect-ranges render range.yaml -o bundle/
+inspect-ranges up bundle/
+```
+
+Each stage consumes only the verified output of the one before it: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance. `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
+
+## daemon-bundle
+
+`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does; built artifacts are consumed everywhere else by digest, so one publish serves every host. Publish to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256` so the artifact is pinned out of band, not just sidecar-consistent.
+
+Failure modes: a missing or wrong-version toolchain refuses with the pin named; builds are reproducible, so rebuilding an unchanged source tree yields the identical bundle digest.
+
+## images derive and list
+
+`images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and every stub listener are disabled, and a provenance sidecar records all input digests. Ubuntu noble vendor images are the v1 scope.
+
+Failure modes, each stage-named: vendor digest mismatch (nothing written), missing, tampered, pin-mismatched, or protocol-skewed daemon artifact (each error names the `daemon-bundle` republish command), an unmanaged file squatting on the target name (never clobbered), a corrupt provenance sidecar (unmanaged to both `list` and `derive`), interrupted derives (self-healing on the next run). Re-running with the same inputs is a cache hit that re-verifies the recorded digests, including the in-cache vendor.
+
+`images list` shows managed goldens with provenance and flags everything else: unmanaged files, stale derivation temps, goldens whose recipe version is behind, and legacy double-suffix names from before the image-name unification.
+
+## up
+
+`inspect-ranges up <bundle>` realizes a rendered bundle into a running, ready range: every manifest digest verifies first (tampered, incomplete, unlisted-file, or path-escaping bundles refuse; `boot.json` is shape-validated before any value reaches a command), image digests re-verify against the cache, then the hardened range container comes up on the bundle's own compose project, guests boot per `boot.json`, and readiness waits on every guest (daemon answering over vsock, then `cloud-init status --wait` succeeding, probed over the control channel). The hardened non-root-QEMU range image is built automatically and is required; there is no bypass.
+
+`up --from-spec range.yaml` composes render into a temporary bundle first. `--uplink-network` supplies the deployment uplink for ranges that request egress. A second `up` of an identical bundle refuses, naming the running project and the exact `down` command.
+
+On failure, the error names the stage and guest, the affected guests' serial console logs are pulled into the project state directory (`~/.local/state/inspect-ranges/projects/<project>/`, next to the JSONL stage log), and the project tears down unless `--keep` is passed.
+
+## down
+
+`inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. A failed removal keeps the ownership record so a retry can still find the project.
+
+## doctor
+
+`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet). `--fix-script` emits the shell commands for whatever failed.
+
+::: {.callout-note}
+## The v1 boundary, honestly
+
+`up` realizes cold-boot bundles only: checkpoint instantiation is build-phase work. Guest content (users, services, weaknesses, Active Directory) and randomization validate but refuse at planning until the build phase lands, and Windows guests refuse at planning until their injectors land, so nothing boots with silently missing content. Bundles are trusted operator input: verification proves integrity, not provenance (signed bundles are image-distribution work).
+:::

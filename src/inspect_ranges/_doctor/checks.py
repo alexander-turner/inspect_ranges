@@ -11,6 +11,7 @@ from typing import Any, cast
 from .result import CheckResult, CheckStatus
 
 PLATFORM = "Platform"
+REALIZER = "Realizer"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
@@ -45,6 +46,118 @@ def run_checks() -> list[CheckResult]:
     else:
         results.append(_skip(NETWORKING, "all checks", "requires Linux x86_64"))
         results.append(_skip(IMAGE_TOOLING, "all checks", "requires Linux x86_64"))
+    if host.status != "ok":
+        results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
+    else:
+        docker_probe = _run(["docker", "version", "--format", "ok"])
+        results += check_realizer(
+            image_inspect=(
+                _run(
+                    [
+                        "docker",
+                        "image",
+                        "inspect",
+                        _range_image_tag(),
+                        "--format",
+                        "ok",
+                    ]
+                )
+                if docker_probe is not None and docker_probe.returncode == 0
+                else None
+            ),
+        )
+    return results
+
+
+def _range_image_tag() -> str:
+    from .._runtime.rangeimage import RANGE_IMAGE_TAG
+
+    return RANGE_IMAGE_TAG
+
+
+def _artifact_state(sidecar: Path) -> str:
+    """`ok`, `tar-missing`, or `absent`: the sidecar names the tarball that must exist beside it."""
+    from .._channel.bundle import DaemonBundleInfo, bundle_file_name
+
+    if not sidecar.is_file():
+        return "absent"
+    try:
+        info = DaemonBundleInfo.model_validate_json(sidecar.read_text())
+    except (OSError, ValueError):
+        return "absent"
+    return (
+        "ok"
+        if (sidecar.parent / bundle_file_name(info.version)).is_file()
+        else "tar-missing"
+    )
+
+
+def check_realizer(
+    image_inspect: subprocess.CompletedProcess[str] | None,
+) -> list[CheckResult]:
+    """Realizer host surface: the hardened range image, the daemon artifact, and the Go toolchain that builds it (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact)."""
+    from .._channel.bundle import GO_PIN, locate_go
+    from .._runtime.images import DEFAULT_ARTIFACT_DIR
+
+    results: list[CheckResult] = []
+    if image_inspect is None:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "skip",
+                "docker unreachable, cannot tell whether the image exists",
+            )
+        )
+    elif image_inspect.returncode == 0:
+        results.append(CheckResult(REALIZER, "range image", "ok", _range_image_tag()))
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "warn",
+                f"{_range_image_tag()} not built yet; `inspect-ranges up` builds it on first use",
+            )
+        )
+    sidecar = DEFAULT_ARTIFACT_DIR / "daemon.json"
+    artifact_state = _artifact_state(sidecar)
+    if artifact_state == "ok":
+        results.append(
+            CheckResult(REALIZER, "daemon artifact", "ok", str(DEFAULT_ARTIFACT_DIR))
+        )
+    elif artifact_state == "tar-missing":
+        results.append(
+            CheckResult(
+                REALIZER,
+                "daemon artifact",
+                "warn",
+                f"sidecar present but its bundle tar is missing at {DEFAULT_ARTIFACT_DIR}; republish",
+                fix=f"inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "daemon artifact",
+                "warn",
+                f"none at {DEFAULT_ARTIFACT_DIR}; publish one: inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+                fix=f"inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+            )
+        )
+    go = locate_go()
+    if go is not None:
+        results.append(CheckResult(REALIZER, "go toolchain", "ok", str(go)))
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "go toolchain",
+                "warn",
+                f"no Go toolchain (needed only to build the daemon artifact; pin {GO_PIN})",
+            )
+        )
     return results
 
 

@@ -20,6 +20,8 @@ inspect-docs:
           href: guests.qmd
         - text: Networks
           href: networks.qmd
+    - text: Running Ranges
+      href: cli.qmd
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk

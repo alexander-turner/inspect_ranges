@@ -1,5 +1,8 @@
 # Spike: bundle conformance — the realization bundle applied end to end
 
+> **Retired to reference (2026-10-08):** `apply.sh` was the spike-grade applier; the production path is `inspect-ranges up` ([realizer-v1](../../inspect-ranges/realizer-v1.md), batteried in [up-core](../up-core/README.md)). This spike's render-contract findings and tamper-refusal battery remain the historical record.
+
+
 *The conformance leg for the ResolvedPlan/render stage (architecture.md §14; host-provider.md "render → apply"): `inspect-ranges render` emits a digest-manifested realization bundle, and a generic applier realizes a range **purely from bundle contents** — the deployment seam's self-sufficiency rule made executable. The applier here is spike-grade but is the specification for the production `apply` stage (provider phase). Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down.*
 
 ## Verdict

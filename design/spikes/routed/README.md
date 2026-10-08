@@ -1,5 +1,7 @@
 # Spike: routed-egress conformance — mode: routed realization (networking-v0.2 §9, slice 6)
 
+> **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
+
 *The last v0.1-legacy ledger row: `mode: routed`, realized as un-NATed two-way forwarding between the network's bridge and the range-netns uplink (`inspect_ranges._compiler.render_egress_nftables`), with the hypervisor gateway reserved by the allocator. The egress battery's sibling: isolated (hardened-container) and nat (egress spike) were already proven; this pins the third posture. Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down.*
 
 ## Verdict

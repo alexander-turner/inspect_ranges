@@ -104,6 +104,7 @@ def options(cache: Path, tmp_path: Path, **overrides: Any) -> UpOptions:
         image_cache=cache,
         state_dir=tmp_path / "state",
         readiness_timeout=1.0,
+        readiness_min_window=0.2,
         **overrides,
     )
 
@@ -114,21 +115,53 @@ def up_module() -> Any:
     return importlib.import_module("inspect_ranges._runtime.up")
 
 
-def _always_ready(cid: int, deadline: float) -> bool:
-    return True
+class FakeOutcome:
+    def __init__(self, rc: int) -> None:
+        self.rc = rc
+        self.stdout = b""
+        self.stderr = b""
 
 
-def _never_ready(cid: int, deadline: float) -> bool:
-    return False
+class FakeChannel:
+    """Readiness-channel stand-in: scriptable ping and exec, optionally executing the probed command for real (behavioral pin)."""
+
+    def __init__(
+        self,
+        ping_ok: bool = True,
+        exec_rc: int = 0,
+        run_commands: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self.ping_ok = ping_ok
+        self.exec_rc = exec_rc
+        self.run_commands = run_commands
+        self.env = env
+        self.exec_requests: list[Any] = []
+
+    async def ping(self, guest: str) -> object:
+        if not self.ping_ok:
+            raise ConnectionError("no daemon")
+        return object()
+
+    async def exec(self, guest: str, request: Any, **kwargs: Any) -> FakeOutcome:
+        self.exec_requests.append(request)
+        if self.run_commands:
+            import subprocess as sp
+
+            proc = sp.run(list(request.cmd), capture_output=True, env=self.env)
+            return FakeOutcome(proc.returncode)
+        return FakeOutcome(self.exec_rc)
 
 
-def _exec_done(cid: int, command: str, timeout: float) -> tuple[int, str, str]:
-    return (0, "done\n", "")
+def use_channel(monkeypatch: pytest.MonkeyPatch, channel: FakeChannel) -> None:
+    def factory(cids: dict[str, int]) -> FakeChannel:
+        return channel
+
+    monkeypatch.setattr(up_module(), "make_channel", factory)
 
 
 def ready_probes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _always_ready)
-    monkeypatch.setattr(up_module().probe, "guest_exec", _exec_done)
+    use_channel(monkeypatch, FakeChannel(ping_ok=True, exec_rc=0))
 
 
 def test_cid_base_is_a_plan_input(cache: Path) -> None:
@@ -223,7 +256,7 @@ def test_up_missing_and_mismatched_image(
 def test_up_readiness_failure_names_guest_and_tears_down(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _never_ready)
+    use_channel(monkeypatch, FakeChannel(ping_ok=False))
     docker = FakeDocker()
     docker.ps_sequence = [
         "",
@@ -239,7 +272,7 @@ def test_up_readiness_failure_names_guest_and_tears_down(
 def test_up_keep_on_failure_skips_teardown(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _never_ready)
+    use_channel(monkeypatch, FakeChannel(ping_ok=False))
     docker = FakeDocker()
     with pytest.raises(UpError, match=r"\[readiness\]"):
         up(bundle, options(cache, tmp_path, keep_on_failure=True), runner=docker)
@@ -331,14 +364,7 @@ def test_cloud_init_failure_means_not_ready(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """cloud-init exiting nonzero (error or degraded) is an unready guest, loudly."""
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _always_ready)
-
-    def cloud_init_failed(
-        cid: int, command: str, timeout: float
-    ) -> tuple[int, str, str]:
-        return (1, "", "")
-
-    monkeypatch.setattr(up_module().probe, "guest_exec", cloud_init_failed)
+    use_channel(monkeypatch, FakeChannel(ping_ok=True, exec_rc=1))
     docker = FakeDocker()
     with pytest.raises(UpError, match=r"\[readiness\] guest 'web'"):
         up(bundle, options(cache, tmp_path), runner=docker)
@@ -505,27 +531,22 @@ def test_boot_script_shell_quotes_values(bundle: Path) -> None:
 def test_cloud_init_probe_command_behaves(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The probe command is executed for real against a stubbed cloud-init: a nonzero status MUST mean not ready (pins the historically-regressed '; echo done' bug behaviorally)."""
+    """The probe command is executed for real against a stubbed cloud-init: a nonzero status MUST mean not ready (pins the historically-regressed '; echo done' bug behaviorally, now through the channel exec)."""
     import os
-    import subprocess as sp
 
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _always_ready)
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     stub = stub_bin / "cloud-init"
     stub.write_text("#!/bin/sh\nexit 1\n")
     stub.chmod(0o755)
-
-    def sh_exec(cid: int, command: str, timeout: float) -> tuple[int, str, str]:
-        env = dict(os.environ, PATH=f"{stub_bin}:{os.environ['PATH']}")
-        proc = sp.run(["sh", "-c", command], capture_output=True, text=True, env=env)
-        return (proc.returncode, proc.stdout, proc.stderr)
-
-    monkeypatch.setattr(up_module().probe, "guest_exec", sh_exec)
+    env = dict(os.environ, PATH=f"{stub_bin}:{os.environ['PATH']}")
+    channel = FakeChannel(run_commands=True, env=env)
+    use_channel(monkeypatch, channel)
     docker = FakeDocker()
     docker.ps_sequence = ["", "c1\n"]
     with pytest.raises(UpError, match=r"\[readiness\]"):
         up(bundle, options(cache, tmp_path), runner=docker)
+    assert channel.exec_requests, "the readiness exec must actually run"
     stub.write_text("#!/bin/sh\nexit 0\n")
     docker2 = FakeDocker()
     result = up(bundle, options(cache, tmp_path), runner=docker2)
@@ -535,7 +556,7 @@ def test_cloud_init_probe_command_behaves(
 def test_teardown_failure_never_masks_the_diagnosed_error(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(up_module().probe, "wait_daemon", _never_ready)
+    use_channel(monkeypatch, FakeChannel(ping_ok=False))
     docker = FakeDocker()
     docker.ps_sequence = ["", "c1\n", "c1\n"]
     docker.fail_rm = True
@@ -546,35 +567,21 @@ def test_teardown_failure_never_masks_the_diagnosed_error(
     assert "teardown also failed" in message
 
 
-def test_probe_fails_closed_on_nonobject_reply() -> None:
-    from inspect_ranges._runtime import probe as probe_module
+def test_readiness_fails_closed_on_any_channel_weirdness(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any exception from the readiness channel is not-ready plus normal teardown, never an escape."""
 
-    class FakeSock:
-        def __init__(self, payload: bytes) -> None:
-            self.payload = payload
+    class WeirdChannel(FakeChannel):
+        async def exec(self, guest: str, request: Any, **kwargs: Any) -> FakeOutcome:
+            raise RuntimeError("protocol went sideways")
 
-        def __enter__(self) -> "FakeSock":
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            return None
-
-        def settimeout(self, t: float) -> None: ...
-        def connect(self, addr: object) -> None: ...
-        def sendall(self, data: bytes) -> None: ...
-        def recv(self, n: int) -> bytes:
-            data, self.payload = self.payload, b""
-            return data
-
-    import socket as socket_module
-
-    original = socket_module.socket
-    try:
-        socket_module.socket = lambda *a, **k: FakeSock(b"[1, 2]\n")  # type: ignore[assignment]
-        with pytest.raises(ValueError, match="not an object"):
-            probe_module.guest_exec(3000, "true", 5.0)
-    finally:
-        socket_module.socket = original
+    use_channel(monkeypatch, WeirdChannel())
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(bundle, options(cache, tmp_path), runner=docker)
+    assert docker.commands("docker", "rm", "-f"), "teardown still runs"
 
 
 def test_range_image_rebuilds_on_content_mismatch() -> None:
@@ -594,3 +601,24 @@ def test_range_image_rebuilds_on_content_mismatch() -> None:
     assert any(argv[:2] == ["docker", "build"] for argv in calls), (
         "a tag whose content label mismatches must rebuild"
     )
+
+
+def test_make_channel_uses_the_readiness_allowance() -> None:
+    """One wedged accept-but-never-reply guest must cost seconds per attempt, not the channel default."""
+    channel = up_module().make_channel({"web": 3000})
+    assert channel._channel_budget_s == 10.0  # noqa: SLF001 - the tuned allowance is the contract
+
+
+def test_readiness_failure_logs_the_swallowed_cause(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_channel(monkeypatch, FakeChannel(ping_ok=True, exec_rc=2))
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(bundle, options(cache, tmp_path), runner=docker)
+    state_root = tmp_path / "state"
+    project = next(entry.name for entry in state_root.iterdir())
+    events = StageLog(state_root, project).events()
+    fails = [e for e in events if e["stage"] == "readiness" and e["status"] == "fail"]
+    assert fails and any("exited 2" in str(e.get("cause", "")) for e in fails)
