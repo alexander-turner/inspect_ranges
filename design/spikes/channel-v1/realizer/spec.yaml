@@ -1,0 +1,23 @@
+# channel-v1 slice 7: minimal conformance range for the realizer-booted
+# convergence run. One guest (the channel batteries drive it by CID from
+# boot.json); the attacker footholds on it so no second VM boots.
+range:
+  name: chan-conformance
+  schema_version: "0.2"
+  description: >
+    Single-guest range for re-running the channel conformance suite, soak,
+    self_check, hostile shim, and wedge storm against a realizer-booted
+    guest instead of the compose harness.
+
+networks:
+  - { name: lan, cidr: 10.90.10.0/24, mode: isolated }
+
+hosts:
+  - name: target
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: lan }]
+
+attacker:
+  host: target
+  entry: assumed-breach
