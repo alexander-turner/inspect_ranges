@@ -88,7 +88,7 @@ The fresh-context review of this slice surfaced one real bug fixed before close:
 | Slice | Status |
 |---|---|
 | 0 Inspect API checkpoint | done 2026-10-08: 10/10, findings above; fresh-context review: 9 findings (1 bug, 2 battery gaps, rest conventions), all fixed |
-| 1 image derivation | planned |
+| 1 image derivation | done 2026-10-08: battery 8/8 ([images-derive](../spikes/images-derive/README.md)); review outcome recorded on close |
 | 2 `up` applier core | planned |
 | 3 `down` and crash cleanup | planned |
 | 4 battery repointing | planned |
