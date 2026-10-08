@@ -14,12 +14,18 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
+from .protocol import (
+    MAX_BULK_DECLARABLE,
+    MESSAGE_ADAPTER,
+    PROTOCOL_VERSION,
+    Message,
+    declared_bulk,
+)
 from .protocol import MAX_FRAME_PAYLOAD as MAX_FRAME_PAYLOAD
-from .protocol import MESSAGE_ADAPTER, Message
 
 _HEADER = struct.Struct(">IB")
 
@@ -35,12 +41,16 @@ class FrameType(IntEnum):
     END = 0x45
 
 
+TraceDirection = Literal["send", "recv"]
+TraceFrame = Literal["CONTROL", "DATA", "END", "message"]
+
+
 @dataclass(frozen=True)
 class TraceEvent:
     """One codec-level trace record; `note` carries the END digest or decode-error name."""
 
-    direction: str  # "send" | "recv"
-    frame: str  # "CONTROL" | "DATA" | "END" | "message"
+    direction: TraceDirection
+    frame: TraceFrame
     size: int
     kind: str | None = None
     request_id: str | None = None
@@ -67,8 +77,8 @@ class TruncatedFrame(DecodeError):
     """The stream ended mid-frame."""
 
 
-class ChannelClosed(DecodeError):
-    """The stream ended cleanly at a frame boundary."""
+class ChannelClosed(Exception):
+    """The stream ended cleanly at a message boundary: loss or completion, never malformed input."""
 
 
 class ProtocolViolation(DecodeError):
@@ -88,7 +98,7 @@ class BulkMismatch(DecodeError):
 
 
 def canonical_json(payload: dict[str, Any]) -> bytes:
-    """Encode `payload` as canonical JSON: sorted keys, compact separators, UTF-8."""
+    """Encode `payload` as canonical JSON: sorted keys, compact separators, UTF-8 (never ASCII-escaped); null-valued optional fields are omitted by the message encoder."""
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode()
@@ -114,7 +124,7 @@ def encode_message(
     Raises:
         EncodeError: The bulk does not match the declaration, or the control payload exceeds one frame.
     """
-    declared = message.data_size
+    declared = declared_bulk(message)
     if declared is None and bulk is not None:
         raise EncodeError(f"{message.kind}: bulk supplied but data_size is None")
     if declared is not None:
@@ -126,7 +136,7 @@ def encode_message(
             raise EncodeError(
                 f"{message.kind}: data_size={declared} but bulk is {len(bulk)} bytes"
             )
-    payload = canonical_json(message.model_dump(mode="json"))
+    payload = canonical_json(message.model_dump(mode="json", exclude_none=True))
     if len(payload) > MAX_CONTROL_PAYLOAD:
         raise EncodeError(
             f"{message.kind}: control payload {len(payload)} bytes exceeds {MAX_CONTROL_PAYLOAD}"
@@ -254,24 +264,42 @@ class MessageAssembler:
             BulkOverrun: Received bulk exceeded the reader's cap.
             BulkMismatch: END size or digest disagrees with the received bulk.
         """
-        if self._trace:
-            self._trace(TraceEvent("recv", frame_type.name, len(payload)))
         if self._message is None:
             if frame_type is not FrameType.CONTROL:
                 raise ProtocolViolation(
                     f"expected CONTROL frame, got {frame_type.name}"
                 )
             message = _parse_control(payload)
-            if message.data_size is None:
+            if self._trace:
+                self._trace(
+                    TraceEvent(
+                        "recv",
+                        "CONTROL",
+                        len(payload),
+                        kind=message.kind,
+                        request_id=message.id,
+                    )
+                )
+            if declared_bulk(message) is None:
                 self._emit_message_trace(message, 0)
                 return message, None
             self._message = message
             self._bulk.clear()
             return None
         message = self._message
-        declared = message.data_size
+        declared = declared_bulk(message)
         assert declared is not None
         if frame_type is FrameType.DATA:
+            if self._trace:
+                self._trace(
+                    TraceEvent(
+                        "recv",
+                        "DATA",
+                        len(payload),
+                        kind=message.kind,
+                        request_id=message.id,
+                    )
+                )
             if len(self._bulk) + len(payload) > min(declared, self._bulk_cap):
                 if len(self._bulk) + len(payload) > self._bulk_cap:
                     raise BulkOverrun(
@@ -299,7 +327,12 @@ class MessageAssembler:
             if self._trace:
                 self._trace(
                     TraceEvent(
-                        "recv", "END", len(payload), request_id=message.id, note=digest
+                        "recv",
+                        "END",
+                        len(payload),
+                        kind=message.kind,
+                        request_id=message.id,
+                        note=digest,
                     )
                 )
             self._emit_message_trace(message, len(bulk))
@@ -337,6 +370,15 @@ def _parse_control(payload: bytes) -> Message:
         data = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
     except (ValueError, UnicodeDecodeError) as error:
         raise InvalidMessage(f"control payload is not JSON: {error}") from None
+    # the schema defaults v for construction ergonomics; the wire requires it:
+    # an honest endpoint always emits its version, so absence is a tamper tell
+    version: object = (
+        cast(dict[Any, Any], data).get("v") if isinstance(data, dict) else None
+    )
+    if version != PROTOCOL_VERSION:
+        raise InvalidMessage(
+            f"control payload must carry v={PROTOCOL_VERSION}, got {version!r}"
+        )
     try:
         return MESSAGE_ADAPTER.validate_python(data)
     except ValidationError as error:
@@ -361,8 +403,10 @@ def _parse_end(payload: bytes) -> tuple[str, int]:
             set(entries) == {"sha256", "size"}
             and isinstance(sha256, str)
             and len(sha256) == 64
+            and all(c in "0123456789abcdef" for c in sha256)
             and isinstance(size, int)
             and not isinstance(size, bool)
+            and 0 <= size <= MAX_BULK_DECLARABLE
         ):
             return sha256, size
     raise InvalidMessage("END payload must be exactly {sha256, size}")

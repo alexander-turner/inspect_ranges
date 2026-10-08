@@ -1,6 +1,8 @@
 """Regenerate `v3.json`, the shared wire test vectors for protocol v3.
 
 Run from the repo root: `uv run python tests/wire_vectors/generate.py`. The vectors pin the encoding byte-exactly; every codec implementation (Python, Go, C#) must encode each vector's message and bulk to exactly `frames_hex` and decode `frames_hex` back to the message and bulk. Regenerating this file is a protocol change and needs the matching review.
+
+Encoding rules the vectors pin: canonical JSON is sorted-key, compact-separator, raw UTF-8 (this JSON file ASCII-escapes its own copies of the messages, but `frames_hex` carries the true UTF-8 wire bytes); null-valued optional fields are omitted on the wire; `v` is always emitted and required on decode.
 """
 
 import json
@@ -91,6 +93,11 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
             None,
         ),
         (
+            "exec-result-killed",
+            p.ExecResult(id=_rid(13), rc=-9, stdout_size=0, stderr_size=0),
+            None,
+        ),
+        (
             "error-enoent",
             p.ErrorReply(
                 id=_rid(4), errno="ENOENT", message="No such file or directory"
@@ -132,7 +139,7 @@ def main() -> None:
         vectors.append(
             {
                 "name": name,
-                "message": message.model_dump(mode="json"),
+                "message": message.model_dump(mode="json", exclude_none=True),
                 "bulk_hex": bulk.hex() if bulk is not None else None,
                 "frames_hex": [frame.hex() for frame in frames],
             }
@@ -140,7 +147,7 @@ def main() -> None:
     doc = {
         "format": "inspect-ranges wire vectors",
         "protocol": 3,
-        "note": "Every codec implementation (Python, Go, C#) must encode message+bulk to exactly frames_hex and decode frames_hex back to message+bulk. Control payloads are canonical JSON: sorted keys, separators ',' ':', UTF-8.",
+        "note": "Every codec implementation (Python, Go, C#) must encode message+bulk to exactly frames_hex and decode frames_hex back to message+bulk. Control payloads are canonical JSON: sorted keys, separators ',' ':', raw UTF-8 (frames_hex carries the wire bytes; this file's message copies are ASCII-escaped), null optional fields omitted, v required. rc convention: signed int32, killed-by-signal negative.",
         "vectors": vectors,
     }
     out = Path(__file__).parent / "v3.json"

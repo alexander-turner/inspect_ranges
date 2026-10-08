@@ -5,8 +5,7 @@ Two planes ride one message contract (`range-channel.md`): guest control (`exec`
 Wire conventions, chosen so the Go and C# codecs cannot drift: every numeric field is an integer (milliseconds, bytes, counts; never floats), control payloads are canonical JSON (sorted keys, compact separators, UTF-8), and schemas are strict (unknown keys are errors, no cross-type coercion) because every reply originates on an attackable guest.
 """
 
-import re
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import (
     BaseModel,
@@ -34,6 +33,9 @@ DEFAULT_CHANNEL_BUDGET_MS = 180_000
 DEFAULT_UNTIMED_BOUND_MS = 14_400_000
 """Bound on commands that declared no timeout (4 h, the layered-budget outer layer)."""
 
+MAX_WIRE_INT = 2**53
+"""Upper bound for unbounded-looking integer wire fields: safe in int64 and double codecs alike."""
+
 RequestId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 """Request ids are 32 lowercase hex chars (`uuid4().hex`); retries reuse the id, never regenerate it."""
 
@@ -56,19 +58,35 @@ class _WireModel(BaseModel):
 class Budget(_WireModel):
     """Layered time budgets carried by guest-control requests.
 
-    The layers are independent by design (`guest-exec-lessons.md`): `command_ms` is enforced in-guest with a process-tree kill; `channel_ms` bounds each channel round trip host-side; `untimed_bound_ms` bounds commands that declared no timeout.
+    The layers are independent by design (`guest-exec-lessons.md`): `command_ms` is enforced in-guest with a process-tree kill; `channel_ms` bounds each channel round trip host-side (per attempt, so retries extend wall time by at most the attempt count); `untimed_bound_ms` is an outer total per operation, covering every attempt and backoff.
+
+    Retry interaction: a lost reply is recovered by resending the identical request id, which the endpoint deduplicates. A host-side deadline firing without an observed in-guest kill is attributed to the channel layer, never the command layer; command-layer errors come only from the guest's own budget reply. Any future layer that retried a transport failure with a FRESH request id would reintroduce double-runs, letting an attacker launder a replay through induced truncation; retries must reuse the id, always.
     """
 
     command_ms: int | None = Field(default=None, ge=1, le=DEFAULT_UNTIMED_BOUND_MS)
-    channel_ms: int = Field(default=DEFAULT_CHANNEL_BUDGET_MS, ge=1)
-    untimed_bound_ms: int = Field(default=DEFAULT_UNTIMED_BOUND_MS, ge=1)
+    channel_ms: int = Field(default=DEFAULT_CHANNEL_BUDGET_MS, ge=1, le=MAX_WIRE_INT)
+    untimed_bound_ms: int = Field(
+        default=DEFAULT_UNTIMED_BOUND_MS, ge=1, le=MAX_WIRE_INT
+    )
 
 
 class _MessageBase(_WireModel):
+    """Envelope fields every message carries. The codec additionally requires `v` on the wire: a payload omitting it (or carrying any other version) is a typed decode error, since an honest endpoint always emits it; the schema default exists only for Python construction ergonomics."""
+
     v: Literal[3] = PROTOCOL_VERSION
     id: RequestId
+
+
+class _BulkMessage(_MessageBase):
+    """Base for the only kinds that may carry out-of-band bulk (exec stdin, write_file, exec_result, file_data). Everywhere else, bulk is an unknown key and therefore a schema violation: a hostile endpoint gets no byte side-channel on ok/error/pending replies."""
+
     data_size: int | None = Field(default=None, ge=0, le=MAX_BULK_DECLARABLE)
     """Byte count of the out-of-band bulk that follows the control frame; `None` means no bulk frames at all."""
+
+
+def declared_bulk(message: "Message") -> int | None:
+    """The bulk byte count `message` declares, or `None` for bulk-less kinds."""
+    return message.data_size if isinstance(message, _BulkMessage) else None
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +100,7 @@ class PingRequest(_MessageBase):
     kind: Literal["ping"] = "ping"
 
 
-class ExecRequest(_MessageBase):
+class ExecRequest(_BulkMessage):
     """Run an argv command in the guest (never an implicit shell); stdin rides the bulk."""
 
     kind: Literal["exec"] = "exec"
@@ -103,7 +121,7 @@ class ReadFileRequest(_MessageBase):
     budget: Budget = Field(default_factory=Budget)
 
 
-class WriteFileRequest(_MessageBase):
+class WriteFileRequest(_BulkMessage):
     """Write a guest file; the request's bulk carries the bytes (zero-size bulk writes an empty file)."""
 
     kind: Literal["write_file"] = "write_file"
@@ -158,13 +176,16 @@ class PongReply(_MessageBase):
     protocol: Literal[3] = PROTOCOL_VERSION
 
 
-class ExecResult(_MessageBase):
-    """Exec outcome; the bulk is stdout then stderr, concatenated at the declared sizes."""
+class ExecResult(_BulkMessage):
+    """Exec outcome; the bulk is stdout then stderr, concatenated at the declared sizes.
+
+    `rc` uses the signed convention: killed-by-signal is negative (`-signal`), and daemons convert platform-unsigned exit codes to signed int32 before replying (the Windows unsigned-32 lesson).
+    """
 
     kind: Literal["exec_result"] = "exec_result"
-    rc: int = Field(ge=-255, le=0xFFFFFFFF)
-    stdout_size: int = Field(ge=0)
-    stderr_size: int = Field(ge=0)
+    rc: int = Field(ge=-(2**31), le=2**31 - 1)
+    stdout_size: int = Field(ge=0, le=MAX_BULK_DECLARABLE)
+    stderr_size: int = Field(ge=0, le=MAX_BULK_DECLARABLE)
     stdout_truncated: bool = False
     stderr_truncated: bool = False
 
@@ -176,11 +197,11 @@ class ExecResult(_MessageBase):
         return self
 
 
-class FileData(_MessageBase):
+class FileData(_BulkMessage):
     """Reply to `read_file`; the bulk carries the bytes."""
 
     kind: Literal["file_data"] = "file_data"
-    size: int = Field(ge=0)
+    size: int = Field(ge=0, le=MAX_BULK_DECLARABLE)
     truncated: bool = False
 
     @model_validator(mode="after")
@@ -202,7 +223,7 @@ class PendingReply(_MessageBase):
 
     kind: Literal["pending"] = "pending"
     target_id: RequestId
-    elapsed_ms: int = Field(ge=0)
+    elapsed_ms: int = Field(ge=0, le=MAX_WIRE_INT)
 
 
 class ForwardReply(_MessageBase):
@@ -211,7 +232,7 @@ class ForwardReply(_MessageBase):
 
 
 class DiagEntry(_WireModel):
-    ts_ms: int = Field(ge=0)
+    ts_ms: int = Field(ge=0, le=MAX_WIRE_INT)
     level: Literal["info", "warn", "error"]
     event: str = Field(max_length=128)
     request_id: str | None = Field(default=None, max_length=64)
@@ -224,12 +245,21 @@ class DiagReply(_MessageBase):
 
 
 class ErrorReply(_MessageBase):
-    """Errno-tagged failure. Budget expiries set `errno` `ETIME` and name the layer that fired."""
+    """Errno-tagged failure. Budget expiries set `errno` `ETIME` and must name the layer that fired.
+
+    Post-compromise, everything in an error reply (errno, message, layer) is attacker-influenceable: layer attribution from the guest is triage advice, and the host-enforced budgets remain the real bound.
+    """
 
     kind: Literal["error"] = "error"
     errno: ErrnoName
     message: str = Field(max_length=4096)
     layer: BudgetLayer | None = None
+
+    @model_validator(mode="after")
+    def _budget_errors_name_their_layer(self) -> "ErrorReply":
+        if self.errno in ("ETIME", "ETIMEDOUT") and self.layer is None:
+            raise ValueError("budget errors must name the layer that fired")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +289,7 @@ class StageReport(_MessageBase):
 
 class Heartbeat(_MessageBase):
     kind: Literal["heartbeat"] = "heartbeat"
-    uptime_ms: int = Field(ge=0)
+    uptime_ms: int = Field(ge=0, le=MAX_WIRE_INT)
     guests: dict[str, GuestState] = Field(default_factory=dict)
 
 
@@ -297,21 +327,12 @@ MESSAGE_ADAPTER: TypeAdapter[Message] = TypeAdapter(Message)
 
 
 def _all_kinds() -> frozenset[str]:
-    import typing
-
     kinds: set[str] = set()
     for union in (GuestRequest, GuestReply, HostMessage):
-        for member in typing.get_args(union):
+        for member in get_args(union):
             kinds.add(member.model_fields["kind"].default)
     return frozenset(kinds)
 
 
 ALL_MESSAGE_KINDS = _all_kinds()
 """Every `kind` discriminator value; the wire vectors must cover each one."""
-
-_ERRNO_RE = re.compile(r"^[A-Z][A-Z0-9]{1,15}$")
-
-
-def is_errno_name(value: str) -> bool:
-    """Return whether `value` is shaped like an errno tag (`ENOENT`, `ETIME`, ...)."""
-    return _ERRNO_RE.fullmatch(value) is not None

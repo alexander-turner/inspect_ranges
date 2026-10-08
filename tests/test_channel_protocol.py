@@ -136,10 +136,32 @@ MALFORMED: list[tuple[str, bytes, type[codec.DecodeError]]] = [
         _control_frame(codec.canonical_json({"v": 3, "id": "Z" * 32, "kind": "ping"})),
         codec.InvalidMessage,
     ),
+    ("data-without-declaration", _data_frame(b"x"), codec.ProtocolViolation),
+    ("end-as-first-frame", _end_frame(b"{}"), codec.ProtocolViolation),
+    ("empty-control-payload", _control_frame(b""), codec.InvalidMessage),
     (
-        "data-without-declaration",
-        _PING[:0] + _data_frame(b"x"),
-        codec.ProtocolViolation,
+        "missing-v",
+        _control_frame(codec.canonical_json({"id": RID, "kind": "ping"})),
+        codec.InvalidMessage,
+    ),
+    (
+        "v-too-old",
+        _control_frame(codec.canonical_json({"v": 2, "id": RID, "kind": "ping"})),
+        codec.InvalidMessage,
+    ),
+    (
+        "v-too-new",
+        _control_frame(codec.canonical_json({"v": 4, "id": RID, "kind": "ping"})),
+        codec.InvalidMessage,
+    ),
+    (
+        "huge-integer-field",
+        _control_frame(
+            codec.canonical_json(
+                {"v": 3, "id": RID, "kind": "heartbeat", "uptime_ms": 10**30}
+            )
+        ),
+        codec.InvalidMessage,
     ),
     (
         "data-beyond-declared",
@@ -148,6 +170,12 @@ MALFORMED: list[tuple[str, bytes, type[codec.DecodeError]]] = [
     ),
     ("end-digest-mismatch", _bad_end(), codec.BulkMismatch),
     ("end-size-mismatch", _short_end_size(), codec.BulkMismatch),
+    (
+        "duplicate-keys-in-end",
+        b"".join(_WRITE_FRAMES[:-1])
+        + _end_frame(b'{"sha256":"' + (b"0" * 64) + b'","size":10,"size":10}'),
+        codec.InvalidMessage,
+    ),
     (
         "end-payload-garbage",
         b"".join(_WRITE_FRAMES[:-1]) + _end_frame(b"{}"),
@@ -252,7 +280,7 @@ SCHEMA_REJECTS: list[tuple[str, dict[str, Any]]] = [
     ),
     (
         "negative-data-size",
-        {"v": 3, "id": RID, "kind": "ping", "data_size": -1},
+        {"v": 3, "id": RID, "kind": "write_file", "path": "/f", "data_size": -1},
     ),
     (
         "bad-bundle-digest",
@@ -269,6 +297,22 @@ SCHEMA_REJECTS: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     ("empty-cmd", {"v": 3, "id": RID, "kind": "exec", "cmd": []}),
+    ("bulk-on-bulkless-kind", {"v": 3, "id": RID, "kind": "ok", "data_size": 4}),
+    (
+        "budget-error-without-layer",
+        {"v": 3, "id": RID, "kind": "error", "errno": "ETIME", "message": "x"},
+    ),
+    (
+        "rc-outside-int32",
+        {
+            "v": 3,
+            "id": RID,
+            "kind": "exec_result",
+            "rc": 2**31,
+            "stdout_size": 0,
+            "stderr_size": 0,
+        },
+    ),
 ]
 
 
