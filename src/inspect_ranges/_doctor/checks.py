@@ -11,6 +11,7 @@ from typing import Any, cast
 from .result import CheckResult, CheckStatus
 
 PLATFORM = "Platform"
+REALIZER = "Realizer"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
@@ -45,6 +46,66 @@ def run_checks() -> list[CheckResult]:
     else:
         results.append(_skip(NETWORKING, "all checks", "requires Linux x86_64"))
         results.append(_skip(IMAGE_TOOLING, "all checks", "requires Linux x86_64"))
+    results += check_realizer(
+        image_inspect=_run(
+            ["docker", "image", "inspect", _range_image_tag(), "--format", "ok"]
+        ),
+    )
+    return results
+
+
+def _range_image_tag() -> str:
+    from .._runtime.rangeimage import RANGE_IMAGE_TAG
+
+    return RANGE_IMAGE_TAG
+
+
+def check_realizer(
+    image_inspect: "subprocess.CompletedProcess[str] | None",
+) -> list[CheckResult]:
+    """Realizer host surface: the hardened range image, the daemon artifact, and the Go toolchain that builds it (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact)."""
+    from .._channel.bundle import GO_PIN, locate_go
+    from .._runtime.images import DEFAULT_ARTIFACT_DIR
+
+    results: list[CheckResult] = []
+    if image_inspect is not None and image_inspect.returncode == 0:
+        results.append(CheckResult(REALIZER, "range image", "ok", _range_image_tag()))
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "warn",
+                f"{_range_image_tag()} not built yet; `inspect-ranges up` builds it on first use",
+            )
+        )
+    sidecar = DEFAULT_ARTIFACT_DIR / "daemon.json"
+    if sidecar.is_file():
+        results.append(
+            CheckResult(REALIZER, "daemon artifact", "ok", str(DEFAULT_ARTIFACT_DIR))
+        )
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "daemon artifact",
+                "warn",
+                f"none at {DEFAULT_ARTIFACT_DIR}; publish one: inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+                fix=f"inspect-ranges daemon-bundle -o {DEFAULT_ARTIFACT_DIR}",
+            )
+        )
+    go = locate_go()
+    if go is not None:
+        results.append(CheckResult(REALIZER, "go toolchain", "ok", str(go)))
+    else:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "go toolchain",
+                "warn",
+                f"no Go toolchain (needed only to build the daemon artifact; pin {GO_PIN})",
+            )
+        )
     return results
 
 
