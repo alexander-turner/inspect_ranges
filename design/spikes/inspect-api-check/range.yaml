@@ -1,0 +1,18 @@
+range:
+  name: api-check
+  description: API checkpoint range.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: acme/web-golden
+    interfaces: [{ network: lab }]
+
+attacker:
+  interfaces: [{ network: lab }]
+  entry: external

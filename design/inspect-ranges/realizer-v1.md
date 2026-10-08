@@ -71,6 +71,16 @@ The phase exits when, on both the m6i.metal devbox and devbox-b (nested virt): `
 4. **`up` hard-requires the hardened range image, no bypass flag.** Containment is the product promise; the prototype profile remains available in the spike harnesses, never in the product path.
 5. **A second `up` of an identical bundle refuses**, naming the running project and the exact `down` command. Supersede hides teardown inside a boot command. Parallel instances of one range are a provider-phase concern and arrive as per-sample renders with distinct `cid_base` (distinct bundles, distinct projects), so the refusal is correct, not a limitation.
 
+## Slice 0 findings (Inspect 0.3.272, checked 2026-10-08)
+
+The checkpoint stub lives in [inspect-api-check](../spikes/inspect-api-check/README.md); `run_check.py` passes 9/9. Confirmed as assumed: `@sandboxenv(name="libvirt_range")` registration; the four lifecycle hooks fire in order (`task_init`, `sample_init`, solver, `sample_cleanup`, `task_cleanup`); `sample_init` returns the environment dict with `default` as the attacker box and named guests resolvable via `sandbox("web")`; `config_files()` is consulted for discovery; the `inspect_ai` entry point imports `inspect_ranges._registry` in a fresh process, so the real provider registers there and users never import anything.
+
+Three contract surprises, none requiring a re-plan:
+
+1. **Typed config requires a hashable `RangeSpec`.** Inspect caches sandbox resolution on the sandbox spec, hashing the config object; non-frozen pydantic models are unhashable, so `Task(sandbox=("libvirt_range", spec))` crashed resolution. Fixed in this slice: `RangeSpec.__hash__` is an eq-consistent content hash (specs stay mutable; a spec mutated while held as a cache key just misses).
+2. **Solvers receive a `SandboxEnvironmentProxy`, not the provider class.** `sandbox()` identity and attribute access do not reach the provider object. Provider-phase consequence: nothing user-facing may depend on provider attributes or `isinstance`; everything goes through the `SandboxEnvironment` method surface.
+3. **`config_deserialize` is load-bearing for typed config** (the hook postdates the e2e-provider spike): the eval log stores the config as a by-alias dict and calls the hook on read. `RangeSpec.model_validate` suffices; the typed config round-trips the log intact.
+
 ## Ledger
 
 | Slice | Status |

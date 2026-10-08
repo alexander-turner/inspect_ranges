@@ -916,6 +916,13 @@ class RangeSpec(_StrictModel):
             raise IssueError(errors)
         return self
 
+    def __hash__(self) -> int:
+        """Content hash, consistent with pydantic field equality.
+
+        Inspect's sandbox resolution caches on the sandbox spec, which requires the config object to be hashable; non-frozen pydantic models are not. Specs stay mutable by design, so the hash is recomputed from current content on each call: equal specs always hash equal, and a spec mutated while held as a dict key simply misses the cache.
+        """
+        return hash(self.model_dump_json(by_alias=True))
+
 
 EndpointKind = Literal["network", "guest", "cidr", "unknown"]
 """How an ACL endpoint resolved: a declared network, a declared guest, a CIDR literal, or nothing."""

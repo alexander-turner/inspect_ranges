@@ -147,3 +147,13 @@ def test_revalidate_range_catches_post_construction_mutation() -> None:
     message = str(excinfo.value)
     assert "is not unique" in message
     assert "undeclared network 'dmx'" in message
+
+
+def test_range_spec_hash_tracks_content() -> None:
+    """Specs work as cache keys (Inspect hashes sandbox configs): equal content hashes equal, mutation changes the hash."""
+    a = dmz_pivot()
+    b = dmz_pivot()
+    assert hash(a) == hash(b)
+    assert {a: "cached"}[b] == "cached"
+    b.hosts[0].hostname = "renamed"
+    assert hash(a) != hash(b)
