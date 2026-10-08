@@ -8,35 +8,83 @@ The typed form of a range definition. A `RangeSpec` is accepted directly as sand
 
 Models validate fully at construction (structural and cross-reference checks) and stay mutable for programmatic building; every consumer boundary revalidates (see `revalidate_range`). See [Defining Ranges](../ranges.qmd) for a guided tour of the syntax.
 
-## Definition
+## Range
 
 ### RangeSpec
 
 ### RangeMeta
 
-### Network
-
-### Router
-
-### Route
-
-### AclRule
+## Guests
 
 ### Host
 
+### Router
+
 ### Attacker
-
-### EgressPolicy
-
-### Interface
 
 ### Os
 
 ### Resources
 
+## Guest Content
+
+### User
+
+### Credentials
+
+### Service
+
+### Vulnerability
+
+### Misconfiguration
+
+### DataFile
+
+### ProvisioningStep
+
+### ScheduledActivity
+
+### Variable
+
+## Defense
+
+### Defense
+
+### HostDefense
+
+### Telemetry
+
+## Active Directory
+
+### ActiveDirectory
+
+### AdDomain
+
+### AdUser
+
+### AdAcl
+
+### AdRight
+
+## Networks
+
+### Network
+
+### Interface
+
 ### DnsConfig
 
 ### DnsRecord
+
+### EgressPolicy
+
+### Route
+
+### AclRule
+
+### AnyIPAddress
+
+### AnyIPNetwork
 
 ## Diagnostics
 

@@ -23,3 +23,6 @@ inspect-docs:
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk
+
+comments:
+  hypothesis: true

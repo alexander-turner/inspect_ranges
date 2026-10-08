@@ -6,9 +6,9 @@ llms-description: "Tutorial and review guide for the range.yaml networking synta
 
 ## Overview
 
-This page covers the networking half of the definition language, starting with a single network and adding one construct at a time. Every construct here is realized by the compiler and verified in a booted range; every example validates in CI on both surfaces. For the anatomy of a definition, the typed Python surface, and the validation workflow, see the [Ranges overview](ranges.qmd); guest-side fields (images, resources, operating systems) are covered in [Guests](guests.qmd).
+This page covers the networking half of the definition language, starting with a single network and adding one construct at a time. For the anatomy of a full range definition, see the [Ranges](ranges.qmd) overview; guest-side fields (images, resources, operating systems) are covered in [Guests](guests.qmd).
 
-## A flat network
+## Flat Network
 
 The smallest range: one network, one target, and the attacker:
 
@@ -65,7 +65,7 @@ flat = RangeSpec(
 ```
 :::
 
-Every guest attaches to networks explicitly through `interfaces`. The attacker is an ordinary guest (a dedicated VM with a real NIC in the broadcast domain), declared separately because evaluations treat it specially. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it.
+Every guest attaches to networks explicitly through `interfaces`. The attacker is an ordinary guest (a dedicated VM with a real NIC in the broadcast domain), declared separately because evaluations map it to `sandbox("default")`. All models live in `inspect_ranges.types`; the import is shown once above, and later Python tabs omit it.
 
 `mode: isolated` means no traffic leaves the range from this network. Use it unless the range needs egress; `nat` and `routed` are covered [below](#egress).
 
@@ -190,7 +190,7 @@ dhcp = RangeSpec(
 ```
 :::
 
-## Name resolution
+## Name Resolution
 
 A network can declare DNS in three ways. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
 
@@ -260,7 +260,7 @@ dns_records = RangeSpec(
 ```
 :::
 
-Records networks hand their guests a derived search domain (`<network>.internal`), because modern stub resolvers do not send single-label names like `web` to DNS without one.
+Networks with `records` hand their guests a derived search domain (`<network>.internal`), because modern stub resolvers do not send single-label names like `web` to DNS without one.
 
 `nameservers` points guests at external resolvers, and `authoritative` names guests (such as domain controllers) that are the network's DNS servers, optionally chaining to a `forwarder`. This is the Active Directory pattern: the DC is the DNS server:
 
@@ -750,7 +750,6 @@ The attacker's own `egress` composes ahead of network policy: `none` (the defaul
 Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code:
 
 ``` yaml
-# invalid-example: FQDN egress targets are gated until their realization lands
 range:
   name: egress-fqdn
   description: FQDN entries are in the vocabulary but gated.
@@ -770,13 +769,7 @@ attacker:
   entry: assumed-breach
 ```
 
-```         
-✗ range.yaml  1 error
-  9:15  networks[0].egress.allow[0]  egress entry 'updates.example.com:tcp/443': FQDN
-                                     targets are not yet realized (use a CIDR for now)
-```
-
-## The attacker
+## Attacker
 
 The attacker either boots as a dedicated attack box (declare `interfaces`, optionally `name`, `image`, and `resources`) or starts from a foothold on a declared host (assumed breach):
 
@@ -830,31 +823,3 @@ foothold = RangeSpec(
 :::
 
 `entry` records how the attacker arrives (`external`, `assumed-breach`, or `operator`) for scorers and dataset builders.
-
-## Boundaries {#boundaries}
-
-Constructs outside the current implementation are rejected with specific error codes. Three categories:
-
-**Gated**: in the vocabulary, rejected with a specific code until their realization lands.
-
-| Construct | Code |
-|------------------------------------|------------------------------------|
-| IPv6 values (any field) | `ipv6-not-realized` |
-| FQDN egress targets | `egress-fqdn-not-realized` |
-| Egress allowlists on router-attached networks | `egress-with-router-not-realized` |
-
-**Excluded**: not in the vocabulary; nothing surveyed forces them yet.
-
-| Construct                           | Status                                |
-|------------------------------------|------------------------------------|
-| VLANs / trunking on shared bridges  | reserved code `vlan-not-supported`    |
-| Multiple NICs on one network        | rejected as `duplicate-attachment`    |
-| Traffic shaping / latency injection | reserved code `shaping-not-supported` |
-
-**Deferred sections**: `attack_path` and operator policy are not networking and are excluded from the schema until their designs land; they are rejected with a pointer to where their content currently lives. Guest content (users, services, weaknesses, defense, Active Directory) and `variables` are covered in [Guests](guests.qmd).
-
-::: callout-note
-## Status and feedback
-
-The networking syntax is schema v0.2. Every construct on this page is enforced in a booted range by a conformance battery. If a network you want to express does not fit this syntax, please share the topology, ideally as a sketch of the `range.yaml` you wish you could write.
-:::
