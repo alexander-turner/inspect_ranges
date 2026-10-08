@@ -16,7 +16,12 @@ import (
 
 type vectorDoc struct {
 	Protocol int `json:"protocol"`
-	Vectors  []struct {
+	Daemon   struct {
+		KillGraceMs    int64 `json:"kill_grace_ms"`
+		WaitDelayMs    int64 `json:"wait_delay_ms"`
+		InboundBulkCap int64 `json:"inbound_bulk_cap"`
+	} `json:"daemon"`
+	Vectors []struct {
 		Name      string          `json:"name"`
 		Message   json.RawMessage `json:"message"`
 		BulkHex   *string         `json:"bulk_hex"`
@@ -107,6 +112,70 @@ func TestDecodeHardening(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if _, err := ParseControl([]byte(c.payload)); err == nil {
 				t.Fatalf("accepted dishonest payload %s", c.name)
+			}
+		})
+	}
+}
+
+func TestVectorCoverage(t *testing.T) {
+	doc := loadVectors(t)
+	seen := map[string]bool{}
+	for _, vector := range doc.Vectors {
+		var probe struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(vector.Message, &probe); err != nil {
+			t.Fatalf("vector %s: %v", vector.Name, err)
+		}
+		seen[probe.Kind] = true
+	}
+	for kind := range allKinds {
+		if !seen[kind] {
+			t.Errorf("no vector covers kind %q", kind)
+		}
+	}
+	for kind := range seen {
+		if !allKinds[kind] {
+			t.Errorf("vector kind %q is not in the protocol", kind)
+		}
+	}
+	if len(doc.Vectors) < len(allKinds) {
+		t.Fatalf("only %d vectors for %d kinds", len(doc.Vectors), len(allKinds))
+	}
+}
+
+func TestDaemonConstantsPinnedByVectors(t *testing.T) {
+	// the host observation grace derives from these; drift here silently
+	// breaks exec deadline verdicts
+	doc := loadVectors(t)
+	if doc.Daemon.KillGraceMs != KillGrace.Milliseconds() {
+		t.Fatalf("KillGrace %dms != pinned %dms", KillGrace.Milliseconds(), doc.Daemon.KillGraceMs)
+	}
+	if doc.Daemon.WaitDelayMs != WaitDelay.Milliseconds() {
+		t.Fatalf("WaitDelay %dms != pinned %dms", WaitDelay.Milliseconds(), doc.Daemon.WaitDelayMs)
+	}
+	if doc.Daemon.InboundBulkCap != ReceiveBulkCap {
+		t.Fatalf("inbound bulk cap %d != pinned %d", ReceiveBulkCap, doc.Daemon.InboundBulkCap)
+	}
+}
+
+func TestPerKindFieldTable(t *testing.T) {
+	rid := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rejects := []struct {
+		name    string
+		payload string
+	}{
+		{"ping-with-cmd", `{"cmd":["x"],"id":"` + rid + `","kind":"ping","v":3}`},
+		{"ok-with-errno", `{"errno":"ENOENT","id":"` + rid + `","kind":"ok","v":3}`},
+		{"pending-missing-elapsed", `{"id":"` + rid + `","kind":"pending","target_id":"` + rid + `","v":3}`},
+		{"error-missing-message", `{"errno":"ENOENT","id":"` + rid + `","kind":"error","v":3}`},
+		{"stage-missing-stage", `{"id":"` + rid + `","kind":"stage","v":3}`},
+		{"heartbeat-with-path", `{"id":"` + rid + `","kind":"heartbeat","path":"/x","uptime_ms":1,"v":3}`},
+	}
+	for _, c := range rejects {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := ParseControl([]byte(c.payload)); err == nil {
+				t.Fatalf("accepted cross-kind payload %s", c.name)
 			}
 		})
 	}
