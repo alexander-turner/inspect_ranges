@@ -230,12 +230,21 @@ CLOUD_INIT_PROBE = ["sh", "-c", "cloud-init status --wait >/dev/null 2>&1"]
 
 
 def make_channel(cids: "dict[str, int]") -> MessageChannel:
-    """The readiness channel to this range's guests (a test seam; built inside the event loop)."""
-    return MessageChannel(VsockTransport(cids), label="up-readiness")
+    """The readiness channel to this range's guests (a test seam; built inside the event loop).
+
+    The per-round-trip allowance is readiness-tuned: a daemon that accepts but never replies must cost seconds per attempt, not the channel's long default, or one wedged guest overshoots the whole readiness budget. Long cloud-init waits stay fine: exec liveness rides pending polls, each bounded by this allowance.
+    """
+    return MessageChannel(
+        VsockTransport(cids), label="up-readiness", channel_budget_s=10.0
+    )
 
 
 async def _await_ready(
-    channel: MessageChannel, guest: str, readiness: str, deadline: float
+    channel: MessageChannel,
+    guest: str,
+    readiness: str,
+    deadline: float,
+    min_window: float = 10.0,
 ) -> bool:
     """One guest's readiness: daemon answering, then the cloud-init gate; any failure or malformed behavior is not-ready, never an escape."""
     while True:
@@ -247,7 +256,9 @@ async def _await_ready(
                 return False
             await asyncio.sleep(1.0)
     if readiness == "cloud-init":
-        remaining_ms = max(10_000, int((deadline - time.monotonic()) * 1000))
+        remaining_ms = max(
+            int(min_window * 1000), int((deadline - time.monotonic()) * 1000)
+        )
         try:
             outcome = await channel.exec(
                 guest,
@@ -418,7 +429,11 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
                 deadline, time.monotonic() + options.readiness_min_window
             )
             ready = await _await_ready(
-                channel, guest.name, guest.readiness, guest_deadline
+                channel,
+                guest.name,
+                guest.readiness,
+                guest_deadline,
+                min_window=options.readiness_min_window,
             )
             collected.append(GuestState(name=guest.name, cid=guest.cid, ready=ready))
             log.log("readiness", "ok" if ready else "fail", guest=guest.name)

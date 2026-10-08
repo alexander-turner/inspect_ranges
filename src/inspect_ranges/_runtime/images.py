@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from .._channel.bundle import BundleError, DaemonBundleInfo, verify_daemon_bundle
+from .._channel.protocol import PROTOCOL_VERSION
 from .._compiler.plan import image_file_name
 
 logger = logging.getLogger(__name__)
@@ -80,11 +81,15 @@ def sha256_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def resolve_daemon_bundle(artifact_dir: Path) -> tuple[Path, DaemonBundleInfo]:
-    """Locate and fully verify the daemon-bundle artifact (sidecar digest, member safety).
+def resolve_daemon_bundle(
+    artifact_dir: Path, expected_sha256: str | None = None
+) -> tuple[Path, DaemonBundleInfo]:
+    """Locate and verify the daemon-bundle artifact against its sidecar, and against an out-of-band pin when one is given.
+
+    Trust model: the sidecar lives next to the tarball, so sidecar verification alone proves internal consistency, not provenance (whoever can write the artifact directory can rewrite both). Passing `expected_sha256` (the digest `daemon-bundle` printed at publish time) restores the out-of-band pin; the batteries and any unattended derivation should always pass it.
 
     Raises:
-        DeriveError: The artifact or its sidecar is absent, unreadable, or fails verification; the hint names the command that publishes it.
+        DeriveError: The artifact or its sidecar is absent, unreadable, protocol-skewed, pin-mismatched, or fails verification; the hint names the command that publishes it.
     """
     sidecar = artifact_dir / "daemon.json"
     if not sidecar.is_file():
@@ -101,6 +106,18 @@ def resolve_daemon_bundle(artifact_dir: Path) -> tuple[Path, DaemonBundleInfo]:
     bundle_path = artifact_dir / f"vsockd-bundle-{info.version}.tar"
     if not bundle_path.is_file():
         raise DeriveError("resolve-daemon", f"daemon bundle missing: {bundle_path}")
+    if expected_sha256 is not None:
+        pin = expected_sha256.removeprefix("sha256:").lower()
+        if info.bundle_sha256 != pin:
+            raise DeriveError(
+                "resolve-daemon",
+                f"daemon bundle digest {info.bundle_sha256} does not match the pin {pin}",
+            )
+    if info.protocol != PROTOCOL_VERSION:
+        raise DeriveError(
+            "resolve-daemon",
+            f"daemon bundle speaks protocol {info.protocol}; this build requires {PROTOCOL_VERSION}",
+        )
     try:
         verify_daemon_bundle(bundle_path, info)
     except BundleError as error:
@@ -112,7 +129,13 @@ def _extract_daemon(bundle_path: Path, staging: Path) -> tuple[Path, Path]:
     """Extract the verified bundle's binary and unit into `staging`; returns their paths."""
     with tarfile.open(bundle_path, mode="r:") as tar:
         for member in ("linux/vsockd", "linux/vsockd.service"):
-            handle = tar.extractfile(member)
+            try:
+                handle = tar.extractfile(member)
+            except KeyError as error:
+                raise DeriveError(
+                    "resolve-daemon",
+                    f"bundle lacks required member {member} (a foreign layout verifies against its own sidecar but is not consumable here)",
+                ) from error
             if handle is None:
                 raise DeriveError(
                     "resolve-daemon", f"bundle member unreadable: {member}"
@@ -155,6 +178,7 @@ def derive_golden(
     name: str | None = None,
     runner: Runner | None = None,
     artifact_dir: Path | None = None,
+    daemon_sha256: str | None = None,
 ) -> tuple[ImageMetadata, bool]:
     """Derive a daemon-baked golden overlay from a digest-pinned vendor image.
 
@@ -167,6 +191,7 @@ def derive_golden(
         name: Golden name; defaults to `<vendor stem>-golden`.
         runner: Command executor, injectable for tests; defaults to `subprocess.run` with check.
         artifact_dir: Where the daemon-bundle artifact lives; defaults to the shared artifact cache.
+        daemon_sha256: Out-of-band pin for the bundle digest (what `daemon-bundle` printed at publish); without it the sidecar proves internal consistency only.
 
     Returns:
         The golden's metadata and whether the cache already satisfied the request. A hit requires the recorded golden digest and the in-cache vendor pin to both verify; a tampered in-cache vendor logs a warning and re-derives.
@@ -196,7 +221,8 @@ def derive_golden(
         )
 
     bundle_path, daemon_info = resolve_daemon_bundle(
-        artifact_dir if artifact_dir is not None else DEFAULT_ARTIFACT_DIR
+        artifact_dir if artifact_dir is not None else DEFAULT_ARTIFACT_DIR,
+        expected_sha256=daemon_sha256,
     )
 
     golden_name = name or f"{Path(vendor.name).stem}-golden"

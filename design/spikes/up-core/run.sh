@@ -37,10 +37,11 @@ $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp"
 
 echo "=== build the daemon artifact and derive the battery golden (v3) ==="
-$IR daemon-bundle -o "$SPIKE/tmp/artifacts" >/dev/null \
+DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts") \
   || { echo "daemon-bundle build failed (install the pinned Go toolchain)"; exit 1; }
+DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" >/dev/null
+$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name up-core-guest --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
 $IR render design/spikes/up-core/spec.yaml -o "$SPIKE/tmp/bundle" --image-cache "$CACHE" --cid-base 3000
 
 echo "=== U1 tamper refusal ==="

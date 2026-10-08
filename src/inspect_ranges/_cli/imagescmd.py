@@ -40,12 +40,19 @@ def images() -> None:
     default=None,
     help="Directory holding the daemon-bundle artifact and its daemon.json (default: the shared artifact cache; publish one with `inspect-ranges daemon-bundle`).",
 )
+@click.option(
+    "--daemon-sha256",
+    "daemon_sha256",
+    default=None,
+    help="Out-of-band pin for the daemon bundle digest (printed by `inspect-ranges daemon-bundle` at publish). Without it, the sidecar proves internal consistency only.",
+)
 def derive(
     vendor: Path,
     vendor_sha256: str,
     name: str | None,
     image_cache: Path,
     daemon_bundle: Path | None,
+    daemon_sha256: str | None,
 ) -> None:
     """Derive a daemon-baked golden from a digest-pinned vendor cloud image.
 
@@ -53,7 +60,12 @@ def derive(
     """
     try:
         metadata, hit = derive_golden(
-            vendor, vendor_sha256, image_cache, name=name, artifact_dir=daemon_bundle
+            vendor,
+            vendor_sha256,
+            image_cache,
+            name=name,
+            artifact_dir=daemon_bundle,
+            daemon_sha256=daemon_sha256,
         )
     except DeriveError as error:
         raise click.ClickException(str(error)) from error

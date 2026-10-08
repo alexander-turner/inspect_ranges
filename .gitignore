@@ -223,3 +223,6 @@ src/inspect_ranges/_version.py
 # Quarto Docs
 /.luarc.json
 
+
+# daemon build droppings (the artifact builder works in a temp name)
+.vsockd-build

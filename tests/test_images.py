@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from inspect_ranges._channel.bundle import DaemonBundleInfo, _tar_bytes
+from inspect_ranges._channel.bundle import DaemonBundleInfo, write_bundle
 from inspect_ranges._runtime import DeriveError, derive_golden, list_images
 from inspect_ranges._runtime.images import sha256_file
 
@@ -30,24 +30,8 @@ def vendor(tmp_path: Path) -> tuple[Path, str]:
 
 
 def make_artifact(directory: Path, binary: bytes = b"#!fake-static-daemon") -> Path:
-    """A structurally real daemon-bundle artifact (verifies end to end) with fake binary bytes."""
-    members = {
-        "linux/vsockd": binary,
-        "linux/install.sh": b"#!/bin/sh\n",
-        "linux/vsockd.service": b"[Unit]\nDescription=t\n",
-        "windows/PLACEHOLDER.md": b"placeholder\n",
-    }
-    blob = _tar_bytes(members)
-    info = DaemonBundleInfo(
-        name="vsockd",
-        version="3.0.0-test",
-        protocol=3,
-        files={k: hashlib.sha256(v).hexdigest() for k, v in members.items()},
-        bundle_sha256=hashlib.sha256(blob).hexdigest(),
-    )
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"vsockd-bundle-{info.version}.tar").write_bytes(blob)
-    (directory / "daemon.json").write_text(info.model_dump_json(indent=2) + "\n")
+    """A real daemon-bundle artifact (production layout via the public `write_bundle`) with stand-in binary bytes."""
+    write_bundle(directory, binary, version="3.0.0-test")
     return directory
 
 
@@ -305,3 +289,40 @@ def test_list_images_separates_managed_and_unmanaged(
     managed, unmanaged = list_images(cache)
     assert [m.file for m in managed] == ["noble-server-cloudimg-amd64-golden.qcow2"]
     assert unmanaged == ["handmade.qcow2"]
+
+
+def test_daemon_pin_mismatch_refuses(
+    tmp_path: Path, vendor: tuple[Path, str], artifact: Path
+) -> None:
+    """The out-of-band pin is the provenance check: a self-consistent artifact that does not match it refuses."""
+    image, digest = vendor
+    with pytest.raises(
+        DeriveError, match=r"\[resolve-daemon\].*does not match the pin"
+    ):
+        derive_golden(
+            image,
+            digest,
+            tmp_path / "cache",
+            runner=fake_runner,
+            artifact_dir=artifact,
+            daemon_sha256="f" * 64,
+        )
+
+
+def test_protocol_skewed_artifact_refuses(
+    tmp_path: Path, vendor: tuple[Path, str], artifact: Path
+) -> None:
+    image, digest = vendor
+    sidecar = artifact / "daemon.json"
+    info = DaemonBundleInfo.model_validate_json(sidecar.read_text())
+    skewed = info.model_dump()
+    skewed["protocol"] = 99
+    sidecar.write_text(DaemonBundleInfo.model_construct(**skewed).model_dump_json())
+    with pytest.raises(DeriveError, match=r"\[resolve-daemon\].*protocol 99"):
+        derive_golden(
+            image,
+            digest,
+            tmp_path / "cache",
+            runner=fake_runner,
+            artifact_dir=artifact,
+        )
