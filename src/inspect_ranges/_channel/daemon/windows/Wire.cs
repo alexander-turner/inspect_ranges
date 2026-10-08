@@ -153,9 +153,9 @@ namespace VsockD
                         case 'r': sb.Append('\r'); break;
                         case 't': sb.Append('\t'); break;
                         case 'u':
-                            if (pos + 4 > s.Length) throw new DecodeException("bad \\u escape");
-                            sb.Append((char)Convert.ToInt32(s.Substring(pos, 4), 16));
-                            pos += 4;
+                            _pendingLow = '\0';
+                            sb.Append(ParseUnicodeEscape(s, ref pos, false));
+                            if (_pendingLow != '\0') sb.Append(_pendingLow);
                             break;
                         default: throw new DecodeException("bad escape '\\" + e + "'");
                     }
@@ -165,6 +165,46 @@ namespace VsockD
                 sb.Append(c);
             }
         }
+
+        static char ParseUnicodeEscape(string s, ref int pos, bool wantLow)
+        {
+            if (pos + 4 > s.Length) throw new DecodeException("bad \\u escape");
+            int code = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                char h = s[pos + i];
+                int digit;
+                if (h >= '0' && h <= '9') digit = h - '0';
+                else if (h >= 'a' && h <= 'f') digit = h - 'a' + 10;
+                else if (h >= 'A' && h <= 'F') digit = h - 'A' + 10;
+                else throw new DecodeException("bad \\u escape (non-hex digit)");
+                code = (code << 4) | digit;
+            }
+            pos += 4;
+            char c = (char)code;
+            if (wantLow)
+            {
+                if (!char.IsLowSurrogate(c))
+                    throw new DecodeException("lone high surrogate escape");
+                return c;
+            }
+            if (char.IsLowSurrogate(c))
+                throw new DecodeException("lone low surrogate escape");
+            if (char.IsHighSurrogate(c))
+            {
+                // a high surrogate must pair with an escaped low surrogate
+                if (pos + 2 > s.Length || s[pos] != '\\' || s[pos + 1] != 'u')
+                    throw new DecodeException("lone high surrogate escape");
+                pos += 2;
+                // the pair is appended by the caller via two Append calls:
+                // return the high here and stash the low through recursion
+                char low = ParseUnicodeEscape(s, ref pos, true);
+                _pendingLow = low;
+            }
+            return c;
+        }
+
+        [ThreadStatic] static char _pendingLow;
 
         static object ParseNumber(string s, ref int pos)
         {
@@ -234,6 +274,15 @@ namespace VsockD
 
         static void WriteString(StringBuilder sb, string s)
         {
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (char.IsHighSurrogate(s[i]) &&
+                    (i + 1 >= s.Length || !char.IsLowSurrogate(s[i + 1])))
+                    throw new InvalidOperationException("lone surrogate is unencodable");
+                if (char.IsLowSurrogate(s[i]) &&
+                    (i == 0 || !char.IsHighSurrogate(s[i - 1])))
+                    throw new InvalidOperationException("lone surrogate is unencodable");
+            }
             sb.Append('"');
             foreach (char c in s)
             {
@@ -481,6 +530,14 @@ namespace VsockD
             return s;
         }
 
+        static long RequireLong(Dictionary<string, object> m, string key)
+        {
+            object v;
+            if (!m.TryGetValue(key, out v) || !(v is long))
+                throw new DecodeException(key + " must be an integer");
+            return (long)v;
+        }
+
         public static void Validate(Dictionary<string, object> m)
         {
             string kind = GetString(m, "kind");
@@ -542,42 +599,65 @@ namespace VsockD
                     if (cmd == null || cmd.Count == 0) throw new DecodeException("exec: empty cmd");
                     foreach (object part in cmd)
                         if (!(part is string)) throw new DecodeException("exec: cmd items must be strings");
+                    GetString(m, "cwd");
+                    GetString(m, "user");
+                    object envObj;
+                    if (m.TryGetValue("env", out envObj))
+                    {
+                        Dictionary<string, object> env = envObj as Dictionary<string, object>;
+                        if (env == null) throw new DecodeException("exec: env must be an object");
+                        foreach (object value in env.Values)
+                            if (!(value is string))
+                                throw new DecodeException("exec: env values must be strings");
+                    }
                     break;
                 case "read_file":
                 case "write_file":
-                    if (((string)m["path"]).Length == 0) throw new DecodeException(kind + ": empty path");
+                    if (GetString(m, "path").Length == 0) throw new DecodeException(kind + ": empty path");
                     if (kind == "write_file" && !dataSize.HasValue)
                         throw new DecodeException("write_file requires data_size");
                     break;
                 case "poll":
                 case "ack":
                 case "pending":
-                    if (!RequestIdRe.IsMatch((string)m["target_id"]))
+                    if (!RequestIdRe.IsMatch(GetString(m, "target_id")))
                         throw new DecodeException(kind + ": bad target id");
                     break;
                 case "exec_result":
-                    long rc = (long)m["rc"];
+                    long rc = RequireLong(m, "rc");
                     if (rc < -(1L << 31) || rc > (1L << 31) - 1)
                         throw new DecodeException("exec_result: rc outside int32");
                     long declared = dataSize.HasValue ? dataSize.Value : 0;
-                    if ((long)m["stdout_size"] + (long)m["stderr_size"] != declared)
+                    if (RequireLong(m, "stdout_size") + RequireLong(m, "stderr_size") != declared)
                         throw new DecodeException("exec_result: sizes do not match data_size");
                     break;
                 case "file_data":
                     long fdDeclared = dataSize.HasValue ? dataSize.Value : 0;
-                    if ((long)m["size"] != fdDeclared)
+                    if (RequireLong(m, "size") != fdDeclared)
                         throw new DecodeException("file_data: size does not match data_size");
                     break;
                 case "error":
-                    if (!ErrnoRe.IsMatch((string)m["errno"]))
+                    if (!ErrnoRe.IsMatch(GetString(m, "errno")))
                         throw new DecodeException("error: bad errno shape");
+                    GetString(m, "message");
                     string errno = (string)m["errno"];
                     if ((errno == "ETIME" || errno == "ETIMEDOUT") && !m.ContainsKey("layer"))
                         throw new DecodeException("error: budget errors must name their layer");
+                    if (m.ContainsKey("layer")) GetString(m, "layer");
                     break;
                 case "forward":
-                    long port = (long)m["port"];
+                    long port = RequireLong(m, "port");
                     if (port < 1 || port > 65535) throw new DecodeException("forward: bad port");
+                    GetString(m, "host");
+                    break;
+                case "pong":
+                    GetString(m, "daemon");
+                    break;
+                case "forward_ok":
+                    GetString(m, "handle");
+                    break;
+                case "stage":
+                    GetString(m, "stage");
                     break;
                 case "diag":
                     long? maxEntries = GetLong(m, "max_entries");
@@ -585,7 +665,7 @@ namespace VsockD
                         throw new DecodeException("diag: max_entries out of bounds");
                     break;
                 case "realize":
-                    if (!Sha256Re.IsMatch((string)m["bundle_digest"]))
+                    if (!Sha256Re.IsMatch(GetString(m, "bundle_digest")))
                         throw new DecodeException("realize: bad bundle digest");
                     break;
             }

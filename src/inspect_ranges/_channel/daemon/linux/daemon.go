@@ -85,10 +85,19 @@ func (s *Store) addTombstoneLocked(id string) {
 		s.tombs[id] = true
 		s.tombsOrder.PushBack(id)
 	}
-	for s.tombsOrder.Len() > TombstoneBound {
+	// acked ids leave stale order nodes; bound the LIVE tombstone count and
+	// drop residue nodes as they surface
+	for len(s.tombs) > TombstoneBound && s.tombsOrder.Len() > 0 {
 		oldest := s.tombsOrder.Front()
 		s.tombsOrder.Remove(oldest)
 		delete(s.tombs, oldest.Value.(string))
+	}
+	for s.tombsOrder.Len() > 0 {
+		front := s.tombsOrder.Front()
+		if s.tombs[front.Value.(string)] {
+			break
+		}
+		s.tombsOrder.Remove(front) // residue from an acked id
 	}
 }
 
@@ -127,19 +136,26 @@ func (s *Store) Ack(id string) {
 	delete(s.tombs, id) // an ack means the client consumed it after all
 }
 
-// Begin registers an in-flight durable request id. Returns (running, isNew):
-// when isNew is false the caller must wait on running.done and read the
-// stored reply (attach semantics: the effect runs exactly once per id, even
-// when a retransmit arrives while the first attempt is still executing).
-func (s *Store) Begin(id string) (*runningExec, bool) {
+// Acquire is the ONE atomic dedupe step for durable ids: under a single lock
+// it returns the stored reply, the tombstone verdict, an in-flight run to
+// attach to, or registers a fresh run. Separate Get/Tombstoned/Begin calls
+// raced a completing first attempt (a retransmit could land between Finish
+// removing the run and the resend's Begin, re-running the effect).
+func (s *Store) Acquire(id string) (stored *storedReply, tombstoned bool, run *runningExec, isNew bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if run, ok := s.running[id]; ok {
-		return run, false
+	if reply, ok := s.replies[id]; ok {
+		return reply, false, nil, false
 	}
-	run := &runningExec{start: time.Now(), done: make(chan struct{})}
-	s.running[id] = run
-	return run, true
+	if s.tombs[id] {
+		return nil, true, nil, false
+	}
+	if existing, ok := s.running[id]; ok {
+		return nil, false, existing, false
+	}
+	fresh := &runningExec{start: time.Now(), done: make(chan struct{})}
+	s.running[id] = fresh
+	return nil, false, fresh, true
 }
 
 func (s *Store) Finish(id string, reply *storedReply) {
@@ -259,35 +275,42 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 			Entries: d.diag.Tail(limit),
 		}}
 	}
-	// durable kinds: dedupe on id before executing any effect; attach to an
-	// in-flight first attempt rather than racing it (exactly-once per id)
-	if stored, ok := d.store.Get(request.ID); ok {
+	// durable kinds: dedupe, tombstones, and attach-to-in-flight in ONE
+	// atomic acquire (exactly-once per id, immune to the completion race)
+	stored, tombstoned, run, isNew := d.store.Acquire(request.ID)
+	if stored != nil {
 		return stored
 	}
-	if d.store.Tombstoned(request.ID) {
+	if tombstoned {
 		return errorReply(request.ID, "ESTALE",
 			"executed, result lost before acknowledgement", nil)
 	}
-	run, isNew := d.store.Begin(request.ID)
 	if !isNew {
 		<-run.done
-		if stored, ok := d.store.Get(request.ID); ok {
-			return stored
+		if attached, ok := d.store.Get(request.ID); ok {
+			return attached
 		}
 		return errorReply(request.ID, "EPROTO", "request finished without a stored result", nil)
 	}
 	var reply *storedReply
-	switch request.Kind {
-	case "exec":
-		reply = d.runCommand(request, bulk)
-	case "read_file":
-		reply = d.readFile(request)
-	case "write_file":
-		reply = d.writeFile(request, bulk)
-	default:
-		reply = errorReply(request.ID, "EPROTO", fmt.Sprintf("unsupported request %s", request.Kind), nil)
-	}
-	d.store.Finish(request.ID, reply)
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				reply = errorReply(request.ID, "EIO", fmt.Sprintf("handler panicked: %v", recovered), nil)
+			}
+			d.store.Finish(request.ID, reply)
+		}()
+		switch request.Kind {
+		case "exec":
+			reply = d.runCommand(request, bulk)
+		case "read_file":
+			reply = d.readFile(request)
+		case "write_file":
+			reply = d.writeFile(request, bulk)
+		default:
+			reply = errorReply(request.ID, "EPROTO", fmt.Sprintf("unsupported request %s", request.Kind), nil)
+		}
+	}()
 	return reply
 }
 

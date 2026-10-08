@@ -113,6 +113,11 @@ namespace VsockD
                 new[] { "non-integer-number", "{\"id\":\"" + rid + "\",\"kind\":\"heartbeat\",\"uptime_ms\":1.5,\"v\":3}" },
                 new[] { "negative-max-entries", "{\"id\":\"" + rid + "\",\"kind\":\"diag\",\"max_entries\":-1,\"v\":3}" },
                 new[] { "rc-outside-int32", "{\"id\":\"" + rid + "\",\"kind\":\"exec_result\",\"rc\":2147483648,\"stderr_size\":0,\"stdout_size\":0,\"v\":3}" },
+                new[] { "bad-u-escape-0x", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\u0x41\",\"v\":3}" },
+                new[] { "bad-u-escape-nonhex", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\uzzzz\",\"v\":3}" },
+                new[] { "lone-high-surrogate", "{\"id\":\"" + rid + "\",\"kind\":\"error\",\"errno\":\"EIO\",\"message\":\"\\ud800\",\"v\":3}" },
+                new[] { "wrong-typed-port", "{\"host\":\"h\",\"id\":\"" + rid + "\",\"kind\":\"forward\",\"port\":\"80\",\"v\":3}" },
+                new[] { "wrong-typed-target", "{\"id\":\"" + rid + "\",\"kind\":\"ack\",\"target_id\":5,\"v\":3}" },
             };
             foreach (string[] reject in rejects)
             {

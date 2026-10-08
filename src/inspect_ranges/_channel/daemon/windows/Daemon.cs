@@ -203,10 +203,13 @@ namespace VsockD
                     _replies.Remove(oldest);
                     // evicted UNACKED: the effect ran, the result is lost
                     if (_tombs.Add(oldest)) _tombOrder.AddLast(oldest);
-                    while (_tombOrder.Count > TombstoneBound)
+                    while (_tombs.Count > TombstoneBound && _tombOrder.Count > 0)
                     {
-                        _tombs.Remove(_tombOrder.First.Value);
+                        // acked ids leave stale order nodes: skip them so the
+                        // bound governs LIVE tombstones, not residue
+                        string candidate = _tombOrder.First.Value;
                         _tombOrder.RemoveFirst();
+                        _tombs.Remove(candidate);
                     }
                 }
             }
@@ -227,14 +230,21 @@ namespace VsockD
             }
         }
 
-        // Begin registers an in-flight durable id. isNew=false: wait on the
-        // returned entry's Done, then Get (attach semantics: exactly once).
-        public RunningEntry Begin(string id, out bool isNew)
+        // Acquire is the ONE atomic dedupe step for durable ids: under a
+        // single lock it returns the stored reply, the tombstone verdict, or
+        // the running entry to attach to, or registers a fresh run. Separate
+        // Get/Tombstoned/Begin calls would race a completing first attempt
+        // (the TOCTOU the review caught, fixed in the Go daemon too).
+        public RunningEntry Acquire(string id, out StoredReply stored, out bool tombstoned, out bool isNew)
         {
             lock (_lock)
             {
+                tombstoned = false;
+                isNew = false;
+                if (_replies.TryGetValue(id, out stored)) return null;
+                if (_tombs.Contains(id)) { tombstoned = true; return null; }
                 RunningEntry entry;
-                if (_running.TryGetValue(id, out entry)) { isNew = false; return entry; }
+                if (_running.TryGetValue(id, out entry)) return entry;
                 entry = new RunningEntry();
                 _running[id] = entry;
                 isNew = true;
@@ -501,13 +511,15 @@ namespace VsockD
                 return new StoredReply(result, null);
             }
 
-            // durable kinds: dedupe, tombstones, attach-to-in-flight
-            StoredReply stored = Replies.Get(id);
+            // durable kinds: dedupe, tombstones, attach-to-in-flight, in ONE
+            // atomic acquire; a handler exception still finishes the id so a
+            // retransmit can never wedge on an entry whose Done never fires
+            StoredReply stored;
+            bool tombstoned, isNew;
+            RunningEntry entry = Replies.Acquire(id, out stored, out tombstoned, out isNew);
             if (stored != null) return stored;
-            if (Replies.Tombstoned(id))
+            if (tombstoned)
                 return ErrorReply(id, "ESTALE", "executed, result lost before acknowledgement", null);
-            bool isNew;
-            RunningEntry entry = Replies.Begin(id, out isNew);
             if (!isNew)
             {
                 entry.Done.WaitOne();
@@ -515,12 +527,22 @@ namespace VsockD
                 if (attached != null) return attached;
                 return ErrorReply(id, "EPROTO", "request finished without a stored result", null);
             }
-            StoredReply reply;
-            if (kind == "exec") reply = ExecRequest(request, bulk);
-            else if (kind == "read_file") reply = ReadFile(request);
-            else if (kind == "write_file") reply = WriteFile(request, bulk);
-            else reply = ErrorReply(id, "EPROTO", "unsupported request " + kind, null);
-            Replies.Finish(id, reply);
+            StoredReply reply = null;
+            try
+            {
+                if (kind == "exec") reply = ExecRequest(request, bulk);
+                else if (kind == "read_file") reply = ReadFile(request);
+                else if (kind == "write_file") reply = WriteFile(request, bulk);
+                else reply = ErrorReply(id, "EPROTO", "unsupported request " + kind, null);
+            }
+            catch (Exception e)
+            {
+                reply = ErrorReply(id, "EIO", "handler failed: " + e.GetType().Name + ": " + e.Message, null);
+            }
+            finally
+            {
+                Replies.Finish(id, reply);
+            }
             return reply;
         }
 

@@ -118,7 +118,8 @@ namespace VsockD
     sealed class CappedPipeReader
     {
         public const int OUTPUT_CAP = 16 * 1024 * 1024;
-        public MemoryStream Head = new MemoryStream();
+        private readonly object _lock = new object();
+        private readonly MemoryStream _head = new MemoryStream();
         public long Total;
         private readonly FileStream _fs;
         public Thread Thread;
@@ -131,6 +132,16 @@ namespace VsockD
             Thread.Start();
         }
 
+        public byte[] Snapshot()
+        {
+            lock (_lock) { return _head.ToArray(); }
+        }
+
+        public void ForceClose()
+        {
+            try { _fs.Close(); } catch (Exception) { }
+        }
+
         private void Run()
         {
             byte[] buf = new byte[1 << 16];
@@ -140,13 +151,16 @@ namespace VsockD
                 {
                     int n = _fs.Read(buf, 0, buf.Length);
                     if (n <= 0) break;
-                    Total += n;
-                    if (Head.Length < OUTPUT_CAP)
-                        Head.Write(buf, 0, (int)Math.Min(n, OUTPUT_CAP - Head.Length));
+                    lock (_lock)
+                    {
+                        Total += n;
+                        if (_head.Length < OUTPUT_CAP)
+                            _head.Write(buf, 0, (int)Math.Min(n, OUTPUT_CAP - _head.Length));
+                    }
                 }
             }
             catch (Exception) { }
-            finally { _fs.Close(); }
+            finally { try { _fs.Close(); } catch (Exception) { } }
         }
     }
 
@@ -208,6 +222,11 @@ namespace VsockD
         private static ExecOutcome RunWithToken(List<string> argv, string cwd,
             Dictionary<string, string> envOverrides, IntPtr token, long commandMs, byte[] stdin)
         {
+            StringBuilder cmdline = new StringBuilder(BuildCommandLine(argv));
+            if (cmdline.Length > 32766)
+                return ExecOutcome.Error("E2BIG",
+                    "command line too long: " + cmdline.Length + " chars (Windows limit 32767)");
+
             Native.SECURITY_ATTRIBUTES sa = new Native.SECURITY_ATTRIBUTES();
             sa.nLength = Marshal.SizeOf(typeof(Native.SECURITY_ATTRIBUTES));
             sa.bInheritHandle = true;
@@ -229,10 +248,6 @@ namespace VsockD
             si.hStdError = stderrW;
             si.lpDesktop = "";
 
-            StringBuilder cmdline = new StringBuilder(BuildCommandLine(argv));
-            if (cmdline.Length > 32766)
-                return ExecOutcome.Error("E2BIG",
-                    "command line too long: " + cmdline.Length + " chars (Windows limit 32767)");
             IntPtr envBlock = BuildEnvBlock(envOverrides);
             uint flags = Native.CREATE_SUSPENDED | Native.CREATE_NO_WINDOW | Native.CREATE_UNICODE_ENVIRONMENT;
 
@@ -258,7 +273,21 @@ namespace VsockD
             }
 
             IntPtr job = Native.CreateJobObject(IntPtr.Zero, null);
-            Native.AssignProcessToJobObject(job, pi.hProcess);
+            if (job == IntPtr.Zero || !Native.AssignProcessToJobObject(job, pi.hProcess))
+            {
+                // without a Job the budget kill would be a silent no-op:
+                // refuse the exec rather than run an unbudgetable process
+                Native.TerminateJobObject(job, 1);
+                Native.CloseHandle(pi.hThread);
+                Native.CloseHandle(pi.hProcess);
+                if (job != IntPtr.Zero) Native.CloseHandle(job);
+                Native.CloseHandle(stdinR); Native.CloseHandle(stdinW);
+                Native.CloseHandle(stdoutR); Native.CloseHandle(stdoutW);
+                Native.CloseHandle(stderrR); Native.CloseHandle(stderrW);
+                return ExecOutcome.Error("EIO",
+                    "job object unavailable (error " + Marshal.GetLastWin32Error() +
+                    "); refusing an unbudgetable exec");
+            }
             Native.ResumeThread(pi.hThread);
             Native.CloseHandle(pi.hThread);
             Native.CloseHandle(stdinR);
@@ -278,16 +307,28 @@ namespace VsockD
             stdinWriter.IsBackground = true;
             stdinWriter.Start();
 
-            long deadlineTicks = DateTime.UtcNow.Ticks + commandMs * TimeSpan.TicksPerMillisecond;
+            long deadlineTicks;
+            long now = DateTime.UtcNow.Ticks;
+            if (commandMs > (long.MaxValue - now) / TimeSpan.TicksPerMillisecond)
+                deadlineTicks = long.MaxValue; // clamp: huge budgets never wrap negative
+            else
+                deadlineTicks = now + commandMs * TimeSpan.TicksPerMillisecond;
 
             bool timedOut = false;
             if (Native.WaitForSingleObject(pi.hProcess, RemainingMs(deadlineTicks)) == Native.WAIT_TIMEOUT)
                 timedOut = true;
             if (!timedOut)
             {
-                if (!outReader.Thread.Join(RemainingJoinMs(deadlineTicks)) ||
-                    !errReader.Thread.Join(RemainingJoinMs(deadlineTicks)))
-                    timedOut = true;
+                // the process exited: pipe reaping is bounded by WaitDelay
+                // (the cmd.WaitDelay analog), never the command budget; a
+                // background child holding stdout gets its handle severed
+                // instead of converting a clean exit into ETIME + job kill
+                if (!outReader.Thread.Join(Daemon.WaitDelayMs))
+                    outReader.ForceClose();
+                if (!errReader.Thread.Join(Daemon.WaitDelayMs))
+                    errReader.ForceClose();
+                outReader.Thread.Join(1000);
+                errReader.Thread.Join(1000);
             }
 
             ExecOutcome outcome = new ExecOutcome();
@@ -309,8 +350,8 @@ namespace VsockD
                 Native.GetExitCodeProcess(pi.hProcess, out rc);
                 // signed int32 convention (the Windows unsigned-32 lesson)
                 outcome.Rc = (int)rc;
-                outcome.Stdout = outReader.Head.ToArray();
-                outcome.Stderr = errReader.Head.ToArray();
+                outcome.Stdout = outReader.Snapshot();
+                outcome.Stderr = errReader.Snapshot();
                 outcome.StdoutTruncated = outReader.Total > CappedPipeReader.OUTPUT_CAP;
                 outcome.StderrTruncated = errReader.Total > CappedPipeReader.OUTPUT_CAP;
             }

@@ -67,6 +67,7 @@ fi
 
 cd ../../../..   # repo root for uv
 export IR_VSOCK_BATTERY_CID=$CID IR_VSOCK_WIN_CID=$CID IR_SELF_CHECK_XFAILS=windows
+export INSPECT_RANGES_REQUIRE_DOTNET=1
 
 echo "=== wait for the v3 daemon on vsock ==="
 for i in $(seq 1 150); do
@@ -84,6 +85,13 @@ asyncio.run(probe())
   sleep 2
 done
 [[ "${READY:-}" == "1" ]] && ok "v3 daemon answers on vsock (CID $CID, windows)" || { bad "daemon answers"; exit 1; }
+
+echo "=== the C# codec drift guard (REQUIRE_DOTNET enforced) ==="
+if uv run pytest tests/test_cs_codec.py -v -n 0 2>&1 | tee design/spikes/channel-v1/windows/tmp/cs_codec.txt | tail -3; then
+  ok "C# wire vectors round-trip byte-exactly"
+else
+  bad "C# wire vectors"
+fi
 
 echo "=== portable conformance + durability + ESTALE + soak (pytest) ==="
 if uv run pytest tests/test_channel_vsock_win.py -v -n 0 2>&1 | tee design/spikes/channel-v1/windows/tmp/pytest.txt | tail -4; then
