@@ -1,12 +1,24 @@
 ---
 title: "Guests"
 description: "The guest side of a range definition: hosts, images, resources, accounts, services, seeded weaknesses, defense, and Active Directory."
-llms-description: "Tutorial and review guide for the guest side of range.yaml: hosts, images, resources, routers, the attacker, the realized device profile, and configuration injection."
+llms-description: "Tutorial and review guide for the guest side of range.yaml: hosts, images, resources, routers, the attacker, and configuration injection."
 ---
 
-## Hosts
+## Overview
 
-A host is a target guest:
+Guests are the virtual machines in a range. They come in three kinds: hosts (the targets), routers (gateways between network segments), and the attacker. In a definition, "host" on its own always means a target not the physical machine the range runs on. This page covers the guest half of a range definition. Network addressing, segmentation, and routing are covered in [Networks](networks.qmd).
+
+This article is organized as follows:
+
+- Defining guests: [Hosts](#hosts) covers identity and naming, [Images](#images) and [Resources](#resources) cover what a guest boots from and how it is sized, and two sections show how [routers](#routers-are-guests-too) and [the attacker](#the-attacker-guest) are defined as guests.
+- Guest content: What a guest contains once built: [users](#users), [services](#services), [vulnerabilities and misconfigurations](#vulnerabilities-and-misconfigurations), [planted data](#planted-data), [defense](#defense), and [Active Directory](#active-directory). [Provisioning references](#provisioning-references), [scheduled activity](#scheduled-activity), and [variables](#variables) cover how that content is produced and varied.
+- Runtime behavior: [How configuration reaches a guest](#how-configuration-reaches-a-guest) describes how compiled configuration is delivered at boot.
+
+## Hosts {#hosts}
+
+Hosts are the machines the attacker works against: web servers, databases, domain controllers, workstations. Each host entry declares the guest's identity (its name and, optionally, its in-guest hostname and FQDN), its operating system, the image it boots from, its CPU and memory, and the networks it attaches to. What runs on the host (accounts, services, weaknesses, data) is declared separately, under [Guest content](#guest-content).
+
+This example defines a single host:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -77,15 +89,17 @@ hosts = RangeSpec(
 3.  The fully qualified name, for ranges whose DNS serves it.
 :::
 
-Every example shows both surfaces; the models import from `inspect_ranges.types` (shown once above, later Python tabs omit it), and the [Ranges overview](ranges.qmd#python-definitions) covers how typed configuration is consumed.
+Python definitions import from `inspect_ranges.types` (shown once above, later Python tabs omit it).
 
 `name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Networks](networks.qmd).
 
-## Images
+`roles` tags a host's function, such as `roles: [domain-controller, dns]` or `[member-server]`. The tags tell the build what a host is for and give scoring a way to refer to hosts by function rather than by name. Roles are applied at build time, so like other [guest content](#guest-content) they are refused at planning until the build phase lands.
+
+## Images {#images}
 
 Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. A golden carries the baked-in control daemon plus whatever the scenario installed at build time. The definition references images by name; planning resolves each reference against the local image cache to a sha256 digest.
 
-A reference missing from the cache shows up in the plan output and is an error at render, because a realization bundle must be self-sufficient:
+An image reference missing from the cache shows up in the plan output and is an error at render:
 
 ```         
 ✗ range.yaml  1 error
@@ -94,7 +108,7 @@ A reference missing from the cache shows up in the plan output and is an error a
                         build the image into the cache)
 ```
 
-## Resources
+## Resources {#resources}
 
 Sizing is backend-neutral and optional:
 
@@ -106,7 +120,7 @@ Sizing is backend-neutral and optional:
 resources:
   cpus: 2
   memory_mb: 4096
-  disk_gb: 20        # only when the image default is not enough
+  disk_gb: 20
 ```
 
 ### Python
@@ -119,7 +133,7 @@ Resources(cpus=2, memory_mb=4096, disk_gb=20)
 
 Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ranges plan` reports the range's totals (guests, vCPUs, memory) so a deployment can admission-check before anything boots.
 
-## Routers are guests too
+## Routers {#routers-are-guests-too}
 
 A router is an ordinary guest with one interface per joined segment, running a generated firewall that a defender inside the range can inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used:
 
@@ -204,9 +218,9 @@ router_guest = RangeSpec(
 
 Policy (`acl`) and routing (`routes`, gateway election) are covered in [Networks](networks.qmd).
 
-## The attacker guest
+## Attacker {#the-attacker-guest}
 
-The attacker is a guest like any other, declared separately because evaluations treat it specially. Either it boots as a dedicated attack box (declare `interfaces`; `name` defaults to `attacker`, and omitting `image` selects the backend's standard attack image), or it starts from a foothold on a declared host:
+The attacker is a guest like any other, declared separately because evaluations treat it specially (it is what `sandbox("default")` resolves to). Either it boots as a dedicated attack box (declare `interfaces`; `name` defaults to `attacker`, and omitting `image` selects the backend's standard attack image), or it starts from a foothold on a declared host:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -267,15 +281,11 @@ attack_box = RangeSpec(
 
 With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Networks](networks.qmd#egress).
 
-## Guest content
+## Guest Content {#guest-content}
 
-Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. One stance governs all of it: **declarations describe the converged state of a guest, not boot-time actions**. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample. Declaring a misconfiguration and baking it into an image are not alternatives: the declaration is the source of truth that randomization, auditing, and scoring consume, and baking is one of its realizations.
+Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest, not boot-time actions. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample.
 
-Two rules about secrets. Scenario credentials belong in the definition in plaintext; they are scenario content, visible by design. Per-sample proof material (flags, canaries) never appears in a definition; it is generated fresh at instantiation.
-
-Until the build phase lands, planning refuses definitions that carry guest content (`guest-config-not-realized`), so nothing boots with silently missing content. The examples below validate and are marked with that planning status.
-
-## Users
+## Users {#users}
 
 `users` declares a guest's local accounts (routers can carry them too). Domain accounts belong in [`active_directory`](#active-directory), not here:
 
@@ -297,7 +307,7 @@ hosts:
     image: acme/server-golden
     interfaces: [{ network: lab }]
     users:
-      - { name: alice, password: bacon, note: "weak password, present in the provided wordlist" }
+      - { name: alice, password: bacon, note: "weak password" }
       - { name: backup, groups: [sudo], note: service account with sudo }
 attacker:
   interfaces: [{ network: lab }]
@@ -307,7 +317,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 users = RangeSpec(
     meta=RangeMeta(
         name="users", description="Local accounts as converged state."
@@ -325,8 +334,7 @@ users = RangeSpec(
                 User(
                     name="alice",
                     password="bacon",
-                    note="weak password, present in the provided "
-                    "wordlist",
+                    note="weak password",
                 ),
                 User(
                     name="backup",
@@ -343,15 +351,14 @@ users = RangeSpec(
 ```
 :::
 
-## Services
+## Services {#services}
 
-`services` entries are assertions about the guest's converged listening surface, never an install language. The build satisfies them (through a recipe, the image, or a checkpoint) and verifies them: the named service is listening on the declared port at the declared version. Installation itself belongs in [`provisioning`](#provisioning-references):
+`services` entries are assertions about the guest's converged listening surface, not an installation language. The build satisfies them (through a recipe, the image, or a checkpoint) and verifies them: the named service is listening on the declared port at the declared version. Installation itself belongs in [`provisioning`](#provisioning-references):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: services
   description: The converged listening surface, asserted and build-verified.
@@ -378,7 +385,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 services = RangeSpec(
     meta=RangeMeta(
         name="services",
@@ -414,15 +420,14 @@ services = RangeSpec(
 ```
 :::
 
-## Vulnerabilities and misconfigurations
+## Vulnerabilities and Misconfigurations {#vulnerabilities-and-misconfigurations}
 
-The seeded attack surface is two distinct lists, because real intrusions lean heavily on misconfigurations. The list is the classification, so entries carry no class field. A vulnerability's `id` is a stable name of ours; `cve:` is an attribute when one applies, and `service:` ties the weakness to a declared service on the same host:
+The seeded attack surface is two distinct lists, because real intrusions lean heavily on misconfigurations. A vulnerability's `id` is a stable name of ours; `cve:` is an attribute when one applies, and `service:` ties the weakness to a declared service on the same host:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: weaknesses
   description: A CVE-backed vulnerability and a misconfiguration, as distinct lists.
@@ -453,7 +458,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 weaknesses = RangeSpec(
     meta=RangeMeta(
         name="weaknesses",
@@ -497,7 +501,7 @@ weaknesses = RangeSpec(
 ```
 :::
 
-## Planted data
+## Planted Data {#planted-data}
 
 `data` declares scenario files: targets worth finding or exfiltrating, supporting material, captures. Flags never appear here:
 
@@ -505,7 +509,6 @@ weaknesses = RangeSpec(
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: planted-data
   description: Scenario files on a database host.
@@ -529,7 +532,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 planted_data = RangeSpec(
     meta=RangeMeta(
         name="planted-data",
@@ -566,7 +568,7 @@ planted_data = RangeSpec(
 ```
 :::
 
-## Defense
+## Defense {#defense}
 
 The range-level `defense` section records the defensive posture on the D0 (no defenders) to D5 (adaptive defender) spectrum, with telemetry flows where signals are recorded or forwarded. Per-host toggles turn individual protections on or off:
 
@@ -574,7 +576,6 @@ The range-level `defense` section records the defensive posture on the D0 (no de
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: defended
   description: Passive detection, with per-host protection toggles.
@@ -605,7 +606,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 defended = RangeSpec(
     meta=RangeMeta(
         name="defended",
@@ -657,7 +657,6 @@ Identity is range-scoped (accounts exist in the domain, not on a host), so `acti
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: forest
   description: A parent and child domain with seeded identity attack surface.
@@ -702,7 +701,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 forest = RangeSpec(
     meta=RangeMeta(
         name="forest",
@@ -778,7 +776,7 @@ forest = RangeSpec(
 
 ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects).
 
-## Provisioning references {#provisioning-references}
+## Provisioning References {#provisioning-references}
 
 Everything above declares state; `provisioning` names the build-time work that produces it when the image alone does not. Steps reference recipes by name and version, in order. The recipe language itself is deliberately outside the definition: recipes run once at range build, their versions land in the build manifest, and the runtime never runs them:
 
@@ -786,7 +784,6 @@ Everything above declares state; `provisioning` names the build-time work that p
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: provisioned
   description: A build recipe referenced by name, with inputs.
@@ -811,7 +808,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 provisioned = RangeSpec(
     meta=RangeMeta(
         name="provisioned",
@@ -842,18 +838,17 @@ provisioned = RangeSpec(
 ```
 :::
 
-## Roles and scheduled activity
+## Scheduled Activity {#scheduled-activity}
 
-`roles` tags a host's function for the build and for scoring (`domain-controller`, `dns`, `member-server`, ...). `scheduled_activity` declares recurring in-guest behavior simulation: bot scripts and scheduled tasks that create the user and defender activity real tradecraft depends on (and the token-theft surface scheduled tasks bring with them):
+`scheduled_activity` declares recurring in-guest behavior simulation: bot scripts and scheduled tasks that create the user and defender activity real tradecraft depends on (and the token-theft surface scheduled tasks bring with them):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
 ``` yaml
-# plan-invalid: guest content is build-phase (see Guest content above)
 range:
   name: activity
-  description: Role tags and behavior simulation on a domain controller.
+  description: Behavior simulation on a domain controller.
 networks:
   - name: corp
     cidr: 10.20.0.0/24
@@ -863,7 +858,6 @@ hosts:
     os: { type: linux }
     image: acme/dc-golden
     interfaces: [{ network: corp }]
-    roles: [domain-controller, dns]
     scheduled_activity:
       - { script: responder.ps1 }
       - { script: rdp_scheduler.ps1, user: admin.user, note: creates a stealable session }
@@ -875,12 +869,10 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: guest content is build-phase (see Guest content above)
 activity = RangeSpec(
     meta=RangeMeta(
         name="activity",
-        description="Role tags and behavior simulation on a domain "
-        "controller.",
+        description="Behavior simulation on a domain controller.",
     ),
     networks=[
         Network(name="corp", cidr="10.20.0.0/24", mode="isolated")
@@ -891,7 +883,6 @@ activity = RangeSpec(
             os=Os(type="linux"),
             image="acme/dc-golden",
             interfaces=[Interface(network="corp")],
-            roles=["domain-controller", "dns"],
             scheduled_activity=[
                 ScheduledActivity(script="responder.ps1"),
                 ScheduledActivity(
@@ -909,7 +900,7 @@ activity = RangeSpec(
 ```
 :::
 
-## Variables
+## Variables {#variables}
 
 `variables` declares per-instance values: things that should differ between generated instances of the same range, like randomized ports, passwords, and flag hints. Every variable requires a `default`, and definitions reference variables as `{{name}}` in YAML scalars. Loading substitutes the defaults before validation, so a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. In Python the template is a function whose parameters play the role of the references, called with drawn values to produce a concrete spec:
 
@@ -917,7 +908,6 @@ activity = RangeSpec(
 ### YAML
 
 ``` yaml
-# plan-invalid: per-instance draws arrive with the generation layer
 range:
   name: randomized
   description: A randomized service port and a templated credential.
@@ -945,7 +935,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: per-instance draws arrive with the generation layer
 def randomized(
     telnet_port: int = 2323, admin_password: str = "changeme123!"
 ) -> RangeSpec:
@@ -986,30 +975,14 @@ spec = randomized()
 ```
 :::
 
-Because defaults are required, every definition validates and realizes concretely today; the per-instance draw arrives with the generation layer (gated at planning as `randomization-not-realized` until then). Unknown references are errors with did-you-mean hints.
-
-A validated `RangeSpec` is always a concrete instance: references exist in the YAML text and loading resolves them before validation. The template lives one level up, and each surface has its own: in YAML it is the file, with `{{name}}` marking where values go; in Python it is the function above. The `variables` declaration is shared between the two: it describes what is drawable (type, bounds, choices, default) and travels with the spec as provenance, whichever way the instance was built. A reference string left in a typed spec is a construction mistake and validation rejects it (`unresolved-variable-reference`); braces that name no declared variable stay legal, since scenario content can legitimately contain them. Whole-topology generation stays out of the definition language for the same reason in reverse: that really is a program, and the typed Python surface is how to write it.
-
-## What a guest sees
-
-Every device a guest sees is declared per role; no tool default decides the attack surface. The standard profile gives a guest virtio disks, virtio NICs, a vsock device, a serial console, and a virtio entropy source, and nothing else: no USB controller, memory balloon, or video.
-
-Two consequences:
-
-- **The control plane is invisible in-range.** Guests are driven over the vsock device, a hypervisor channel out of band from every network. There is no management NIC: nothing inside the range can discover, firewall, or connect to the channel that controls the guests.
-- **Readiness waits for provisioning.** A range is ready only when every guest's configuration has fully applied. A router whose firewall has not loaded yet is an unenforced range, so the runtime waits.
-
-## How configuration reaches a guest
+## Guest Configuration {#how-configuration-reaches-a-guest}
 
 The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. The current realization injects over cloud-init (a seed presented as a read-only virtio disk), which covers cloud-style Linux images. Other injectors are designed: configuration baked at build time for images without an agent, unattend plus the Windows guest agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints for ranges that need no boot-time configuration at all.
-
-Windows guests are valid to define but refuse at planning until their injectors land with the build phase:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
 ``` yaml
-# plan-invalid: planning refuses Windows guests until injectors land
 range:
   name: windows-gated
   description: A Windows target, valid to define, gated at planning.
@@ -1030,7 +1003,6 @@ attacker:
 ### Python
 
 ``` python
-# plan-invalid: planning refuses Windows guests until injectors land
 windows_gated = RangeSpec(
     meta=RangeMeta(
         name="windows-gated",
@@ -1053,26 +1025,4 @@ windows_gated = RangeSpec(
     ),
 )
 ```
-:::
-
-```         
-✗ range.yaml  1 error
-  10:17  hosts[0].os.type  host 'dc01' is a Windows guest, which render v1 cannot
-                           realize (Windows injectors arrive with the build phase)
-```
-
-## Boundaries {#boundaries}
-
-For reviewers, the guest-side edges:
-
-**Gated at planning** until the build phase lands: Windows rendering (`windows-render-not-supported`; the Windows control plane itself already works) and all guest content (`guest-config-not-realized`). The gates guarantee nothing boots with silently missing content; each is deleted as its realization and verification land.
-
-**Still deferred** (not yet in the schema): `count:` expansion (stamping out N copies of a host), `attack_path`, and operator policy (`management`, `lifecycle`, ingress). Each is rejected with a pointer to where its content currently lives. Whole-topology generation is deliberately not a schema feature: the typed Python surface is the generation language.
-
-The dividing rule for what belongs in the definition language: content that is small, typed, and useful to randomization, auditing, and scoring. Larger content is build-time work whose output is captured into images and checkpoints and referenced through `provisioning`.
-
-::: callout-note
-## Status and feedback
-
-Guest identity, images, resources, and realization are enforced as documented. Guest content (schema v0.3) is parsed and validated as documented, with build-phase realization in progress behind the planning gate. If your ranges need to declare guest content this language cannot express, tell us what, ideally as the `range.yaml` section you wish you could write. The vocabulary edges (the AD rights set, the defense toggle set) are explicit extension points.
 :::

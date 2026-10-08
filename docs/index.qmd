@@ -1,17 +1,25 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI extension for ranges."
-llms-description: "What Inspect Ranges is and how to install it."
+llms-description: "What Inspect Ranges is, its development status, and where reviewers can find the design overview and range definition documentation."
 ---
 
 ## Overview
 
-Welcome to Inspect Ranges, an extension for [Inspect AI](https://inspect.aisi.org.uk).
+Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for evaluating models and agents on network intrusion and defense tasks, using cyber ranges built from libvirt/KVM virtual machines.
 
-## Installation
+::: callout-note
+Inspect Ranges is under active development and is not yet ready for general use. These pages are published for reviewers, and the design and syntax may change in response to feedback.
+:::
 
-Install Inspect Ranges from PyPI with:
+The source code is available in the [inspect_ranges](https://github.com/meridianlabs-ai/inspect_ranges) repository on GitHub. For the overall design (range definitions, the libvirt/KVM runtime, attacker containment, and evidence collection), start with the [Inspect Ranges overview](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/ranges-overview.qmd).
 
-```{.bash filename="Terminal"}
-pip install inspect_ranges
-```
+## Defining Ranges
+
+Documentation for the range definition language (`range.yaml` and its typed Python equivalent) is available for review and feedback:
+
+- [Ranges](ranges.qmd): what a range definition is, end-to-end examples in YAML and Python, and the validation workflow.
+
+- [Guests](guests.qmd): hosts, images, resources, routers and the attacker as guests, and guest content such as accounts, services, seeded weaknesses, defense, and Active Directory.
+
+- [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
