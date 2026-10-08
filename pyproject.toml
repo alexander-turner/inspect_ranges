@@ -70,7 +70,7 @@ local_scheme = "no-local-version" # Important for PyPI compatibility
 managed = true
 
 [tool.ruff]
-extend-exclude = ["docs", "design"]
+extend-exclude = ["docs", "design", "src/inspect_ranges/_runtime/daemon"]
 src = ["."]
 
 [tool.ruff.lint]
@@ -97,6 +97,9 @@ addopts = "-n auto"
 
 [tool.pyright]
 include = ["src", "tests"]
+# daemon payloads are digest-pinned artifacts baked into guests, byte-identical
+# to their published form; reformatting or annotating them would change the pin
+exclude = ["src/inspect_ranges/_runtime/daemon"]
 extraPaths = ["."]
 typeCheckingMode = "strict"
 pythonPlatform = "All"

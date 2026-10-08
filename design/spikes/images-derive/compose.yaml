@@ -1,0 +1,26 @@
+# Range container for the images-derive battery (same image recipe as net-compile).
+services:
+  range:
+    build: ../net-compile/range
+    init: true
+    devices:
+      - /dev/kvm
+      - /dev/vhost-vsock
+      - /dev/vhost-net
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - ${BATTERY_CACHE:?set by run.sh}:/images:ro
+      - ./tmp/render:/render:ro
+      - scratch:/scratch
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  scratch:

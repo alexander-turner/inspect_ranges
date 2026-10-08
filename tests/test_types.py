@@ -147,3 +147,25 @@ def test_revalidate_range_catches_post_construction_mutation() -> None:
     message = str(excinfo.value)
     assert "is not unique" in message
     assert "undeclared network 'dmx'" in message
+
+
+def test_range_spec_hash_tracks_content() -> None:
+    """Specs work as cache keys (Inspect hashes sandbox configs): equal content hashes equal, mutation changes the hash."""
+    from inspect_ranges.types import Variable
+
+    a = dmz_pivot()
+    b = dmz_pivot()
+    assert hash(a) == hash(b)
+    assert {a: "cached"}[b] == "cached"
+    # pydantic equality ignores dict insertion order; the hash must too
+    a.variables = {"x": Variable(default=1), "y": Variable(default=2)}
+    b.variables = {"y": Variable(default=2), "x": Variable(default=1)}
+    assert a == b
+    assert hash(a) == hash(b)
+    # pydantic eq treats True == 1 (Python semantics); the hash must too
+    a.variables = {"x": Variable(default=True)}
+    b.variables = {"x": Variable(default=1)}
+    assert a == b
+    assert hash(a) == hash(b)
+    b.hosts[0].hostname = "renamed"
+    assert hash(a) != hash(b)
