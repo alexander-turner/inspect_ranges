@@ -1,11 +1,12 @@
 """The daemon artifact: `inspect-ranges daemon-bundle` builds the versioned, byte-deterministic tarball the realizer bakes into goldens.
 
-Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon placeholder (source arrives with channel-v1 slice 6), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest; the realizer consumes the bundle strictly by digest, and `verify_daemon_bundle` refuses any tampered member.
+Contents: the static Go Linux daemon (amd64) with its installer and systemd unit, the Windows daemon placeholder (source arrives with channel-v1 slice 6), and nothing else. The sidecar `daemon.json` carries the protocol version, the daemon version, per-file sha256 digests, and the bundle digest.
 
-Determinism: the Go build runs `-trimpath -buildvcs=false CGO_ENABLED=0` under the pinned toolchain, and the tar is normalized (sorted members, zeroed timestamps and ownership, fixed modes, gzip with zeroed mtime), so building twice yields the identical digest.
+Trust model: the sidecar written beside the tarball is a convenience copy. A consumer that must trust the artifact (the realizer, the build manifest) pins `bundle_sha256` out of band and passes the pinned `DaemonBundleInfo` to `verify_daemon_bundle`; verifying against a sidecar fetched from the same directory as the tarball proves only internal consistency, which an attacker controlling both files can fake.
+
+Determinism: the Go build runs under the pinned toolchain (verified by `go version`, never silently substituted) in a scrubbed environment, and the artifact is an UNCOMPRESSED tar normalized completely (sorted members, zeroed timestamps and ownership, fixed modes), so the digest binds bytes the build fully controls; compression would additionally bind the zlib implementation, which varies across hosts.
 """
 
-import gzip
 import hashlib
 import io
 import os
@@ -16,10 +17,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-DAEMON_VERSION = "3.0.0"
-PROTOCOL_VERSION = 3
+from .protocol import PROTOCOL_VERSION
 
-PINNED_GO = Path.home() / ".local/go-toolchains/go1.23.6/bin/go"
+DAEMON_VERSION = "3.0.0"
+
+GO_PIN = "go1.23.6"
+PINNED_GO = Path.home() / ".local/go-toolchains" / GO_PIN / "bin/go"
 GO_SOURCE = Path(__file__).parent / "daemon" / "linux"
 
 _INSTALL_SH = """#!/bin/sh
@@ -65,27 +68,52 @@ class DaemonBundleInfo(BaseModel):
     bundle_sha256: str
 
 
-def _go_binary() -> Path:
+def locate_go() -> Path | None:
+    """The pinned Go toolchain if installed, else whatever is on PATH (tests may skip on None)."""
     if PINNED_GO.exists():
         return PINNED_GO
     located = shutil.which("go")
-    if located:
-        return Path(located)
-    raise BundleError(
-        "toolchain",
-        f"no Go toolchain: install the pin per {GO_SOURCE / 'README.md'}",
-    )
+    return Path(located) if located else None
+
+
+def _pinned_go_binary() -> Path:
+    """The toolchain for ARTIFACT builds: whatever is found must match the pin exactly."""
+    go = locate_go()
+    if go is None:
+        raise BundleError(
+            "toolchain",
+            f"no Go toolchain: install {GO_PIN} per {GO_SOURCE / 'README.md'}",
+        )
+    probe = subprocess.run([str(go), "version"], capture_output=True, text=True)
+    if probe.returncode != 0 or f" {GO_PIN} " not in probe.stdout:
+        raise BundleError(
+            "toolchain",
+            f"artifact builds require the pinned toolchain {GO_PIN}; "
+            f"{go} reports: {probe.stdout.strip() or probe.stderr.strip()}",
+        )
+    return go
 
 
 def build_daemon_binary(out: Path) -> None:
     """Build the static Linux daemon reproducibly into `out`.
 
+    The environment is scrubbed: only PATH, HOME, and the Go cache variables survive, so ambient `GOFLAGS`/`GOEXPERIMENT`/`GOAMD64` cannot silently change the bytes.
+
     Raises:
-        BundleError: Toolchain missing or the build failed.
+        BundleError: Toolchain missing, not the pin, or the build failed.
     """
-    go = _go_binary()
-    env = dict(os.environ)
-    env.update(CGO_ENABLED="0", GOARCH="amd64", GOOS="linux")
+    go = _pinned_go_binary()
+    home = os.environ.get("HOME", str(Path.home()))
+    env = {
+        "PATH": f"{go.parent}:/usr/bin:/bin",
+        "HOME": home,
+        "GOCACHE": os.environ.get("GOCACHE", f"{home}/.cache/go-build"),
+        "GOPATH": os.environ.get("GOPATH", f"{home}/go"),
+        "CGO_ENABLED": "0",
+        "GOOS": "linux",
+        "GOARCH": "amd64",
+        "GOFLAGS": "",
+    }
     result = subprocess.run(
         [
             str(go),
@@ -107,7 +135,7 @@ def build_daemon_binary(out: Path) -> None:
 
 
 def _tar_bytes(members: dict[str, bytes]) -> bytes:
-    """A normalized tar.gz: sorted members, zeroed times and ownership, fixed modes."""
+    """A normalized, uncompressed tar: sorted members, zeroed times and ownership, fixed modes."""
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         for name in sorted(members):
@@ -119,14 +147,15 @@ def _tar_bytes(members: dict[str, bytes]) -> bytes:
             info.uname = info.gname = ""
             info.mode = 0o755 if name.endswith((".sh", "vsockd")) else 0o644
             tar.addfile(info, io.BytesIO(data))
-    gz_buffer = io.BytesIO()
-    with gzip.GzipFile(fileobj=gz_buffer, mode="wb", mtime=0) as gz:
-        gz.write(tar_buffer.getvalue())
-    return gz_buffer.getvalue()
+    return tar_buffer.getvalue()
+
+
+def bundle_file_name() -> str:
+    return f"vsockd-bundle-{DAEMON_VERSION}.tar"
 
 
 def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
-    """Build the daemon bundle and sidecar into `out_dir`.
+    """Build the daemon bundle and its `daemon.json` sidecar into `out_dir`.
 
     Returns:
         The sidecar content, including the bundle digest.
@@ -147,7 +176,6 @@ def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
     finally:
         binary_path.unlink(missing_ok=True)
     blob = _tar_bytes(members)
-    digest = hashlib.sha256(blob).hexdigest()
     info = DaemonBundleInfo(
         name="vsockd",
         version=DAEMON_VERSION,
@@ -155,30 +183,48 @@ def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
         files={
             name: hashlib.sha256(data).hexdigest() for name, data in members.items()
         },
-        bundle_sha256=digest,
+        bundle_sha256=hashlib.sha256(blob).hexdigest(),
     )
-    bundle_path = out_dir / f"vsockd-bundle-{DAEMON_VERSION}.tar.gz"
-    sidecar_path = out_dir / f"vsockd-bundle-{DAEMON_VERSION}.json"
-    bundle_path.write_bytes(blob)
-    sidecar_path.write_text(info.model_dump_json(indent=2) + "\n")
+    (out_dir / bundle_file_name()).write_bytes(blob)
+    (out_dir / "daemon.json").write_text(info.model_dump_json(indent=2) + "\n")
     return info
 
 
+def _safe_member_name(name: str) -> bool:
+    return (
+        not name.startswith("/")
+        and ".." not in Path(name).parts
+        and not Path(name).is_absolute()
+    )
+
+
 def verify_daemon_bundle(bundle_path: Path, info: DaemonBundleInfo) -> None:
-    """Verify a bundle against its sidecar: bundle digest, then every member digest.
+    """Verify a bundle against a TRUSTED `info` (see the module trust model).
+
+    Checks the bundle digest, then every member: regular files only, safe relative names, no duplicates, digests matching the sidecar exactly. A verified bundle is safe to extract.
 
     Raises:
-        BundleError: Digest mismatch (tamper) or a missing/extra member.
+        BundleError: Any mismatch or unsafe member.
     """
     blob = bundle_path.read_bytes()
     digest = hashlib.sha256(blob).hexdigest()
     if digest != info.bundle_sha256:
         raise BundleError(
-            "verify-bundle", f"bundle digest {digest} != sidecar {info.bundle_sha256}"
+            "verify-bundle", f"bundle digest {digest} != pinned {info.bundle_sha256}"
         )
     seen: dict[str, str] = {}
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as tar:
         for member in tar.getmembers():
+            if not member.isreg():
+                raise BundleError(
+                    "verify-members", f"non-regular member {member.name!r}"
+                )
+            if not _safe_member_name(member.name):
+                raise BundleError(
+                    "verify-members", f"unsafe member name {member.name!r}"
+                )
+            if member.name in seen:
+                raise BundleError("verify-members", f"duplicate member {member.name!r}")
             handle = tar.extractfile(member)
             if handle is None:
                 raise BundleError("verify-members", f"unreadable member {member.name}")

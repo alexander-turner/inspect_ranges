@@ -14,7 +14,7 @@ from .._channel.bundle import BundleError, build_daemon_bundle
     type=click.Path(file_okay=False, path_type=Path),
     default=Path("dist/daemon"),
     show_default=True,
-    help="Directory receiving the bundle tarball and its daemon.json sidecar.",
+    help="Directory receiving the bundle tar and its daemon.json sidecar.",
 )
 def daemon_bundle(output: Path) -> None:
     """Build the byte-deterministic daemon bundle the realizer bakes into goldens."""
@@ -22,7 +22,7 @@ def daemon_bundle(output: Path) -> None:
         info = build_daemon_bundle(output)
     except BundleError as error:
         raise click.ClickException(str(error)) from error
-    click.echo(f"bundle: vsockd-bundle-{info.version}.tar.gz")
+    click.echo(f"bundle: vsockd-bundle-{info.version}.tar")
     click.echo(f"protocol: {info.protocol}")
     for name, digest in sorted(info.files.items()):
         click.echo(f"  {name}  sha256:{digest[:16]}…")

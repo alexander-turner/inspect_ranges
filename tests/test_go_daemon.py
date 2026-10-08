@@ -4,23 +4,16 @@ Skips when no Go toolchain is available (dev convenience); CI must provide the p
 """
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from inspect_ranges._channel.bundle import locate_go
 
 DAEMON_DIR = Path(__file__).parent.parent / "src/inspect_ranges/_channel/daemon/linux"
-PINNED_GO = Path.home() / ".local/go-toolchains/go1.23.6/bin/go"
 
-
-def _go() -> str | None:
-    if PINNED_GO.exists():
-        return str(PINNED_GO)
-    return shutil.which("go")
-
-
-go_binary = _go()
+_located = locate_go()
+go_binary = str(_located) if _located is not None else None
 pytestmark = pytest.mark.skipif(
     go_binary is None, reason="no Go toolchain (see daemon/linux/README.md for the pin)"
 )
