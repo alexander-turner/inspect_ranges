@@ -312,16 +312,6 @@ SCHEMA_REJECTS: list[tuple[str, dict[str, Any]]] = [
         {"v": 3, "id": RID, "kind": "error", "errno": "ETIME", "message": "x"},
     ),
     (
-        "exec-with-channel-allowance",
-        {
-            "v": 3,
-            "id": RID,
-            "kind": "exec",
-            "cmd": ["true"],
-            "budget": {"channel_ms": 50},
-        },
-    ),
-    (
         "outer-bound-below-command",
         {
             "v": 3,

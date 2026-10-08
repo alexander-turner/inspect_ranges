@@ -60,7 +60,7 @@ class Budget(_WireModel):
 
     The layers are independent by design (`guest-exec-lessons.md`): `command_ms` is enforced in-guest with a process-tree kill; `channel_ms` bounds each channel round trip host-side (per attempt, so retries extend wall time by at most the attempt count; `None` takes the channel default); `untimed_bound_ms` is an outer total per operation, covering every attempt and backoff.
 
-    Exec is the exception: under per-operation connect, a silent transport is indistinguishable from a still-running command, so `channel_ms` is REJECTED on exec requests rather than silently ignored. An exec's reply wait is bounded by `command_ms` plus the observation grace, or by the untimed outer total when no command budget was declared; channel-allowance-bounded exec liveness arrives with the daemon's poll/pending verbs (channel-v1 slice 4).
+    Exec liveness: the channel allowance bounds each exec round trip too. When the initial reply does not arrive within the allowance, the client switches to polling the request id; the daemon answers `pending` while the command runs, so a long exec stays allowance-bounded between polls while the command itself is bounded in-guest by `command_ms` (plus the host's observation grace) or the untimed total. A host-side exec deadline firing WITHOUT observed liveness is a channel-layer verdict; WITH observed liveness (polls answered, command overdue past kill grace) it is a command-layer verdict, since the guest demonstrably failed to kill.
 
     Retry interaction: a lost reply is recovered by resending the identical request id, which the endpoint deduplicates. A host-side deadline firing without an observed in-guest kill is attributed to the channel layer, never the command layer; command-layer errors come only from the guest's own budget reply. Any future layer that retried a transport failure with a FRESH request id would reintroduce double-runs, letting an attacker launder a replay through induced truncation; retries must reuse the id, always.
     """
@@ -119,18 +119,6 @@ class ExecRequest(_BulkMessage):
     env: dict[str, str] = Field(default_factory=dict)
     user: str | None = None
     budget: Budget = Field(default_factory=Budget)
-
-    @model_validator(mode="after")
-    def _no_channel_allowance(self) -> "ExecRequest":
-        # explicit over silently-dead config: under per-operation connect a
-        # silent transport is indistinguishable from a running command, so a
-        # channel allowance cannot bound exec until poll/pending land
-        if self.budget.channel_ms is not None:
-            raise ValueError(
-                "exec requests take no channel_ms; exec waits are bounded by "
-                "command_ms plus grace or the untimed outer total"
-            )
-        return self
 
 
 class ReadFileRequest(_MessageBase):

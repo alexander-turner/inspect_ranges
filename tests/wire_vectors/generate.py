@@ -41,6 +41,15 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
         ),
         ("exec-unicode", p.ExecRequest(id=_rid(3), cmd=["echo", "snowman ☃"]), None),
         (
+            "exec-with-liveness-allowance",
+            p.ExecRequest(
+                id=_rid(14),
+                cmd=["long-task"],
+                budget=p.Budget(command_ms=600000, channel_ms=2000),
+            ),
+            None,
+        ),
+        (
             "read-file",
             p.ReadFileRequest(id=_rid(4), path="/etc/hostname", max_bytes=65536),
             None,

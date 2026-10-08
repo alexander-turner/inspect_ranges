@@ -214,6 +214,55 @@ def test_untimed_outer_total_caps_attempts_and_backoff() -> None:
     )
 
 
+def test_silent_exec_without_liveness_is_channel_layer() -> None:
+    """An exec against a silent transport fails at the exec deadline attributed to the channel."""
+    channel = MessageChannel(
+        SilentTransport(), label="silent-exec", channel_budget_s=0.1, grace_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        from inspect_ranges._channel.protocol import Budget, ExecRequest
+
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec(
+                "web",
+                ExecRequest(
+                    id=request_id(), cmd=["true"], budget=Budget(command_ms=200)
+                ),
+            )
+        assert failure.value.layer == "channel"
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    assert time.monotonic() - start < 2.0
+
+
+def test_overdue_exec_with_liveness_is_command_layer() -> None:
+    """Polls answered but the guest never kills: the command layer is the honest verdict."""
+    from inspect_ranges._channel.protocol import Budget, ExecRequest
+
+    fleet = LoopbackTransport(["web"])
+    fleet.guest("web").ignore_command_budget = True
+    channel = MessageChannel(
+        fleet, label="liveness-overdue", channel_budget_s=0.1, grace_s=0.2
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec(
+                "web",
+                ExecRequest(
+                    id=request_id(),
+                    cmd=["sleep-ms", "5000"],
+                    budget=Budget(command_ms=100),
+                ),
+            )
+        assert failure.value.layer == "command"
+        assert "observed liveness" in str(failure.value)
+
+    asyncio.run(scenario_run())
+
+
 @pytest.mark.parametrize("scenario", sorted(HOSTILE_APPLIER_HANGS))
 def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
     """Every realize transport interaction is budget-bounded (the two probe-demonstrated hangs)."""
