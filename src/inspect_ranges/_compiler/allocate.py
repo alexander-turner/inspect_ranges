@@ -70,11 +70,12 @@ class Allocation(BaseModel):
         return [interface.ip for interface in self.guest(name).interfaces]
 
 
-def allocate(spec: RangeSpec) -> Allocation:
+def allocate(spec: RangeSpec, cid_base: int = 3) -> Allocation:
     """Compute the deterministic allocation for a validated spec.
 
     Args:
         spec: A validated range definition (IPv6 values are excluded by validation).
+        cid_base: First vsock CID; guests number upward from it in declaration order (a plan-time input, partitioned per host since CIDs are kernel-global).
 
     Returns:
         Addresses, MACs, and CIDs for every guest.
@@ -82,6 +83,10 @@ def allocate(spec: RangeSpec) -> Allocation:
     Raises:
         ValueError: The spec contains IPv6 values (which validation gates) or a subnet is exhausted.
     """
+    if cid_base < 3:
+        raise ValueError(
+            f"cid_base must be at least 3 (0-2 are reserved vsock CIDs), got {cid_base}"
+        )
     subnets: dict[str, IPv4Network] = {}
     claimed: dict[str, set[IPv4Address]] = {}
     for network in spec.networks:
@@ -131,7 +136,7 @@ def allocate(spec: RangeSpec) -> Allocation:
     cid_order += [router.name for router in spec.routers]
     if spec.attacker.host is None:
         cid_order.append(spec.attacker.name)
-    cids = {name: 3 + index for index, name in enumerate(cid_order)}
+    cids = {name: cid_base + index for index, name in enumerate(cid_order)}
 
     guests: list[GuestAllocation] = []
     for kind, name, interfaces in ordered:

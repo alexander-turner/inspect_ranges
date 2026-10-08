@@ -11,7 +11,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route
 from .allocate import (
@@ -37,6 +37,9 @@ class PlanOptions(BaseModel):
 
     default_router_image: str = "noble-range-guest"
     """Image for routers that declare none (the backend's default router appliance)."""
+
+    cid_base: int = Field(default=3, ge=3)
+    """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
 
 
 class ImageRef(BaseModel):
@@ -248,7 +251,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     if issues:
         raise IssueError(issues)
 
-    allocation = allocate(spec)
+    allocation = allocate(spec, cid_base=options.cid_base)
     gateways = elect_gateways(spec, allocation)
 
     networks: list[PlannedNetwork] = []
@@ -325,9 +328,16 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     )
 
 
+def image_file_name(reference: str) -> str:
+    """The cache file a logical image reference maps to: `/` and `:` become `-`, and `.qcow2` is appended unless the reference already names a known image format. One rule shared by planning and `images derive`."""
+    normalized = reference.replace("/", "-").replace(":", "-")
+    if normalized.endswith((".qcow2", ".img", ".iso")):
+        return normalized
+    return f"{normalized}.qcow2"
+
+
 def _resolve_image(reference: str, cache: Path | None) -> ImageRef:
-    file = reference if "." in Path(reference).name else f"{reference}.qcow2"
-    file = file.replace("/", "-").replace(":", "-")
+    file = image_file_name(reference)
     digest: str | None = None
     if cache is not None and (cache / file).is_file():
         hasher = hashlib.sha256()

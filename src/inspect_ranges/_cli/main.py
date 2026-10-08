@@ -6,6 +6,7 @@ from .doctor import doctor
 from .imagescmd import images
 from .plancmd import plan, render
 from .schema import schema
+from .upcmd import down, up
 from .validate import validate
 
 
@@ -21,6 +22,8 @@ ranges.add_command(images)
 ranges.add_command(plan)
 ranges.add_command(render)
 ranges.add_command(schema)
+ranges.add_command(up)
+ranges.add_command(down)
 ranges.add_command(validate)
 
 

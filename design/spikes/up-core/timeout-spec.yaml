@@ -1,0 +1,21 @@
+# Readiness-timeout fixture: the guest boots from the raw vendor image, which
+# carries no control daemon, so the readiness probe can never succeed.
+range:
+  name: up-timeout
+  description: A guest that can never become ready (no daemon in the image).
+
+networks:
+  - name: lab
+    cidr: 10.99.0.0/24
+    mode: isolated
+
+hosts:
+  - name: mute
+    os: { type: linux }
+    image: noble-server-cloudimg-amd64.img
+    interfaces: [{ network: lab }]
+
+attacker:
+  image: noble-server-cloudimg-amd64.img
+  interfaces: [{ network: lab }]
+  entry: external

@@ -52,16 +52,30 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
+@click.option(
+    "--cid-base",
+    type=click.IntRange(min=3),
+    default=3,
+    show_default=True,
+    help="First vsock CID (plan-time input; realizer batteries use 3000+).",
+)
 @click.pass_context
 def plan(
-    ctx: click.Context, path: Path, as_json: bool, image_cache: Path, cpu_model: str
+    ctx: click.Context,
+    path: Path,
+    as_json: bool,
+    image_cache: Path,
+    cpu_model: str,
+    cid_base: int,
 ) -> None:
     """Resolve a `range.yaml` into its immutable plan (allocations, requirements, totals).
 
     Unsupported constructs fail here, at planning, with the same diagnostics as `validate`.
     """
     spec = _load_or_exit(ctx, path)
-    options = PlanOptions(image_cache=image_cache, cpu_model=cpu_model)
+    options = PlanOptions(
+        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
+    )
     try:
         resolved = resolve_plan(spec, options)
     except IssueError as error:
@@ -112,13 +126,27 @@ def plan(
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
+@click.option(
+    "--cid-base",
+    type=click.IntRange(min=3),
+    default=3,
+    show_default=True,
+    help="First vsock CID (plan-time input; realizer batteries use 3000+).",
+)
 @click.pass_context
 def render(
-    ctx: click.Context, path: Path, out: Path, image_cache: Path, cpu_model: str
+    ctx: click.Context,
+    path: Path,
+    out: Path,
+    image_cache: Path,
+    cpu_model: str,
+    cid_base: int,
 ) -> None:
     """Render a `range.yaml` into its realization bundle (plan + every artifact `apply` needs)."""
     spec = _load_or_exit(ctx, path)
-    options = PlanOptions(image_cache=image_cache, cpu_model=cpu_model)
+    options = PlanOptions(
+        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
+    )
     try:
         render_bundle(spec, out, options)
     except IssueError as error:
