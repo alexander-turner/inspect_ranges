@@ -6,8 +6,8 @@ from pathlib import Path
 import click
 
 from .._compiler import PlanOptions, render_bundle
+from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
-from .._runtime.down import down_all
 from .._runtime.up import UpError, UpOptions
 from .._runtime.up import up as run_up
 from ..schema import load_range
@@ -113,6 +113,13 @@ def down(project: str | None, sweep_all: bool) -> None:
     """Tear down PROJECT (idempotent, works from any process, after any crash)."""
     if (project is None) == (not sweep_all):
         raise click.UsageError("pass a PROJECT name or --all")
+    try:
+        _run_down_command(project, sweep_all)
+    except DownError as error:
+        raise click.ClickException(str(error)) from error
+
+
+def _run_down_command(project: str | None, sweep_all: bool) -> None:
     if sweep_all:
         results = down_all()
         if not results:

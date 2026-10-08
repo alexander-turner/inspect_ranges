@@ -3,7 +3,7 @@
 The realizer consumes `inspect_ranges.types` and the compiler's plan/bundle and nothing from the channel track; the guest control daemon crosses the tracks only as a digest-pinned artifact (see `realizer-v1.md`).
 """
 
-from .down import DownResult, down, down_all
+from .down import DownError, DownResult, down, down_all
 from .images import (
     DaemonPin,
     DeriveError,
@@ -16,6 +16,7 @@ from .up import UpError, UpOptions, UpResult, up, verify_bundle
 __all__ = [
     "DaemonPin",
     "DeriveError",
+    "DownError",
     "DownResult",
     "ImageMetadata",
     "UpError",

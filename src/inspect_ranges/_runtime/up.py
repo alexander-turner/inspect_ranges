@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import probe
 from .ownership import (
@@ -53,7 +53,7 @@ class UpOptions(BaseModel):
 
     project: str | None = None
     image_cache: Path
-    state_dir: Path = default_state_dir()
+    state_dir: Path = Field(default_factory=default_state_dir)
     readiness_timeout: float = 300.0
     keep_on_failure: bool = False
     uplink_network: str | None = None
@@ -80,25 +80,48 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
     """Verify every manifest digest and that nothing unlisted is present; returns the manifest.
 
     Raises:
-        UpError: Any missing file, digest mismatch, or unlisted file (all reported at once); acting on an unverified bundle is never attempted.
+        UpError: Any missing, unreadable, mismatched, unlisted, or symlinked file, a malformed manifest, or a required render file absent from the manifest (all reported at once); acting on an unverified bundle is never attempted.
     """
     manifest_path = bundle / "manifest.json"
     if not manifest_path.is_file():
         raise UpError("verify-bundle", f"{bundle} has no manifest.json")
-    manifest = cast(dict[str, Any], json.loads(manifest_path.read_text()))
-    files = cast(dict[str, dict[str, Any]], manifest["files"])
+    try:
+        manifest = cast(dict[str, Any], json.loads(manifest_path.read_text()))
+        files = cast(dict[str, dict[str, Any]], manifest["files"])
+        range_name = cast(str, manifest["range"])
+        spec_sha = cast(str, manifest["spec_sha256"])
+        assert isinstance(files, dict) and range_name and spec_sha
+    except (OSError, ValueError, KeyError, AssertionError) as error:
+        raise UpError(
+            "verify-bundle", f"manifest.json is unreadable or malformed: {error}"
+        ) from error
     failures: list[str] = []
+    for required in ("boot.json", "compose.yaml", "plan.json"):
+        if required not in files:
+            failures.append(f"{required}: required render file not listed in manifest")
     for relative, meta in files.items():
         path = bundle / relative
         if not path.is_file():
             failures.append(f"{relative}: missing")
             continue
-        if hashlib.sha256(path.read_bytes()).hexdigest() != meta["sha256"]:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            failures.append(f"{relative}: unreadable ({error})")
+            continue
+        if digest != meta.get("sha256"):
             failures.append(f"{relative}: sha256 mismatch")
     listed = set(files) | {"manifest.json"}
-    on_disk = {
-        str(path.relative_to(bundle)) for path in bundle.rglob("*") if path.is_file()
-    }
+    on_disk: set[str] = set()
+    for path in bundle.rglob("*"):
+        relative = str(path.relative_to(bundle))
+        if path.is_symlink():
+            # the container applies /render by its own resolution: host-side
+            # verification of a symlink target is not verification of what is
+            # applied, so symlinks are refused outright
+            failures.append(f"{relative}: symlink (not allowed in a bundle)")
+        elif path.is_file():
+            on_disk.add(relative)
     failures.extend(f"{extra}: not in manifest" for extra in sorted(on_disk - listed))
     if failures:
         raise UpError(
@@ -165,6 +188,10 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
     run: Runner = runner or run_command
     started = time.monotonic()
     bundle = bundle.resolve()
+    # compose's short volume syntax reads a relative path as a named volume,
+    # so the cache the environment hands the project must be absolute and the
+    # same one verify-images checked
+    options = options.model_copy(update={"image_cache": options.image_cache.resolve()})
 
     manifest = verify_bundle(bundle)
     boot = cast(dict[str, Any], json.loads((bundle / "boot.json").read_text()))
@@ -217,8 +244,17 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
     if options.uplink_network is not None:
         env["UPLINK_NETWORK"] = options.uplink_network
 
-    def fail(stage: str, message: str, guest: str | None = None) -> UpError:
+    def fail(
+        stage: str,
+        message: str,
+        guest: str | None = None,
+        consoles: list[str] | None = None,
+    ) -> UpError:
         log.log(stage, "fail", error=message, **({"guest": guest} if guest else {}))
+        if consoles:
+            # teardown removes the scratch volume holding the serial logs:
+            # pull them first, they are the first artifact of boot debugging
+            _pull_consoles(run, project, bundle, env, options, consoles)
         if not options.keep_on_failure:
             from .down import down as teardown
 
@@ -241,7 +277,10 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
     )
     if boot_result.returncode != 0:
         raise fail(
-            "guest-boot", f"guest boot failed: {boot_result.stderr.strip()[-800:]}"
+            "guest-boot",
+            f"guest boot failed: {boot_result.stderr.strip()[-800:]} "
+            f"(consoles of already-booted guests under {project_dir(options.state_dir, project) / 'consoles'})",
+            consoles=[cast(str, g["name"]) for g in guests],
         )
     log.log("guest-boot", "ok")
 
@@ -251,14 +290,19 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
         name = cast(str, guest["name"])
         cid = cast(int, guest["cid"])
         log.log("readiness", "start", guest=name, cid=cid)
-        ready = probe.wait_daemon(cid, deadline)
+        # a hung guest must not consume later guests' diagnostics: every guest
+        # gets a minimum probe window even after the shared deadline passes,
+        # so the failure report names only genuinely unready guests
+        guest_deadline = max(deadline, time.monotonic() + 10.0)
+        ready = probe.wait_daemon(cid, guest_deadline)
         if ready and cast(str, guest["readiness"]) == "cloud-init":
-            remaining = max(10.0, deadline - time.monotonic())
+            remaining = max(10.0, guest_deadline - time.monotonic())
             try:
+                # the exit status of `cloud-init status --wait` IS the signal:
+                # 0 done, nonzero error or degraded, both of which mean the
+                # guest's declared configuration did not fully apply
                 rc, _, _ = probe.guest_exec(
-                    cid,
-                    "cloud-init status --wait >/dev/null 2>&1; echo done",
-                    remaining,
+                    cid, "cloud-init status --wait >/dev/null 2>&1", remaining
                 )
                 ready = rc == 0
             except (OSError, ValueError):
@@ -267,12 +311,12 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
         log.log("readiness", "ok" if ready else "fail", guest=name)
     failed = [state.name for state in states if not state.ready]
     if failed:
-        _pull_consoles(run, project, bundle, env, options, failed)
         raise fail(
             "readiness",
             f"guests not ready within {options.readiness_timeout:.0f}s: {', '.join(failed)} "
             f"(console logs under {project_dir(options.state_dir, project) / 'consoles'})",
             guest=failed[0],
+            consoles=failed,
         )
 
     log.log("ready", "ok", seconds=round(time.monotonic() - started, 1))

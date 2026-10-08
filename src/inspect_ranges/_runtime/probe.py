@@ -36,7 +36,8 @@ def wait_daemon(cid: int, deadline: float) -> bool:
         except (OSError, ValueError):
             # connect refused, reset mid-reply, or a partial reply during
             # boot: all mean "not ready yet"
-            time.sleep(1.0)
+            pass
+        time.sleep(1.0)  # also between answered-but-not-ok replies: never spin
     return False
 
 

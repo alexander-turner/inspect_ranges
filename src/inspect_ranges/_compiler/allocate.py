@@ -83,6 +83,10 @@ def allocate(spec: RangeSpec, cid_base: int = 3) -> Allocation:
     Raises:
         ValueError: The spec contains IPv6 values (which validation gates) or a subnet is exhausted.
     """
+    if cid_base < 3:
+        raise ValueError(
+            f"cid_base must be at least 3 (0-2 are reserved vsock CIDs), got {cid_base}"
+        )
     subnets: dict[str, IPv4Network] = {}
     claimed: dict[str, set[IPv4Address]] = {}
     for network in spec.networks:

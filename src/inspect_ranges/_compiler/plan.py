@@ -11,7 +11,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route
 from .allocate import (
@@ -38,8 +38,8 @@ class PlanOptions(BaseModel):
     default_router_image: str = "noble-range-guest"
     """Image for routers that declare none (the backend's default router appliance)."""
 
-    cid_base: int = 3
-    """First vsock CID; a plan-time input (CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md: batteries at 3000 and up, the channel harness below 3000)."""
+    cid_base: int = Field(default=3, ge=3)
+    """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
 
 
 class ImageRef(BaseModel):
