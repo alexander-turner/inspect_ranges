@@ -36,10 +36,14 @@ from .codec import (
     decode_frames,
     encode_message,
 )
+from .mocks import HOSTILE_SCENARIOS, HostileTransport, LatencyTransport
 from .protocol import PROTOCOL_VERSION, Budget, Message
 
 __all__ = [
     "Budget",
+    "HOSTILE_SCENARIOS",
+    "HostileTransport",
+    "LatencyTransport",
     "BulkMismatch",
     "ChannelBudgetError",
     "ChannelError",

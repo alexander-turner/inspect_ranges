@@ -525,7 +525,7 @@ _TRANSITIONS: dict[SamplePhase, frozenset[SamplePhase]] = {
     SamplePhase.REALIZED: frozenset({SamplePhase.VERIFIED, SamplePhase.FAILED}),
     SamplePhase.VERIFIED: frozenset({SamplePhase.EXECUTING, SamplePhase.FAILED}),
     SamplePhase.EXECUTING: frozenset({SamplePhase.FINALIZED, SamplePhase.FAILED}),
-    SamplePhase.FINALIZED: frozenset({SamplePhase.DESTROYED}),
+    SamplePhase.FINALIZED: frozenset({SamplePhase.DESTROYED, SamplePhase.FAILED}),
     SamplePhase.FAILED: frozenset({SamplePhase.DESTROYED}),
     SamplePhase.DESTROYED: frozenset(),
 }
@@ -602,6 +602,7 @@ async def run_sample(
         if execute is not None:
             await execute(channel)
         machine.to(SamplePhase.FINALIZED)
+        await channel.teardown()
     except BaseException:
         machine.to(SamplePhase.FAILED)
         machine.to(SamplePhase.DESTROYED)
@@ -612,7 +613,6 @@ async def run_sample(
             logger.error("teardown after failure also failed: %s", teardown_failure)
         raise
     machine.to(SamplePhase.DESTROYED)
-    await channel.teardown()
     return machine
 
 
@@ -645,7 +645,7 @@ class MemoryStream:
             await self._outgoing.put(b"")
 
 
-def _stream_pair() -> tuple[MemoryStream, MemoryStream]:
+def stream_pair() -> tuple[MemoryStream, MemoryStream]:
     a: asyncio.Queue[bytes] = asyncio.Queue()
     b: asyncio.Queue[bytes] = asyncio.Queue()
     return MemoryStream(a, b), MemoryStream(b, a)
@@ -838,6 +838,7 @@ class FakeApplier:
 
     def __init__(self) -> None:
         self.fail_at_stage: str | None = None
+        self.fail_teardown = False
         self.torn_down = False
         self.realized_digests: list[str] = []
 
@@ -875,7 +876,7 @@ class LoopbackTransport:
     async def connect(self, endpoint: str) -> ByteStream:
         if endpoint != HOST_APPLIER and endpoint not in self.guests:
             raise ConnectionError(f"no such endpoint: {endpoint}")
-        client_side, server_side = _stream_pair()
+        client_side, server_side = stream_pair()
         asyncio.create_task(self._serve(endpoint, server_side))
         return client_side
 
@@ -912,6 +913,15 @@ class LoopbackTransport:
                 for frame in encode_message(report, None):
                     await stream.send(frame)
         elif isinstance(message, TeardownRequest):
+            if self.applier.fail_teardown:
+                self.applier.fail_teardown = False
+                error = ErrorReply(
+                    id=message.id, errno="EBUSY", message="injected teardown failure"
+                )
+                for frame in encode_message(error, None):
+                    await stream.send(frame)
+                await stream.aclose()
+                return
             self.applier.torn_down = True
             for frame in encode_message(OkReply(id=message.id), None):
                 await stream.send(frame)

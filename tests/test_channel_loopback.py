@@ -6,6 +6,7 @@ import logging
 import pytest
 from inspect_ranges._channel.channel import (
     ChannelError,
+    GuestError,
     IllegalTransition,
     LoopbackTransport,
     MessageChannel,
@@ -76,6 +77,31 @@ def test_run_sample_realize_failure_fails_then_destroys() -> None:
     machine = asyncio.run(scenario())
     assert _phases(machine) == ["acquired", "failed", "destroyed"]
     assert fleet.applier.torn_down, "teardown must run on the failure path"
+
+
+def test_run_sample_teardown_failure_fails_cleanly() -> None:
+    """A teardown failure on the success path lands in failed -> destroyed, never an illegal transition."""
+    fleet = LoopbackTransport(["web"])
+    fleet.applier.fail_teardown = True
+    channel = MessageChannel(fleet)
+
+    async def scenario() -> SampleStateMachine:
+        machine = SampleStateMachine()
+        with pytest.raises(GuestError, match="injected teardown failure"):
+            await run_sample(channel, bundle_digest="ab" * 32, machine=machine)
+        return machine
+
+    machine = asyncio.run(scenario())
+    assert _phases(machine) == [
+        "acquired",
+        "realized",
+        "verified",
+        "executing",
+        "finalized",
+        "failed",
+        "destroyed",
+    ]
+    assert fleet.applier.torn_down, "the failure-path retry still tears down"
 
 
 ILLEGAL_EDGES = [
