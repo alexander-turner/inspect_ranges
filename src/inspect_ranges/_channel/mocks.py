@@ -1,8 +1,10 @@
 """Mock channels for conformance testing (`range-channel.md`).
 
-`HostileTransport` plays the attacker-controlled endpoint: it reads the real request, then replies with bytes an honest endpoint cannot produce (malformed frames, schema violations, wrong ids, lying sizes, digest mismatches, oversized bulk). The driver must surface every scenario as a typed failure, never a parse fallback.
+`HostileTransport` plays the attacker-controlled endpoint: it reads the real request, then replies with bytes an honest endpoint cannot produce (malformed frames, schema violations, wrong ids and kinds, lying sizes, digest mismatches, oversized or unsolicited bulk, duplicate replies, trailing garbage). The driver must surface every scenario as a typed failure, never a parse fallback. `HOSTILE_GUEST_SCENARIOS` maps each scenario to the operation that exercises the documented defense (exec-shaped attacks drive `exec`, file-shaped drive `read_file`).
 
-`LatencyTransport` wraps a real transport and injects second-scale round trips, so the full conformance suite runs at slow-backend timing in CI and any multi-round-trip regression in the hot path fails fast instead of surfacing only on a slow transport.
+`HostileApplierTransport` does the same for the host lifecycle plane: forged stage-report ids, `ready`-first streams, and non-monotonic stage spam.
+
+`LatencyTransport` wraps a real transport and injects configurable round trips, so the conformance suite runs at slow-backend timing and any multi-round-trip regression in the hot path fails fast. `DribbleTransport` delivers reply bytes one at a time, pinning reader robustness to arbitrary chunk boundaries.
 """
 
 import asyncio
@@ -42,6 +44,13 @@ def _unknown_kind(request: Message) -> bytes:
     return _frame(FrameType.CONTROL, payload)
 
 
+def _v2_reply(request: Message) -> bytes:
+    payload = canonical_json(
+        {"v": 2, "id": request.id, "kind": "pong", "daemon": "old", "protocol": 3}
+    )
+    return _frame(FrameType.CONTROL, payload)
+
+
 def _wrong_id(request: Message) -> bytes:
     reply = OkReply(id="f" * 32)
     return b"".join(encode_message(reply))
@@ -62,6 +71,8 @@ def _lying_exec_sizes(request: Message) -> bytes:
             "rc": 0,
             "stdout_size": 10,
             "stderr_size": 10,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
             "data_size": 5,
         }
     )
@@ -94,22 +105,64 @@ def _bulk_overrun(request: Message) -> bytes:
     return b"".join(encode_message(reply, data))
 
 
+def _unsolicited_bulk(request: Message) -> bytes:
+    # a bulk-less reply followed by digest-correct bulk frames: free resource
+    # burn if the reader tolerated it
+    data = b"burn" * 1024
+    honest = b"".join(encode_message(OkReply(id=request.id)))
+    return (
+        honest
+        + _frame(FrameType.DATA, data)
+        + _frame(
+            FrameType.END,
+            canonical_json(
+                {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            ),
+        )
+    )
+
+
+def _duplicate_reply(request: Message) -> bytes:
+    honest = b"".join(encode_message(OkReply(id=request.id)))
+    return honest + honest
+
+
+def _trailing_garbage(request: Message) -> bytes:
+    honest = b"".join(encode_message(OkReply(id=request.id)))
+    return honest + b"\x00\x01\x02\x03"
+
+
+def _data_frame_first(request: Message) -> bytes:
+    return _frame(FrameType.DATA, b"orphan bulk")
+
+
+def _end_frame_first(request: Message) -> bytes:
+    return _frame(FrameType.END, canonical_json({"sha256": "0" * 64, "size": 0}))
+
+
 def _truncated_reply(request: Message) -> bytes:
     honest = b"".join(encode_message(OkReply(id=request.id)))
     return honest[: len(honest) // 2]
 
 
-HOSTILE_SCENARIOS: dict[str, Callable[[Message], bytes]] = {
-    "garbage-bytes": _garbage,
-    "oversized-length-field": _oversized_length_field,
-    "bad-json": _bad_json,
-    "unknown-kind": _unknown_kind,
-    "wrong-id": _wrong_id,
-    "wrong-kind": _wrong_kind,
-    "lying-exec-sizes": _lying_exec_sizes,
-    "bulk-digest-mismatch": _bulk_digest_mismatch,
-    "bulk-overrun": _bulk_overrun,
-    "truncated-reply": _truncated_reply,
+HOSTILE_GUEST_SCENARIOS: dict[str, tuple[Callable[[Message], bytes], str]] = {
+    # scenario -> (reply crafter, channel operation that exercises the defense)
+    "garbage-bytes": (_garbage, "read_file"),
+    "oversized-length-field": (_oversized_length_field, "read_file"),
+    "bad-json": (_bad_json, "read_file"),
+    "unknown-kind": (_unknown_kind, "read_file"),
+    "v2-reply": (_v2_reply, "read_file"),
+    "wrong-id": (_wrong_id, "read_file"),
+    "wrong-kind": (_wrong_kind, "exec"),
+    "lying-exec-sizes": (_lying_exec_sizes, "exec"),
+    "bulk-digest-mismatch": (_bulk_digest_mismatch, "read_file"),
+    "bulk-overrun": (_bulk_overrun, "read_file"),
+    "unsolicited-bulk": (_unsolicited_bulk, "write_file"),
+    "data-frame-first": (_data_frame_first, "read_file"),
+    "end-frame-first": (_end_frame_first, "read_file"),
+    "duplicate-reply": (_duplicate_reply, "write_file"),
+    "trailing-garbage": (_trailing_garbage, "write_file"),
+    "truncated-reply": (_truncated_reply, "write_file"),
 }
 
 
@@ -117,12 +170,15 @@ class HostileTransport:
     """A `Transport` whose endpoint answers every request with the configured hostile reply."""
 
     def __init__(self, scenario: str) -> None:
-        self.craft = HOSTILE_SCENARIOS[scenario]
+        self.craft = HOSTILE_GUEST_SCENARIOS[scenario][0]
         self.requests_seen = 0
+        self._tasks: set[asyncio.Task[None]] = set()
 
     async def connect(self, endpoint: str) -> ByteStream:
         client_side, server_side = stream_pair()
-        asyncio.create_task(self._serve(server_side))
+        task = asyncio.create_task(self._serve(server_side))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return client_side
 
     async def _serve(self, stream: MemoryStream) -> None:
@@ -133,6 +189,65 @@ class HostileTransport:
             await stream.aclose()
             return
         self.requests_seen += 1
+        await stream.send(self.craft(request))
+        await stream.aclose()
+
+
+def _stage(request: Message, stage: str, rid: str | None = None) -> bytes:
+    payload = canonical_json(
+        {
+            "v": 3,
+            "id": rid or request.id,
+            "kind": "stage",
+            "stage": stage,
+            "detail": "",
+            "guests": {},
+        }
+    )
+    return _frame(FrameType.CONTROL, payload)
+
+
+def _stage_wrong_id(request: Message) -> bytes:
+    return _stage(request, "fetch", rid="e" * 32)
+
+
+def _stage_ready_first(request: Message) -> bytes:
+    return _stage(request, "ready")
+
+
+def _stage_spam(request: Message) -> bytes:
+    # non-monotonic repetition: the second fetch violates strict stage order
+    return _stage(request, "fetch") * 8
+
+
+HOSTILE_APPLIER_SCENARIOS: dict[str, Callable[[Message], bytes]] = {
+    "stage-wrong-id": _stage_wrong_id,
+    "stage-ready-first": _stage_ready_first,
+    "stage-spam": _stage_spam,
+}
+
+
+class HostileApplierTransport:
+    """A `Transport` whose host-plane endpoint streams forged stage reports."""
+
+    def __init__(self, scenario: str) -> None:
+        self.craft = HOSTILE_APPLIER_SCENARIOS[scenario]
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        client_side, server_side = stream_pair()
+        task = asyncio.create_task(self._serve(server_side))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return client_side
+
+    async def _serve(self, stream: MemoryStream) -> None:
+        reader = MessageStreamReader(stream.receive, bulk_cap=DEFAULT_BULK_CAP)
+        try:
+            request, _ = await reader.next()
+        except Exception:
+            await stream.aclose()
+            return
         await stream.send(self.craft(request))
         await stream.aclose()
 
@@ -168,3 +283,36 @@ class LatencyTransport:
     async def connect(self, endpoint: str) -> ByteStream:
         await asyncio.sleep(self._rtt_s)
         return LatencyStream(await self._inner.connect(endpoint), self._rtt_s)
+
+
+class DribbleStream:
+    """Delivers received bytes one at a time: arbitrary chunk boundaries, worst case."""
+
+    def __init__(self, inner: ByteStream) -> None:
+        self._inner = inner
+        self._pending = bytearray()
+
+    async def send(self, data: bytes) -> None:
+        await self._inner.send(data)
+
+    async def receive(self) -> bytes:
+        if not self._pending:
+            self._pending.extend(await self._inner.receive())
+            if not self._pending:
+                return b""
+        byte = self._pending[:1]
+        del self._pending[:1]
+        return bytes(byte)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+class DribbleTransport:
+    """Wraps a transport so every reply arrives byte by byte (reader robustness pinning)."""
+
+    def __init__(self, inner: Transport) -> None:
+        self._inner = inner
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        return DribbleStream(await self._inner.connect(endpoint))

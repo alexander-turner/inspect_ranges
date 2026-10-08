@@ -1,22 +1,23 @@
 """The `RangeChannel` seam: transport-agnostic control plane to one sample's range.
 
-`MessageChannel` implements the seam from `host-provider.md` over any `Transport` (per-operation connect, the resolved connection model). It owns the client-side message contract: request ids with idempotent resend, recovery of lost replies by resending the same id (the endpoint deduplicates), acknowledgement of consumed results, layered budgets, strict validation of every reply as untrusted input, and a bounded wire-trace tail that is dumped on failure.
+`MessageChannel` implements the seam from `host-provider.md` over any `Transport` (per-operation connect, the resolved connection model). It owns the client-side message contract: request ids with idempotent resend, recovery of lost replies by resending the same id (the endpoint deduplicates), acknowledgement of consumed results including durable errors, the three independent budget layers, strict validation of every reply as untrusted input (residual bytes after a reply are tamper), and a bounded wire-trace tail dumped on every tamper or budget failure.
+
+Budget layers, as implemented: the channel allowance (`Budget.channel_ms`, or the channel default) bounds each attempt's round trip; for an exec with a command budget the attempt bound is `command_ms` plus grace, and when it fires without an observed in-guest kill the failure is attributed to the channel layer, never the command layer (command-layer errors come only from the guest's own budget reply, whose attribution is advisory post-compromise). The untimed bound is an outer total per operation, covering every attempt and backoff.
 
 `LoopbackTransport` is the in-memory reference endpoint: frames travel through the real codec in both directions to a `FakeGuest` fleet and a `FakeApplier`, so the conformance suite exercises the genuine client logic with no VM behind it.
 
-`SampleStateMachine` is the driver-side sample lifecycle (acquire, realize, verify, execute, finalize evidence, destroy) with observable transitions; illegal transitions are rejected, never absorbed.
+`SampleStateMachine` is the driver-side sample lifecycle (acquire, realize, verify, execute, finalize evidence, destroy) with observable transitions; illegal transitions are rejected, never absorbed, and `destroyed` is only ever recorded after a completed teardown.
 """
 
 import asyncio
 import enum
-import hashlib
 import logging
 import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, NoReturn, Protocol
 
 from .codec import (
     ChannelClosed,
@@ -29,6 +30,7 @@ from .codec import (
 from .protocol import (
     DEFAULT_BULK_CAP,
     AckRequest,
+    Budget,
     BudgetLayer,
     DiagEntry,
     DiagReply,
@@ -37,10 +39,12 @@ from .protocol import (
     ExecRequest,
     ExecResult,
     FileData,
+    ForwardReply,
     GuestState,
     Message,
     OkReply,
     PingRequest,
+    PollRequest,
     PongReply,
     ReadFileRequest,
     RealizeRequest,
@@ -61,6 +65,11 @@ _CHANNEL_GRACE_S = 8.0
 """Added to the in-guest command budget when waiting for an exec reply, so the guest's own kill is observed rather than raced (the poll-grace lesson)."""
 
 _TRACE_TAIL = 256
+
+MAX_STAGE_REPORTS = 32
+"""Cap on reports per realize; the monotonic stage rule already bounds honest streams well below this."""
+
+_STAGE_ORDER = {"fetch": 0, "construct": 1, "boot": 2, "verify": 3, "ready": 4}
 
 
 class ChannelError(Exception):
@@ -84,7 +93,7 @@ class ChannelBudgetError(ChannelError):
 
 
 class GuestError(ChannelError):
-    """An honest, errno-tagged failure reported by the endpoint."""
+    """An errno-tagged failure reported by the endpoint (attacker-influenceable post-compromise)."""
 
     def __init__(
         self, errno: str, message: str, layer: BudgetLayer | None = None
@@ -92,6 +101,14 @@ class GuestError(ChannelError):
         super().__init__(f"{errno}: {message}")
         self.errno = errno
         self.layer = layer
+
+
+class FileLimitExceeded(ChannelError):
+    """An honest read was truncated at the requested cap; `partial` carries the capped bytes."""
+
+    def __init__(self, path: str, partial: bytes) -> None:
+        super().__init__(f"{path}: truncated at {len(partial)} bytes")
+        self.partial = partial
 
 
 class IllegalTransition(ChannelError):
@@ -139,6 +156,7 @@ class RangeChannel(Protocol):
         self, guest: str, path: str, *, cap: int = DEFAULT_BULK_CAP
     ) -> bytes: ...
     async def write_file(self, guest: str, path: str, data: bytes) -> None: ...
+    async def forward(self, guest: str, host: str, port: int) -> ForwardReply: ...
     async def ping(self, guest: str) -> PongReply: ...
     async def diag(self, guest: str, *, max_entries: int = 100) -> list[DiagEntry]: ...
     async def teardown(self) -> None: ...
@@ -201,90 +219,6 @@ class MessageChannel:
             extra={"request_id": rid, "endpoint": endpoint, "channel": self._label},
         )
 
-    # -- the exchange core -------------------------------------------------
-
-    async def _exchange(
-        self,
-        endpoint: str,
-        request: Message,
-        bulk: bytes | None,
-        *,
-        reply_budget_s: float,
-        bulk_cap: int,
-        budget_layer: BudgetLayer,
-    ) -> tuple[Message, bytes | None]:
-        """One request/reply exchange with idempotent resend on lost replies.
-
-        A dropped connection or truncated reply is recovered by reconnecting and resending the identical request (the endpoint deduplicates on id). Any reply shape an honest endpoint cannot produce raises `TamperError` immediately, with the trace tail dumped to the log.
-        """
-        frames = encode_message(request, bulk, trace=self._trace.append)
-        last_failure = ""
-        self._log(
-            logging.DEBUG,
-            "request",
-            rid=request.id,
-            endpoint=endpoint,
-            detail=request.kind,
-        )
-        for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            try:
-                async with asyncio.timeout(reply_budget_s):
-                    stream = await self._transport.connect(endpoint)
-                    self.stats.connects += 1
-                    try:
-                        for frame in frames:
-                            await stream.send(frame)
-                        reader = MessageStreamReader(
-                            stream.receive, bulk_cap=bulk_cap, trace=self._trace.append
-                        )
-                        reply, reply_bulk = await reader.next()
-                    finally:
-                        await stream.aclose()
-            except TimeoutError:
-                self._dump_trace(request, endpoint, f"budget expired ({budget_layer})")
-                raise ChannelBudgetError(
-                    budget_layer,
-                    f"{request.kind} id={request.id}: no reply within {reply_budget_s:.1f}s",
-                ) from None
-            except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
-                last_failure = f"{type(failure).__name__}: {failure}"
-                self._log(
-                    logging.WARNING,
-                    "retry",
-                    rid=request.id,
-                    endpoint=endpoint,
-                    detail=f"attempt {attempt}/{_RETRY_ATTEMPTS}: {last_failure}",
-                )
-                await asyncio.sleep(_RETRY_BACKOFF_S * attempt)
-                continue
-            except DecodeError as failure:
-                self._dump_trace(request, endpoint, str(failure))
-                raise TamperError(
-                    f"{request.kind} id={request.id}: {type(failure).__name__}: {failure}"
-                ) from failure
-            self.stats.exchanges += 1
-            if reply.id != request.id:
-                self._dump_trace(request, endpoint, f"reply id {reply.id}")
-                raise TamperError(
-                    f"{request.kind} id={request.id}: reply carries id {reply.id}"
-                )
-            if isinstance(reply, ErrorReply):
-                if reply.errno == "ETIME" and reply.layer is not None:
-                    raise ChannelBudgetError(reply.layer, reply.message)
-                raise GuestError(reply.errno, reply.message, reply.layer)
-            self._log(
-                logging.DEBUG,
-                "reply",
-                rid=request.id,
-                endpoint=endpoint,
-                detail=reply.kind,
-            )
-            return reply, reply_bulk
-        self._dump_trace(request, endpoint, last_failure)
-        raise TransportFailure(
-            f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
-        )
-
     def _dump_trace(self, request: Message, endpoint: str, reason: str) -> None:
         self._log(
             logging.ERROR,
@@ -298,28 +232,165 @@ class MessageChannel:
                 "  %s", line, extra={"request_id": request.id, "endpoint": endpoint}
             )
 
+    def _tamper(
+        self,
+        request: Message,
+        endpoint: str,
+        reason: str,
+        cause: BaseException | None = None,
+    ) -> NoReturn:
+        """Every tamper verdict goes through here: dump the trace tail, then raise."""
+        self._dump_trace(request, endpoint, reason)
+        raise TamperError(f"{request.kind} id={request.id}: {reason}") from cause
+
+    # -- budgets -------------------------------------------------------------
+
+    def _op_budgets(self, request: Message) -> tuple[float, float]:
+        """Per-attempt and outer-total budgets for `request` (seconds).
+
+        The attempt bound is the channel allowance, or `command_ms` plus grace for a timed exec; firing is always a channel-layer verdict (a host-side deadline without an observed in-guest kill is a transport stall, not a command timeout). The outer bound caps the whole operation across attempts and backoff.
+        """
+        budget = getattr(request, "budget", None)
+        if not isinstance(budget, Budget):
+            return self._channel_budget_s, self._untimed_bound_s
+        outer_s = min(budget.untimed_bound_ms / 1000, self._untimed_bound_s)
+        if isinstance(request, ExecRequest):
+            if request.budget.command_ms is not None:
+                return request.budget.command_ms / 1000 + _CHANNEL_GRACE_S, outer_s
+            return outer_s, outer_s  # untimed exec: only the outer total governs
+        return budget.channel_ms / 1000, outer_s
+
+    # -- the exchange core -------------------------------------------------
+
+    async def _exchange(
+        self,
+        endpoint: str,
+        request: Message,
+        bulk: bytes | None = None,
+        *,
+        bulk_cap: int = DEFAULT_BULK_CAP,
+        ack_consumed: bool = False,
+    ) -> tuple[Message, bytes | None]:
+        """One request/reply exchange with idempotent resend on lost replies.
+
+        A dropped connection or truncated reply is recovered by reconnecting and resending the identical request (the endpoint deduplicates on id). Any reply shape an honest endpoint cannot produce, including residual bytes after the reply, is a tamper verdict with the trace tail dumped. With `ack_consumed`, the reply (success or durable error) is acknowledged before this returns or raises.
+        """
+        frames = encode_message(request, bulk, trace=self._trace.append)
+        attempt_s, outer_s = self._op_budgets(request)
+        deadline = time.monotonic() + outer_s
+        last_failure = ""
+        self._log(
+            logging.DEBUG,
+            "request",
+            rid=request.id,
+            endpoint=endpoint,
+            detail=request.kind,
+        )
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ChannelBudgetError(
+                    "untimed",
+                    f"{request.kind} id={request.id}: operation total bound ({outer_s:.0f}s) expired",
+                )
+            try:
+                async with asyncio.timeout(min(attempt_s, remaining)):
+                    stream = await self._transport.connect(endpoint)
+                    self.stats.connects += 1
+                    try:
+                        for frame in frames:
+                            await stream.send(frame)
+                        reader = MessageStreamReader(
+                            stream.receive, bulk_cap=bulk_cap, trace=self._trace.append
+                        )
+                        reply, reply_bulk = await reader.next()
+                        # an honest per-operation endpoint sends one reply and
+                        # closes; anything after it is tamper, not padding
+                        if reader.pending:
+                            self._tamper(request, endpoint, "data after the reply")
+                        residual = await stream.receive()
+                        if residual:
+                            self._tamper(
+                                request, endpoint, "data after the reply (post-close)"
+                            )
+                    finally:
+                        await stream.aclose()
+            except TimeoutError:
+                layer: BudgetLayer = (
+                    "untimed" if deadline - time.monotonic() <= 0 else "channel"
+                )
+                self._dump_trace(request, endpoint, f"budget expired ({layer})")
+                raise ChannelBudgetError(
+                    layer,
+                    f"{request.kind} id={request.id}: no reply within the {layer} allowance",
+                ) from None
+            except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
+                last_failure = f"{type(failure).__name__}: {failure}"
+                self._log(
+                    logging.WARNING,
+                    "retry",
+                    rid=request.id,
+                    endpoint=endpoint,
+                    detail=f"attempt {attempt}/{_RETRY_ATTEMPTS}: {last_failure}",
+                )
+                await asyncio.sleep(
+                    min(
+                        _RETRY_BACKOFF_S * attempt,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                continue
+            except DecodeError as failure:
+                self._tamper(
+                    request, endpoint, f"{type(failure).__name__}: {failure}", failure
+                )
+            self.stats.exchanges += 1
+            if reply.id != request.id:
+                self._tamper(
+                    request,
+                    endpoint,
+                    f"reply carries id {reply.id}, request was id {request.id}",
+                )
+            if isinstance(reply, ErrorReply):
+                if ack_consumed:
+                    await self._ack(endpoint, request.id)
+                if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
+                    raise ChannelBudgetError(reply.layer, reply.message)
+                raise GuestError(reply.errno, reply.message, reply.layer)
+            self._log(
+                logging.DEBUG,
+                "reply",
+                rid=request.id,
+                endpoint=endpoint,
+                detail=reply.kind,
+            )
+            if ack_consumed:
+                await self._ack(endpoint, request.id)
+            return reply, reply_bulk
+        self._dump_trace(request, endpoint, last_failure)
+        raise TransportFailure(
+            f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
+        )
+
     def _expect[ReplyT: Message](
-        self, reply: Message, expected: type[ReplyT], request: Message
+        self, reply: Message, expected: type[ReplyT], request: Message, endpoint: str
     ) -> ReplyT:
         if not isinstance(reply, expected):
-            raise TamperError(
-                f"{request.kind} id={request.id}: expected {expected.__name__}, got {reply.kind}"
+            self._tamper(
+                request,
+                endpoint,
+                f"expected {expected.__name__}, got {reply.kind}",
             )
         return reply
 
     async def _ack(self, endpoint: str, target_id: str) -> None:
-        """Best-effort acknowledgement; the endpoint may then drop its stored reply."""
+        """Acknowledge a consumed durable result. Loss is best-effort (logged); tamper re-raises."""
         ack = AckRequest(id=request_id(), target_id=target_id)
         try:
-            reply, _ = await self._exchange(
-                endpoint,
-                ack,
-                None,
-                reply_budget_s=self._channel_budget_s,
-                bulk_cap=DEFAULT_BULK_CAP,
-                budget_layer="channel",
-            )
-            self._expect(reply, OkReply, ack)
+            reply, _ = await self._exchange(endpoint, ack)
+            self._expect(reply, OkReply, ack, endpoint)
+        except TamperError:
+            raise
         except ChannelError as failure:
             self._log(
                 logging.WARNING,
@@ -332,16 +403,10 @@ class MessageChannel:
     # -- guest control plane ------------------------------------------------
 
     async def ping(self, guest: str) -> PongReply:
+        """Liveness and protocol-version probe for one guest."""
         request = PingRequest(id=request_id())
-        reply, _ = await self._exchange(
-            guest,
-            request,
-            None,
-            reply_budget_s=self._channel_budget_s,
-            bulk_cap=DEFAULT_BULK_CAP,
-            budget_layer="channel",
-        )
-        return self._expect(reply, PongReply, request)
+        reply, _ = await self._exchange(guest, request)
+        return self._expect(reply, PongReply, request, guest)
 
     async def exec(
         self, guest: str, request: ExecRequest, *, stdin: bytes | None = None
@@ -351,27 +416,13 @@ class MessageChannel:
             request.data_size or 0
         ) != len(stdin or b""):
             raise ValueError("stdin must match the request's data_size declaration")
-        if request.budget.command_ms is not None:
-            reply_budget_s = request.budget.command_ms / 1000 + _CHANNEL_GRACE_S
-            budget_layer: BudgetLayer = "command"
-        else:
-            reply_budget_s = min(
-                self._untimed_bound_s, request.budget.untimed_bound_ms / 1000
-            )
-            budget_layer = "untimed"
         reply, bulk = await self._exchange(
-            guest,
-            request,
-            stdin,
-            reply_budget_s=reply_budget_s,
-            bulk_cap=2 * DEFAULT_BULK_CAP,
-            budget_layer=budget_layer,
+            guest, request, stdin, bulk_cap=2 * DEFAULT_BULK_CAP, ack_consumed=True
         )
-        result = self._expect(reply, ExecResult, request)
+        result = self._expect(reply, ExecResult, request, guest)
         payload = bulk or b""
         stdout = payload[: result.stdout_size]
         stderr = payload[result.stdout_size : result.stdout_size + result.stderr_size]
-        await self._ack(guest, request.id)
         return ExecOutcome(
             rc=result.rc,
             stdout=stdout,
@@ -383,55 +434,54 @@ class MessageChannel:
     async def read_file(
         self, guest: str, path: str, *, cap: int = DEFAULT_BULK_CAP
     ) -> bytes:
+        """Read a guest file, capped at `cap` bytes.
+
+        Raises:
+            FileLimitExceeded: The guest honestly truncated at the cap; `partial` carries the bytes.
+            GuestError: Errno-tagged guest failure (`ENOENT`, `EISDIR`, ...).
+        """
         request = ReadFileRequest(id=request_id(), path=path, max_bytes=cap)
         reply, bulk = await self._exchange(
-            guest,
-            request,
-            None,
-            reply_budget_s=self._channel_budget_s,
-            bulk_cap=cap,
-            budget_layer="channel",
+            guest, request, bulk_cap=cap, ack_consumed=True
         )
-        self._expect(reply, FileData, request)
-        await self._ack(guest, request.id)
+        data = self._expect(reply, FileData, request, guest)
+        if data.truncated:
+            raise FileLimitExceeded(path, bulk or b"")
         return bulk or b""
 
     async def write_file(self, guest: str, path: str, data: bytes) -> None:
+        """Write `data` to a guest file (exactly once per request id, even across retries)."""
         request = WriteFileRequest(id=request_id(), path=path, data_size=len(data))
-        reply, _ = await self._exchange(
-            guest,
-            request,
-            data,
-            reply_budget_s=self._channel_budget_s,
-            bulk_cap=DEFAULT_BULK_CAP,
-            budget_layer="channel",
+        reply, _ = await self._exchange(guest, request, data, ack_consumed=True)
+        self._expect(reply, OkReply, request, guest)
+
+    async def forward(self, guest: str, host: str, port: int) -> ForwardReply:
+        """Open a capability-gated forward (not implemented until the realizer integration)."""
+        raise NotImplementedError(
+            "forward arrives with the realizer integration slice; the message "
+            "schema is wire-stable (ForwardRequest/ForwardReply) and capability-gated"
         )
-        self._expect(reply, OkReply, request)
-        await self._ack(guest, request.id)
 
     async def diag(self, guest: str, *, max_entries: int = 100) -> list[DiagEntry]:
+        """Read the daemon's in-guest diagnostic ring buffer."""
         request = DiagRequest(id=request_id(), max_entries=max_entries)
-        reply, _ = await self._exchange(
-            guest,
-            request,
-            None,
-            reply_budget_s=self._channel_budget_s,
-            bulk_cap=DEFAULT_BULK_CAP,
-            budget_layer="channel",
-        )
-        return self._expect(reply, DiagReply, request).entries
+        reply, _ = await self._exchange(guest, request)
+        return self._expect(reply, DiagReply, request, guest).entries
 
     # -- host lifecycle plane -----------------------------------------------
 
     async def realize(
         self, bundle_digest: Sha256Hex, grants: Sequence[str]
     ) -> AsyncIterator[StageReport]:
-        """Stream stage reports until `ready` or `failed` (schemas live; applier mocked until the provider phase)."""
+        """Stream stage reports until `ready` or `failed`.
+
+        Hardened per the realize policy: the untimed bound caps the whole stream, reports are capped in count and must follow strictly increasing stage order (`ready` never first; `failed` always allowed), an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically), and anything else is tamper.
+        """
         request = RealizeRequest(
             id=request_id(), bundle_digest=bundle_digest, grants=list(grants)
         )
-        stream = await self._transport.connect(HOST_APPLIER)
-        self.stats.connects += 1
+        deadline = time.monotonic() + self._untimed_bound_s
+        seen: list[StageReport] = []
         self._log(
             logging.INFO,
             "realize",
@@ -439,66 +489,109 @@ class MessageChannel:
             endpoint=HOST_APPLIER,
             detail=bundle_digest,
         )
-        try:
-            for frame in encode_message(request, None, trace=self._trace.append):
-                await stream.send(frame)
-            reader = MessageStreamReader(
-                stream.receive, bulk_cap=DEFAULT_BULK_CAP, trace=self._trace.append
-            )
-            while True:
-                try:
-                    async with asyncio.timeout(self._channel_budget_s):
-                        message, _ = await reader.next()
-                except TimeoutError:
-                    self._dump_trace(
-                        request, HOST_APPLIER, "stage report budget expired"
-                    )
-                    raise ChannelBudgetError(
-                        "channel",
-                        f"realize id={request.id}: no stage report within budget",
-                    ) from None
-                except ChannelClosed:
-                    self._dump_trace(
-                        request, HOST_APPLIER, "stream closed before ready/failed"
-                    )
-                    raise TamperError(
-                        f"realize id={request.id}: stream ended before a terminal stage"
-                    ) from None
-                except DecodeError as failure:
-                    self._dump_trace(request, HOST_APPLIER, str(failure))
-                    raise TamperError(
-                        f"realize id={request.id}: {failure}"
-                    ) from failure
-                self.stats.exchanges += 1
-                report = self._expect(message, StageReport, request)
-                if report.id != request.id:
-                    raise TamperError(
-                        f"realize id={request.id}: report carries id {report.id}"
-                    )
-                self._log(
-                    logging.INFO,
-                    "stage",
-                    rid=request.id,
-                    endpoint=HOST_APPLIER,
-                    detail=f"{report.stage} {report.detail}".strip(),
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            stream = await self._transport.connect(HOST_APPLIER)
+            self.stats.connects += 1
+            expected_replay = list(seen)  # a resumed stream must replay these first
+            replayed = 0
+            last_index = -1 if not seen else _STAGE_ORDER[seen[-1].stage]
+            received = 0
+            try:
+                for frame in encode_message(request, None, trace=self._trace.append):
+                    await stream.send(frame)
+                reader = MessageStreamReader(
+                    stream.receive, bulk_cap=DEFAULT_BULK_CAP, trace=self._trace.append
                 )
-                yield report
-                if report.stage in ("ready", "failed"):
-                    return
-        finally:
-            await stream.aclose()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ChannelBudgetError(
+                            "untimed", f"realize id={request.id}: total bound expired"
+                        )
+                    try:
+                        async with asyncio.timeout(
+                            min(self._channel_budget_s, remaining)
+                        ):
+                            message, _ = await reader.next()
+                    except TimeoutError:
+                        layer: BudgetLayer = (
+                            "untimed" if deadline - time.monotonic() <= 0 else "channel"
+                        )
+                        self._dump_trace(
+                            request, HOST_APPLIER, f"stage budget ({layer})"
+                        )
+                        raise ChannelBudgetError(
+                            layer, f"realize id={request.id}: no stage report in budget"
+                        ) from None
+                    except (ConnectionError, ChannelClosed, TruncatedFrame) as loss:
+                        # early stream end is loss, not tamper: resume same id
+                        self._log(
+                            logging.WARNING,
+                            "realize-resume",
+                            rid=request.id,
+                            endpoint=HOST_APPLIER,
+                            detail=f"attempt {attempt}: {type(loss).__name__}",
+                        )
+                        break
+                    except DecodeError as failure:
+                        self._tamper(request, HOST_APPLIER, str(failure), failure)
+                    self.stats.exchanges += 1
+                    received += 1
+                    if received > MAX_STAGE_REPORTS:
+                        self._tamper(request, HOST_APPLIER, "stage report flood")
+                    report = self._expect(message, StageReport, request, HOST_APPLIER)
+                    if report.id != request.id:
+                        self._tamper(
+                            request,
+                            HOST_APPLIER,
+                            f"stage report carries id {report.id}",
+                        )
+                    if replayed < len(expected_replay):
+                        if report != expected_replay[replayed]:
+                            self._tamper(
+                                request, HOST_APPLIER, "resumed replay diverged"
+                            )
+                        replayed += 1
+                        continue
+                    if report.stage != "failed":
+                        index = _STAGE_ORDER[report.stage]
+                        if index <= last_index or (
+                            report.stage == "ready" and not seen
+                        ):
+                            self._tamper(
+                                request,
+                                HOST_APPLIER,
+                                f"stage order violation: {report.stage} after "
+                                f"{seen[-1].stage if seen else 'nothing'}",
+                            )
+                        last_index = index
+                    seen.append(report)
+                    self._log(
+                        logging.INFO,
+                        "stage",
+                        rid=request.id,
+                        endpoint=HOST_APPLIER,
+                        detail=f"{report.stage} {report.detail}".strip(),
+                    )
+                    yield report
+                    if report.stage in ("ready", "failed"):
+                        if reader.pending or await stream.receive():
+                            self._tamper(
+                                request, HOST_APPLIER, "data after the terminal stage"
+                            )
+                        return
+            finally:
+                await stream.aclose()
+            await asyncio.sleep(_RETRY_BACKOFF_S * attempt)
+        raise TransportFailure(
+            f"realize id={request.id}: stream lost after {_RETRY_ATTEMPTS} attempts"
+        )
 
     async def teardown(self) -> None:
+        """Tear the range down. Teardown is contractually idempotent: callers may retry with a fresh id."""
         request = TeardownRequest(id=request_id())
-        reply, _ = await self._exchange(
-            HOST_APPLIER,
-            request,
-            None,
-            reply_budget_s=self._channel_budget_s,
-            bulk_cap=DEFAULT_BULK_CAP,
-            budget_layer="channel",
-        )
-        self._expect(reply, OkReply, request)
+        reply, _ = await self._exchange(HOST_APPLIER, request)
+        self._expect(reply, OkReply, request, HOST_APPLIER)
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +627,10 @@ Observer = Callable[[SamplePhase, SamplePhase], None]
 
 
 class SampleStateMachine:
-    """Observable sample lifecycle; illegal transitions raise, never absorb."""
+    """Observable sample lifecycle; illegal transitions raise, never absorb.
+
+    `destroyed` is recorded only after a completed teardown; a sample whose teardown never succeeded ends in `failed`, honestly. Observer exceptions are logged and never affect the machine or the lifecycle around it.
+    """
 
     def __init__(self, *, label: str = "sample") -> None:
         self._label = label
@@ -569,7 +665,24 @@ class SampleStateMachine:
             extra={"sample": self._label},
         )
         for observer in self._observers:
-            observer(previous, phase)
+            try:
+                observer(previous, phase)
+            except Exception:
+                logger.exception("state observer failed (non-fatal)")
+
+
+async def _teardown_with_retry(channel: "MessageChannel") -> Exception | None:
+    """Attempt teardown twice; teardown is contractually idempotent, so retries use fresh ids."""
+    last: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            await channel.teardown()
+            return None
+        except Exception as failure:
+            # broad on purpose: nothing here may mask the sample's own outcome
+            last = failure
+            logger.error("teardown attempt %d failed: %s", attempt, failure)
+    return last
 
 
 async def run_sample(
@@ -583,10 +696,11 @@ async def run_sample(
 ) -> SampleStateMachine:
     """Drive one sample through the lifecycle against `channel`.
 
-    On any phase failure the machine moves to `failed`, teardown still runs, and the original failure re-raises; the machine's history records exactly what happened.
+    Teardown always runs and completes before any `destroyed` transition; a teardown that fails even after retry leaves the machine in `failed`, because claiming destruction without a completed teardown would be dishonest. Phase failures re-raise after teardown; a success-path teardown failure that the retry recovers is a logged warning, not an error.
     """
     machine = machine or SampleStateMachine()
     machine.to(SamplePhase.ACQUIRED)
+    original: BaseException | None = None
     try:
         final: StageReport | None = None
         async for report in channel.realize(bundle_digest, grants):
@@ -602,17 +716,18 @@ async def run_sample(
         if execute is not None:
             await execute(channel)
         machine.to(SamplePhase.FINALIZED)
-        await channel.teardown()
-    except BaseException:
+    except BaseException as failure:
+        original = failure
         machine.to(SamplePhase.FAILED)
+    teardown_failure = await _teardown_with_retry(channel)
+    if teardown_failure is None:
         machine.to(SamplePhase.DESTROYED)
-        try:
-            await channel.teardown()
-        except ChannelError as teardown_failure:
-            # best effort on the failure path: never mask the original failure
-            logger.error("teardown after failure also failed: %s", teardown_failure)
-        raise
-    machine.to(SamplePhase.DESTROYED)
+    elif machine.phase is SamplePhase.FINALIZED:
+        machine.to(SamplePhase.FAILED)  # honest: the range was not destroyed
+    if original is not None:
+        raise original
+    if teardown_failure is not None:
+        raise teardown_failure
     return machine
 
 
@@ -674,7 +789,7 @@ class _StoredReply:
 class FakeGuest:
     """A deterministic in-memory guest endpoint speaking protocol v3.
 
-    Implements the daemon-side contract the conformance suite checks: request-id dedupe (a resent id attaches to the running command or returns the stored result; the command runs once), durable replies held until acked, in-guest command budgets, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
+    Implements the daemon-side contract the conformance suite checks: EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
     """
 
     def __init__(self, name: str) -> None:
@@ -682,6 +797,7 @@ class FakeGuest:
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = {"/", "/tmp"}
         self.exec_count = 0
+        self.write_count = 0
         self.drop_next_reply = False
         self.close_mid_run = False
         self._stored: dict[str, _StoredReply] = {}
@@ -697,20 +813,41 @@ class FakeGuest:
 
     # -- daemon behavior ----------------------------------------------------
 
-    async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply | None:
-        """Produce the reply for one request; `None` means drop the connection without replying."""
+    async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+        """Produce the reply for one request; every kind dedupes on id."""
+        if isinstance(message, AckRequest):
+            self._stored.pop(message.target_id, None)
+            return _StoredReply(OkReply(id=message.id), None)
+        if isinstance(message, PollRequest):
+            stored = self._stored.get(message.target_id)
+            if stored is not None:
+                return stored
+            return _StoredReply(
+                ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
+                None,
+            )
+        if (stored := self._stored.get(message.id)) is not None:
+            return stored
+        if isinstance(message, ExecRequest):
+            return await self.start_exec(message, bulk or b"")
+        reply = self._handle_fresh(message, bulk)
+        self._store(message.id, reply)
+        return reply
+
+    def _store(self, rid: str, reply: _StoredReply) -> None:
+        # durable replies are held BOUNDED until acked (range-channel property 3)
+        self._stored[rid] = reply
+        while len(self._stored) > 256:
+            self._stored.pop(next(iter(self._stored)))
+
+    def _handle_fresh(self, message: Message, bulk: bytes | None) -> _StoredReply:
         if isinstance(message, PingRequest):
             return _StoredReply(
                 PongReply(id=message.id, daemon=f"fake {self.name}"), None
             )
-        if isinstance(message, AckRequest):
-            self._stored.pop(message.target_id, None)
-            return _StoredReply(OkReply(id=message.id), None)
         if isinstance(message, DiagRequest):
             entries = self.diag_entries[-message.max_entries :]
             return _StoredReply(DiagReply(id=message.id, entries=entries), None)
-        if isinstance(message, ExecRequest):
-            return await self.start_exec(message, bulk or b"")
         if isinstance(message, ReadFileRequest):
             return self._read(message)
         if isinstance(message, WriteFileRequest):
@@ -765,7 +902,7 @@ class FakeGuest:
                 ),
                 None,
             )
-            self._stored[request.id] = reply
+            self._store(request.id, reply)
             return reply
         payload = stdout + stderr
         reply = _StoredReply(
@@ -778,7 +915,7 @@ class FakeGuest:
             ),
             payload if payload else None,
         )
-        self._stored[request.id] = reply
+        self._store(request.id, reply)
         return reply
 
     def _read(self, request: ReadFileRequest) -> _StoredReply:
@@ -795,18 +932,24 @@ class FakeGuest:
                 ),
                 None,
             )
-        reply = _StoredReply(
-            FileData(id=request.id, size=len(data), data_size=len(data) or None),
+        truncated = request.max_bytes is not None and len(data) > request.max_bytes
+        if truncated:
+            assert request.max_bytes is not None
+            data = data[: request.max_bytes]
+        return _StoredReply(
+            FileData(
+                id=request.id,
+                size=len(data),
+                data_size=len(data) or None,
+                truncated=truncated,
+            ),
             data if data else None,
         )
-        self._stored[request.id] = reply
-        return reply
 
     def _write(self, request: WriteFileRequest, data: bytes) -> _StoredReply:
+        self.write_count += 1
         self.files[request.path] = data
-        reply = _StoredReply(OkReply(id=request.id), None)
-        self._stored[request.id] = reply
-        return reply
+        return _StoredReply(OkReply(id=request.id), None)
 
 
 async def _default_handler(context: ExecContext) -> tuple[int, bytes, bytes]:
@@ -834,19 +977,32 @@ async def _default_handler(context: ExecContext) -> tuple[int, bytes, bytes]:
 
 
 class FakeApplier:
-    """In-memory host applier endpoint: realize streams stage reports, teardown acknowledges."""
+    """In-memory host applier endpoint: realize streams stage reports with id-keyed replay (dedupe), teardown acknowledges."""
 
     def __init__(self) -> None:
         self.fail_at_stage: str | None = None
-        self.fail_teardown = False
+        self.fail_teardown_times = 0
+        self.drop_after_reports: int | None = None
         self.torn_down = False
+        self.realize_executions = 0
         self.realized_digests: list[str] = []
+        self._report_log: dict[str, list[StageReport]] = {}
 
     def stage_reports(self, request: RealizeRequest) -> list[StageReport]:
+        """The full report stream for `request.id`: computed once, replayed on resends."""
+        if request.id in self._report_log:
+            return self._report_log[request.id]
+        self.realize_executions += 1
         self.realized_digests.append(request.bundle_digest)
         stages: list[StageReport] = []
         guests: dict[str, GuestState] = {}
-        for stage in ("fetch", "construct", "boot", "verify"):
+        nonterminal: tuple[Literal["fetch", "construct", "boot", "verify"], ...] = (
+            "fetch",
+            "construct",
+            "boot",
+            "verify",
+        )
+        for stage in nonterminal:
             if self.fail_at_stage == stage:
                 stages.append(
                     StageReport(
@@ -856,9 +1012,11 @@ class FakeApplier:
                         guests=guests,
                     )
                 )
+                self._report_log[request.id] = stages
                 return stages
-            stages.append(StageReport(id=request.id, stage=stage, guests=guests))  # type: ignore[arg-type]
+            stages.append(StageReport(id=request.id, stage=stage, guests=guests))
         stages.append(StageReport(id=request.id, stage="ready", guests=guests))
+        self._report_log[request.id] = stages
         return stages
 
 
@@ -868,6 +1026,7 @@ class LoopbackTransport:
     def __init__(self, guests: Iterable[str] = ("guest",)) -> None:
         self.guests: dict[str, FakeGuest] = {name: FakeGuest(name) for name in guests}
         self.applier = FakeApplier()
+        self._server_tasks: set[asyncio.Task[None]] = set()
         self._background: list[asyncio.Task[_StoredReply]] = []
 
     def guest(self, name: str) -> FakeGuest:
@@ -877,14 +1036,21 @@ class LoopbackTransport:
         if endpoint != HOST_APPLIER and endpoint not in self.guests:
             raise ConnectionError(f"no such endpoint: {endpoint}")
         client_side, server_side = stream_pair()
-        asyncio.create_task(self._serve(endpoint, server_side))
+        task = asyncio.create_task(self._serve(endpoint, server_side))
+        self._server_tasks.add(task)
+        task.add_done_callback(self._reap)
         return client_side
+
+    def _reap(self, task: asyncio.Task[None]) -> None:
+        self._server_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("loopback server task failed", exc_info=task.exception())
 
     async def _serve(self, endpoint: str, stream: MemoryStream) -> None:
         reader = MessageStreamReader(stream.receive, bulk_cap=2 * DEFAULT_BULK_CAP)
         try:
             message, bulk = await reader.next()
-        except DecodeError:
+        except (DecodeError, ChannelClosed):
             await stream.aclose()
             return
         if endpoint == HOST_APPLIER:
@@ -899,7 +1065,7 @@ class LoopbackTransport:
             await stream.aclose()
             return
         reply = await guest.handle(message, bulk)
-        if reply is None or guest.drop_next_reply:
+        if guest.drop_next_reply:
             guest.drop_next_reply = False
             await stream.aclose()
             return
@@ -909,12 +1075,17 @@ class LoopbackTransport:
 
     async def _serve_host(self, message: Message, stream: MemoryStream) -> None:
         if isinstance(message, RealizeRequest):
-            for report in self.applier.stage_reports(message):
+            reports = self.applier.stage_reports(message)
+            limit = len(reports)
+            if self.applier.drop_after_reports is not None:
+                limit = min(limit, self.applier.drop_after_reports)
+                self.applier.drop_after_reports = None
+            for report in reports[:limit]:
                 for frame in encode_message(report, None):
                     await stream.send(frame)
         elif isinstance(message, TeardownRequest):
-            if self.applier.fail_teardown:
-                self.applier.fail_teardown = False
+            if self.applier.fail_teardown_times > 0:
+                self.applier.fail_teardown_times -= 1
                 error = ErrorReply(
                     id=message.id, errno="EBUSY", message="injected teardown failure"
                 )
@@ -932,8 +1103,3 @@ class LoopbackTransport:
             for frame in encode_message(error, None):
                 await stream.send(frame)
         await stream.aclose()
-
-
-def digest_of(data: bytes) -> Sha256Hex:
-    """sha256 hex of `data` (test and loopback convenience)."""
-    return hashlib.sha256(data).hexdigest()

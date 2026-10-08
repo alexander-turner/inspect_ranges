@@ -7,6 +7,7 @@ from .channel import (
     ChannelBudgetError,
     ChannelError,
     ExecOutcome,
+    FileLimitExceeded,
     GuestError,
     IllegalTransition,
     LoopbackTransport,
@@ -36,7 +37,14 @@ from .codec import (
     decode_frames,
     encode_message,
 )
-from .mocks import HOSTILE_SCENARIOS, HostileTransport, LatencyTransport
+from .mocks import (
+    HOSTILE_APPLIER_SCENARIOS,
+    HOSTILE_GUEST_SCENARIOS,
+    DribbleTransport,
+    HostileApplierTransport,
+    HostileTransport,
+    LatencyTransport,
+)
 from .protocol import PROTOCOL_VERSION, Budget, Message
 
 __all__ = [
@@ -49,10 +57,14 @@ __all__ = [
     "DecodeError",
     "EncodeError",
     "ExecOutcome",
+    "FileLimitExceeded",
     "FrameTooLarge",
     "FrameType",
     "GuestError",
-    "HOSTILE_SCENARIOS",
+    "HOSTILE_APPLIER_SCENARIOS",
+    "HOSTILE_GUEST_SCENARIOS",
+    "DribbleTransport",
+    "HostileApplierTransport",
     "HostileTransport",
     "IllegalTransition",
     "InvalidMessage",

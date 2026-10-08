@@ -452,6 +452,11 @@ class MessageStreamReader:
         self._assembler = MessageAssembler(bulk_cap=bulk_cap, trace=trace)
         self._eof = False
 
+    @property
+    def pending(self) -> bool:
+        """Whether buffered bytes or an in-flight bulk remain after the last returned message (residual data an honest one-reply endpoint cannot leave)."""
+        return self._buffer.pending or self._assembler.in_flight
+
     async def next(self) -> tuple[Message, bytes | None]:
         """Read the next message.
 

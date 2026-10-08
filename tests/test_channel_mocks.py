@@ -1,6 +1,6 @@
 """Slice 3 battery: the hostile and latency mock channels complete the conformance suite.
 
-Hostile replies must surface as typed failures (tamper, never a parse fallback), with the wire-trace tail dumped to the log. The latency mock runs the whole conformance suite at second-scale round trips and catches the chatty reference bug a fast transport would hide.
+Hostile replies must surface as typed failures (tamper, never a parse fallback), with the wire-trace tail dumped on every tamper verdict. Each hostile scenario drives the operation whose defense it attacks (exec-shaped forgeries through `exec`). The latency mock runs the whole portable suite at injected round trips (50 ms for speed, with one second-scale smoke test), and catches the chatty reference bug a fast transport would hide.
 """
 
 import asyncio
@@ -13,55 +13,112 @@ from inspect_ranges._channel.channel import (
     LoopbackTransport,
     MessageChannel,
     TamperError,
-    Transport,
     TransportFailure,
+    request_id,
 )
 from inspect_ranges._channel.mocks import (
-    HOSTILE_SCENARIOS,
+    HOSTILE_APPLIER_SCENARIOS,
+    HOSTILE_GUEST_SCENARIOS,
+    DribbleTransport,
+    HostileApplierTransport,
     HostileTransport,
     LatencyTransport,
 )
+from inspect_ranges._channel.protocol import ExecRequest
 
-from tests.channel_conformance import ChannelConformanceSuite
+from tests.channel_conformance import PortableChannelSuite
 
 RTT_S = 0.05
 
 
-class TestLatency(ChannelConformanceSuite):
-    """The full conformance suite at second-scale round trips: hot-path regressions fail here first."""
+class TestLatencyPortable(PortableChannelSuite):
+    """The portable suite at injected round trips: hot-path regressions fail here first."""
 
-    def make_transport(self, fleet: LoopbackTransport) -> Transport:
-        return LatencyTransport(fleet, rtt_s=RTT_S)
+    @pytest.fixture
+    def channel(self) -> MessageChannel:
+        return MessageChannel(
+            LatencyTransport(LoopbackTransport([self.guest]), rtt_s=RTT_S),
+            label="latency",
+        )
 
 
-# -- hostile endpoint: every scenario is a typed failure, never a fallback ------
+def test_second_scale_round_trip_smoke() -> None:
+    """One representative exchange at genuinely second-scale latency (the connectionless model)."""
+    channel = MessageChannel(
+        LatencyTransport(LoopbackTransport(["web"]), rtt_s=1.0), label="slow"
+    )
+
+    async def scenario() -> None:
+        outcome = await channel.exec(
+            "web", ExecRequest(id=request_id(), cmd=["echo", "slow"])
+        )
+        assert outcome.stdout == b"slow\n"
+
+    start = time.monotonic()
+    asyncio.run(scenario())
+    assert time.monotonic() - start >= 2.0, "the smoke test must actually pay the RTTs"
+
+
+def test_dribbled_delivery_still_decodes() -> None:
+    """Reply bytes arriving one at a time must not disturb a single operation."""
+    channel = MessageChannel(
+        DribbleTransport(LoopbackTransport(["web"])), label="dribble"
+    )
+
+    async def scenario() -> None:
+        outcome = await channel.exec(
+            "web", ExecRequest(id=request_id(), cmd=["echo", "dribble"])
+        )
+        assert outcome.stdout == b"dribble\n"
+
+    asyncio.run(scenario())
+
+
+# -- hostile guest endpoint: every scenario is a typed failure, never a fallback --
 
 EXPECTED_FAILURE: dict[str, type[Exception]] = {
-    scenario: TamperError for scenario in HOSTILE_SCENARIOS
+    scenario: TamperError for scenario in HOSTILE_GUEST_SCENARIOS
 }
-# a truncated reply is indistinguishable from loss: retried, then given up
+# a truncated reply is indistinguishable from loss: retried, then given up.
+# NOTE: any future layer retrying TransportFailure with a FRESH id would
+# reintroduce double-runs (tamper-laundering via truncation); see protocol.Budget.
 EXPECTED_FAILURE["truncated-reply"] = TransportFailure
 
 
-@pytest.mark.parametrize("scenario", sorted(HOSTILE_SCENARIOS))
+async def _drive(channel: MessageChannel, operation: str) -> None:
+    if operation == "exec":
+        await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+    elif operation == "write_file":
+        await channel.write_file("web", "/tmp/x", b"payload")
+    else:
+        await channel.read_file("web", "/etc/shadow", cap=1024)
+
+
+@pytest.mark.parametrize("scenario", sorted(HOSTILE_GUEST_SCENARIOS))
 def test_hostile_reply_surfaces_as_typed_failure(scenario: str) -> None:
     transport = HostileTransport(scenario)
     channel = MessageChannel(transport, label=f"hostile-{scenario}")
+    operation = HOSTILE_GUEST_SCENARIOS[scenario][1]
 
     async def scenario_run() -> None:
         with pytest.raises(EXPECTED_FAILURE[scenario]):
-            await channel.read_file("web", "/etc/shadow", cap=1024)
+            await _drive(channel, operation)
 
     asyncio.run(scenario_run())
     assert transport.requests_seen >= 1
 
 
-def test_hostile_failure_dumps_the_trace_tail(caplog: pytest.LogCaptureFixture) -> None:
-    channel = MessageChannel(HostileTransport("garbage-bytes"), label="hostile")
+@pytest.mark.parametrize("scenario", ["garbage-bytes", "wrong-kind", "wrong-id"])
+def test_hostile_failure_dumps_the_trace_tail(
+    scenario: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every tamper verdict dumps the trace tail, not just codec-level ones."""
+    channel = MessageChannel(HostileTransport(scenario), label="hostile")
+    operation = HOSTILE_GUEST_SCENARIOS[scenario][1]
 
     async def scenario_run() -> None:
         with pytest.raises(TamperError):
-            await channel.read_file("web", "/etc/shadow")
+            await _drive(channel, operation)
 
     with caplog.at_level(logging.ERROR, logger="inspect_ranges.channel"):
         asyncio.run(scenario_run())
@@ -75,15 +132,32 @@ def test_hostile_failure_dumps_the_trace_tail(caplog: pytest.LogCaptureFixture) 
 def test_hostile_wrong_id_names_both_ids() -> None:
     channel = MessageChannel(HostileTransport("wrong-id"))
 
-    async def scenario_run() -> str:
+    async def scenario_run() -> tuple[str, str]:
+        request = request_id()
         try:
             await channel.read_file("web", "/x")
         except TamperError as failure:
-            return str(failure)
+            return request, str(failure)
         raise AssertionError("wrong-id reply was accepted")
 
-    message = asyncio.run(scenario_run())
+    _, message = asyncio.run(scenario_run())
     assert "f" * 32 in message, "the tamper error must name the forged id"
+    assert "request was id" in message, "the tamper error must name the request id"
+
+
+# -- hostile host plane -------------------------------------------------------
+
+
+@pytest.mark.parametrize("scenario", sorted(HOSTILE_APPLIER_SCENARIOS))
+def test_hostile_stage_reports_are_tamper(scenario: str) -> None:
+    channel = MessageChannel(HostileApplierTransport(scenario), label="hostile-applier")
+
+    async def scenario_run() -> None:
+        with pytest.raises(TamperError):
+            async for _ in channel.realize("ab" * 32, []):
+                pass
+
+    asyncio.run(scenario_run())
 
 
 # -- the chatty reference bug ----------------------------------------------------
@@ -115,8 +189,8 @@ def test_latency_mock_catches_the_chatty_reference_bug() -> None:
 
     proper = asyncio.run(timed(_proper_transfer))
     chatty = asyncio.run(timed(_chatty_transfer))
-    assert proper < 1.0, f"a single transfer must stay fast ({proper:.2f}s)"
-    assert chatty > 1.5, (
-        f"the chatty implementation must be visibly slow under latency ({chatty:.2f}s)"
+    # sleeps only stretch under load, so compare shape, not absolute wall time
+    assert chatty > 1.0, f"the chatty bug must be visibly slow ({chatty:.2f}s)"
+    assert chatty > 4 * proper, (
+        f"chatty ({chatty:.2f}s) must dwarf the single transfer ({proper:.2f}s)"
     )
-    assert chatty > 4 * proper
