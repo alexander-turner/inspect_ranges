@@ -46,6 +46,7 @@ from .mocks import (
     LatencyTransport,
 )
 from .protocol import PROTOCOL_VERSION, Budget, Message
+from .vsock import VsockTransport
 
 __all__ = [
     "Budget",
@@ -83,6 +84,7 @@ __all__ = [
     "Transport",
     "TransportFailure",
     "TruncatedFrame",
+    "VsockTransport",
     "decode_frames",
     "encode_message",
     "request_id",

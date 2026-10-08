@@ -41,6 +41,15 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
         ),
         ("exec-unicode", p.ExecRequest(id=_rid(3), cmd=["echo", "snowman ☃"]), None),
         (
+            "exec-with-liveness-allowance",
+            p.ExecRequest(
+                id=_rid(14),
+                cmd=["long-task"],
+                budget=p.Budget(command_ms=600000, channel_ms=2000),
+            ),
+            None,
+        ),
+        (
             "read-file",
             p.ReadFileRequest(id=_rid(4), path="/etc/hostname", max_bytes=65536),
             None,
@@ -105,6 +114,15 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
             None,
         ),
         (
+            "error-estale-result-lost",
+            p.ErrorReply(
+                id=_rid(15),
+                errno="ESTALE",
+                message="executed, result lost before acknowledgement",
+            ),
+            None,
+        ),
+        (
             "realize",
             p.RealizeRequest(
                 id=_rid(10),
@@ -147,6 +165,11 @@ def main() -> None:
     doc = {
         "format": "inspect-ranges wire vectors",
         "protocol": 3,
+        "daemon": {
+            "kill_grace_ms": p.DAEMON_KILL_GRACE_MS,
+            "wait_delay_ms": p.DAEMON_WAIT_DELAY_MS,
+            "inbound_bulk_cap": p.DAEMON_INBOUND_BULK_CAP,
+        },
         "note": "Every codec implementation (Python, Go, C#) must encode message+bulk to exactly frames_hex and decode frames_hex back to message+bulk. Control payloads are canonical JSON: sorted keys, separators ',' ':', raw UTF-8 (frames_hex carries the wire bytes; this file's message copies are ASCII-escaped), null optional fields omitted (explicit nulls rejected on decode), v required. rc convention: signed int32, killed-by-signal negative.",
         "vectors": vectors,
     }

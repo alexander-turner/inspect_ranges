@@ -28,7 +28,9 @@ from .codec import (
     encode_message,
 )
 from .protocol import (
+    DAEMON_INBOUND_BULK_CAP,
     DEFAULT_BULK_CAP,
+    EXEC_OBSERVATION_GRACE_S,
     AckRequest,
     Budget,
     BudgetLayer,
@@ -43,6 +45,7 @@ from .protocol import (
     GuestState,
     Message,
     OkReply,
+    PendingReply,
     PingRequest,
     PollRequest,
     PongReply,
@@ -61,8 +64,14 @@ HOST_APPLIER = "@host"
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_S = 0.05
-_CHANNEL_GRACE_S = 8.0
-"""Added to the in-guest command budget when waiting for an exec reply, so the guest's own kill is observed rather than raced (the poll-grace lesson)."""
+_CHANNEL_GRACE_S = EXEC_OBSERVATION_GRACE_S
+"""Added to the in-guest command budget when waiting for an exec verdict: the daemon's worst-case honest kill latency (TERM-to-KILL grace plus the pipe-reap wait delay) plus margin, derived from the shared protocol constants so host and daemon cannot drift apart."""
+
+_SILENT_WINDOW_LIMIT = 3
+"""Consecutive allowance windows with zero liveness evidence before an exec is a channel-layer failure."""
+
+_POLL_INTERVAL_S = 0.5
+"""Gap between exec liveness polls once the initial reply misses the allowance."""
 
 _TRACE_TAIL = 256
 
@@ -82,6 +91,10 @@ class TamperError(ChannelError):
 
 class TransportFailure(ChannelError):
     """The transport could not complete the exchange within its retry budget."""
+
+
+class _ConnectFailure(ConnectionError):
+    """The transport failed BEFORE the request could have been delivered (connect itself failed)."""
 
 
 class ChannelBudgetError(ChannelError):
@@ -185,11 +198,13 @@ class MessageChannel:
         label: str = "channel",
         channel_budget_s: float = 180.0,
         untimed_bound_s: float = 14_400.0,
+        grace_s: float = _CHANNEL_GRACE_S,
     ) -> None:
         self._transport = transport
         self._label = label
         self._channel_budget_s = channel_budget_s
         self._untimed_bound_s = untimed_bound_s
+        self._grace_s = grace_s
         self._trace: deque[TraceEvent] = deque(maxlen=_TRACE_TAIL)
         self.stats = ChannelStats()
 
@@ -248,16 +263,12 @@ class MessageChannel:
     def _op_budgets(self, request: Message) -> tuple[float, float]:
         """Per-attempt and outer-total budgets for `request` (seconds).
 
-        The attempt bound is the channel allowance, or `command_ms` plus grace for a timed exec; firing is always a channel-layer verdict (a host-side deadline without an observed in-guest kill is a transport stall, not a command timeout). The outer bound caps the whole operation across attempts and backoff.
+        The attempt bound is the channel allowance; firing is a channel-layer verdict (a host-side deadline is a transport stall) unless the outer total expired. The outer bound caps the whole operation across attempts and backoff. Exec does not route through here: its liveness-polled flow lives in `exec`.
         """
         budget = getattr(request, "budget", None)
         if not isinstance(budget, Budget):
             return self._channel_budget_s, self._untimed_bound_s
         outer_s = min(budget.untimed_bound_ms / 1000, self._untimed_bound_s)
-        if isinstance(request, ExecRequest):
-            if request.budget.command_ms is not None:
-                return request.budget.command_ms / 1000 + _CHANNEL_GRACE_S, outer_s
-            return outer_s, outer_s  # untimed exec: only the outer total governs
         if budget.channel_ms is not None:
             return budget.channel_ms / 1000, outer_s
         return self._channel_budget_s, outer_s
@@ -296,27 +307,13 @@ class MessageChannel:
                     f"{request.kind} id={request.id}: operation total bound ({outer_s:.0f}s) expired",
                 )
             try:
-                async with asyncio.timeout(min(attempt_s, remaining)):
-                    stream = await self._transport.connect(endpoint)
-                    self.stats.connects += 1
-                    try:
-                        for frame in frames:
-                            await stream.send(frame)
-                        reader = MessageStreamReader(
-                            stream.receive, bulk_cap=bulk_cap, trace=self._trace.append
-                        )
-                        reply, reply_bulk = await reader.next()
-                        # an honest per-operation endpoint sends one reply and
-                        # closes; anything after it is tamper, not padding
-                        if reader.pending:
-                            self._tamper(request, endpoint, "data after the reply")
-                        residual = await stream.receive()
-                        if residual:
-                            self._tamper(
-                                request, endpoint, "data after the reply (post-close)"
-                            )
-                    finally:
-                        await stream.aclose()
+                reply, reply_bulk = await self._once(
+                    endpoint,
+                    request,
+                    frames,
+                    min(attempt_s, remaining),
+                    bulk_cap=bulk_cap,
+                )
             except TimeoutError:
                 layer: BudgetLayer = (
                     "untimed" if deadline - time.monotonic() <= 0 else "channel"
@@ -342,11 +339,6 @@ class MessageChannel:
                     )
                 )
                 continue
-            except DecodeError as failure:
-                self._tamper(
-                    request, endpoint, f"{type(failure).__name__}: {failure}", failure
-                )
-            self.stats.exchanges += 1
             if reply.id != request.id:
                 self._tamper(
                     request,
@@ -354,6 +346,10 @@ class MessageChannel:
                     f"reply carries id {reply.id}, request was id {request.id}",
                 )
             if isinstance(reply, ErrorReply):
+                if reply.errno == "ESTALE":
+                    raise TransportFailure(
+                        f"{request.kind} id={request.id}: executed, result lost before acknowledgement"
+                    )
                 if ack_consumed:
                     await self._ack(endpoint, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
@@ -373,6 +369,55 @@ class MessageChannel:
         raise TransportFailure(
             f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
         )
+
+    async def _once(
+        self,
+        endpoint: str,
+        context: Message,
+        frames: list[bytes],
+        window_s: float,
+        *,
+        bulk_cap: int,
+    ) -> tuple[Message, bytes | None]:
+        """One bounded connect-send-reply round trip.
+
+        Raises `TimeoutError` when the window expires (the caller attributes the layer), loss exceptions for the caller's retry policy, and turns every malformed or residual-bearing reply into a tamper verdict directly. Counts one exchange on success.
+        """
+        async with asyncio.timeout(window_s):
+            try:
+                stream = await self._transport.connect(endpoint)
+            except ConnectionError as failure:
+                # the request provably never left: callers may resend freely
+                raise _ConnectFailure(str(failure)) from failure
+            self.stats.connects += 1
+            try:
+                for frame in frames:
+                    await stream.send(frame)
+                reader = MessageStreamReader(
+                    stream.receive, bulk_cap=bulk_cap, trace=self._trace.append
+                )
+                try:
+                    reply, reply_bulk = await reader.next()
+                except (ChannelClosed, TruncatedFrame):
+                    raise  # loss, not tamper: the caller's retry policy decides
+                except DecodeError as failure:
+                    self._tamper(
+                        context,
+                        endpoint,
+                        f"{type(failure).__name__}: {failure}",
+                        failure,
+                    )
+                # an honest per-operation endpoint sends one reply and closes;
+                # anything after it is tamper, not padding
+                if reader.pending:
+                    self._tamper(context, endpoint, "data after the reply")
+                residual = await stream.receive()
+                if residual:
+                    self._tamper(context, endpoint, "data after the reply (post-close)")
+            finally:
+                await stream.aclose()
+        self.stats.exchanges += 1
+        return reply, reply_bulk
 
     def _expect[ReplyT: Message](
         self, reply: Message, expected: type[ReplyT], request: Message, endpoint: str
@@ -413,15 +458,178 @@ class MessageChannel:
     async def exec(
         self, guest: str, request: ExecRequest, *, stdin: bytes | None = None
     ) -> ExecOutcome:
-        """Run `request` in the guest; `stdin` must match the request's `data_size` declaration."""
+        """Run `request` in the guest; `stdin` must match the request's `data_size` declaration.
+
+        Liveness-polled: the initial reply wait is capped so at least one poll precedes the exec deadline; `pending` replies prove liveness while the command runs, so long execs stay allowance-bounded between polls, and three consecutive allowance windows with zero liveness evidence are a channel-layer failure. The exec deadline (`command_ms` plus the shared observation grace, or the untimed total) firing without RECENT liveness is a channel-layer verdict; with recent liveness it is a command-layer verdict (the guest demonstrably failed to kill within its own grace).
+
+        At-most-once: a resend is only legal while the request provably never left (connect failed); once delivery is possible, a daemon `ENOENT`/`ESTALE` for the id surfaces as `TransportFailure`, never a re-run.
+        """
         if (request.data_size is None) != (stdin is None) or (
             request.data_size or 0
         ) != len(stdin or b""):
             raise ValueError("stdin must match the request's data_size declaration")
-        reply, bulk = await self._exchange(
-            guest, request, stdin, bulk_cap=2 * DEFAULT_BULK_CAP, ack_consumed=True
+        if stdin is not None and len(stdin) > DAEMON_INBOUND_BULK_CAP:
+            raise ValueError(
+                f"exec stdin of {len(stdin)} bytes exceeds the daemon inbound cap "
+                f"({DAEMON_INBOUND_BULK_CAP} bytes)"
+            )
+        budget = request.budget
+        allowance_s = (
+            budget.channel_ms / 1000
+            if budget.channel_ms is not None
+            else self._channel_budget_s
+        )
+        outer_s = min(budget.untimed_bound_ms / 1000, self._untimed_bound_s)
+        exec_bound_s = (
+            min(budget.command_ms / 1000 + self._grace_s, outer_s)
+            if budget.command_ms is not None
+            else outer_s
+        )
+        start = time.monotonic()
+        exec_deadline = start + exec_bound_s
+        outer_deadline = start + outer_s
+        frames = encode_message(request, stdin, trace=self._trace.append)
+        self._log(
+            logging.DEBUG, "request", rid=request.id, endpoint=guest, detail="exec"
+        )
+        last_pending_at: float | None = None
+        polling = False
+        losses = 0
+        silent_windows = 0
+        # liveness must be RECENT to blame the command layer: a pending seen
+        # once at the start must not convert a later transport stall into a
+        # guest-failed-to-kill verdict
+        recent_window_s = max(allowance_s, _POLL_INTERVAL_S) * 2 + self._grace_s
+        while True:
+            now = time.monotonic()
+            if now >= outer_deadline:
+                raise ChannelBudgetError(
+                    "untimed", f"exec id={request.id}: operation total bound expired"
+                )
+            if now >= exec_deadline:
+                recent_liveness = (
+                    last_pending_at is not None
+                    and now - last_pending_at <= recent_window_s
+                )
+                layer: BudgetLayer = "command" if recent_liveness else "channel"
+                self._dump_trace(request, guest, f"exec deadline ({layer})")
+                raise ChannelBudgetError(
+                    layer,
+                    f"exec id={request.id}: no result by the exec deadline "
+                    + (
+                        "despite recently observed liveness (the guest failed to kill)"
+                        if recent_liveness
+                        else "without recent liveness (transport stall)"
+                    ),
+                )
+            remaining = min(exec_deadline, outer_deadline) - now
+            window = min(allowance_s, remaining)
+            if not polling and window >= remaining:
+                # cap the initial wait so at least one poll precedes the
+                # deadline; otherwise every deadline would read as a
+                # transport stall even on a healthy transport
+                reserve = min(allowance_s, _POLL_INTERVAL_S + 1.0)
+                window = max(remaining - reserve, remaining / 2, 0.05)
+            if polling:
+                probe: Message = PollRequest(id=request_id(), target_id=request.id)
+                send_frames = encode_message(probe, None, trace=self._trace.append)
+            else:
+                probe = request
+                send_frames = frames
+            try:
+                reply, bulk = await self._once(
+                    guest, probe, send_frames, window, bulk_cap=2 * DEFAULT_BULK_CAP
+                )
+            except TimeoutError:
+                # no reply within the allowance: switch to liveness polling
+                polling = True
+                if last_pending_at is None:
+                    silent_windows += 1
+                    if silent_windows >= _SILENT_WINDOW_LIMIT:
+                        self._dump_trace(request, guest, "silent transport")
+                        raise ChannelBudgetError(
+                            "channel",
+                            f"exec id={request.id}: {silent_windows} allowance "
+                            "windows with zero liveness evidence",
+                        ) from None
+                continue
+            except _ConnectFailure as failure:
+                losses += 1
+                if losses > _RETRY_ATTEMPTS:
+                    raise TransportFailure(
+                        f"exec id={request.id}: unreachable after {losses - 1} attempts ({failure})"
+                    ) from failure
+                await asyncio.sleep(
+                    min(
+                        _RETRY_BACKOFF_S * losses,
+                        max(0.0, outer_deadline - time.monotonic()),
+                    )
+                )
+                continue
+            except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
+                losses += 1
+                if losses > _RETRY_ATTEMPTS:
+                    raise TransportFailure(
+                        f"exec id={request.id}: lost after {losses - 1} consecutive attempts ({failure})"
+                    ) from failure
+                await asyncio.sleep(
+                    min(
+                        _RETRY_BACKOFF_S * losses,
+                        max(0.0, outer_deadline - time.monotonic()),
+                    )
+                )
+                continue
+            losses = 0
+            silent_windows = 0
+            if (
+                polling
+                and isinstance(reply, PendingReply)
+                and reply.id == probe.id
+                and reply.target_id == request.id
+            ):
+                last_pending_at = time.monotonic()
+                await asyncio.sleep(
+                    min(_POLL_INTERVAL_S, max(0.0, exec_deadline - time.monotonic()))
+                )
+                continue
+            if polling and isinstance(reply, ErrorReply) and reply.id == probe.id:
+                if reply.errno == "ESTALE":
+                    # the daemon's at-most-once tombstone: the effect EXECUTED
+                    # and its result was evicted; never resend
+                    raise TransportFailure(
+                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    )
+                if reply.errno == "ENOENT":
+                    # ENOENT is only resend-safe while the request provably
+                    # never left (every attempt failed at connect); anything
+                    # else risks a double run on a tombstone-evicted id
+                    raise TransportFailure(
+                        f"exec id={request.id}: no stored result and delivery "
+                        "cannot be ruled out; refusing an at-most-once-unsafe resend"
+                    )
+                # any other poll failure is an honest errno-tagged error
+                raise GuestError(reply.errno, reply.message, reply.layer)
+            if reply.id != request.id:
+                self._tamper(
+                    request,
+                    guest,
+                    f"reply carries id {reply.id}, request was id {request.id}",
+                )
+            if isinstance(reply, ErrorReply):
+                if reply.errno == "ESTALE":
+                    raise TransportFailure(
+                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    )
+                await self._ack(guest, request.id)
+                if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
+                    raise ChannelBudgetError(reply.layer, reply.message)
+                raise GuestError(reply.errno, reply.message, reply.layer)
+            break
+        self._log(
+            logging.DEBUG, "reply", rid=request.id, endpoint=guest, detail=reply.kind
         )
         result = self._expect(reply, ExecResult, request, guest)
+        await self._ack(guest, request.id)
         payload = bulk or b""
         stdout = payload[: result.stdout_size]
         stderr = payload[result.stdout_size : result.stdout_size + result.stderr_size]
@@ -452,7 +660,16 @@ class MessageChannel:
         return bulk or b""
 
     async def write_file(self, guest: str, path: str, data: bytes) -> None:
-        """Write `data` to a guest file (exactly once per request id, even across retries)."""
+        """Write `data` to a guest file (exactly once per request id, even across retries).
+
+        Raises:
+            ValueError: The payload exceeds the daemon's inbound bulk cap (refused before sending).
+        """
+        if len(data) > DAEMON_INBOUND_BULK_CAP:
+            raise ValueError(
+                f"write of {len(data)} bytes exceeds the daemon inbound cap "
+                f"({DAEMON_INBOUND_BULK_CAP} bytes)"
+            )
         request = WriteFileRequest(id=request_id(), path=path, data_size=len(data))
         reply, _ = await self._exchange(guest, request, data, ack_consumed=True)
         self._expect(reply, OkReply, request, guest)
@@ -858,8 +1075,12 @@ class FakeGuest:
         self.write_count = 0
         self.drop_next_reply = False
         self.close_mid_run = False
+        self.ignore_command_budget = False
+        """Simulates a guest that fails to enforce command_ms (the host-side command-layer verdict path)."""
         self._stored: dict[str, _StoredReply] = {}
+        self._tombstones: dict[str, None] = {}  # insertion-ordered FIFO
         self._running: dict[str, asyncio.Task[_StoredReply]] = {}
+        self._running_started: dict[str, float] = {}
         self._handlers: dict[str, ExecHandler] = {}
         self.diag_entries: list[DiagEntry] = []
 
@@ -875,17 +1096,46 @@ class FakeGuest:
         """Produce the reply for one request; every kind dedupes on id."""
         if isinstance(message, AckRequest):
             self._stored.pop(message.target_id, None)
+            self._tombstones.pop(message.target_id, None)
             return _StoredReply(OkReply(id=message.id), None)
         if isinstance(message, PollRequest):
             stored = self._stored.get(message.target_id)
             if stored is not None:
-                return stored
+                return stored  # replayed with the ORIGINAL id, by design
+            if message.target_id in self._tombstones:
+                return _StoredReply(
+                    ErrorReply(
+                        id=message.id,
+                        errno="ESTALE",
+                        message="executed, result lost before acknowledgement",
+                    ),
+                    None,
+                )
+            if message.target_id in self._running:
+                started = self._running_started.get(message.target_id, time.monotonic())
+                return _StoredReply(
+                    PendingReply(
+                        id=message.id,
+                        target_id=message.target_id,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    ),
+                    None,
+                )
             return _StoredReply(
                 ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
                 None,
             )
         if (stored := self._stored.get(message.id)) is not None:
             return stored
+        if message.id in self._tombstones:
+            return _StoredReply(
+                ErrorReply(
+                    id=message.id,
+                    errno="ESTALE",
+                    message="executed, result lost before acknowledgement",
+                ),
+                None,
+            )
         if isinstance(message, ExecRequest):
             return await self.start_exec(message, bulk or b"")
         reply = self._handle_fresh(message, bulk)
@@ -893,10 +1143,16 @@ class FakeGuest:
         return reply
 
     def _store(self, rid: str, reply: _StoredReply) -> None:
-        # durable replies are held BOUNDED until acked (range-channel property 3)
+        # durable replies are held BOUNDED until acked (range-channel
+        # property 3); evicted-unacked ids tombstone so a resend can never
+        # double-run (property 1 under eviction, the ESTALE contract)
         self._stored[rid] = reply
         while len(self._stored) > 256:
-            self._stored.pop(next(iter(self._stored)))
+            evicted = next(iter(self._stored))
+            self._stored.pop(evicted)
+            self._tombstones[evicted] = None
+            while len(self._tombstones) > 4096:
+                self._tombstones.pop(next(iter(self._tombstones)))
 
     def _handle_fresh(self, message: Message, bulk: bytes | None) -> _StoredReply:
         if isinstance(message, PingRequest):
@@ -927,11 +1183,13 @@ class FakeGuest:
             return await asyncio.shield(self._running[request.id])
         task = asyncio.create_task(self._run_command(request, stdin))
         self._running[request.id] = task
+        self._running_started[request.id] = time.monotonic()
         try:
             return await asyncio.shield(task)
         finally:
             if task.done():
                 self._running.pop(request.id, None)
+                self._running_started.pop(request.id, None)
 
     async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
         self.exec_count += 1
@@ -944,7 +1202,9 @@ class FakeGuest:
         )
         handler = self._handlers.get(request.cmd[0], _default_handler)
         try:
-            if request.budget.command_ms is not None:
+            if self.ignore_command_budget:
+                rc, stdout, stderr = await handler(context)
+            elif request.budget.command_ms is not None:
                 rc, stdout, stderr = await asyncio.wait_for(
                     handler(context), timeout=request.budget.command_ms / 1000
                 )

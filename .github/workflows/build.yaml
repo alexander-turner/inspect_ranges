@@ -51,8 +51,20 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
         run: uv sync --group dev
+      - name: Install the pinned Go toolchain (the cross-codec drift guard)
+        run: |
+          curl -fsSL -o /tmp/go.tgz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
+          echo "9379441ea310de000f33a4dc767bd966e72ab2826270e038e78b2c53c2e7802d  /tmp/go.tgz" | sha256sum -c
+          mkdir -p "$HOME/.local/go-toolchains"
+          tar -C "$HOME/.local/go-toolchains" -xzf /tmp/go.tgz
+          mv "$HOME/.local/go-toolchains/go" "$HOME/.local/go-toolchains/go1.23.6"
+          "$HOME/.local/go-toolchains/go1.23.6/bin/go" version
       - name: Run tests
         run: uv run pytest
+        env:
+          # the Go drift guard and bundle determinism battery must RUN in CI,
+          # never silently skip (tests fail loudly if the toolchain is absent)
+          INSPECT_RANGES_REQUIRE_GO: "1"
 
   py-build:
     runs-on: ubuntu-latest

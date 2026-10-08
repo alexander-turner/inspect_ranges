@@ -1,6 +1,11 @@
 {
  "format": "inspect-ranges wire vectors",
  "protocol": 3,
+ "daemon": {
+  "kill_grace_ms": 5000,
+  "wait_delay_ms": 5000,
+  "inbound_bulk_cap": 268435456
+ },
  "note": "Every codec implementation (Python, Go, C#) must encode message+bulk to exactly frames_hex and decode frames_hex back to message+bulk. Control payloads are canonical JSON: sorted keys, separators ',' ':', raw UTF-8 (frames_hex carries the wire bytes; this file's message copies are ASCII-escaped), null optional fields omitted (explicit nulls rejected on decode), v required. rc convention: signed int32, killed-by-signal negative.",
  "vectors": [
   {
@@ -95,6 +100,27 @@
    "bulk_hex": null,
    "frames_hex": [
     "0000008a437b22627564676574223a7b22756e74696d65645f626f756e645f6d73223a31343430303030307d2c22636d64223a5b226563686f222c22736e6f776d616e20e29883225d2c22656e76223a7b7d2c226964223a223030303030303030303030303030303030303030303030303030303030303033222c226b696e64223a2265786563222c2276223a337d"
+   ]
+  },
+  {
+   "name": "exec-with-liveness-allowance",
+   "message": {
+    "v": 3,
+    "id": "0000000000000000000000000000000e",
+    "kind": "exec",
+    "cmd": [
+     "long-task"
+    ],
+    "env": {},
+    "budget": {
+     "command_ms": 600000,
+     "channel_ms": 2000,
+     "untimed_bound_ms": 14400000
+    }
+   },
+   "bulk_hex": null,
+   "frames_hex": [
+    "000000a7437b22627564676574223a7b226368616e6e656c5f6d73223a323030302c22636f6d6d616e645f6d73223a3630303030302c22756e74696d65645f626f756e645f6d73223a31343430303030307d2c22636d64223a5b226c6f6e672d7461736b225d2c22656e76223a7b7d2c226964223a223030303030303030303030303030303030303030303030303030303030303065222c226b696e64223a2265786563222c2276223a337d"
    ]
   },
   {
@@ -309,6 +335,20 @@
    "bulk_hex": null,
    "frames_hex": [
     "00000075437b226572726e6f223a22454e4f454e54222c226964223a223030303030303030303030303030303030303030303030303030303030303034222c226b696e64223a226572726f72222c226d657373616765223a224e6f20737563682066696c65206f72206469726563746f7279222c2276223a337d"
+   ]
+  },
+  {
+   "name": "error-estale-result-lost",
+   "message": {
+    "v": 3,
+    "id": "0000000000000000000000000000000f",
+    "kind": "error",
+    "errno": "ESTALE",
+    "message": "executed, result lost before acknowledgement"
+   },
+   "bulk_hex": null,
+   "frames_hex": [
+    "00000088437b226572726e6f223a22455354414c45222c226964223a223030303030303030303030303030303030303030303030303030303030303066222c226b696e64223a226572726f72222c226d657373616765223a2265786563757465642c20726573756c74206c6f7374206265666f72652061636b6e6f776c656467656d656e74222c2276223a337d"
    ]
   },
   {

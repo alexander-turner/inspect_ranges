@@ -1,0 +1,27 @@
+# Range container for the channel-v1 slice 4 battery (same image recipe as
+# net-compile). Project prefix chan- per the CID/collision discipline.
+services:
+  range:
+    build: ../net-compile/range
+    init: true
+    devices:
+      - /dev/kvm
+      - /dev/vhost-vsock
+      - /dev/vhost-net
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - ./tmp/images:/images:ro
+      - ./tmp/render:/render:ro
+      - scratch:/scratch
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  scratch:

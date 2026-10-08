@@ -32,6 +32,8 @@ class PortableChannelSuite:
     missing_path = "/no/such/file"
     directory_path = "/tmp"
     scratch_path = "/tmp/conformance-blob"
+    probe_cwd = "/srv"
+    probe_user = "postgres"
 
     @pytest.fixture
     def channel(self) -> MessageChannel:
@@ -122,12 +124,12 @@ class PortableChannelSuite:
                     id=request_id(),
                     cmd=self.argv_env_probe(),
                     env={"ANSWER": "42"},
-                    cwd="/srv",
-                    user="postgres",
+                    cwd=self.probe_cwd,
+                    user=self.probe_user,
                 ),
             )
             assert outcome.stdout == self.expected_env_probe(
-                {"ANSWER": "42"}, "/srv", "postgres"
+                {"ANSWER": "42"}, self.probe_cwd, self.probe_user
             )
 
         self.run(scenario)
@@ -193,6 +195,29 @@ class PortableChannelSuite:
                     ),
                 )
             assert failure.value.layer == "command"
+
+        self.run(scenario)
+
+    def test_exec_liveness_polling_under_small_allowance(
+        self, channel: MessageChannel
+    ) -> None:
+        """A long exec under a small channel allowance completes via liveness polls."""
+
+        async def scenario() -> None:
+            before = channel.stats.exchanges
+            outcome = await channel.exec(
+                self.guest,
+                ExecRequest(
+                    id=request_id(),
+                    cmd=self.argv_sleep_ms(1200),
+                    budget=Budget(command_ms=10_000, channel_ms=400),
+                ),
+            )
+            assert outcome.rc == 0
+            polled = channel.stats.exchanges - before
+            assert polled >= 3, (
+                f"expected at least one liveness poll plus result plus ack, saw {polled}"
+            )
 
         self.run(scenario)
 
