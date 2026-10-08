@@ -365,11 +365,27 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _contains_null(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(
+            _contains_null(item) for item in cast(dict[Any, Any], value).values()
+        )
+    if isinstance(value, list):
+        return any(_contains_null(item) for item in cast(list[Any], value))
+    return False
+
+
 def _parse_control(payload: bytes) -> Message:
     try:
         data = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
     except (ValueError, UnicodeDecodeError) as error:
         raise InvalidMessage(f"control payload is not JSON: {error}") from None
+    # the canonical encoding omits null optionals, so an honest endpoint never
+    # emits an explicit null anywhere; decoders reject rather than coerce
+    if _contains_null(data):
+        raise InvalidMessage("explicit null in control payload")
     # the schema defaults v for construction ergonomics; the wire requires it:
     # an honest endpoint always emits its version, so absence is a tamper tell
     version: object = (

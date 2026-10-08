@@ -220,21 +220,41 @@ def _stage_spam(request: Message) -> bytes:
     return _stage(request, "fetch") * 8
 
 
+def _honest_stages(request: Message) -> bytes:
+    frames = b""
+    for stage in ("fetch", "construct", "boot", "verify", "ready"):
+        frames += _stage(request, stage)
+    return frames
+
+
 HOSTILE_APPLIER_SCENARIOS: dict[str, Callable[[Message], bytes]] = {
     "stage-wrong-id": _stage_wrong_id,
     "stage-ready-first": _stage_ready_first,
     "stage-spam": _stage_spam,
 }
 
+HOSTILE_APPLIER_HANGS = ("hang-connect", "no-close-after-ready")
+"""Scenarios that previously hung realize forever; now bounded by the budget layers."""
+
 
 class HostileApplierTransport:
-    """A `Transport` whose host-plane endpoint streams forged stage reports."""
+    """A `Transport` whose host-plane endpoint streams forged stage reports or hangs.
+
+    The hang scenarios pin that every realize transport interaction is budget-bounded: `hang-connect` never completes the connection; `no-close-after-ready` streams an honest report sequence and then never closes the stream.
+    """
 
     def __init__(self, scenario: str) -> None:
-        self.craft = HOSTILE_APPLIER_SCENARIOS[scenario]
+        self.scenario = scenario
+        self.craft = (
+            None
+            if scenario in HOSTILE_APPLIER_HANGS
+            else HOSTILE_APPLIER_SCENARIOS[scenario]
+        )
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def connect(self, endpoint: str) -> ByteStream:
+        if self.scenario == "hang-connect":
+            await asyncio.Event().wait()  # never set: bounded only by the caller
         client_side, server_side = stream_pair()
         task = asyncio.create_task(self._serve(server_side))
         self._tasks.add(task)
@@ -248,8 +268,26 @@ class HostileApplierTransport:
         except Exception:
             await stream.aclose()
             return
+        if self.scenario == "no-close-after-ready":
+            await stream.send(_honest_stages(request))
+            await asyncio.Event().wait()  # terminal delivered; close never comes
+        assert self.craft is not None
         await stream.send(self.craft(request))
         await stream.aclose()
+
+
+class SilentTransport:
+    """Connects (optionally failing the first `fail_connects` attempts), then never replies."""
+
+    def __init__(self, fail_connects: int = 0) -> None:
+        self.fail_connects = fail_connects
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        if self.fail_connects > 0:
+            self.fail_connects -= 1
+            raise ConnectionError("injected connect failure")
+        client_side, _server_side = stream_pair()
+        return client_side  # nothing ever serves the other end
 
 
 class LatencyStream:

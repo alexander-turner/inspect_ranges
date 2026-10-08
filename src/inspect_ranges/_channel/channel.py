@@ -258,7 +258,9 @@ class MessageChannel:
             if request.budget.command_ms is not None:
                 return request.budget.command_ms / 1000 + _CHANNEL_GRACE_S, outer_s
             return outer_s, outer_s  # untimed exec: only the outer total governs
-        return budget.channel_ms / 1000, outer_s
+        if budget.channel_ms is not None:
+            return budget.channel_ms / 1000, outer_s
+        return self._channel_budget_s, outer_s
 
     # -- the exchange core -------------------------------------------------
 
@@ -475,7 +477,9 @@ class MessageChannel:
     ) -> AsyncIterator[StageReport]:
         """Stream stage reports until `ready` or `failed`.
 
-        Hardened per the realize policy: the untimed bound caps the whole stream, reports are capped in count and must follow strictly increasing stage order (`ready` never first; `failed` always allowed), an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically), and anything else is tamper.
+        Hardened per the realize policy: every transport interaction (connect, send, each report read, the terminal drain, close) sits inside the layered budgets (per-report channel allowance, untimed outer total); reports are capped in count and must follow strictly increasing stage order; an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically); anything else is tamper.
+
+        Stage-order leniency, deliberate: skipping stages is allowed (a cache-hitting applier legitimately jumps ahead) and `failed` is allowed anywhere including first (an honest fast failure); only `ready` as the very first report is tamper. A hostile applier can emit the honest sequence anyway, so tightening buys no security.
         """
         request = RealizeRequest(
             id=request_id(), bundle_digest=bundle_digest, grants=list(grants)
@@ -490,15 +494,42 @@ class MessageChannel:
             detail=bundle_digest,
         )
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
-            stream = await self._transport.connect(HOST_APPLIER)
-            self.stats.connects += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ChannelBudgetError(
+                    "untimed", f"realize id={request.id}: total bound expired"
+                )
+            try:
+                async with asyncio.timeout(min(self._channel_budget_s, remaining)):
+                    stream = await self._transport.connect(HOST_APPLIER)
+                    self.stats.connects += 1
+                    for frame in encode_message(
+                        request, None, trace=self._trace.append
+                    ):
+                        await stream.send(frame)
+            except TimeoutError:
+                layer: BudgetLayer = (
+                    "untimed" if deadline - time.monotonic() <= 0 else "channel"
+                )
+                self._dump_trace(request, HOST_APPLIER, f"connect budget ({layer})")
+                raise ChannelBudgetError(
+                    layer, f"realize id={request.id}: applier unreachable in budget"
+                ) from None
+            except ConnectionError as loss:
+                self._log(
+                    logging.WARNING,
+                    "realize-resume",
+                    rid=request.id,
+                    endpoint=HOST_APPLIER,
+                    detail=f"attempt {attempt}: connect: {loss}",
+                )
+                await asyncio.sleep(_RETRY_BACKOFF_S * attempt)
+                continue
             expected_replay = list(seen)  # a resumed stream must replay these first
             replayed = 0
             last_index = -1 if not seen else _STAGE_ORDER[seen[-1].stage]
             received = 0
             try:
-                for frame in encode_message(request, None, trace=self._trace.append):
-                    await stream.send(frame)
                 reader = MessageStreamReader(
                     stream.receive, bulk_cap=DEFAULT_BULK_CAP, trace=self._trace.append
                 )
@@ -514,7 +545,7 @@ class MessageChannel:
                         ):
                             message, _ = await reader.next()
                     except TimeoutError:
-                        layer: BudgetLayer = (
+                        layer = (
                             "untimed" if deadline - time.monotonic() <= 0 else "channel"
                         )
                         self._dump_trace(
@@ -575,13 +606,40 @@ class MessageChannel:
                     )
                     yield report
                     if report.stage in ("ready", "failed"):
-                        if reader.pending or await stream.receive():
+                        if reader.pending:
                             self._tamper(
                                 request, HOST_APPLIER, "data after the terminal stage"
                             )
+                        try:
+                            async with asyncio.timeout(
+                                min(
+                                    self._channel_budget_s,
+                                    max(0.05, deadline - time.monotonic()),
+                                )
+                            ):
+                                if await stream.receive():
+                                    self._tamper(
+                                        request,
+                                        HOST_APPLIER,
+                                        "data after the terminal stage",
+                                    )
+                        except TimeoutError:
+                            # the terminal report is already delivered; a stream
+                            # that never closes is logged, not a failure
+                            self._log(
+                                logging.WARNING,
+                                "realize-no-close",
+                                rid=request.id,
+                                endpoint=HOST_APPLIER,
+                                detail="stream not closed after terminal stage",
+                            )
                         return
             finally:
-                await stream.aclose()
+                try:
+                    async with asyncio.timeout(5.0):
+                        await stream.aclose()
+                except Exception:  # close is best effort, never masks
+                    logger.warning("realize stream close failed (ignored)")
             await asyncio.sleep(_RETRY_BACKOFF_S * attempt)
         raise TransportFailure(
             f"realize id={request.id}: stream lost after {_RETRY_ATTEMPTS} attempts"
@@ -983,6 +1041,7 @@ class FakeApplier:
         self.fail_at_stage: str | None = None
         self.fail_teardown_times = 0
         self.drop_after_reports: int | None = None
+        self.corrupt_replay = False
         self.torn_down = False
         self.realize_executions = 0
         self.realized_digests: list[str] = []
@@ -991,7 +1050,12 @@ class FakeApplier:
     def stage_reports(self, request: RealizeRequest) -> list[StageReport]:
         """The full report stream for `request.id`: computed once, replayed on resends."""
         if request.id in self._report_log:
-            return self._report_log[request.id]
+            replay = self._report_log[request.id]
+            if self.corrupt_replay:
+                self.corrupt_replay = False
+                first = replay[0].model_copy(update={"detail": "diverged"})
+                return [first, *replay[1:]]
+            return replay
         self.realize_executions += 1
         self.realized_digests.append(request.bundle_digest)
         stages: list[StageReport] = []

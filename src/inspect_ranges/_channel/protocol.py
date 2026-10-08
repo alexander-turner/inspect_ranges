@@ -58,16 +58,26 @@ class _WireModel(BaseModel):
 class Budget(_WireModel):
     """Layered time budgets carried by guest-control requests.
 
-    The layers are independent by design (`guest-exec-lessons.md`): `command_ms` is enforced in-guest with a process-tree kill; `channel_ms` bounds each channel round trip host-side (per attempt, so retries extend wall time by at most the attempt count); `untimed_bound_ms` is an outer total per operation, covering every attempt and backoff.
+    The layers are independent by design (`guest-exec-lessons.md`): `command_ms` is enforced in-guest with a process-tree kill; `channel_ms` bounds each channel round trip host-side (per attempt, so retries extend wall time by at most the attempt count; `None` takes the channel default); `untimed_bound_ms` is an outer total per operation, covering every attempt and backoff.
+
+    Exec is the exception: under per-operation connect, a silent transport is indistinguishable from a still-running command, so `channel_ms` is REJECTED on exec requests rather than silently ignored. An exec's reply wait is bounded by `command_ms` plus the observation grace, or by the untimed outer total when no command budget was declared; channel-allowance-bounded exec liveness arrives with the daemon's poll/pending verbs (channel-v1 slice 4).
 
     Retry interaction: a lost reply is recovered by resending the identical request id, which the endpoint deduplicates. A host-side deadline firing without an observed in-guest kill is attributed to the channel layer, never the command layer; command-layer errors come only from the guest's own budget reply. Any future layer that retried a transport failure with a FRESH request id would reintroduce double-runs, letting an attacker launder a replay through induced truncation; retries must reuse the id, always.
     """
 
     command_ms: int | None = Field(default=None, ge=1, le=DEFAULT_UNTIMED_BOUND_MS)
-    channel_ms: int = Field(default=DEFAULT_CHANNEL_BUDGET_MS, ge=1, le=MAX_WIRE_INT)
+    channel_ms: int | None = Field(default=None, ge=1, le=MAX_WIRE_INT)
     untimed_bound_ms: int = Field(
         default=DEFAULT_UNTIMED_BOUND_MS, ge=1, le=MAX_WIRE_INT
     )
+
+    @model_validator(mode="after")
+    def _outer_covers_command(self) -> "Budget":
+        if self.command_ms is not None and self.command_ms > self.untimed_bound_ms:
+            raise ValueError(
+                "untimed_bound_ms is the outer total and must cover command_ms"
+            )
+        return self
 
 
 class _MessageBase(_WireModel):
@@ -109,6 +119,18 @@ class ExecRequest(_BulkMessage):
     env: dict[str, str] = Field(default_factory=dict)
     user: str | None = None
     budget: Budget = Field(default_factory=Budget)
+
+    @model_validator(mode="after")
+    def _no_channel_allowance(self) -> "ExecRequest":
+        # explicit over silently-dead config: under per-operation connect a
+        # silent transport is indistinguishable from a running command, so a
+        # channel allowance cannot bound exec until poll/pending land
+        if self.budget.channel_ms is not None:
+            raise ValueError(
+                "exec requests take no channel_ms; exec waits are bounded by "
+                "command_ms plus grace or the untimed outer total"
+            )
+        return self
 
 
 class ReadFileRequest(_MessageBase):

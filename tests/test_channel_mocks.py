@@ -10,6 +10,7 @@ from collections.abc import Callable, Coroutine
 
 import pytest
 from inspect_ranges._channel.channel import (
+    ChannelBudgetError,
     LoopbackTransport,
     MessageChannel,
     TamperError,
@@ -17,12 +18,14 @@ from inspect_ranges._channel.channel import (
     request_id,
 )
 from inspect_ranges._channel.mocks import (
+    HOSTILE_APPLIER_HANGS,
     HOSTILE_APPLIER_SCENARIOS,
     HOSTILE_GUEST_SCENARIOS,
     DribbleTransport,
     HostileApplierTransport,
     HostileTransport,
     LatencyTransport,
+    SilentTransport,
 )
 from inspect_ranges._channel.protocol import ExecRequest
 
@@ -108,7 +111,17 @@ def test_hostile_reply_surfaces_as_typed_failure(scenario: str) -> None:
     assert transport.requests_seen >= 1
 
 
-@pytest.mark.parametrize("scenario", ["garbage-bytes", "wrong-kind", "wrong-id"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "garbage-bytes",
+        "wrong-kind",
+        "wrong-id",
+        "unsolicited-bulk",
+        "duplicate-reply",
+        "trailing-garbage",
+    ],
+)
 def test_hostile_failure_dumps_the_trace_tail(
     scenario: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -154,6 +167,92 @@ def test_hostile_stage_reports_are_tamper(scenario: str) -> None:
 
     async def scenario_run() -> None:
         with pytest.raises(TamperError):
+            async for _ in channel.realize("ab" * 32, []):
+                pass
+
+    asyncio.run(scenario_run())
+
+
+# -- budget layers under hostile transports ------------------------------------
+
+
+def test_silent_transport_fails_at_channel_allowance() -> None:
+    """A silent transport on a budget-less op fires the channel allowance, attributed correctly."""
+    channel = MessageChannel(
+        SilentTransport(), label="silent", channel_budget_s=0.2, untimed_bound_s=10.0
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.read_file("web", "/x")
+        assert failure.value.layer == "channel"
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    assert time.monotonic() - start < 2.0
+
+
+def test_untimed_outer_total_caps_attempts_and_backoff() -> None:
+    """Failing connects then silence must fail at the TOTAL bound with layer untimed, not 3x."""
+    channel = MessageChannel(
+        SilentTransport(fail_connects=2),
+        label="flaky-silent",
+        channel_budget_s=5.0,
+        untimed_bound_s=0.5,
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.read_file("web", "/x")
+        assert failure.value.layer == "untimed"
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.5, (
+        f"the outer total must cap the whole operation ({elapsed:.2f}s)"
+    )
+
+
+@pytest.mark.parametrize("scenario", sorted(HOSTILE_APPLIER_HANGS))
+def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
+    """Every realize transport interaction is budget-bounded (the two probe-demonstrated hangs)."""
+    channel = MessageChannel(
+        HostileApplierTransport(scenario),
+        label=f"hang-{scenario}",
+        channel_budget_s=0.2,
+        untimed_bound_s=1.0,
+    )
+
+    async def scenario_run() -> list[str]:
+        stages: list[str] = []
+        if scenario == "hang-connect":
+            with pytest.raises(ChannelBudgetError):
+                async for report in channel.realize("ab" * 32, []):
+                    stages.append(report.stage)
+        else:
+            # terminal already delivered: a never-closing stream is not a failure
+            async for report in channel.realize("ab" * 32, []):
+                stages.append(report.stage)
+        return stages
+
+    start = time.monotonic()
+    stages = asyncio.run(scenario_run())
+    assert time.monotonic() - start < 3.0, "realize hung past its budgets"
+    if scenario == "no-close-after-ready":
+        assert stages[-1] == "ready", "the delivered terminal stage must be returned"
+
+
+def test_divergent_resume_replay_is_tamper() -> None:
+    from inspect_ranges._channel.channel import TamperError as Tamper
+
+    fleet = LoopbackTransport(["web"])
+    fleet.applier.drop_after_reports = 2
+    fleet.applier.corrupt_replay = True
+    channel = MessageChannel(fleet, label="diverging")
+
+    async def scenario_run() -> None:
+        with pytest.raises(Tamper, match="resumed replay diverged"):
             async for _ in channel.realize("ab" * 32, []):
                 pass
 

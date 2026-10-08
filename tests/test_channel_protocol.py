@@ -155,6 +155,15 @@ MALFORMED: list[tuple[str, bytes, type[codec.DecodeError]]] = [
         codec.InvalidMessage,
     ),
     (
+        "explicit-null-value",
+        _control_frame(
+            codec.canonical_json(
+                {"v": 3, "id": RID, "kind": "exec", "cmd": ["true"], "cwd": None}
+            )
+        ),
+        codec.InvalidMessage,
+    ),
+    (
         "huge-integer-field",
         _control_frame(
             codec.canonical_json(
@@ -301,6 +310,26 @@ SCHEMA_REJECTS: list[tuple[str, dict[str, Any]]] = [
     (
         "budget-error-without-layer",
         {"v": 3, "id": RID, "kind": "error", "errno": "ETIME", "message": "x"},
+    ),
+    (
+        "exec-with-channel-allowance",
+        {
+            "v": 3,
+            "id": RID,
+            "kind": "exec",
+            "cmd": ["true"],
+            "budget": {"channel_ms": 50},
+        },
+    ),
+    (
+        "outer-bound-below-command",
+        {
+            "v": 3,
+            "id": RID,
+            "kind": "exec",
+            "cmd": ["true"],
+            "budget": {"command_ms": 5000, "untimed_bound_ms": 1000},
+        },
     ),
     (
         "rc-outside-int32",
