@@ -42,10 +42,14 @@ Restart=always
 WantedBy=multi-user.target
 """
 
-_WINDOWS_PLACEHOLDER = """The Windows daemon (C# codec swap plus listener supervision) arrives with
-channel-v1 slice 6; this placeholder reserves the bundle layout. The protocol
-contract it must satisfy is pinned by tests/wire_vectors/v3.json.
-"""
+_WINDOWS_DIR = Path(__file__).parent / "daemon" / "windows"
+_WINDOWS_SOURCES = (
+    "Wire.cs",
+    "Exec.cs",
+    "Daemon.cs",
+    "Program.cs",
+    "install-daemon.ps1",
+)
 
 
 class BundleError(Exception):
@@ -171,8 +175,11 @@ def build_daemon_bundle(out_dir: Path) -> DaemonBundleInfo:
             "linux/vsockd": binary_path.read_bytes(),
             "linux/install.sh": _INSTALL_SH.encode(),
             "linux/vsockd.service": _UNIT.encode(),
-            "windows/PLACEHOLDER.md": _WINDOWS_PLACEHOLDER.encode(),
         }
+        for source in _WINDOWS_SOURCES:
+            # the Windows daemon ships as source + installer: it compiles
+            # in-guest with the in-box csc.exe (daemon/windows/README.md)
+            members[f"windows/{source}"] = (_WINDOWS_DIR / source).read_bytes()
     finally:
         binary_path.unlink(missing_ok=True)
     blob = _tar_bytes(members)

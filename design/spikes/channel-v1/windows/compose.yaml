@@ -1,0 +1,32 @@
+# Range container for the channel-v1 slice 6 battery (Windows guest, v3
+# daemon). Same container recipe as the vsockd-win spike; chan- prefix and
+# the chan CID band per the concurrency discipline. The spike's assets
+# (installer machinery) mount at /assets; the PRODUCTION daemon sources
+# mount at /payload-src and ride the payload ISO into the guest.
+services:
+  range:
+    build: ../../vsockd-win/range
+    init: true
+    devices:
+      - /dev/kvm
+      - /dev/vhost-vsock
+      - /dev/vhost-net
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - apparmor=unconfined
+    volumes:
+      - ${IMAGE_CACHE:-~/.cache/inspect-ranges/images}:/images:ro
+      - ../../vsockd-win/assets:/assets:ro
+      - ../../../../src/inspect_ranges/_channel/daemon/windows:/payload-src:ro
+      - ./boot-win.sh:/boot-win.sh:ro
+      - scratch:/scratch
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/range-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+volumes:
+  scratch:

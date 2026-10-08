@@ -26,7 +26,7 @@ def _vector_message(vector: dict[str, Any]) -> p.Message:
 
 
 def _vector_bulk(vector: dict[str, Any]) -> bytes | None:
-    bulk_hex = vector["bulk_hex"]
+    bulk_hex = vector.get("bulk_hex")
     return bytes.fromhex(bulk_hex) if bulk_hex is not None else None
 
 

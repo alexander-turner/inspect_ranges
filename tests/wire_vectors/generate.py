@@ -154,14 +154,14 @@ def main() -> None:
     vectors: list[dict[str, object]] = []
     for name, message, bulk in _cases():
         frames = codec.encode_message(message, bulk)
-        vectors.append(
-            {
-                "name": name,
-                "message": message.model_dump(mode="json", exclude_none=True),
-                "bulk_hex": bulk.hex() if bulk is not None else None,
-                "frames_hex": [frame.hex() for frame in frames],
-            }
-        )
+        vector: dict[str, object] = {
+            "name": name,
+            "message": message.model_dump(mode="json", exclude_none=True),
+            "frames_hex": [frame.hex() for frame in frames],
+        }
+        if bulk is not None:
+            vector["bulk_hex"] = bulk.hex()  # omitted entirely when bulkless
+        vectors.append(vector)
     doc = {
         "format": "inspect-ranges wire vectors",
         "protocol": 3,

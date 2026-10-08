@@ -27,15 +27,29 @@ from inspect_ranges._channel.channel import request_id
 CID = int(os.environ["IR_VSOCK_BATTERY_CID"])
 PORT = int(os.environ.get("IR_VSOCK_BATTERY_PORT", "5000"))
 
-DOCUMENTED_XFAILS = frozenset(
-    {
-        # the daemon runs as root (default unprivileged exec user is
-        # build-phase image work); root reads/writes chmod-000 files happily
-        "test_read_file_not_allowed",
-        "test_write_binary_file_without_permissions",
-        "test_write_text_file_without_permissions",
-    }
-)
+_XFAILS: dict[str, frozenset[str]] = {
+    # linux: the daemon runs as root (default unprivileged exec user is
+    # build-phase image work); root reads/writes chmod-000 files happily
+    "linux": frozenset(
+        {
+            "test_read_file_not_allowed",
+            "test_write_binary_file_without_permissions",
+            "test_write_text_file_without_permissions",
+        }
+    ),
+    # windows: platform facts per the vsockd-win spike README (NTFS has no
+    # POSIX read bit; adduser/userdel provisioning; no POSIX signals). The
+    # 1 MiB-argv case passes under v3: the wrapper-script path makes the big
+    # arg a busybox-sh BUILTIN echo, never a CreateProcess command line.
+    "windows": frozenset(
+        {
+            "test_read_file_not_allowed",
+            "test_exec_as_user",
+            "test_exec_timeout_not_raised_on_fast_signal_death",
+        }
+    ),
+}
+DOCUMENTED_XFAILS = _XFAILS[os.environ.get("IR_SELF_CHECK_XFAILS", "linux")]
 
 _ERRNO_EXC: dict[str, type[Exception]] = {
     "ENOENT": FileNotFoundError,
