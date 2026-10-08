@@ -34,6 +34,15 @@ v3 is the named successor to the spike-proven v2 wire protocol ([vsockd2.py](../
 
 **7. Integration against the realizer (blocked on the realizer landing).** Re-run the full conformance suite, soak, and the wedge regression against a realizer-booted range instead of the compose harness, on both daemon OSes. Acceptance: identical results to slices 4 and 6; CID and pacing coordination verified with both tracks' batteries running concurrently on one host. This is the only slice with a cross-track dependency and it is last by design.
 
+## Logging and debuggability
+
+Channel failures are the subtle kind (timeouts with three candidate layers, dropped frames, dedupe misfires); the plan makes them mechanical to triage:
+
+- Request-id correlation end to end: every host-side log line carries the guest CID and request id, and the daemon echoes request ids in its own log, so one grep follows an operation across the boundary (slices 2 and 4).
+- The codec exposes a wire trace hook (direction, message type, request id, sizes, timing; bulk payloads redacted to digests). `RangeChannel` enables it per channel, and conformance failures dump the trace tail automatically (slice 1 for the hook, slice 3 for the dump-on-failure).
+- The daemon keeps an in-guest ring buffer of recent operations and errors, retrievable over the channel via a diag request and never written anywhere the range can see; the Windows wedge battery asserts the listener supervisor's recovery events appear in it (slices 4 and 6).
+- Every errno-tagged failure names the layer whose budget fired (in-guest, channel allowance, transport), so timeout triage never starts from guesswork (slice 1 taxonomy, enforced by the latency mock in slice 3).
+
 ## Review discipline
 
 Every slice closes with a fresh-context code review: a reviewer with no shared session context with the author (not a fork of the authoring session) reads the slice diff against this record's acceptance criteria, the house rules, and the seam contracts. For this track the review brief additionally weights the untrusted-input posture (every reply strict-validated, byte caps reader-side, no parse fallbacks) and protocol-semantics gaps (dedupe, durability, budget enforcement) against the range-channel contract. Blocking findings are fixed before the slice is declared done.

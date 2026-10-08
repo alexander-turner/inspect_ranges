@@ -22,6 +22,15 @@ New code lives in `src/inspect_ranges/_runtime/` (files inside the underscored p
 
 vsock CIDs are host-kernel-global ([agent-containment](agent-containment.md)), so two concurrently booted ranges, or this track's battery beside the channel track's VM harness, can collide. Three rules: `PlanOptions` gains `cid_base` so CIDs are partitioned at plan time (CIDs are render inputs per host-provider, never apply-time probes; boot-storm already ran per-range CID bases); the tracks take documented disjoint partitions (realizer batteries 3000 and up, channel harness below 3000); and batteries that assume an otherwise-quiet host serialize on a host flock (`/tmp/inspect-ranges-battery.lock`). Compose project names are per-range and deterministic (`ir-<range>-<spec-digest-prefix>`), so stale projects from one track are visible and attributable to the other.
 
+## Logging and debuggability
+
+Subtle failures in this stack must be diagnosable from artifacts, not reproduction. Four requirements the slices absorb:
+
+- Every `up`/`down` run writes a structured JSONL log (stage, guest, timing, outcome) under the project state directory, and every failure names the stage and guest and carries the underlying tool output (slice 2 and 3 acceptance).
+- The serial console of every guest is captured to the project log directory from first boot (the standard device profile already carries the console); the console log is the first artifact of any boot debugging (slice 2 acceptance).
+- `inspect-ranges debug-bundle <project>` collects host state (compose logs, domain XML, the live nftables ruleset, dnsmasq leases, readiness probe results) plus per-guest console logs into one tarball; readiness-timeout errors point at it (slice 5).
+- Batteries assert debuggability itself: the readiness-timeout battery checks that the failure output names the guest and stage and that the console log exists and is non-empty (slice 2 battery).
+
 ## Review discipline
 
 Every slice closes with a fresh-context code review: a reviewer with no shared session context with the author (not a fork of the authoring session) reads the slice diff against this record's acceptance criteria, the house rules, and the seam contracts, hunting specifically for silent-failure paths, battery gaps against the slice's failure-mode list, and containment-posture drift. Blocking findings are fixed before the slice is declared done; the slice ledger records the review outcome.
