@@ -1,0 +1,49 @@
+# up-core conformance spec: the bundle spike's combined coverage (ACL v2 with
+# deny carve-out, guest and CIDR endpoints, icmp; DHCP reservations; range-served
+# DNS records) realized by `inspect-ranges up` with battery-derived v2 goldens.
+range:
+  name: up-core
+  schema_version: "0.2"
+  description: >
+    Two segments joined by a router carrying the full ACL v2 vocabulary; the
+    dmz addresses its guests via DHCP reservations and serves name records.
+    Realized by the production applier from a rendered bundle.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+    dhcp: true
+    dns:
+      records:
+        - { name: web }
+        - { name: files.corp.example, ip: 10.80.10.200 }
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    image: up-core-guest
+    os: { type: linux }
+    interfaces: [{ network: dmz }, { network: internal }]
+    acl:
+      - { from: dmz, to: db, deny: [tcp/22] }
+      - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
+      - { from: web, to: internal, allow: [tcp/80] }
+      - { from: 10.80.10.3/32, to: internal, allow: [tcp/8080] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: up-core-guest
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: up-core-guest
+    interfaces: [{ network: internal }]   # allocated: 10.80.20.10
+
+attacker:
+  image: up-core-guest
+  interfaces: [{ network: dmz }]          # allocated: 10.80.10.3
+  entry: external

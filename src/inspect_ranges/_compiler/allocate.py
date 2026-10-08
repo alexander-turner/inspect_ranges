@@ -70,11 +70,12 @@ class Allocation(BaseModel):
         return [interface.ip for interface in self.guest(name).interfaces]
 
 
-def allocate(spec: RangeSpec) -> Allocation:
+def allocate(spec: RangeSpec, cid_base: int = 3) -> Allocation:
     """Compute the deterministic allocation for a validated spec.
 
     Args:
         spec: A validated range definition (IPv6 values are excluded by validation).
+        cid_base: First vsock CID; guests number upward from it in declaration order (a plan-time input, partitioned per host since CIDs are kernel-global).
 
     Returns:
         Addresses, MACs, and CIDs for every guest.
@@ -131,7 +132,7 @@ def allocate(spec: RangeSpec) -> Allocation:
     cid_order += [router.name for router in spec.routers]
     if spec.attacker.host is None:
         cid_order.append(spec.attacker.name)
-    cids = {name: 3 + index for index, name in enumerate(cid_order)}
+    cids = {name: cid_base + index for index, name in enumerate(cid_order)}
 
     guests: list[GuestAllocation] = []
     for kind, name, interfaces in ordered:

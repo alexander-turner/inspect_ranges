@@ -56,8 +56,10 @@ _DOMAIN_XML = """<domain type='kvm'>
 {interfaces}    <vsock model='virtio'>
       <cid auto='no' address='{cid}'/>
     </vsock>
-    <serial type='pty'><target port='0'/></serial>
-    <console type='pty'><target type='serial' port='0'/></console>
+    <serial type='file'>
+      <source path='/scratch/console/{name}.log' append='on'/>
+      <target port='0'/>
+    </serial>
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>

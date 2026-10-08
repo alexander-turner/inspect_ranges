@@ -19,6 +19,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from .._compiler.plan import image_file_name
+
 logger = logging.getLogger(__name__)
 
 RECIPE_VERSION = "2"
@@ -116,8 +118,8 @@ def _run(argv: list[str], cwd: Path) -> None:
 
 
 def _cache_file_name(name: str) -> str:
-    normalized = name.replace("/", "-").replace(":", "-")
-    return normalized if normalized.endswith(".qcow2") else f"{normalized}.qcow2"
+    # one naming rule with planning's image resolution (realizer-v1 chunk 1 note)
+    return image_file_name(name)
 
 
 def _metadata_path(cache: Path, file: str) -> Path:
