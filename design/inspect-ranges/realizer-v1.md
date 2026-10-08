@@ -90,6 +90,6 @@ The fresh-context review of this slice surfaced one real bug fixed before close:
 | 0 Inspect API checkpoint | done 2026-10-08: 10/10, findings above; fresh-context review: 9 findings (1 bug, 2 battery gaps, rest conventions), all fixed |
 | 1 image derivation | done 2026-10-08: battery 8/8 ([images-derive](../spikes/images-derive/README.md)); fresh-context review: 8 findings (crash-window provenance ordering, corrupt-sidecar handling, daemon-mismatch coverage, dotted names, tool-missing errors, client robustness, UDP in the listener check, ledger process), all fixed and re-batteried |
 | 2 `up` applier core | battery 17/17 ([up-core](../spikes/up-core/README.md), 52.3 s to enforced-ready under the hardened image); review pending |
-| 3 `down` and crash cleanup | planned |
+| 3 `down` and crash cleanup | battery 6/6 ([up-core crash.sh](../spikes/up-core/README.md): kill matrix, double down, --all sweeps ir- only, pkill recovery); review pending |
 | 4 battery repointing | planned |
 | 5 docs and doctor | planned |
