@@ -63,4 +63,4 @@ A reviewer flagged that requiring cloud-init on every guest would over-constrain
 
 ## What this does not decide
 
-The provisioning language itself (how recipes are expressed — Ansible, scripts over the control plane, declarative sections in a later schema) stays deferred per schema-v0.1-scope. This record only fixes the boundary: whatever the recipes are, they run at build time, their versions land in the manifest, and the runtime never runs them.
+The provisioning language itself (how recipes are expressed — Ansible, scripts over the control plane, declarative sections in a later schema) stays deferred per schema-v0.1-scope. This record only fixes the boundary: whatever the recipes are, they run at build time, their versions land in the manifest, and the runtime never runs them. How references *resolve and execute* (addressing, the bundle contract, invocation) is specified in [recipe-references](recipe-references.md); the language inside stays out.
