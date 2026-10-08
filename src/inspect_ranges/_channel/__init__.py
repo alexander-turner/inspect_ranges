@@ -3,6 +3,23 @@
 The wire contract is specified in `design/inspect-ranges/range-channel.md` and the phase plan in `design/inspect-ranges/channel-v1.md`. Everything arriving over the channel is untrusted input: replies are strict-schema validated and byte caps are enforced reader-side.
 """
 
+from .channel import (
+    ChannelBudgetError,
+    ChannelError,
+    ExecOutcome,
+    GuestError,
+    IllegalTransition,
+    LoopbackTransport,
+    MessageChannel,
+    RangeChannel,
+    SamplePhase,
+    SampleStateMachine,
+    TamperError,
+    Transport,
+    TransportFailure,
+    request_id,
+    run_sample,
+)
 from .codec import (
     BulkMismatch,
     BulkOverrun,
@@ -24,6 +41,21 @@ from .protocol import PROTOCOL_VERSION, Budget, Message
 __all__ = [
     "Budget",
     "BulkMismatch",
+    "ChannelBudgetError",
+    "ChannelError",
+    "ExecOutcome",
+    "GuestError",
+    "IllegalTransition",
+    "LoopbackTransport",
+    "MessageChannel",
+    "RangeChannel",
+    "SamplePhase",
+    "SampleStateMachine",
+    "TamperError",
+    "Transport",
+    "TransportFailure",
+    "request_id",
+    "run_sample",
     "BulkOverrun",
     "ChannelClosed",
     "DecodeError",
