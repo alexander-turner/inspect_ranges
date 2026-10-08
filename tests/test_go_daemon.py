@@ -14,9 +14,21 @@ DAEMON_DIR = Path(__file__).parent.parent / "src/inspect_ranges/_channel/daemon/
 
 _located = locate_go()
 go_binary = str(_located) if _located is not None else None
+
+REQUIRE_GO = os.environ.get("INSPECT_RANGES_REQUIRE_GO") == "1"
+"""CI sets this: the drift guard must fail loudly there, never silently skip."""
 pytestmark = pytest.mark.skipif(
-    go_binary is None, reason="no Go toolchain (see daemon/linux/README.md for the pin)"
+    go_binary is None and not REQUIRE_GO,
+    reason="no Go toolchain (see daemon/linux/README.md for the pin)",
 )
+
+
+def test_toolchain_present_when_required() -> None:
+    if REQUIRE_GO:
+        assert go_binary is not None, (
+            "INSPECT_RANGES_REQUIRE_GO=1 but no toolchain: install the pin "
+            "per src/inspect_ranges/_channel/daemon/linux/README.md"
+        )
 
 
 def _run(*argv: str) -> subprocess.CompletedProcess[str]:

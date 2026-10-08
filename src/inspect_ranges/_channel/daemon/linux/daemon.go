@@ -23,9 +23,11 @@ import (
 
 const (
 	OutputCap      = 16 * 1024 * 1024 // per stream, the qemu-ga precedent
-	StoredBound    = 256              // durable replies held bounded until acked
+	StoredBound    = 256              // durable replies held bounded (FIFO) until acked
+	TombstoneBound = 4096             // evicted-unacked ids answering ESTALE, their own FIFO
 	DiagBound      = 256
 	KillGrace      = 5 * time.Second // SIGTERM, then SIGKILL after grace
+	WaitDelay      = 5 * time.Second // bound on reaping pipe copiers after exit (cmd.WaitDelay)
 	MaxConnActive  = 512             // resource bound against floods; polls must outlive held exec slots
 	DaemonVersion  = "vsockd 3.0.0 (go)"
 	DefaultPort    = 5000
@@ -46,21 +48,47 @@ type runningExec struct {
 }
 
 // Store is the dedupe and durability core: every request kind stores its
-// reply by id until acked, bounded LRU; exec attaches to in-flight runs.
+// reply by id until acked, bounded FIFO (oldest unacked evicted first).
+// Evicted-unacked ids leave a TOMBSTONE: the effect ran, the result is gone,
+// and polls or resends for the id answer ESTALE so a client can never
+// double-run it (range-channel property 1 under eviction).
 type Store struct {
-	mu      sync.Mutex
-	replies map[string]*storedReply
-	order   *list.List // front = oldest
-	keys    map[string]*list.Element
-	running map[string]*runningExec
+	mu         sync.Mutex
+	replies    map[string]*storedReply
+	order      *list.List // front = oldest
+	keys       map[string]*list.Element
+	running    map[string]*runningExec
+	tombs      map[string]bool
+	tombsOrder *list.List
 }
 
 func NewStore() *Store {
 	return &Store{
-		replies: map[string]*storedReply{},
-		order:   list.New(),
-		keys:    map[string]*list.Element{},
-		running: map[string]*runningExec{},
+		replies:    map[string]*storedReply{},
+		order:      list.New(),
+		keys:       map[string]*list.Element{},
+		running:    map[string]*runningExec{},
+		tombs:      map[string]bool{},
+		tombsOrder: list.New(),
+	}
+}
+
+// Tombstoned reports whether id executed but lost its unacked result.
+func (s *Store) Tombstoned(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tombs[id]
+}
+
+func (s *Store) addTombstoneLocked(id string) {
+	if !s.tombs[id] {
+		s.tombs[id] = true
+		s.tombsOrder.PushBack(id)
+	}
+	for s.tombsOrder.Len() > TombstoneBound {
+		oldest := s.tombsOrder.Front()
+		s.tombsOrder.Remove(oldest)
+		delete(s.tombs, oldest.Value.(string))
 	}
 }
 
@@ -84,6 +112,7 @@ func (s *Store) Put(id string, reply *storedReply) {
 		key := oldest.Value.(string)
 		delete(s.replies, key)
 		delete(s.keys, key)
+		s.addTombstoneLocked(key) // evicted UNACKED: effect ran, result lost
 	}
 }
 
@@ -95,6 +124,7 @@ func (s *Store) Ack(id string) {
 		delete(s.keys, id)
 		delete(s.replies, id)
 	}
+	delete(s.tombs, id) // an ack means the client consumed it after all
 }
 
 // Begin registers an in-flight durable request id. Returns (running, isNew):
@@ -234,6 +264,10 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 	if stored, ok := d.store.Get(request.ID); ok {
 		return stored
 	}
+	if d.store.Tombstoned(request.ID) {
+		return errorReply(request.ID, "ESTALE",
+			"executed, result lost before acknowledgement", nil)
+	}
 	run, isNew := d.store.Begin(request.ID)
 	if !isNew {
 		<-run.done
@@ -260,6 +294,10 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 func (d *Daemon) poll(request *Message) *storedReply {
 	if stored, ok := d.store.Get(request.TargetID); ok {
 		return stored // replayed with the ORIGINAL id, by design
+	}
+	if d.store.Tombstoned(request.TargetID) {
+		return errorReply(request.ID, "ESTALE",
+			"executed, result lost before acknowledgement", nil)
 	}
 	if run, ok := d.store.Running(request.TargetID); ok {
 		return &storedReply{message: &Message{
@@ -319,7 +357,7 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	// a killed process group can leave a descendant holding the stdout pipe
 	// (setsid daemonizer): WaitDelay bounds Wait's pipe-copier wait after the
 	// process exits, so runCommand can never hang a slot forever
-	cmd.WaitDelay = KillGrace
+	cmd.WaitDelay = WaitDelay
 
 	if err := cmd.Start(); err != nil {
 		return execStartFailure(request.ID, argv[0], err)
@@ -355,7 +393,9 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	if timedOut {
 		d.diag.Add("warn", "exec-budget-killed", &request.ID, argv[0])
 		return errorReply(request.ID,
-			"ETIME", fmt.Sprintf("command budget expired after %d ms", commandMs), strp("command"))
+			"ETIME",
+			fmt.Sprintf("command budget expired after %d ms (process-group kill; setsid descendants survive)", commandMs),
+			strp("command"))
 	}
 	rc := int64(cmd.ProcessState.ExitCode())
 	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
@@ -417,13 +457,32 @@ func (d *Daemon) readFile(request *Message) *storedReply {
 	if err == nil && info.IsDir() {
 		return errorReply(request.ID, "EISDIR", "Is a directory", nil)
 	}
-	data, err := os.ReadFile(request.Path)
+	// incremental, bounded read: at most limit+1 bytes ever in memory, so a
+	// multi-GiB file or an endless device cannot OOM or wedge the daemon
+	limit := int64(DefaultBulkCap)
+	if request.MaxBytes != nil {
+		limit = *request.MaxBytes
+	}
+	handle, err := os.Open(request.Path)
 	if err != nil {
 		return fileError(request.ID, err)
 	}
+	defer handle.Close()
+	data := make([]byte, 0, min64(limit+1, 1<<20))
+	chunk := make([]byte, 1<<20)
+	for int64(len(data)) <= limit {
+		n, readErr := handle.Read(chunk)
+		data = append(data, chunk[:n]...)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fileError(request.ID, readErr)
+		}
+	}
 	truncated := false
-	if request.MaxBytes != nil && int64(len(data)) > *request.MaxBytes {
-		data = data[:*request.MaxBytes]
+	if int64(len(data)) > limit {
+		data = data[:limit]
 		truncated = true
 	}
 	message := &Message{
@@ -448,6 +507,13 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 		return fileError(request.ID, err)
 	}
 	return okReply(request.ID)
+}
+
+func min64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func parentDir(path string) string {

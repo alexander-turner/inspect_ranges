@@ -20,10 +20,11 @@ from inspect_ranges._channel.bundle import (
 )
 from inspect_ranges._cli.main import ranges
 
-from tests.test_go_daemon import go_binary
+from tests.test_go_daemon import REQUIRE_GO, go_binary
 
 pytestmark = pytest.mark.skipif(
-    go_binary is None, reason="no Go toolchain (see daemon/linux/README.md for the pin)"
+    go_binary is None and not REQUIRE_GO,
+    reason="no Go toolchain (see daemon/linux/README.md for the pin)",
 )
 
 
@@ -87,6 +88,22 @@ def test_sidecar_carries_the_contract(tmp_path: Path) -> None:
         "windows/PLACEHOLDER.md",
     }
     assert sidecar["bundle_sha256"] == info.bundle_sha256
+
+
+def test_unpinned_toolchain_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Artifact builds refuse a toolchain that is not the pin (determinism gate)."""
+    import inspect_ranges._channel.bundle as bundle_module
+
+    fake = tmp_path / "fakego" / "go"
+    fake.parent.mkdir()
+    fake.write_text("#!/bin/sh\necho 'go version go1.22.0 linux/amd64'\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(bundle_module, "PINNED_GO", tmp_path / "missing-go")
+    monkeypatch.setenv("PATH", str(fake.parent))
+    with pytest.raises(BundleError, match="toolchain"):
+        build_daemon_bundle(tmp_path / "out")
 
 
 def test_cli_daemon_bundle(tmp_path: Path) -> None:

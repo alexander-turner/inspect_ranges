@@ -10,12 +10,14 @@ from collections.abc import Callable, Coroutine
 
 import pytest
 from inspect_ranges._channel.channel import (
+    ByteStream,
     ChannelBudgetError,
     LoopbackTransport,
     MessageChannel,
     TamperError,
     TransportFailure,
     request_id,
+    stream_pair,
 )
 from inspect_ranges._channel.mocks import (
     HOSTILE_APPLIER_HANGS,
@@ -27,7 +29,7 @@ from inspect_ranges._channel.mocks import (
     LatencyTransport,
     SilentTransport,
 )
-from inspect_ranges._channel.protocol import ExecRequest
+from inspect_ranges._channel.protocol import Budget, ExecRequest
 
 from tests.channel_conformance import PortableChannelSuite
 
@@ -158,6 +160,75 @@ def test_hostile_wrong_id_names_both_ids() -> None:
     assert "request was id" in message, "the tamper error must name the request id"
 
 
+class PollForger:
+    """Holds the exec silently, then answers every poll with a forged reply shape."""
+
+    def __init__(self, fleet: LoopbackTransport, forge: str) -> None:
+        self._fleet = fleet
+        self._forge = forge
+        self._first = True
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        from inspect_ranges._channel.codec import MessageStreamReader, encode_message
+        from inspect_ranges._channel.protocol import (
+            DEFAULT_BULK_CAP,
+            ExecResult,
+            OkReply,
+            PendingReply,
+        )
+
+        if self._first:
+            self._first = False
+            client_side, _server = stream_pair()
+            return client_side  # the exec is swallowed: the client must poll
+
+        client_side, server_side = stream_pair()
+
+        async def serve() -> None:
+            reader = MessageStreamReader(server_side.receive, bulk_cap=DEFAULT_BULK_CAP)
+            poll, _ = await reader.next()
+            target = getattr(poll, "target_id", "0" * 32)
+            wrong = "e" * 32
+            if self._forge == "pending-wrong-target":
+                reply = PendingReply(id=poll.id, target_id=wrong, elapsed_ms=1)
+            elif self._forge == "pending-wrong-poll-id":
+                reply = PendingReply(id=wrong, target_id=target, elapsed_ms=1)
+            elif self._forge == "result-under-poll-id":
+                reply = ExecResult(id=poll.id, rc=0, stdout_size=0, stderr_size=0)
+            else:  # ok-under-request-id
+                reply = OkReply(id=target)
+            for frame in encode_message(reply):
+                await server_side.send(frame)
+            await server_side.aclose()
+
+        task = asyncio.ensure_future(serve())
+        _ = task
+        return client_side
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [
+        "pending-wrong-target",
+        "pending-wrong-poll-id",
+        "result-under-poll-id",
+        "ok-under-request-id",
+    ],
+)
+def test_forged_poll_reply_shapes_are_tamper(forge: str) -> None:
+    """The exec poll loop accepts exactly the honest id pair; every forgery is tamper."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        PollForger(fleet, forge), label=f"forge-{forge}", channel_budget_s=0.15
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(TamperError):
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+
+    asyncio.run(scenario_run())
+
+
 # -- hostile host plane -------------------------------------------------------
 
 
@@ -221,8 +292,6 @@ def test_silent_exec_without_liveness_is_channel_layer() -> None:
     )
 
     async def scenario_run() -> None:
-        from inspect_ranges._channel.protocol import Budget, ExecRequest
-
         with pytest.raises(ChannelBudgetError) as failure:
             await channel.exec(
                 "web",
@@ -239,8 +308,6 @@ def test_silent_exec_without_liveness_is_channel_layer() -> None:
 
 def test_overdue_exec_with_liveness_is_command_layer() -> None:
     """Polls answered but the guest never kills: the command layer is the honest verdict."""
-    from inspect_ranges._channel.protocol import Budget, ExecRequest
-
     fleet = LoopbackTransport(["web"])
     fleet.guest("web").ignore_command_budget = True
     channel = MessageChannel(
@@ -293,15 +360,13 @@ def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
 
 
 def test_divergent_resume_replay_is_tamper() -> None:
-    from inspect_ranges._channel.channel import TamperError as Tamper
-
     fleet = LoopbackTransport(["web"])
     fleet.applier.drop_after_reports = 2
     fleet.applier.corrupt_replay = True
     channel = MessageChannel(fleet, label="diverging")
 
     async def scenario_run() -> None:
-        with pytest.raises(Tamper, match="resumed replay diverged"):
+        with pytest.raises(TamperError, match="resumed replay diverged"):
             async for _ in channel.realize("ab" * 32, []):
                 pass
 
@@ -309,29 +374,54 @@ def test_divergent_resume_replay_is_tamper() -> None:
 
 
 class SwallowFirstConnects:
-    """Wraps a transport: the first N connections accept but never serve (undelivered requests)."""
+    """Wraps a transport: the first N connections accept but never serve (requests of unknown fate)."""
 
     def __init__(self, inner: LoopbackTransport, swallow: int) -> None:
         self._inner = inner
         self.swallow = swallow
 
-    async def connect(self, endpoint: str):  # noqa: ANN201 - Transport protocol
-        from inspect_ranges._channel.channel import stream_pair
-
+    async def connect(self, endpoint: str) -> ByteStream:
         if self.swallow > 0:
             self.swallow -= 1
             client_side, _server = stream_pair()
-            return client_side  # nothing ever serves: the request is undelivered
+            return client_side  # nothing ever serves: delivery cannot be ruled out
         return await self._inner.connect(endpoint)
 
 
-def test_undelivered_exec_falls_back_from_poll_to_resend() -> None:
-    """ENOENT on poll with no delivery confirmation means resend the exec, not fail (review finding)."""
-    from inspect_ranges._channel.protocol import ExecRequest
-
+def test_possibly_delivered_exec_never_resends() -> None:
+    """A swallowed first send MAY have been delivered: ENOENT on poll must refuse the resend (at-most-once)."""
     fleet = LoopbackTransport(["web"])
     transport = SwallowFirstConnects(fleet, swallow=1)
-    channel = MessageChannel(transport, label="undelivered", channel_budget_s=0.15)
+    channel = MessageChannel(transport, label="maybe-delivered", channel_budget_s=0.15)
+
+    async def scenario_run() -> None:
+        with pytest.raises(TransportFailure, match="at-most-once"):
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["echo", "x"]))
+        assert fleet.guest("web").exec_count == 0, "the refused resend must not run"
+
+    asyncio.run(scenario_run())
+
+
+class FailFirstConnects:
+    """The first N connect attempts raise (provably undelivered), then honest."""
+
+    def __init__(self, inner: LoopbackTransport, failures: int) -> None:
+        self._inner = inner
+        self.failures = failures
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        if self.failures > 0:
+            self.failures -= 1
+            raise ConnectionError("injected connect refusal")
+        return await self._inner.connect(endpoint)
+
+
+def test_provably_undelivered_exec_resends_exactly_once() -> None:
+    """Connect failures are the only resend-safe losses: the exec retries and runs once."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        FailFirstConnects(fleet, failures=2), label="undelivered", channel_budget_s=0.3
+    )
 
     async def scenario_run() -> None:
         outcome = await channel.exec(
@@ -343,6 +433,23 @@ def test_undelivered_exec_falls_back_from_poll_to_resend() -> None:
     asyncio.run(scenario_run())
 
 
+def test_silent_untimed_exec_fails_after_three_windows() -> None:
+    """Zero liveness evidence across three allowance windows is a channel-layer failure, fast."""
+    channel = MessageChannel(
+        SilentTransport(), label="silent-windows", channel_budget_s=0.15
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+        assert failure.value.layer == "channel"
+        assert "zero liveness" in str(failure.value)
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    assert time.monotonic() - start < 3.0, "a dead transport must not pin the exec"
+
+
 class SilentAfterNConnects:
     """Serves the first N connections honestly, then every later one is silent."""
 
@@ -350,9 +457,7 @@ class SilentAfterNConnects:
         self._inner = inner
         self.honest = honest
 
-    async def connect(self, endpoint: str):  # noqa: ANN201 - Transport protocol
-        from inspect_ranges._channel.channel import stream_pair
-
+    async def connect(self, endpoint: str) -> ByteStream:
         if self.honest > 0:
             self.honest -= 1
             return await self._inner.connect(endpoint)
@@ -367,8 +472,6 @@ class SilentAfterNConnects:
 
 def test_stale_liveness_does_not_blame_the_command_layer() -> None:
     """One early pending then silence: the deadline verdict is channel, not command (review finding)."""
-    from inspect_ranges._channel.protocol import Budget, ExecRequest
-
     fleet = LoopbackTransport(["web"])
     fleet.guest("web").ignore_command_budget = True
     # connection 1: the exec (held, never replies within allowance);

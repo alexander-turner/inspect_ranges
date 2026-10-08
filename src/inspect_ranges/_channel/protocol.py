@@ -33,6 +33,18 @@ DEFAULT_CHANNEL_BUDGET_MS = 180_000
 DEFAULT_UNTIMED_BOUND_MS = 14_400_000
 """Bound on commands that declared no timeout (4 h, the layered-budget outer layer)."""
 
+DAEMON_KILL_GRACE_MS = 5_000
+"""The daemon's TERM-to-KILL grace on a command budget expiry (mirrored by the Go daemon; the vectors pin it)."""
+
+DAEMON_WAIT_DELAY_MS = 5_000
+"""The daemon's bound on reaping pipe copiers after the process exits (`cmd.WaitDelay`; the vectors pin it)."""
+
+EXEC_OBSERVATION_GRACE_S = (DAEMON_KILL_GRACE_MS + DAEMON_WAIT_DELAY_MS) / 1000 + 2.0
+"""Host-side grace added to `command_ms` before an exec deadline verdict: the daemon's worst-case honest kill latency (kill grace plus wait delay) plus margin, derived from the shared constants so host and daemon cannot drift apart."""
+
+DAEMON_INBOUND_BULK_CAP = 256 * 1024 * 1024
+"""The daemon's reader-side cap on inbound bulk (write payloads, exec stdin); the host refuses larger payloads before sending."""
+
 MAX_WIRE_INT = 2**53
 """Upper bound for unbounded-looking integer wire fields: safe in int64 and double codecs alike."""
 
@@ -256,6 +268,8 @@ class DiagReply(_MessageBase):
 
 class ErrorReply(_MessageBase):
     """Errno-tagged failure. Budget expiries set `errno` `ETIME` and must name the layer that fired.
+
+    `ESTALE` is the at-most-once sentinel: the effect EXECUTED but its unacknowledged result was evicted; a client must surface it as an infrastructure failure and never resend the id.
 
     Post-compromise, everything in an error reply (errno, message, layer) is attacker-influenceable: layer attribution from the guest is triage advice, and the host-enforced budgets remain the real bound.
     """

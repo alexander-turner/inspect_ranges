@@ -28,7 +28,9 @@ from .codec import (
     encode_message,
 )
 from .protocol import (
+    DAEMON_INBOUND_BULK_CAP,
     DEFAULT_BULK_CAP,
+    EXEC_OBSERVATION_GRACE_S,
     AckRequest,
     Budget,
     BudgetLayer,
@@ -62,8 +64,11 @@ HOST_APPLIER = "@host"
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_S = 0.05
-_CHANNEL_GRACE_S = 8.0
-"""Added to the in-guest command budget when waiting for an exec reply, so the guest's own kill is observed rather than raced (the poll-grace lesson)."""
+_CHANNEL_GRACE_S = EXEC_OBSERVATION_GRACE_S
+"""Added to the in-guest command budget when waiting for an exec verdict: the daemon's worst-case honest kill latency (TERM-to-KILL grace plus the pipe-reap wait delay) plus margin, derived from the shared protocol constants so host and daemon cannot drift apart."""
+
+_SILENT_WINDOW_LIMIT = 3
+"""Consecutive allowance windows with zero liveness evidence before an exec is a channel-layer failure."""
 
 _POLL_INTERVAL_S = 0.5
 """Gap between exec liveness polls once the initial reply misses the allowance."""
@@ -86,6 +91,10 @@ class TamperError(ChannelError):
 
 class TransportFailure(ChannelError):
     """The transport could not complete the exchange within its retry budget."""
+
+
+class _ConnectFailure(ConnectionError):
+    """The transport failed BEFORE the request could have been delivered (connect itself failed)."""
 
 
 class ChannelBudgetError(ChannelError):
@@ -337,6 +346,10 @@ class MessageChannel:
                     f"reply carries id {reply.id}, request was id {request.id}",
                 )
             if isinstance(reply, ErrorReply):
+                if reply.errno == "ESTALE":
+                    raise TransportFailure(
+                        f"{request.kind} id={request.id}: executed, result lost before acknowledgement"
+                    )
                 if ack_consumed:
                     await self._ack(endpoint, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
@@ -371,7 +384,11 @@ class MessageChannel:
         Raises `TimeoutError` when the window expires (the caller attributes the layer), loss exceptions for the caller's retry policy, and turns every malformed or residual-bearing reply into a tamper verdict directly. Counts one exchange on success.
         """
         async with asyncio.timeout(window_s):
-            stream = await self._transport.connect(endpoint)
+            try:
+                stream = await self._transport.connect(endpoint)
+            except ConnectionError as failure:
+                # the request provably never left: callers may resend freely
+                raise _ConnectFailure(str(failure)) from failure
             self.stats.connects += 1
             try:
                 for frame in frames:
@@ -443,12 +460,19 @@ class MessageChannel:
     ) -> ExecOutcome:
         """Run `request` in the guest; `stdin` must match the request's `data_size` declaration.
 
-        Liveness-polled: when the initial reply misses the channel allowance, the client polls the request id; `pending` replies prove liveness while the command runs, so long execs stay allowance-bounded between polls. The exec deadline (`command_ms` plus grace, or the untimed total) firing WITHOUT observed liveness is a channel-layer verdict; WITH liveness it is a command-layer verdict (the guest demonstrably failed to kill).
+        Liveness-polled: the initial reply wait is capped so at least one poll precedes the exec deadline; `pending` replies prove liveness while the command runs, so long execs stay allowance-bounded between polls, and three consecutive allowance windows with zero liveness evidence are a channel-layer failure. The exec deadline (`command_ms` plus the shared observation grace, or the untimed total) firing without RECENT liveness is a channel-layer verdict; with recent liveness it is a command-layer verdict (the guest demonstrably failed to kill within its own grace).
+
+        At-most-once: a resend is only legal while the request provably never left (connect failed); once delivery is possible, a daemon `ENOENT`/`ESTALE` for the id surfaces as `TransportFailure`, never a re-run.
         """
         if (request.data_size is None) != (stdin is None) or (
             request.data_size or 0
         ) != len(stdin or b""):
             raise ValueError("stdin must match the request's data_size declaration")
+        if stdin is not None and len(stdin) > DAEMON_INBOUND_BULK_CAP:
+            raise ValueError(
+                f"exec stdin of {len(stdin)} bytes exceeds the daemon inbound cap "
+                f"({DAEMON_INBOUND_BULK_CAP} bytes)"
+            )
         budget = request.budget
         allowance_s = (
             budget.channel_ms / 1000
@@ -471,6 +495,7 @@ class MessageChannel:
         last_pending_at: float | None = None
         polling = False
         losses = 0
+        silent_windows = 0
         # liveness must be RECENT to blame the command layer: a pending seen
         # once at the start must not convert a later transport stall into a
         # guest-failed-to-kill verdict
@@ -497,7 +522,14 @@ class MessageChannel:
                         else "without recent liveness (transport stall)"
                     ),
                 )
-            window = min(allowance_s, exec_deadline - now, outer_deadline - now)
+            remaining = min(exec_deadline, outer_deadline) - now
+            window = min(allowance_s, remaining)
+            if not polling and window >= remaining:
+                # cap the initial wait so at least one poll precedes the
+                # deadline; otherwise every deadline would read as a
+                # transport stall even on a healthy transport
+                reserve = min(allowance_s, _POLL_INTERVAL_S + 1.0)
+                window = max(remaining - reserve, remaining / 2, 0.05)
             if polling:
                 probe: Message = PollRequest(id=request_id(), target_id=request.id)
                 send_frames = encode_message(probe, None, trace=self._trace.append)
@@ -511,6 +543,28 @@ class MessageChannel:
             except TimeoutError:
                 # no reply within the allowance: switch to liveness polling
                 polling = True
+                if last_pending_at is None:
+                    silent_windows += 1
+                    if silent_windows >= _SILENT_WINDOW_LIMIT:
+                        self._dump_trace(request, guest, "silent transport")
+                        raise ChannelBudgetError(
+                            "channel",
+                            f"exec id={request.id}: {silent_windows} allowance "
+                            "windows with zero liveness evidence",
+                        ) from None
+                continue
+            except _ConnectFailure as failure:
+                losses += 1
+                if losses > _RETRY_ATTEMPTS:
+                    raise TransportFailure(
+                        f"exec id={request.id}: unreachable after {losses - 1} attempts ({failure})"
+                    ) from failure
+                await asyncio.sleep(
+                    min(
+                        _RETRY_BACKOFF_S * losses,
+                        max(0.0, outer_deadline - time.monotonic()),
+                    )
+                )
                 continue
             except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
                 losses += 1
@@ -526,6 +580,7 @@ class MessageChannel:
                 )
                 continue
             losses = 0
+            silent_windows = 0
             if (
                 polling
                 and isinstance(reply, PendingReply)
@@ -538,23 +593,19 @@ class MessageChannel:
                 )
                 continue
             if polling and isinstance(reply, ErrorReply) and reply.id == probe.id:
-                if reply.errno == "ENOENT" and last_pending_at is None:
-                    # the daemon never saw the exec (the initial attempt
-                    # stalled before delivery): fall back to resending it,
-                    # bounded like any other loss
-                    losses += 1
-                    if losses > _RETRY_ATTEMPTS:
-                        raise TransportFailure(
-                            f"exec id={request.id}: undeliverable after {losses - 1} attempts"
-                        )
-                    polling = False
-                    continue
-                if reply.errno == "ENOENT":
-                    # delivery was confirmed (pending seen), so the stored
-                    # result was evicted before we could ack: an infra loss,
-                    # never retried with the effect already run
+                if reply.errno == "ESTALE":
+                    # the daemon's at-most-once tombstone: the effect EXECUTED
+                    # and its result was evicted; never resend
                     raise TransportFailure(
-                        f"exec id={request.id}: result evicted before acknowledgement"
+                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    )
+                if reply.errno == "ENOENT":
+                    # ENOENT is only resend-safe while the request provably
+                    # never left (every attempt failed at connect); anything
+                    # else risks a double run on a tombstone-evicted id
+                    raise TransportFailure(
+                        f"exec id={request.id}: no stored result and delivery "
+                        "cannot be ruled out; refusing an at-most-once-unsafe resend"
                     )
                 # any other poll failure is an honest errno-tagged error
                 raise GuestError(reply.errno, reply.message, reply.layer)
@@ -565,6 +616,10 @@ class MessageChannel:
                     f"reply carries id {reply.id}, request was id {request.id}",
                 )
             if isinstance(reply, ErrorReply):
+                if reply.errno == "ESTALE":
+                    raise TransportFailure(
+                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    )
                 await self._ack(guest, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
                     raise ChannelBudgetError(reply.layer, reply.message)
@@ -605,7 +660,16 @@ class MessageChannel:
         return bulk or b""
 
     async def write_file(self, guest: str, path: str, data: bytes) -> None:
-        """Write `data` to a guest file (exactly once per request id, even across retries)."""
+        """Write `data` to a guest file (exactly once per request id, even across retries).
+
+        Raises:
+            ValueError: The payload exceeds the daemon's inbound bulk cap (refused before sending).
+        """
+        if len(data) > DAEMON_INBOUND_BULK_CAP:
+            raise ValueError(
+                f"write of {len(data)} bytes exceeds the daemon inbound cap "
+                f"({DAEMON_INBOUND_BULK_CAP} bytes)"
+            )
         request = WriteFileRequest(id=request_id(), path=path, data_size=len(data))
         reply, _ = await self._exchange(guest, request, data, ack_consumed=True)
         self._expect(reply, OkReply, request, guest)
@@ -1014,6 +1078,7 @@ class FakeGuest:
         self.ignore_command_budget = False
         """Simulates a guest that fails to enforce command_ms (the host-side command-layer verdict path)."""
         self._stored: dict[str, _StoredReply] = {}
+        self._tombstones: dict[str, None] = {}  # insertion-ordered FIFO
         self._running: dict[str, asyncio.Task[_StoredReply]] = {}
         self._running_started: dict[str, float] = {}
         self._handlers: dict[str, ExecHandler] = {}
@@ -1031,11 +1096,21 @@ class FakeGuest:
         """Produce the reply for one request; every kind dedupes on id."""
         if isinstance(message, AckRequest):
             self._stored.pop(message.target_id, None)
+            self._tombstones.pop(message.target_id, None)
             return _StoredReply(OkReply(id=message.id), None)
         if isinstance(message, PollRequest):
             stored = self._stored.get(message.target_id)
             if stored is not None:
                 return stored  # replayed with the ORIGINAL id, by design
+            if message.target_id in self._tombstones:
+                return _StoredReply(
+                    ErrorReply(
+                        id=message.id,
+                        errno="ESTALE",
+                        message="executed, result lost before acknowledgement",
+                    ),
+                    None,
+                )
             if message.target_id in self._running:
                 started = self._running_started.get(message.target_id, time.monotonic())
                 return _StoredReply(
@@ -1052,6 +1127,15 @@ class FakeGuest:
             )
         if (stored := self._stored.get(message.id)) is not None:
             return stored
+        if message.id in self._tombstones:
+            return _StoredReply(
+                ErrorReply(
+                    id=message.id,
+                    errno="ESTALE",
+                    message="executed, result lost before acknowledgement",
+                ),
+                None,
+            )
         if isinstance(message, ExecRequest):
             return await self.start_exec(message, bulk or b"")
         reply = self._handle_fresh(message, bulk)
@@ -1059,10 +1143,16 @@ class FakeGuest:
         return reply
 
     def _store(self, rid: str, reply: _StoredReply) -> None:
-        # durable replies are held BOUNDED until acked (range-channel property 3)
+        # durable replies are held BOUNDED until acked (range-channel
+        # property 3); evicted-unacked ids tombstone so a resend can never
+        # double-run (property 1 under eviction, the ESTALE contract)
         self._stored[rid] = reply
         while len(self._stored) > 256:
-            self._stored.pop(next(iter(self._stored)))
+            evicted = next(iter(self._stored))
+            self._stored.pop(evicted)
+            self._tombstones[evicted] = None
+            while len(self._tombstones) > 4096:
+                self._tombstones.pop(next(iter(self._tombstones)))
 
     def _handle_fresh(self, message: Message, bulk: bytes | None) -> _StoredReply:
         if isinstance(message, PingRequest):

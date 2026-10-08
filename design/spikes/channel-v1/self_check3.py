@@ -27,6 +27,16 @@ from inspect_ranges._channel.channel import request_id
 CID = int(os.environ["IR_VSOCK_BATTERY_CID"])
 PORT = int(os.environ.get("IR_VSOCK_BATTERY_PORT", "5000"))
 
+DOCUMENTED_XFAILS = frozenset(
+    {
+        # the daemon runs as root (default unprivileged exec user is
+        # build-phase image work); root reads/writes chmod-000 files happily
+        "test_read_file_not_allowed",
+        "test_write_binary_file_without_permissions",
+        "test_write_text_file_without_permissions",
+    }
+)
+
 _ERRNO_EXC: dict[str, type[Exception]] = {
     "ENOENT": FileNotFoundError,
     "EISDIR": IsADirectoryError,
@@ -155,8 +165,13 @@ async def main() -> int:
     )
     for name, reason in failed:
         print(f"  - {name}: {reason}")
-    return len(failed)
+    # the gate pins the xfail NAMES: a traded regression (a documented xfail
+    # starts passing while something else breaks) fails even at equal counts
+    unexpected = {name for name, _ in failed} - DOCUMENTED_XFAILS
+    if unexpected:
+        print(f"UNEXPECTED failures: {sorted(unexpected)}")
+    return len(unexpected)
 
 
 if __name__ == "__main__":
-    sys.exit(0 if asyncio.run(main()) <= 3 else 1)  # 3 documented platform xfails (root daemon permissions)
+    sys.exit(0 if asyncio.run(main()) == 0 else 1)

@@ -33,4 +33,12 @@ go test ./...       # includes the cross-codec drift guard
 
 `tests/test_go_daemon.py` wraps `gofmt`/`go vet`/`go test` so the Python suite drives them; it skips with a notice when no pinned toolchain is on PATH or at the install path above. CI must provide the pinned toolchain so the drift guard is enforced, not skipped.
 
+## Known containment edge: setsid escape
+
+The command budget kills the PROCESS GROUP (TERM, then KILL after the grace). A descendant that calls `setsid()` leaves the group and survives the kill (the battery's own hostile shim is started exactly this way). `cmd.WaitDelay` bounds the daemon's pipe wait so the escape cannot hang a serve slot, and the ETIME message states the kill was group-scoped, but the surviving process is real. The honest fix is cgroup-scoped kill, recorded in `design/inspect-ranges/channel-v1.md` as future work; range containment does not rest on this kill (the hypervisor boundary does).
+
+## At-most-once under eviction (ESTALE)
+
+Durable results are held in a bounded FIFO until acked. An evicted-unacked id leaves a tombstone (own FIFO, 4096): polls and resends for it answer errno `ESTALE` ("executed, result lost"), and the client surfaces that as an infrastructure failure, never a re-run.
+
 The drift guard (`wire_test.go`) decodes every vector in `tests/wire_vectors/v3.json` from its pinned frame bytes and re-encodes to byte equality, so the Go and Python codecs cannot diverge silently. Regenerating the vectors is a protocol change and needs the matching review.

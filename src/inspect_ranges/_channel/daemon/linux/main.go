@@ -125,6 +125,11 @@ func acceptLoop(fd int, daemon *Daemon, limiter chan struct{}) {
 		go func(fd int) {
 			limiter <- struct{}{}
 			defer func() { <-limiter }()
+			// idle deadlines: a connected-silent peer cannot hold a slot
+			// and fd forever (reads/writes fail with EAGAIN after 60s)
+			idle := unix.Timeval{Sec: 60}
+			_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &idle)
+			_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &idle)
 			daemon.Serve(&vsockConn{fd: fd})
 		}(connFd)
 	}

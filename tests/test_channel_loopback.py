@@ -16,6 +16,7 @@ from inspect_ranges._channel.channel import (
     MessageChannel,
     SamplePhase,
     SampleStateMachine,
+    TransportFailure,
     request_id,
     run_sample,
 )
@@ -114,6 +115,39 @@ def test_consumed_results_are_acked_and_dropped(
         with pytest.raises(GuestError):
             await channel.read_file("web", "/missing")
         assert fleet.guest("web").stored_reply_count() == 0
+
+    asyncio.run(scenario())
+
+
+def test_evicted_unacked_result_tombstones_never_rerun(
+    channel: MessageChannel, fleet: LoopbackTransport
+) -> None:
+    """Blocking finding 2: delivered, executed, evicted before the retry must be ESTALE, never a double run."""
+
+    async def scenario() -> None:
+        rid = request_id()
+        guest = fleet.guest("web")
+        # deliver and execute, with the reply dropped in flight
+        guest.drop_next_reply = True
+        first = await guest.handle(ExecRequest(id=rid, cmd=["echo", "once"]), None)
+        assert first.message.kind == "exec_result"
+        assert guest.exec_count == 1
+        # the unacked result is evicted from the bounded store (raw handles:
+        # channel.write_file would ack-and-drop its own entries)
+        from inspect_ranges._channel.protocol import WriteFileRequest
+
+        for index in range(300):
+            await guest.handle(
+                WriteFileRequest(
+                    id=request_id(), path=f"/tmp/flood-{index % 3}", data_size=1
+                ),
+                b"x",
+            )
+        assert guest.stored_reply_count() <= 256
+        # the client's resend of the SAME id must refuse, not re-run
+        with pytest.raises(TransportFailure, match="result lost"):
+            await channel.exec("web", ExecRequest(id=rid, cmd=["echo", "once"]))
+        assert guest.exec_count == 1, "the tombstone must forbid a re-run"
 
     asyncio.run(scenario())
 

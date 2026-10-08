@@ -34,6 +34,10 @@ v3 is the named successor to the spike-proven v2 wire protocol ([vsockd2.py](../
 
 **7. Integration against the realizer (blocked on the realizer landing).** Re-run the full conformance suite, soak, and the wedge regression against a realizer-booted range instead of the compose harness, on both daemon OSes. Acceptance: identical results to slices 4 and 6; CID and pacing coordination verified with both tracks' batteries running concurrently on one host. This is the only slice with a cross-track dependency and it is last by design.
 
+## Known edge: setsid escapes the budget kill
+
+The in-guest command budget kills the process group; a `setsid()` descendant survives it. `WaitDelay` keeps the daemon healthy regardless, and the budget error states the kill was group-scoped. Cgroup-scoped kill is the recorded future fix; containment does not depend on this kill (the hypervisor boundary does).
+
 ## Logging and debuggability
 
 Channel failures are the subtle kind (timeouts with three candidate layers, dropped frames, dedupe misfires); the plan makes them mechanical to triage:

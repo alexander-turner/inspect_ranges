@@ -36,7 +36,7 @@ mkdir -p tmp/images tmp/render tmp/logs
 
 echo "=== build the Go daemon (pinned toolchain) ==="
 ( cd ../../../src/inspect_ranges/_channel/daemon/linux \
-  && CGO_ENABLED=0 GOARCH=amd64 "$GO" build -trimpath -ldflags="-s -w" -o "$OLDPWD/tmp/vsockd" . )
+  && CGO_ENABLED=0 GOARCH=amd64 "$GO" build -trimpath -buildvcs=false -ldflags="-s -w" -o "$OLDPWD/tmp/vsockd" . )
 ./tmp/vsockd --version | tee tmp/logs/version.txt
 grep -q "protocol=3" tmp/logs/version.txt && ok "daemon builds and reports protocol 3" \
   || bad "daemon builds and reports protocol 3"

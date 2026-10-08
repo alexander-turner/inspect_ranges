@@ -5,7 +5,10 @@
 // protocol.py, codec.py) and pinned by the shared vectors in
 // tests/wire_vectors/v3.json. Canonical JSON: sorted keys, compact
 // separators, raw UTF-8 (no HTML escaping), null optionals omitted on
-// encode and REJECTED on decode; v is required; duplicate keys rejected.
+// encode and REJECTED on decode; v is required; duplicate keys rejected;
+// unknown fields, cross-kind fields, and missing per-kind required fields
+// are rejected by the per-kind field table, mirroring the Python schema
+// (implementation note for the C# port: copy the table, not the struct).
 package main
 
 import (
@@ -377,10 +380,73 @@ func ParseControl(payload []byte) (*Message, error) {
 	if err := decoder.Decode(&message); err != nil {
 		return nil, decodeErrf("schema violation: %v", err)
 	}
+	keys := make(map[string]bool, len(probe))
+	for key := range probe {
+		keys[key] = true
+	}
+	if err := validateFields(message.Kind, keys); err != nil {
+		return nil, err
+	}
 	if err := message.validate(); err != nil {
 		return nil, err
 	}
 	return &message, nil
+}
+
+// kindSpec mirrors the Python per-kind schema: which fields a kind requires
+// and which it may carry; everything else is a cross-kind violation.
+type kindSpec struct {
+	required []string
+	optional []string
+}
+
+var kindFields = map[string]kindSpec{
+	"ping":        {},
+	"pong":        {required: []string{"daemon"}, optional: []string{"protocol"}},
+	"exec":        {required: []string{"cmd"}, optional: []string{"cwd", "env", "user", "budget"}},
+	"read_file":   {required: []string{"path"}, optional: []string{"max_bytes", "budget"}},
+	"write_file":  {required: []string{"path"}, optional: []string{"budget"}},
+	"forward":     {required: []string{"host", "port"}, optional: []string{"budget"}},
+	"poll":        {required: []string{"target_id"}},
+	"ack":         {required: []string{"target_id"}},
+	"diag":        {optional: []string{"max_entries"}},
+	"exec_result": {required: []string{"rc", "stdout_size", "stderr_size"}, optional: []string{"stdout_truncated", "stderr_truncated"}},
+	"file_data":   {required: []string{"size"}, optional: []string{"truncated"}},
+	"ok":          {},
+	"pending":     {required: []string{"target_id", "elapsed_ms"}},
+	"forward_ok":  {required: []string{"handle"}},
+	"diag_result": {optional: []string{"entries"}},
+	"error":       {required: []string{"errno", "message"}, optional: []string{"layer"}},
+	"realize":     {required: []string{"bundle_digest"}, optional: []string{"grants"}},
+	"teardown":    {},
+	"stage":       {required: []string{"stage"}, optional: []string{"detail", "guests"}},
+	"heartbeat":   {required: []string{"uptime_ms"}, optional: []string{"guests"}},
+}
+
+func validateFields(kind string, keys map[string]bool) error {
+	spec, ok := kindFields[kind]
+	if !ok {
+		return decodeErrf("unknown kind %q", kind)
+	}
+	allowed := map[string]bool{"v": true, "id": true, "kind": true}
+	if bulkKinds[kind] {
+		allowed["data_size"] = true
+	}
+	for _, name := range spec.required {
+		allowed[name] = true
+		if !keys[name] {
+			return decodeErrf("%s: missing required field %q", kind, name)
+		}
+	}
+	for _, name := range spec.optional {
+		allowed[name] = true
+	}
+	for key := range keys {
+		if !allowed[key] {
+			return decodeErrf("%s: field %q does not belong to this kind", kind, key)
+		}
+	}
+	return nil
 }
 
 // scanStrict walks the raw JSON once, rejecting duplicate keys and explicit

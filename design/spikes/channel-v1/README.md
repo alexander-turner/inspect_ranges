@@ -19,6 +19,8 @@
 - **Daemon inbound bulk cap 256 MiB** (write_file payloads, exec stdin): generous but bounded; outbound stays 16 MiB per stream. The first run's 32 MiB cap broke Inspect's large-file tests with mid-transfer EPIPE.
 - **Poll replies replay the stored result under the ORIGINAL request id**; only `pending` and poll-errors carry the poll's own id. The client exec loop accepts exactly that id pair; anything else is tamper.
 - **Relative backing refs** for the battery golden (the images.py lesson applies to spike harnesses too).
+- **Evicted-after-confirmation is `TransportFailure`**: once delivery was confirmed (a pending observed), a missing stored result is an infrastructure loss; the effect ran and is never retried.
+- **`ESTALE` is the at-most-once sentinel**: the daemon tombstones evicted-unacked result ids (bounded FIFO, 4096) and answers polls/resends for them with `ESTALE` ("executed, result lost"); clients surface it as `TransportFailure` and never resend. An unconfirmed `ENOENT` resend is legal only while the request provably never left (connect failed).
 
 ## Files
 
