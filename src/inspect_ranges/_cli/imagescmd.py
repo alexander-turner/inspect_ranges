@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from .._runtime import DeriveError, derive_golden, list_images
+from .._runtime.images import RECIPE_VERSION
 
 _DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 
@@ -43,6 +44,8 @@ def derive(
         metadata, hit = derive_golden(vendor, vendor_sha256, image_cache, name=name)
     except DeriveError as error:
         raise click.ClickException(str(error)) from error
+    except OSError as error:
+        raise click.ClickException(f"derive failed on this host: {error}") from error
     verb = "cache hit" if hit else "derived"
     click.echo(f"{verb}: {metadata.file}  sha256:{metadata.golden_sha256}")
     click.echo(
@@ -61,15 +64,28 @@ def derive(
 )
 def list_cmd(image_cache: Path) -> None:
     """List the cache: managed goldens with provenance, then unmanaged files."""
-    managed, unmanaged = list_images(image_cache)
+    try:
+        managed, unmanaged = list_images(image_cache)
+    except OSError as error:
+        raise click.ClickException(f"cannot read image cache: {error}") from error
     if not managed and not unmanaged:
         click.echo(f"image cache {image_cache} is empty")
         return
     for metadata in managed:
+        flags = ""
+        if not (image_cache / metadata.file).is_file():
+            flags += "  MISSING GOLDEN (interrupted derive; re-run derive)"
+        if metadata.recipe_version != RECIPE_VERSION:
+            flags += f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
         click.echo(
             f"{metadata.file}  sha256:{metadata.golden_sha256[:12]}  "
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "
-            f"recipe=v{metadata.recipe_version}  created={metadata.created}"
+            f"recipe=v{metadata.recipe_version}  created={metadata.created}{flags}"
         )
     for file in unmanaged:
-        click.echo(f"{file}  (unmanaged: no provenance metadata)")
+        note = (
+            "stale derivation temp; a locked derive sweeps its own, remove by hand"
+            if file.endswith(".deriving")
+            else "unmanaged: no provenance metadata"
+        )
+        click.echo(f"{file}  ({note})")

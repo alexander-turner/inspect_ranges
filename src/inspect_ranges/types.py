@@ -920,11 +920,27 @@ class RangeSpec(_StrictModel):
     def __hash__(self) -> int:
         """Content hash, consistent with pydantic field equality.
 
-        Inspect's sandbox resolution caches on the sandbox spec, which requires the config object to be hashable; non-frozen pydantic models are not. Specs stay mutable by design, so the hash is recomputed from current content on each call: equal specs always hash equal, and a spec mutated while held as a dict key simply misses the cache. The dump is rendered with sorted keys because pydantic equality is insertion-order-insensitive for dict fields (`variables`, `vars`) while serialization is not.
+        Inspect's sandbox resolution caches on the sandbox spec, which requires the config object to be hashable; non-frozen pydantic models are not. Specs stay mutable by design, so the hash is recomputed from current content on each call: equal specs always hash equal, and a spec mutated while held in a set or dict leaves its old entry orphaned (unreachable under the new hash), which for a cache key means a miss, never corruption. The dump is canonicalized before hashing because pydantic equality is looser than serialization: sorted keys (dict fields like `variables` compare order-insensitively) and bools normalized to ints (`default=True` equals `default=1`, matching Python's own `hash(True) == hash(1)`).
         """
         return hash(
-            json.dumps(self.model_dump(mode="json", by_alias=True), sort_keys=True)
+            json.dumps(
+                _canonical(self.model_dump(mode="json", by_alias=True)),
+                sort_keys=True,
+            )
         )
+
+
+def _canonical(value: Any) -> Any:
+    """Normalize a dumped tree so hash-equal follows eq-equal: bools become ints (pydantic eq treats `True == 1`), recursively. Written as a general walk so a future loosely-compared union does not silently regress the hash contract."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, list):
+        return [_canonical(item) for item in cast("list[Any]", value)]
+    if isinstance(value, dict):
+        return {
+            key: _canonical(item) for key, item in cast("dict[Any, Any]", value).items()
+        }
+    return value
 
 
 EndpointKind = Literal["network", "guest", "cidr", "unknown"]

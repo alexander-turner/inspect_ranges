@@ -15,6 +15,6 @@ Recorded in [realizer-v1](../../inspect-ranges/realizer-v1.md) (Slice 0 findings
 ## Files
 
 - `provider.py` — stub `@sandboxenv(name="libvirt_range")` provider; hooks record to JSONL, exec/file deliberately unimplemented
-- `task.py` — probe solver asserting `sandbox()`/`sandbox("web")` resolution through the proxy (tasks are built by `run_check.py`)
+- `task.py` — probe solver asserting `sandbox()`/`sandbox("web")` resolution through the proxy (tasks are built by `run_check.py`). Warning: its `getattr(default, "_sandbox", default)` unwrap reaches into private inspect-ai API; fine in this throwaway, never to be copied into the provider slice.
 - `range.yaml` — minimal valid spec for the path-config form
 - `run_check.py` — the 10-check battery; run logs under `tmp/` (gitignored)

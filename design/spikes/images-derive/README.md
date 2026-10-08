@@ -12,7 +12,8 @@
 4. A same-named file without provenance metadata is never clobbered.
 5. `images list` shows managed provenance and flags unmanaged files.
 6. The golden boots in the range container (CID 3000, the realizer battery band); the baked daemon answers on vsock.
-7. `ss -tln` inside the booted guest shows zero TCP listeners (ssh masked, resolved stub listener off).
+7. `ss -tuln` inside the booted guest shows zero TCP/UDP listeners (resolved stub, LLMNR, and mDNS off).
+8. `systemctl is-enabled ssh` reports masked.
 
 ## Files
 

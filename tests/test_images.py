@@ -103,7 +103,13 @@ def test_failed_customize_leaves_no_cache_residue(
 
     with pytest.raises(DeriveError, match=r"\[customize\]"):
         derive_golden(image, digest, cache, runner=failing_runner)
-    residue = [p.name for p in cache.iterdir() if p.name != image.name]
+    # the per-name .lock file is deliberate persistent state (unlinking a
+    # flock file races concurrent lockers); everything else must be gone
+    residue = [
+        p.name
+        for p in cache.iterdir()
+        if p.name != image.name and not p.name.endswith(".lock")
+    ]
     assert residue == [], residue
 
 
@@ -135,10 +141,10 @@ def test_missing_host_tool_is_stage_named(
         derive_golden(image, digest, tmp_path / "cache", runner=no_tool)
 
 
-def test_corrupt_sidecar_recovers_and_lists_as_unmanaged(
+def test_corrupt_sidecar_is_unmanaged_to_both_list_and_derive(
     tmp_path: Path, vendor: tuple[Path, str]
 ) -> None:
-    """A truncated sidecar never crashes list or derive: list flags the image unmanaged, derive re-derives."""
+    """A non-conforming sidecar means unmanaged everywhere: list flags the image, derive refuses to touch it."""
     image, digest = vendor
     cache = tmp_path / "cache"
     metadata, _ = derive_golden(image, digest, cache, runner=fake_runner)
@@ -147,9 +153,37 @@ def test_corrupt_sidecar_recovers_and_lists_as_unmanaged(
     managed, unmanaged = list_images(cache)
     assert managed == []
     assert metadata.file in unmanaged
+    with pytest.raises(DeriveError, match=r"\[prepare\].*not a valid provenance"):
+        derive_golden(image, digest, cache, runner=fake_runner)
+    assert sidecar.read_text() == "{not json", "derive must not touch it"
+
+
+def test_tampered_in_cache_vendor_rederives_on_hit(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    """A cache hit stands only on an untampered backing file; a swapped in-cache vendor re-derives from the verified source."""
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    metadata, _ = derive_golden(image, digest, cache, runner=fake_runner)
+    (cache / image.name).write_bytes(b"tampered")
     repaired, hit = derive_golden(image, digest, cache, runner=fake_runner)
     assert not hit
+    assert (cache / image.name).read_bytes() == b"vendor-bytes"
     assert repaired.golden_sha256 == metadata.golden_sha256
+
+
+def test_partial_vendor_copy_is_replaced_not_bricked(
+    tmp_path: Path, vendor: tuple[Path, str]
+) -> None:
+    """A partial in-cache vendor (killed mid-copy) is atomically replaced from the verified source, never refused."""
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / image.name).write_bytes(b"vendor-by")  # truncated copy
+    metadata, hit = derive_golden(image, digest, cache, runner=fake_runner)
+    assert not hit
+    assert (cache / image.name).read_bytes() == b"vendor-bytes"
+    assert metadata.vendor_sha256 == digest
 
 
 def test_sidecar_without_golden_is_repaired_not_refused(

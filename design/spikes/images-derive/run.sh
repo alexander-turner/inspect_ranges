@@ -82,6 +82,11 @@ grep -q "range-guest.qcow2" design/spikes/images-derive/tmp/list.txt \
 
 cd design/spikes/images-derive
 
+if [[ "${SKIP_VM:-}" == "1" ]]; then
+  echo; echo "$PASS passed, $FAIL failed (host checks only; SKIP_VM=1)"
+  exit $((FAIL > 0))
+fi
+
 echo "=== boot the golden, verify daemon + zero listeners ==="
 # the range container entrypoint realizes compiled artifacts; a single
 # NIC-less guest needs none, so feed it an empty render

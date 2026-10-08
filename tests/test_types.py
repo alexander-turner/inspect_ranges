@@ -162,5 +162,10 @@ def test_range_spec_hash_tracks_content() -> None:
     b.variables = {"y": Variable(default=2), "x": Variable(default=1)}
     assert a == b
     assert hash(a) == hash(b)
+    # pydantic eq treats True == 1 (Python semantics); the hash must too
+    a.variables = {"x": Variable(default=True)}
+    b.variables = {"x": Variable(default=1)}
+    assert a == b
+    assert hash(a) == hash(b)
     b.hosts[0].hostname = "renamed"
     assert hash(a) != hash(b)

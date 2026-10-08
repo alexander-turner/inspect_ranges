@@ -5,15 +5,21 @@ A golden is a qcow2 overlay on a digest-pinned vendor cloud image with the guest
 The daemon arrives as a pinned artifact (name, version, sha256). Until the channel track publishes its v3 `daemon-bundle`, the pin is the spike v2 daemon vendored as package data; consumption is digest-based either way, so the swap is a pin update.
 """
 
+import fcntl
 import hashlib
+import logging
+import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
+
+logger = logging.getLogger(__name__)
 
 RECIPE_VERSION = "2"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
@@ -139,17 +145,17 @@ def derive_golden(
     The vendor image is verified against `vendor_sha256` before anything is written. The golden is a relative-backing qcow2 overlay in `cache` (the cache mounts as one directory in the range container, so backing references must be relative), customized offline: daemon installed and enabled, ssh and the resolved stub listener disabled, `systemd-networkd-wait-online` masked, cloud-init left enabled for the per-guest seed.
 
     Args:
-        vendor: The vendor cloud image. Copied into the cache if not already there.
+        vendor: The vendor cloud image. Copied into the cache atomically when absent; an in-cache copy that no longer matches the pin is replaced from this verified source.
         vendor_sha256: Required pin, hex or `sha256:`-prefixed.
         cache: The image cache directory (created if absent).
         name: Golden name; defaults to `<vendor stem>-golden`.
         runner: Command executor, injectable for tests; defaults to `subprocess.run` with check.
 
     Returns:
-        The golden's metadata and whether the cache already satisfied the request (hit skips all work).
+        The golden's metadata and whether the cache already satisfied the request. A hit requires the recorded golden digest and the in-cache vendor pin to both verify; a tampered in-cache vendor logs a warning and re-derives.
 
     Raises:
-        DeriveError: Stage-named failure: vendor missing or digest mismatch, daemon pin mismatch, an unmanaged file squatting on the target name, a missing host tool, or a failed derivation command (nothing is left behind in the cache).
+        DeriveError: Stage-named failure: vendor missing or digest mismatch, daemon pin mismatch, an unmanaged file or non-conforming sidecar squatting on the target name, a missing host tool, or a failed derivation command (nothing is left behind in the cache).
     """
     base_run = runner or _run
 
@@ -185,15 +191,78 @@ def derive_golden(
     golden_path = cache / file
     metadata_path = _metadata_path(cache, file)
 
-    existing = _load_metadata(metadata_path) if metadata_path.is_file() else None
-    if existing is not None:
+    with _name_lock(cache, file):
+        return _derive_locked(
+            run,
+            vendor,
+            expected,
+            cache,
+            golden_name,
+            file,
+            key,
+            golden_path,
+            metadata_path,
+            daemon,
+        )
+
+
+@contextmanager
+def _name_lock(cache: Path, file: str) -> Generator[None]:
+    """Per-name advisory lock so concurrent derives of one golden cannot interleave temps."""
+    lock_path = cache / f".{file}.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _derive_locked(
+    run: "Callable[[str, list[str], Path], None]",
+    vendor: Path,
+    expected: str,
+    cache: Path,
+    golden_name: str,
+    file: str,
+    key: str,
+    golden_path: Path,
+    metadata_path: Path,
+    daemon: Path,
+) -> tuple[ImageMetadata, bool]:
+    # a crashed prior derive of this name may have left temps; we hold the lock
+    temp = cache / f".{file}.deriving"
+    metadata_temp = metadata_path.with_suffix(".json.deriving")
+    temp.unlink(missing_ok=True)
+    metadata_temp.unlink(missing_ok=True)
+
+    if metadata_path.is_file():
+        existing = _load_metadata(metadata_path)
+        if existing is None:
+            # non-conforming sidecar: unmanaged, exactly as `images list` reports it
+            raise DeriveError(
+                "prepare",
+                f"{metadata_path} is not a valid provenance sidecar (unmanaged); refusing to touch it, remove it to re-derive",
+            )
         if (
             existing.derivation_key == key
             and golden_path.is_file()
             and sha256_file(golden_path) == existing.golden_sha256
         ):
-            return existing, True
-    elif not metadata_path.is_file() and golden_path.exists():
+            # the hit must also stand on an untampered backing file: the
+            # overlay reads vendor bytes at boot, and the cache is local
+            # working state, not a signed artifact
+            vendor_cached = cache / existing.vendor_file
+            if (
+                vendor_cached.is_file()
+                and sha256_file(vendor_cached) == existing.vendor_sha256
+            ):
+                return existing, True
+            logger.warning(
+                "in-cache vendor %s no longer matches its pin; re-deriving from the verified source",
+                vendor_cached,
+            )
+    elif golden_path.exists():
         raise DeriveError(
             "prepare",
             f"{golden_path} exists without metadata (unmanaged); refusing to overwrite",
@@ -201,16 +270,16 @@ def derive_golden(
 
     vendor_in_cache = cache / vendor.name
     if vendor_in_cache.resolve() != vendor.resolve():
-        if vendor_in_cache.is_file() and sha256_file(vendor_in_cache) != expected:
-            raise DeriveError(
-                "prepare",
-                f"{vendor_in_cache} exists with a different digest; refusing to overwrite",
-            )
-        if not vendor_in_cache.is_file():
-            shutil.copy2(vendor, vendor_in_cache)
+        if not vendor_in_cache.is_file() or sha256_file(vendor_in_cache) != expected:
+            # atomic: a kill mid-copy must never leave a partial vendor the
+            # next derive would refuse forever. The source re-verified above.
+            vendor_temp = cache / f".{vendor.name}.{os.getpid()}.deriving"
+            try:
+                shutil.copy2(vendor, vendor_temp)
+                vendor_temp.replace(vendor_in_cache)
+            finally:
+                vendor_temp.unlink(missing_ok=True)
 
-    temp = cache / f".{file}.deriving"
-    metadata_temp = metadata_path.with_suffix(".json.deriving")
     try:
         run(
             "create-overlay",
@@ -313,7 +382,9 @@ def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
         path.name
         for path in cache.iterdir()
         if path.is_file()
-        and path.suffix in (".qcow2", ".img", ".iso")
+        and (
+            path.suffix in (".qcow2", ".img", ".iso") or path.name.endswith(".deriving")
+        )
         and path.name not in managed_files
     )
     return managed, unmanaged
