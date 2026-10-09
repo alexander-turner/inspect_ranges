@@ -74,32 +74,44 @@ def make_env(
     return LibvirtRangeSandboxEnvironment("box", handle), channel
 
 
-@pytest.mark.parametrize("transport_kind", ["loopback", "latency"])
-@pytest.mark.parametrize(("name", "check"), CHECKS, ids=[name for name, _ in CHECKS])
+_LATENCY_SKIPS = frozenset(
+    {"test_read_and_write_large_file_binary", "test_exec_input_large"}
+)
+
+
+def _check_params() -> list[object]:
+    """Every (check, transport) pair: CI xfails as collection-time STRICT marks (an XPASS fails the run and control-flow exceptions are never swallowed, unlike a hand-rolled try/except) and the latency 50 MiB skips as skip marks."""
+    params: list[object] = []
+    for transport_kind in ("loopback", "latency"):
+        for name, check in CHECKS:
+            marks: list[pytest.MarkDecorator] = []
+            if name in CI_XFAILS:
+                marks.append(pytest.mark.xfail(strict=True, reason=CI_XFAILS[name]))
+            if transport_kind == "latency" and name in _LATENCY_SKIPS:
+                marks.append(
+                    pytest.mark.skip(reason="50 MiB payloads add nothing under latency")
+                )
+            params.append(
+                pytest.param(
+                    name,
+                    check,
+                    transport_kind,
+                    id=f"{name}-{transport_kind}",
+                    marks=marks,
+                )
+            )
+    return params
+
+
+@pytest.mark.parametrize(("name", "check", "transport_kind"), _check_params())
 def test_self_check(
     name: str, check: Check, transport_kind: str, tmp_path: Path
 ) -> None:
-    if transport_kind == "latency" and name in (
-        "test_read_and_write_large_file_binary",
-        "test_exec_input_large",
-    ):
-        pytest.skip(
-            "50 MiB payload cases add nothing under latency; loopback covers them"
-        )
     env, channel = make_env(tmp_path, transport_kind)
 
     async def scenario() -> None:
         await check(env)
 
-    if name in CI_XFAILS:
-        try:
-            asyncio.run(scenario())
-        except BaseException:
-            return  # expected failure on this endpoint
-        pytest.fail(
-            f"{name} unexpectedly PASSED despite the CI xfail pin "
-            f"({CI_XFAILS[name]}); update the pin, two-sidedly"
-        )
     asyncio.run(scenario())
     if transport_kind == "latency":
         assert channel.stats.exchanges <= EXCHANGES_BUDGET_PER_CHECK, (

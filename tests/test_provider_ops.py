@@ -17,11 +17,7 @@ from inspect_ranges._channel.channel import (
 )
 from inspect_ranges._channel.mocks import HostileTransport
 from inspect_ranges._compiler.plan import Totals
-from inspect_ranges._provider.ops import (
-    AGENT_HOME,
-    ARGV_WRAPPER_THRESHOLD,
-    resolve_guest_path,
-)
+from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
 from inspect_ranges._provider.retry import RetryConfig, RetryPolicy
 from inspect_ranges._provider.state import SampleHandle
@@ -136,12 +132,47 @@ def test_large_argv_rides_the_wrapper_script(tmp_path: Path) -> None:
         env, transport = make_env(tmp_path)
         chunk = "x" * (64 * 1024)
         args = [chunk] * 16  # ~1 MiB: over the control-frame budget
-        assert sum(len(a) for a in args) > ARGV_WRAPPER_THRESHOLD
         result = await env.exec(["printf", "%s", *args])
         assert result.success
         assert result.stdout == chunk * 16
         endpoint = transport.guests["box"]
         assert endpoint.write_count == 1, "the wrapper script upload"
+        # the script removes itself: the private tmp holds no leftovers
+        from tests.local_endpoint import LocalEndpoint
+
+        assert isinstance(endpoint, LocalEndpoint)
+        leftovers = list((endpoint.root / "tmp").glob(".ir-exec-*"))
+        assert leftovers == [], f"wrapper scripts leaked: {leftovers}"
+
+    asyncio.run(scenario())
+
+
+def test_escape_heavy_argv_and_large_env_ride_the_wrapper(tmp_path: Path) -> None:
+    """The wrapper decision measures the ENCODED payload: escape-heavy argv and a large env inflate the canonical JSON past the frame cap even when raw bytes look small."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        quotes = '"' * 20_000  # ~20 KB raw, ~40 KB JSON-escaped
+        result = await env.exec(["printf", "%s", quotes])
+        assert result.success and result.stdout == quotes
+        big_env = {"BLOB": "y" * 40_000}
+        result = await env.exec(["sh", "-c", 'printf %s "$BLOB"'], env=big_env)
+        assert result.success and result.stdout == big_env["BLOB"]
+        endpoint = transport.guests["box"]
+        assert endpoint.write_count == 2, "both oversized requests used the wrapper"
+
+    asyncio.run(scenario())
+
+
+def test_assignment_shaped_command_is_not_a_shell_assignment(tmp_path: Path) -> None:
+    """A NAME=value cmd[0] through the wrapper stays a command (127), never a variable assignment."""
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        filler = "z" * 40_000  # force the wrapper path
+        result = await env.exec(["FOO=bar", filler])
+        assert not result.success
+        assert result.returncode == 127
 
     asyncio.run(scenario())
 

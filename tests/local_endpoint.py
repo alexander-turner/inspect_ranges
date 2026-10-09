@@ -5,6 +5,7 @@ Test infrastructure (deliberately not shipped in the package: it executes arbitr
 
 import asyncio
 import os
+import pwd
 import signal
 from pathlib import Path
 
@@ -36,16 +37,24 @@ class LocalEndpoint(FakeGuest):
         super().__init__(name)
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
+        (root / "tmp").mkdir(exist_ok=True)
 
     # -- path translation -----------------------------------------------------
 
     def translate(self, path: str) -> Path:
-        """The in-guest path as a host path: the agent home maps onto the temp root."""
+        """The in-guest path as a host path.
+
+        The agent home maps onto the temp root, and `/tmp` maps onto a PRIVATE tmp under the root: the self_check suite uses fixed `/tmp/...` paths, and two parametrizations racing on the real host `/tmp` under pytest-xdist would share mutable state (and litter the machine). Other absolute paths (the suite reads `/etc`, lists `/usr/bin`) touch the host read-only.
+        """
         if path == AGENT_HOME:
             return self.root
-        prefix = AGENT_HOME + "/"
-        if path.startswith(prefix):
-            return self.root / path[len(prefix) :]
+        agent_prefix = AGENT_HOME + "/"
+        if path.startswith(agent_prefix):
+            return self.root / path[len(agent_prefix) :]
+        if path == "/tmp":
+            return self.root / "tmp"
+        if path.startswith("/tmp/"):
+            return self.root / "tmp" / path[len("/tmp/") :]
         if path.startswith("/"):
             return Path(path)
         return self.root / path
@@ -103,7 +112,7 @@ class LocalEndpoint(FakeGuest):
 
     async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
         self.exec_count += 1
-        current_user = os.environ.get("USER", "")
+        current_user = pwd.getpwuid(os.geteuid()).pw_name
         if request.user is not None and request.user != current_user:
             # the daemon's unknown/unswitchable-user shape: a failed result
             # naming the user, never an exception (self_check expects this)
@@ -118,13 +127,42 @@ class LocalEndpoint(FakeGuest):
             )
             self._store(request.id, reply)
             return reply
+        # argv elements that are agent-home or /tmp paths are translated the
+        # same way file paths are: self_check manipulates its fixed /tmp
+        # fixtures through exec (mkdir/rm/ls) and the provider's wrapper
+        # script is invoked by its uploaded path, so argv and the filesystem
+        # must see one coherent namespace
+        argv = [
+            str(self.translate(part))
+            if part == "/tmp"
+            or part.startswith("/tmp/")
+            or part == AGENT_HOME
+            or part.startswith(AGENT_HOME + "/")
+            else part
+            for part in request.cmd
+        ]
+        host_cwd = self.translate(request.cwd) if request.cwd else self.root
+        if not host_cwd.is_dir():
+            # the real daemon reports a missing cwd as an errno error, never as
+            # command-not-found (a spawn FileNotFoundError is ambiguous between
+            # the two: distinguish before spawning)
+            reply = _StoredReply(
+                ErrorReply(
+                    id=request.id,
+                    errno="ENOENT",
+                    message=f"chdir {request.cwd}: no such file or directory",
+                ),
+                None,
+            )
+            self._store(request.id, reply)
+            return reply
         try:
             process = await asyncio.create_subprocess_exec(
-                *request.cmd,
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self.translate(request.cwd) if request.cwd else self.root,
+                cwd=host_cwd,
                 env={**os.environ, **request.env},
                 start_new_session=True,  # its own process group: the budget kill is a group kill
             )
@@ -137,7 +175,7 @@ class LocalEndpoint(FakeGuest):
             )
             self._store(request.id, reply)
             return reply
-        except (PermissionError, OSError):
+        except OSError:  # deliberate collapse: every spawn OSError is the 126 shape
             reply = _result_reply(
                 request,
                 rc=126,
@@ -152,9 +190,10 @@ class LocalEndpoint(FakeGuest):
             else None
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(stdin), timeout=budget_s
-            )
+            async with asyncio.timeout(budget_s):
+                (stdout, stdout_truncated), (stderr, stderr_truncated) = await _pump(
+                    process, stdin
+                )
         except TimeoutError:
             self._group_kill(process)
             await process.wait()  # SIGKILL closes the pipes; wait reaps
@@ -169,8 +208,6 @@ class LocalEndpoint(FakeGuest):
             )
             self._store(request.id, reply)
             return reply
-        stdout, stdout_truncated = stdout[:STREAM_CAP], len(stdout) > STREAM_CAP
-        stderr, stderr_truncated = stderr[:STREAM_CAP], len(stderr) > STREAM_CAP
         payload = stdout + stderr
         reply = _StoredReply(
             ExecResult(
@@ -198,6 +235,42 @@ class LocalEndpoint(FakeGuest):
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+async def _pump(
+    process: asyncio.subprocess.Process, stdin: bytes
+) -> tuple[tuple[bytes, bool], tuple[bytes, bool]]:
+    """Feed stdin and read both streams with the per-stream cap applied WHILE reading, mirroring the daemon's bounded memory (never buffer-then-slice)."""
+
+    async def feed() -> None:
+        writer = process.stdin
+        if writer is None:
+            return
+        try:
+            if stdin:
+                writer.write(stdin)
+                await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the command exited without reading its stdin
+        finally:
+            writer.close()
+
+    async def read_capped(reader: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+        if reader is None:
+            return b"", False
+        buffer = bytearray()
+        while chunk := await reader.read(1 << 16):
+            if len(buffer) <= STREAM_CAP:
+                buffer.extend(chunk[: STREAM_CAP + 1 - len(buffer)])
+            # keep draining so the child never blocks on a full pipe
+        truncated = len(buffer) > STREAM_CAP
+        return bytes(buffer[:STREAM_CAP]), truncated
+
+    _, out, err = await asyncio.gather(
+        feed(), read_capped(process.stdout), read_capped(process.stderr)
+    )
+    await process.wait()
+    return out, err
 
 
 def _result_reply(

@@ -19,6 +19,7 @@ from .._channel.channel import (
     TransportFailure,
     request_id,
 )
+from .._channel.codec import MAX_CONTROL_PAYLOAD, EncodeError, encode_message
 from .._channel.protocol import DEFAULT_BULK_CAP, Budget, ExecRequest
 from .errors import (
     exec_permission_error,
@@ -37,8 +38,29 @@ logger = logging.getLogger("inspect_ranges.provider")
 AGENT_HOME = "/home/agent"
 """The per-sample working directory: the agent user's home; relative paths resolve against it host-side."""
 
-ARGV_WRAPPER_THRESHOLD = 24_000
-"""Above this many argv bytes, the command rides an uploaded wrapper script: the protocol's control frame is deliberately a single bounded frame (32 KiB, never chunked), so huge argv uses the guest-exec-lessons pattern channel-v1 documents instead of the control payload."""
+_WRAPPER_MARGIN = 1_024
+"""Headroom under the control-frame cap when deciding whether a request needs the wrapper (id and data_size fields vary a little between the probe and the real request)."""
+
+
+def _request_fits(
+    cmd: list[str],
+    cwd: str,
+    env: dict[str, str],
+    user: str | None,
+    budget: Budget,
+) -> bool:
+    """Whether the request's ENCODED control payload fits one frame.
+
+    The bound is the canonical-JSON payload, not raw argv bytes: escape-heavy argv inflates several-fold and `env` counts too, so the decision dry-encodes the actual request shape rather than approximating.
+    """
+    probe = ExecRequest(
+        id=request_id(), cmd=cmd, cwd=cwd, env=env, user=user, budget=budget
+    )
+    try:
+        frames = encode_message(probe, None)
+    except EncodeError:
+        return False
+    return len(frames[0]) <= MAX_CONTROL_PAYLOAD - _WRAPPER_MARGIN
 
 
 def resolve_guest_path(path: str) -> str:
@@ -93,13 +115,29 @@ async def provider_exec(
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME
     budget = Budget(command_ms=timeout * 1000 if timeout is not None else None)
-    if sum(len(part.encode("utf-8")) for part in cmd) > ARGV_WRAPPER_THRESHOLD:
-        # the wrapper script is written through the retried file path; the
-        # script itself is per-request, tiny, and dies with the sample's VM
+    if not _request_fits(cmd, resolved_cwd, env or {}, user, budget):
+        # the control frame is deliberately a single bounded frame (32 KiB,
+        # never chunked), so an oversized request (huge or escape-heavy argv,
+        # a large env) rides an uploaded wrapper script instead, the
+        # guest-exec-lessons pattern channel-v1 documents. The script removes
+        # itself (sh keeps reading from the unlinked-but-open fd), carries the
+        # env as exports, and force-quotes the first word so a NAME=value
+        # cmd[0] stays a command (ENOENT), never a shell assignment.
         script_path = f"/tmp/.ir-exec-{request_id()}.sh"
-        script = "#!/bin/sh\nexec " + " ".join(shlex.quote(part) for part in cmd) + "\n"
+        exports = "".join(
+            f"export {shlex.quote(key)}={shlex.quote(value)}\n"
+            for key, value in (env or {}).items()
+        )
+        first = "'" + cmd[0].replace("'", "'\\''") + "'"
+        rest = " ".join(shlex.quote(part) for part in cmd[1:])
+        script = (
+            '#!/bin/sh\nrm -f -- "$0"\n'
+            + exports
+            + f"exec {first}{' ' if rest else ''}{rest}\n"
+        )
         await provider_write_file(handle, guest, script_path, script)
         cmd = ["sh", script_path]
+        env = {}
 
     async def attempt() -> ExecOutcome:
         request = ExecRequest(
