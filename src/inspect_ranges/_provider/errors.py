@@ -3,8 +3,7 @@
 Every translation the provider performs lives here, so the error semantics the `self_check` suite asserts on (exception types, filenames in messages, the word "directory", shell return-code conventions) have exactly one home. `TamperError` is deliberately absent from every mapping: a tampering guest must never read as "sandbox temporarily unavailable", so it propagates unmapped and fails the sample hard.
 """
 
-from inspect_ai.util import OutputLimitExceededError
-from inspect_ai.util._sandbox.environment import SandboxUnavailableError
+from inspect_ai.util import OutputLimitExceededError, SandboxUnavailableError
 
 from .._channel.channel import (
     ChannelBudgetError,
@@ -15,6 +14,16 @@ from .._channel.channel import (
 
 PERMISSION_DENIED_RC = 126
 """The daemon reports an unexecutable command as rc 126 with "permission denied" on stderr."""
+
+
+def exec_permission_error(rc: int, stderr: str) -> PermissionError | None:
+    """The contract's rc-126 sniff: an unexecutable command raises `PermissionError`.
+
+    The daemon has no distinct errno channel for exec-time EACCES; it reports rc 126 with "permission denied" on stderr (the shell convention), so the provider sniffs exactly that pair. Any other rc-126 (a command that itself exits 126) passes through as an ordinary result.
+    """
+    if rc == PERMISSION_DENIED_RC and "permission denied" in stderr.lower():
+        return PermissionError(stderr.strip() or "permission denied")
+    return None
 
 
 class SessionChangedError(RuntimeError):
@@ -45,8 +54,16 @@ def unavailable(
 ) -> SandboxUnavailableError:
     """An infrastructure failure the retry layer could not recover: the sandbox is unavailable.
 
-    Only channel/untimed/transport budget layers and transport failures map here; a command-layer budget is a real timeout and maps to `TimeoutError` instead (`timeout_error`).
+    Only channel/untimed/transport budget layers and transport failures map here. A command-layer budget is a real timeout and maps to `TimeoutError` instead (`timeout_error`); routing one here would leave the sample running past a genuine command timeout, so the table defends itself.
+
+    Raises:
+        ValueError: `error` is a command-layer budget (caller bug, never maskable).
     """
+    if isinstance(error, ChannelBudgetError) and error.layer == "command":
+        raise ValueError(
+            "a command-layer budget is a real timeout: map it with timeout_error, "
+            "never unavailable"
+        )
     return SandboxUnavailableError(str(error))
 
 
@@ -105,7 +122,10 @@ def file_limit_error(
 
 
 def human_size(size_bytes: int) -> str:
-    """Byte counts as the contract's human-readable rendering (matches inspect-ai's `_human_readable_size`)."""
+    """Byte counts as the contract's human-readable rendering.
+
+    Deliberately duplicates inspect-ai's private `_human_readable_size` rather than importing a private module at runtime; the parity test (`test_human_size_matches_the_contract_rendering`) pins the two together, so a divergence fails CI instead of silently changing the message `self_check` asserts on.
+    """
     if size_bytes >= 1024**3 and size_bytes % 1024**3 == 0:
         return f"{size_bytes // 1024**3} GiB"
     if size_bytes >= 1024**2 and size_bytes % 1024**2 == 0:

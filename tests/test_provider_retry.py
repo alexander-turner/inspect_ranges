@@ -143,6 +143,24 @@ def test_shared_deadline_bounds_wall_time() -> None:
         elapsed = time.monotonic() - start
         assert elapsed < 1.0, f"shared deadline did not bound retries: {elapsed:.2f}s"
 
+        # the deadline is a hard wall: an in-flight straggler attempt is
+        # truncated, surfacing as TransportFailure (its cause), never a bare
+        # TimeoutError that would read as a command timeout
+        async def slow_transient() -> None:
+            await asyncio.sleep(5.0)
+            raise TransportFailure("slow loss")
+
+        hard = RetryPolicy(
+            attempts=50, wait_initial_s=0.01, wait_max_s=0.01, deadline_s=0.3
+        )
+        start = time.monotonic()
+        with pytest.raises(TransportFailure, match="retry deadline"):
+            await with_retry(slow_transient, policy=hard, stats=RetryStats(), op="exec")
+        elapsed = time.monotonic() - start
+        assert elapsed < 2.0, (
+            f"deadline did not truncate in-flight work: {elapsed:.2f}s"
+        )
+
     asyncio.run(scenario())
 
 

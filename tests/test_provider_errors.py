@@ -1,8 +1,7 @@
 """Slice-1 battery: the channel-to-Inspect error mapping table."""
 
 import pytest
-from inspect_ai.util import OutputLimitExceededError
-from inspect_ai.util._sandbox.environment import SandboxUnavailableError
+from inspect_ai.util import OutputLimitExceededError, SandboxUnavailableError
 from inspect_ranges._channel.channel import (
     ChannelBudgetError,
     FileLimitExceeded,
@@ -10,8 +9,8 @@ from inspect_ranges._channel.channel import (
     TransportFailure,
 )
 from inspect_ranges._provider.errors import (
-    PERMISSION_DENIED_RC,
     SessionChangedError,
+    exec_permission_error,
     file_limit_error,
     human_size,
     map_file_failure,
@@ -56,8 +55,13 @@ def test_shell_returncode_convention(wire_rc: int, expected: int) -> None:
     assert shell_returncode(wire_rc) == expected
 
 
-def test_permission_denied_rc_constant() -> None:
-    assert PERMISSION_DENIED_RC == 126
+def test_exec_permission_sniff() -> None:
+    error = exec_permission_error(126, "sh: /etc/passwd: Permission denied")
+    assert isinstance(error, PermissionError)
+    assert "Permission denied" in str(error)
+    # an ordinary command exiting 126 without the daemon's marker passes through
+    assert exec_permission_error(126, "my own exit code") is None
+    assert exec_permission_error(1, "permission denied") is None
 
 
 def test_timeout_error_carries_truncated_output() -> None:
@@ -67,6 +71,11 @@ def test_timeout_error_carries_truncated_output() -> None:
     assert isinstance(failure, TimeoutError)
     assert failure.truncated_output == "partial out"
     assert "command budget expired" in str(failure)
+
+
+def test_unavailable_refuses_command_layer() -> None:
+    with pytest.raises(ValueError, match="command-layer"):
+        unavailable(ChannelBudgetError("command", "command budget expired"))
 
 
 def test_unavailable_mapping() -> None:

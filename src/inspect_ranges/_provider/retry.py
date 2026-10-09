@@ -7,8 +7,11 @@ Classification: the deny-list outranks the allow-list, and unknown failures defa
 Retries are telemetry, never silent: every retry logs one structured line (op, endpoint, attempt, cause, sleep) joinable with the channel's request-id logs, and increments per-op counters surfaced in the debug bundle. Teardown and cleanup paths never pass through this module.
 """
 
+import asyncio
+import dataclasses
 import enum
 import logging
+import math
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -46,8 +49,7 @@ _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     FileNotFoundError,
     IsADirectoryError,
     NotADirectoryError,
-    UnicodeDecodeError,
-    ValueError,
+    ValueError,  # covers UnicodeDecodeError (a ValueError subclass) and stdin-mismatch refusals
 )
 """Deny-list, checked before the transient allow-list. `TimeoutError` and the file errors are `OSError` subclasses and MUST stay here or the `OSError` allow-list entry would silently retry them. `TamperError`, `GuestError`, `FileLimitExceeded`, and `OutputLimitExceededError` are permanent through the default (they match no transient type)."""
 
@@ -91,12 +93,7 @@ class RetryPolicy:
 
     def with_deadline(self, deadline_s: float | None) -> "RetryPolicy":
         """This policy with a per-call shared deadline."""
-        return RetryPolicy(
-            attempts=self.attempts,
-            wait_initial_s=self.wait_initial_s,
-            wait_max_s=self.wait_max_s,
-            deadline_s=deadline_s,
-        )
+        return dataclasses.replace(self, deadline_s=deadline_s)
 
 
 @dataclass
@@ -115,6 +112,7 @@ class RetryStats:
     ops: dict[str, OpCounters] = field(default_factory=dict[str, OpCounters])
 
     def counters(self, op: str) -> OpCounters:
+        """The (created-on-first-use) counters for one operation kind."""
         return self.ops.setdefault(op, OpCounters())
 
     def snapshot(self) -> dict[str, dict[str, int | str]]:
@@ -150,8 +148,8 @@ def _env_float(name: str, default: float) -> float:
         parsed = float(value)
     except ValueError as error:
         raise ValueError(f"{name} must be a number, got {value!r}") from error
-    if parsed <= 0:
-        raise ValueError(f"{name} must be positive, got {parsed}")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {parsed}")
     return parsed
 
 
@@ -236,4 +234,29 @@ async def with_retry[T](
         reraise=True,
         before_sleep=_record,
     )
-    return await retrying(operation)
+    if policy.deadline_s is None:
+        return await retrying(operation)
+    # tenacity's stop_after_delay only checks BETWEEN attempts, so an attempt
+    # started just inside the deadline could overrun it by a sleep plus a full
+    # attempt; the outer timeout makes the shared deadline a hard wall-time
+    # bound. Its expiry surfaces as TransportFailure carrying the last cause,
+    # never a bare TimeoutError (which the mapping table treats as a command
+    # timeout, a different claim than "the retry window closed").
+    last: BaseException | None = None
+
+    async def observed() -> T:
+        nonlocal last
+        try:
+            return await operation()
+        except BaseException as failure:
+            last = failure
+            raise
+
+    try:
+        async with asyncio.timeout(policy.deadline_s):
+            return await retrying(observed)
+    except TimeoutError as expiry:
+        cause = f"; last failure: {str(last)[:_CAUSE_CAP]}" if last is not None else ""
+        raise TransportFailure(
+            f"{op}: retry deadline ({policy.deadline_s:.1f}s) expired{cause}"
+        ) from (last or expiry)
