@@ -1454,7 +1454,9 @@ class LoopbackTransport:
             logger.error("loopback server task failed", exc_info=task.exception())
 
     async def _serve(self, endpoint: str, stream: MemoryStream) -> None:
-        reader = MessageStreamReader(stream.receive, bulk_cap=2 * DEFAULT_BULK_CAP)
+        # the server side is the daemon side: accept inbound bulk up to the
+        # daemon's cap (write payloads, exec stdin), like the Go daemon does
+        reader = MessageStreamReader(stream.receive, bulk_cap=DAEMON_INBOUND_BULK_CAP)
         try:
             message, bulk = await reader.next()
         except (DecodeError, ChannelClosed):

@@ -4,6 +4,7 @@ Each layer-2 attempt mints a FRESH request id (layer-1 same-id recovery already 
 """
 
 import logging
+import shlex
 from pathlib import PurePosixPath
 
 from inspect_ai.util import SandboxEnvironmentLimits
@@ -35,6 +36,9 @@ logger = logging.getLogger("inspect_ranges.provider")
 
 AGENT_HOME = "/home/agent"
 """The per-sample working directory: the agent user's home; relative paths resolve against it host-side."""
+
+ARGV_WRAPPER_THRESHOLD = 24_000
+"""Above this many argv bytes, the command rides an uploaded wrapper script: the protocol's control frame is deliberately a single bounded frame (32 KiB, never chunked), so huge argv uses the guest-exec-lessons pattern channel-v1 documents instead of the control payload."""
 
 
 def resolve_guest_path(path: str) -> str:
@@ -89,6 +93,13 @@ async def provider_exec(
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME
     budget = Budget(command_ms=timeout * 1000 if timeout is not None else None)
+    if sum(len(part.encode("utf-8")) for part in cmd) > ARGV_WRAPPER_THRESHOLD:
+        # the wrapper script is written through the retried file path; the
+        # script itself is per-request, tiny, and dies with the sample's VM
+        script_path = f"/tmp/.ir-exec-{request_id()}.sh"
+        script = "#!/bin/sh\nexec " + " ".join(shlex.quote(part) for part in cmd) + "\n"
+        await provider_write_file(handle, guest, script_path, script)
+        cmd = ["sh", script_path]
 
     async def attempt() -> ExecOutcome:
         request = ExecRequest(
