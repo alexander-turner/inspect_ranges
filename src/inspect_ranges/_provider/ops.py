@@ -83,7 +83,7 @@ def _channel(handle: SampleHandle) -> MessageChannel:
 async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     """Raise `SessionChangedError` when the guest's daemon session changed since the pin.
 
-    No-op while no session is pinned (boot not finished). Called after a post-retry transient failure, and after a side-effecting success that needed a same-id resend, per the layer-2b design: a restarted daemon forgot its dedupe store, so a resend there may have double-run.
+    No-op while no session is pinned (boot not finished). Called after any resent or re-attempted delivery of a side-effecting operation, whatever its outcome shape, per the layer-2b design: a restarted daemon forgot its dedupe store, so the earlier delivery may have double-run.
     """
     pinned = handle.sessions.get(guest)
     if pinned is None:
@@ -94,6 +94,29 @@ async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     if observed != pinned:
         handle.sessions[guest] = observed  # re-pin so later samples/ops proceed
         raise SessionChangedError(guest, op, pinned, observed)
+
+
+async def _confirm_session_best_effort(
+    handle: SampleHandle, guest: str, op: str
+) -> None:
+    """`confirm_session` for the arms that are about to raise their own failure.
+
+    The confirm ping racing a daemon outage (the restart window itself) cannot be distinguished from plain unavailability, and the caller is about to surface an honest failure anyway: only a POSITIVE session change (or a tamper verdict, which propagates) outranks it.
+    """
+    try:
+        await confirm_session(handle, guest, op)
+    except (TransportFailure, ChannelBudgetError):
+        return
+
+
+async def _confirm_session_or_unavailable(
+    handle: SampleHandle, guest: str, op: str
+) -> None:
+    """`confirm_session` after a SUCCESS that involved any re-delivery: a dead daemon at confirm time means exactly-once cannot be certified for the result in hand, which is unavailable-shaped, not silently fine."""
+    try:
+        await confirm_session(handle, guest, op)
+    except (TransportFailure, ChannelBudgetError) as failure:
+        raise unavailable(failure) from failure
 
 
 async def _bounded_exec(
@@ -211,6 +234,7 @@ async def provider_exec(
                 )
             raise
 
+    retries_before = handle.stats.counters("exec").retries
     try:
         outcome = await with_retry(
             attempt,
@@ -226,26 +250,28 @@ async def provider_exec(
             # resend double-ran into the budget): the session verdict outranks
             # the timeout verdict
             if (failure.attempts or 0) > 1:
-                await confirm_session(handle, guest, "exec")
+                await _confirm_session_best_effort(handle, guest, "exec")
             # the daemon's ETIME reply may carry the killed command's output
             # tail (`ErrorReply.partial`); surface it on the TimeoutError
             raise timeout_error(failure, failure.partial) from failure
-        await confirm_session(handle, guest, "exec")
+        await _confirm_session_best_effort(handle, guest, "exec")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "exec")
+        await _confirm_session_best_effort(handle, guest, "exec")
         raise unavailable(failure) from failure
     except GuestError as failure:
         # an errno-tagged failure after a resent delivery still means the
         # resend may have double-run on a restarted daemon; confirm before
         # the honest error propagates
         if (failure.attempts or 0) > 1:
-            await confirm_session(handle, guest, "exec")
+            await _confirm_session_best_effort(handle, guest, "exec")
         raise
     # TamperError, SessionChangedError, ValueError propagate unmapped
 
-    if outcome.attempts > 1:
-        await confirm_session(handle, guest, "exec")
+    if outcome.attempts > 1 or handle.stats.counters("exec").retries > retries_before:
+        # either a same-id resend (wire layer) or a fresh-id re-attempt
+        # (retry layer) delivered more than once: both are restart-risky
+        await _confirm_session_or_unavailable(handle, guest, "exec")
     if outcome.stdout_truncated or outcome.stderr_truncated:
         # the daemon's own per-stream cap fired before anything reached the host
         raise output_limit_error(
@@ -336,6 +362,7 @@ async def provider_write_file(
     async def attempt() -> int:
         return await channel.write_file(guest, path, data, mode=mode)
 
+    retries_before = handle.stats.counters("write_file").retries
     try:
         deliveries = await with_retry(
             attempt,
@@ -348,7 +375,7 @@ async def provider_write_file(
         # side-effecting op: a resent delivery that then failed may still have
         # double-run on a restarted daemon; the session verdict comes first
         if (failure.attempts or 0) > 1:
-            await confirm_session(handle, guest, "write_file")
+            await _confirm_session_best_effort(handle, guest, "write_file")
         mapped = map_file_failure(failure, file)
         if mapped is failure:
             raise
@@ -356,12 +383,12 @@ async def provider_write_file(
     except ChannelBudgetError as failure:
         if failure.layer == "command":
             if (failure.attempts or 0) > 1:
-                await confirm_session(handle, guest, "write_file")
+                await _confirm_session_best_effort(handle, guest, "write_file")
             raise timeout_error(failure, None) from failure
-        await confirm_session(handle, guest, "write_file")
+        await _confirm_session_best_effort(handle, guest, "write_file")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "write_file")
+        await _confirm_session_best_effort(handle, guest, "write_file")
         raise unavailable(failure) from failure
-    if deliveries > 1:
-        await confirm_session(handle, guest, "write_file")
+    if deliveries > 1 or handle.stats.counters("write_file").retries > retries_before:
+        await _confirm_session_or_unavailable(handle, guest, "write_file")

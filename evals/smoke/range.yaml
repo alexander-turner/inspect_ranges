@@ -1,0 +1,26 @@
+# provider-v1 slice-5 battery spec: the provider-driven multi-guest range.
+# One isolated segment, one named target ("web"), one attacker box; both run
+# the recipe-v4 golden (vsockd 3.1.0 + the agent user).
+range:
+  name: provider-battery
+  schema_version: "0.1"
+  description: >
+    Slice-5 battery range: provider-driven lifecycle, self_check, retry
+    faults, and the third-user wrapper path against realizer-booted VMs.
+
+networks:
+  - name: lab
+    cidr: 10.91.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.91.10.10 }]
+
+attacker:
+  interfaces: [{ network: lab, ip: 10.91.10.2 }]
+  image: noble-range-guest
+  entry: external
+  egress: none
