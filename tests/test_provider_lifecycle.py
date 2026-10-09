@@ -62,7 +62,9 @@ class FakeSeams:
         self.registered_at_up: list[bool] = []
         self.plans: dict[str, ResolvedPlan] = {}
 
-    def render(self, spec: RangeSpec, out: Path, options: PlanOptions) -> ResolvedPlan:
+    def render(
+        self, spec: RangeSpec, out: Path, options: PlanOptions | None
+    ) -> ResolvedPlan:
         self.render_calls.append(out)
         out.mkdir(parents=True, exist_ok=True)
         plan = resolve_plan(spec, options)
@@ -171,7 +173,7 @@ def test_render_failure_unwinds_everything(tmp_path: Path) -> None:
             runtime, _seams = rigged_runtime(tmp_path)
 
             def broken_render(
-                spec: RangeSpec, out: Path, options: PlanOptions
+                spec: RangeSpec, out: Path, options: PlanOptions | None
             ) -> ResolvedPlan:
                 raise OSError("disk full")
 

@@ -33,6 +33,7 @@ from ..schema import load_range, revalidate_range
 from ..types import RangeSpec
 from .admission import default_max_sandboxes
 from .naming import sample_project
+from .ops import provider_exec, provider_read_file, provider_write_file
 from .state import ProviderRuntime, SampleHandle, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
@@ -100,8 +101,12 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     ) -> None:
         """Validate the config once and resolve the plan so a broken range fails at startup, not per sample."""
         runtime = provider_runtime()
-        spec = _resolve_spec(config)
-        plan = resolve_plan(spec, runtime.plan_options())
+        if isinstance(config, (str, RangeSpec)):
+            spec, plan = runtime.resolve_config(config, lambda: _resolve_spec(config))
+        else:
+            spec = _resolve_spec(config)
+            plan = resolve_plan(spec, runtime.plan_options())
+        del spec
         logger.info(
             "task_init %s: range %s (%d guests, %d vCPUs, %d MiB)",
             task_name,
@@ -120,9 +125,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
         runtime = provider_runtime()
-        spec = _resolve_spec(config)
-        plan = resolve_plan(spec, runtime.plan_options())
-        sample_id = metadata.get("__sample_id__", "sample")
+        # inspect-ai injects int ids for default datasets: always stringify
+        sample_id = str(metadata.get("__sample_id__", "sample"))
+        cache_key = config if isinstance(config, (str, RangeSpec)) else None
+        if cache_key is not None:
+            spec, plan = runtime.resolve_config(
+                cache_key, lambda: _resolve_spec(config)
+            )
+        else:
+            spec = _resolve_spec(config)
+            plan = resolve_plan(spec, runtime.plan_options())
 
         await runtime.admission.acquire(plan.totals)
         handle: SampleHandle | None = None
@@ -166,7 +178,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         last_error: UpError | None = None
         for attempt in range(1, attempts + 1):
             project = sample_project(spec.meta.name, sample_id)
-            lease = runtime.allocator.lease(project, plan.totals.guests)
+            # the allocator takes a blocking cross-process flock: off the loop
+            lease = await asyncio.to_thread(
+                runtime.allocator.lease, project, plan.totals.guests
+            )
             staging = runtime.staging_root() / project
             handle = SampleHandle(
                 project=project,
@@ -174,25 +189,43 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 staging=staging,
                 totals=plan.totals,
                 cid_base=lease.base,
+                retry=runtime.retry_config,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
             runtime.registry[handle.project] = handle
             try:
-                runtime.render_fn(
+                await asyncio.to_thread(
+                    runtime.render_fn,
                     spec,
                     staging / "bundle",
                     runtime.plan_options(cid_base=lease.base),
                 )
-                result: UpResult = await asyncio.to_thread(
-                    runtime.up_fn,
-                    staging / "bundle",
-                    UpOptions(
-                        project=project,
-                        image_cache=runtime.image_cache,
-                        state_dir=runtime.state_dir,
-                    ),
+                boot = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        runtime.up_fn,
+                        staging / "bundle",
+                        UpOptions(
+                            project=project,
+                            image_cache=runtime.image_cache,
+                            state_dir=runtime.state_dir,
+                        ),
+                    )
                 )
+                try:
+                    result: UpResult = await asyncio.shield(boot)
+                except asyncio.CancelledError:
+                    # the boot thread cannot be aborted and keeps creating
+                    # resources; drain it (up is internally bounded) so the
+                    # unwind sees everything the attempt created, then
+                    # propagate the cancellation
+                    try:
+                        await asyncio.shield(
+                            asyncio.gather(boot, return_exceptions=True)
+                        )
+                    finally:
+                        await cls._unwind_attempt(runtime, handle)
+                    raise
             except UpError as error:
                 await cls._unwind_attempt(runtime, handle)
                 if error.stage in TRANSIENT_UP_STAGES and attempt < attempts:
@@ -253,7 +286,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 error,
             )
             return  # keep lease and registry so the sweep can still find it
-        runtime.allocator.release(handle.project)
+        await asyncio.to_thread(runtime.allocator.release, handle.project)
         shutil.rmtree(handle.staging, ignore_errors=True)
         runtime.registry.pop(handle.project, None)
 
@@ -264,7 +297,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         Leases, the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, lease plus the provider-marked owner record for `cli_cleanup`).
         """
         await asyncio.to_thread(runtime.down_fn, handle.project, runtime.state_dir)
-        runtime.allocator.release(handle.project)
+        await asyncio.to_thread(runtime.allocator.release, handle.project)
         shutil.rmtree(handle.staging, ignore_errors=True)
         runtime.registry.pop(handle.project, None)
         if handle.admission_charged:
@@ -336,7 +369,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         Provider origin is the union of the CID lease registry (written before anything boots, so it covers crash windows) and owner records marked `origin="provider"`.
         """
         runtime = provider_runtime()  # fresh process: the fallback runtime, real seams
-        leased = set(runtime.allocator.leased_projects())
+        leased = set(await asyncio.to_thread(runtime.allocator.leased_projects))
         marked = {
             project
             for project in list_projects(runtime.state_dir)
@@ -353,11 +386,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             except Exception as error:
                 failures.append(f"{project}: {error}")
                 continue
-            runtime.allocator.release(project)
+            await asyncio.to_thread(runtime.allocator.release, project)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)
-        failed_projects = {failure.split(":", 1)[0] for failure in failures}
-        runtime.allocator.prune(failed_projects)
+        # no blanket prune: leases outside `targets` may belong to a
+        # concurrently running eval (or to an entry this version cannot
+        # parse); successful targets were released individually above and
+        # failed ones must stay findable
         if failures:
             raise RuntimeError(
                 "cli_cleanup could not tear down every project:\n  "
@@ -378,11 +413,19 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        raise NotImplementedError("the op surface lands in provider-v1 slice 3")
+        """Run `cmd` in this guest over the channel.
+
+        `timeout` is enforced in-guest (the daemon's process-tree kill), so a timed-out command genuinely timed out; `timeout_retry` is therefore advisory and ignored, the inspect_k8s_sandbox stance: re-running a command that hit its deadline is destructive in a range, and the transient-infrastructure class Docker's re-run ladder exists for is handled by the provider's layered retry instead. `concurrency` applies to local sandboxes only and is ignored. Transient infrastructure failures retry with fresh request ids; per the k8s caveat quoted in `retry.py`, a command that partially executed before such a failure may run again.
+        """
+        del timeout_retry, concurrency  # advisory; see the docstring
+        return await provider_exec(
+            self._handle, self._guest, cmd, input, cwd, env, user, timeout
+        )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        raise NotImplementedError("the op surface lands in provider-v1 slice 3")
+        """Write `contents` to `file` (relative paths join the per-sample working directory); parent directories are created."""
+        await provider_write_file(self._handle, self._guest, file, contents)
 
     @overload
     async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
@@ -392,7 +435,9 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        raise NotImplementedError("the op surface lands in provider-v1 slice 3")
+        """Read `file` (capped at the per-call `MAX_READ_FILE_SIZE`); strict UTF-8 decode in text mode."""
+        data = await provider_read_file(self._handle, self._guest, file)
+        return data.decode("utf-8") if text else data
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:

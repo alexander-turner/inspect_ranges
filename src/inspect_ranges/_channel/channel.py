@@ -82,7 +82,12 @@ _STAGE_ORDER = {"fetch": 0, "construct": 1, "boot": 2, "verify": 3, "ready": 4}
 
 
 class ChannelError(Exception):
-    """Base for every channel-layer failure."""
+    """Base for every channel-layer failure.
+
+    `attempts` is the delivery-attempt annotation for the provider's retry layer: how many times the failing request's frames were actually sent (a send that failed at connect provably never left and does not count). `None` means the operation never reached the counting path.
+    """
+
+    attempts: int | None = None
 
 
 class TamperError(ChannelError):
@@ -130,13 +135,17 @@ class IllegalTransition(ChannelError):
 
 @dataclass
 class ExecOutcome:
-    """Validated exec result with the bulk split back into streams."""
+    """Validated exec result with the bulk split back into streams.
+
+    `attempts` counts deliveries of the exec request itself (not liveness polls): a value above 1 means a same-id resend happened, which the provider's session-invalidation policy uses to decide whether exactly-once still holds for side-effecting operations.
+    """
 
     rc: int
     stdout: bytes
     stderr: bytes
     stdout_truncated: bool
     stderr_truncated: bool
+    attempts: int = 1
 
 
 class ByteStream(Protocol):
@@ -168,7 +177,7 @@ class RangeChannel(Protocol):
     async def read_file(
         self, guest: str, path: str, *, cap: int = DEFAULT_BULK_CAP
     ) -> bytes: ...
-    async def write_file(self, guest: str, path: str, data: bytes) -> None: ...
+    async def write_file(self, guest: str, path: str, data: bytes) -> int: ...
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply: ...
     async def ping(self, guest: str) -> PongReply: ...
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply: ...
@@ -283,15 +292,23 @@ class MessageChannel:
         *,
         bulk_cap: int = DEFAULT_BULK_CAP,
         ack_consumed: bool = False,
-    ) -> tuple[Message, bytes | None]:
+    ) -> tuple[Message, bytes | None, int]:
         """One request/reply exchange with idempotent resend on lost replies.
 
         A dropped connection or truncated reply is recovered by reconnecting and resending the identical request (the endpoint deduplicates on id). Any reply shape an honest endpoint cannot produce, including residual bytes after the reply, is a tamper verdict with the trace tail dumped. With `ack_consumed`, the reply (success or durable error) is acknowledged before this returns or raises.
+
+        Returns the reply, its bulk, and the delivery-attempt count (sends that got past connect); raised `ChannelError`s carry the same count as `.attempts`.
         """
         frames = encode_message(request, bulk, trace=self._trace.append)
         attempt_s, outer_s = self._op_budgets(request)
         deadline = time.monotonic() + outer_s
         last_failure = ""
+        deliveries = 0
+
+        def stamped[E: ChannelError](error: E) -> E:
+            error.attempts = deliveries
+            return error
+
         self._log(
             logging.DEBUG,
             "request",
@@ -302,9 +319,11 @@ class MessageChannel:
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise ChannelBudgetError(
-                    "untimed",
-                    f"{request.kind} id={request.id}: operation total bound ({outer_s:.0f}s) expired",
+                raise stamped(
+                    ChannelBudgetError(
+                        "untimed",
+                        f"{request.kind} id={request.id}: operation total bound ({outer_s:.0f}s) expired",
+                    )
                 )
             try:
                 reply, reply_bulk = await self._once(
@@ -314,16 +333,38 @@ class MessageChannel:
                     min(attempt_s, remaining),
                     bulk_cap=bulk_cap,
                 )
+                deliveries += 1
             except TimeoutError:
+                deliveries += 1  # the frames went out; only the reply is missing
                 layer: BudgetLayer = (
                     "untimed" if deadline - time.monotonic() <= 0 else "channel"
                 )
                 self._dump_trace(request, endpoint, f"budget expired ({layer})")
-                raise ChannelBudgetError(
-                    layer,
-                    f"{request.kind} id={request.id}: no reply within the {layer} allowance",
+                raise stamped(
+                    ChannelBudgetError(
+                        layer,
+                        f"{request.kind} id={request.id}: no reply within the {layer} allowance",
+                    )
                 ) from None
+            except _ConnectFailure as failure:
+                # the request provably never left: not a delivery
+                last_failure = f"{type(failure).__name__}: {failure}"
+                self._log(
+                    logging.WARNING,
+                    "retry",
+                    rid=request.id,
+                    endpoint=endpoint,
+                    detail=f"attempt {attempt}/{_RETRY_ATTEMPTS}: {last_failure}",
+                )
+                await asyncio.sleep(
+                    min(
+                        _RETRY_BACKOFF_S * attempt,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
+                continue
             except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
+                deliveries += 1
                 last_failure = f"{type(failure).__name__}: {failure}"
                 self._log(
                     logging.WARNING,
@@ -347,14 +388,16 @@ class MessageChannel:
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
-                    raise TransportFailure(
-                        f"{request.kind} id={request.id}: executed, result lost before acknowledgement"
+                    raise stamped(
+                        TransportFailure(
+                            f"{request.kind} id={request.id}: executed, result lost before acknowledgement"
+                        )
                     )
                 if ack_consumed:
                     await self._ack(endpoint, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
-                    raise ChannelBudgetError(reply.layer, reply.message)
-                raise GuestError(reply.errno, reply.message, reply.layer)
+                    raise stamped(ChannelBudgetError(reply.layer, reply.message))
+                raise stamped(GuestError(reply.errno, reply.message, reply.layer))
             self._log(
                 logging.DEBUG,
                 "reply",
@@ -364,10 +407,12 @@ class MessageChannel:
             )
             if ack_consumed:
                 await self._ack(endpoint, request.id)
-            return reply, reply_bulk
+            return reply, reply_bulk, deliveries
         self._dump_trace(request, endpoint, last_failure)
-        raise TransportFailure(
-            f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
+        raise stamped(
+            TransportFailure(
+                f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
+            )
         )
 
     async def _once(
@@ -434,7 +479,7 @@ class MessageChannel:
         """Acknowledge a consumed durable result. Loss is best-effort (logged); tamper re-raises."""
         ack = AckRequest(id=request_id(), target_id=target_id)
         try:
-            reply, _ = await self._exchange(endpoint, ack)
+            reply, _, _ = await self._exchange(endpoint, ack)
             self._expect(reply, OkReply, ack, endpoint)
         except TamperError:
             raise
@@ -452,13 +497,18 @@ class MessageChannel:
     async def ping(self, guest: str) -> PongReply:
         """Liveness and protocol-version probe for one guest."""
         request = PingRequest(id=request_id())
-        reply, _ = await self._exchange(guest, request)
+        reply, _, _ = await self._exchange(guest, request)
         return self._expect(reply, PongReply, request, guest)
 
     async def exec(
-        self, guest: str, request: ExecRequest, *, stdin: bytes | None = None
+        self,
+        guest: str,
+        request: ExecRequest,
+        *,
+        stdin: bytes | None = None,
+        bulk_cap: int = 2 * DEFAULT_BULK_CAP,
     ) -> ExecOutcome:
-        """Run `request` in the guest; `stdin` must match the request's `data_size` declaration.
+        """Run `request` in the guest; `stdin` must match the request's `data_size` declaration. `bulk_cap` bounds the accepted reply bulk (stdout plus stderr), reader-side.
 
         Liveness-polled: the initial reply wait is capped so at least one poll precedes the exec deadline; `pending` replies prove liveness while the command runs, so long execs stay allowance-bounded between polls, and three consecutive allowance windows with zero liveness evidence are a channel-layer failure. The exec deadline (`command_ms` plus the shared observation grace, or the untimed total) firing without RECENT liveness is a channel-layer verdict; with recent liveness it is a command-layer verdict (the guest demonstrably failed to kill within its own grace).
 
@@ -496,6 +546,12 @@ class MessageChannel:
         polling = False
         losses = 0
         silent_windows = 0
+        deliveries = 0
+
+        def stamped[E: ChannelError](error: E) -> E:
+            error.attempts = deliveries
+            return error
+
         # liveness must be RECENT to blame the command layer: a pending seen
         # once at the start must not convert a later transport stall into a
         # guest-failed-to-kill verdict
@@ -503,8 +559,11 @@ class MessageChannel:
         while True:
             now = time.monotonic()
             if now >= outer_deadline:
-                raise ChannelBudgetError(
-                    "untimed", f"exec id={request.id}: operation total bound expired"
+                raise stamped(
+                    ChannelBudgetError(
+                        "untimed",
+                        f"exec id={request.id}: operation total bound expired",
+                    )
                 )
             if now >= exec_deadline:
                 recent_liveness = (
@@ -513,14 +572,16 @@ class MessageChannel:
                 )
                 layer: BudgetLayer = "command" if recent_liveness else "channel"
                 self._dump_trace(request, guest, f"exec deadline ({layer})")
-                raise ChannelBudgetError(
-                    layer,
-                    f"exec id={request.id}: no result by the exec deadline "
-                    + (
-                        "despite recently observed liveness (the guest failed to kill)"
-                        if recent_liveness
-                        else "without recent liveness (transport stall)"
-                    ),
+                raise stamped(
+                    ChannelBudgetError(
+                        layer,
+                        f"exec id={request.id}: no result by the exec deadline "
+                        + (
+                            "despite recently observed liveness (the guest failed to kill)"
+                            if recent_liveness
+                            else "without recent liveness (transport stall)"
+                        ),
+                    )
                 )
             remaining = min(exec_deadline, outer_deadline) - now
             window = min(allowance_s, remaining)
@@ -538,26 +599,34 @@ class MessageChannel:
                 send_frames = frames
             try:
                 reply, bulk = await self._once(
-                    guest, probe, send_frames, window, bulk_cap=2 * DEFAULT_BULK_CAP
+                    guest, probe, send_frames, window, bulk_cap=bulk_cap
                 )
+                if probe is request:
+                    deliveries += 1
             except TimeoutError:
+                if probe is request:
+                    deliveries += 1  # sent; only the reply is missing
                 # no reply within the allowance: switch to liveness polling
                 polling = True
                 if last_pending_at is None:
                     silent_windows += 1
                     if silent_windows >= _SILENT_WINDOW_LIMIT:
                         self._dump_trace(request, guest, "silent transport")
-                        raise ChannelBudgetError(
-                            "channel",
-                            f"exec id={request.id}: {silent_windows} allowance "
-                            "windows with zero liveness evidence",
+                        raise stamped(
+                            ChannelBudgetError(
+                                "channel",
+                                f"exec id={request.id}: {silent_windows} allowance "
+                                "windows with zero liveness evidence",
+                            )
                         ) from None
                 continue
             except _ConnectFailure as failure:
                 losses += 1
                 if losses > _RETRY_ATTEMPTS:
-                    raise TransportFailure(
-                        f"exec id={request.id}: unreachable after {losses - 1} attempts ({failure})"
+                    raise stamped(
+                        TransportFailure(
+                            f"exec id={request.id}: unreachable after {losses - 1} attempts ({failure})"
+                        )
                     ) from failure
                 await asyncio.sleep(
                     min(
@@ -569,8 +638,10 @@ class MessageChannel:
             except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
                 losses += 1
                 if losses > _RETRY_ATTEMPTS:
-                    raise TransportFailure(
-                        f"exec id={request.id}: lost after {losses - 1} consecutive attempts ({failure})"
+                    raise stamped(
+                        TransportFailure(
+                            f"exec id={request.id}: lost after {losses - 1} consecutive attempts ({failure})"
+                        )
                     ) from failure
                 await asyncio.sleep(
                     min(
@@ -596,19 +667,23 @@ class MessageChannel:
                 if reply.errno == "ESTALE":
                     # the daemon's at-most-once tombstone: the effect EXECUTED
                     # and its result was evicted; never resend
-                    raise TransportFailure(
-                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    raise stamped(
+                        TransportFailure(
+                            f"exec id={request.id}: executed, result lost before acknowledgement"
+                        )
                     )
                 if reply.errno == "ENOENT":
                     # ENOENT is only resend-safe while the request provably
                     # never left (every attempt failed at connect); anything
                     # else risks a double run on a tombstone-evicted id
-                    raise TransportFailure(
-                        f"exec id={request.id}: no stored result and delivery "
-                        "cannot be ruled out; refusing an at-most-once-unsafe resend"
+                    raise stamped(
+                        TransportFailure(
+                            f"exec id={request.id}: no stored result and delivery "
+                            "cannot be ruled out; refusing an at-most-once-unsafe resend"
+                        )
                     )
                 # any other poll failure is an honest errno-tagged error
-                raise GuestError(reply.errno, reply.message, reply.layer)
+                raise stamped(GuestError(reply.errno, reply.message, reply.layer))
             if reply.id != request.id:
                 self._tamper(
                     request,
@@ -617,13 +692,15 @@ class MessageChannel:
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
-                    raise TransportFailure(
-                        f"exec id={request.id}: executed, result lost before acknowledgement"
+                    raise stamped(
+                        TransportFailure(
+                            f"exec id={request.id}: executed, result lost before acknowledgement"
+                        )
                     )
                 await self._ack(guest, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
-                    raise ChannelBudgetError(reply.layer, reply.message)
-                raise GuestError(reply.errno, reply.message, reply.layer)
+                    raise stamped(ChannelBudgetError(reply.layer, reply.message))
+                raise stamped(GuestError(reply.errno, reply.message, reply.layer))
             break
         self._log(
             logging.DEBUG, "reply", rid=request.id, endpoint=guest, detail=reply.kind
@@ -639,6 +716,7 @@ class MessageChannel:
             stderr=stderr,
             stdout_truncated=result.stdout_truncated,
             stderr_truncated=result.stderr_truncated,
+            attempts=max(deliveries, 1),
         )
 
     async def read_file(
@@ -651,7 +729,7 @@ class MessageChannel:
             GuestError: Errno-tagged guest failure (`ENOENT`, `EISDIR`, ...).
         """
         request = ReadFileRequest(id=request_id(), path=path, max_bytes=cap)
-        reply, bulk = await self._exchange(
+        reply, bulk, _ = await self._exchange(
             guest, request, bulk_cap=cap, ack_consumed=True
         )
         data = self._expect(reply, FileData, request, guest)
@@ -659,8 +737,10 @@ class MessageChannel:
             raise FileLimitExceeded(path, bulk or b"")
         return bulk or b""
 
-    async def write_file(self, guest: str, path: str, data: bytes) -> None:
+    async def write_file(self, guest: str, path: str, data: bytes) -> int:
         """Write `data` to a guest file (exactly once per request id, even across retries).
+
+        Returns the delivery-attempt count: above 1 means a same-id resend happened (the provider's session-invalidation policy reads this for side-effecting operations).
 
         Raises:
             ValueError: The payload exceeds the daemon's inbound bulk cap (refused before sending).
@@ -671,8 +751,11 @@ class MessageChannel:
                 f"({DAEMON_INBOUND_BULK_CAP} bytes)"
             )
         request = WriteFileRequest(id=request_id(), path=path, data_size=len(data))
-        reply, _ = await self._exchange(guest, request, data, ack_consumed=True)
+        reply, _, deliveries = await self._exchange(
+            guest, request, data, ack_consumed=True
+        )
         self._expect(reply, OkReply, request, guest)
+        return deliveries
 
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply:
         """Open a capability-gated forward (not implemented until the realizer integration)."""
@@ -684,7 +767,7 @@ class MessageChannel:
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply:
         """Read the daemon's diagnostics: the in-guest ring buffer tail plus the supervised listener-restart count."""
         request = DiagRequest(id=request_id(), max_entries=max_entries)
-        reply, _ = await self._exchange(guest, request)
+        reply, _, _ = await self._exchange(guest, request)
         return self._expect(reply, DiagReply, request, guest)
 
     # -- host lifecycle plane -----------------------------------------------
@@ -865,7 +948,7 @@ class MessageChannel:
     async def teardown(self) -> None:
         """Tear the range down. Teardown is contractually idempotent: callers may retry with a fresh id."""
         request = TeardownRequest(id=request_id())
-        reply, _ = await self._exchange(HOST_APPLIER, request)
+        reply, _, _ = await self._exchange(HOST_APPLIER, request)
         self._expect(reply, OkReply, request, HOST_APPLIER)
 
 

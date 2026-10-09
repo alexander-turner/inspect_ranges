@@ -252,10 +252,16 @@ async def with_retry[T](
             last = failure
             raise
 
+    window = asyncio.timeout(policy.deadline_s)
     try:
-        async with asyncio.timeout(policy.deadline_s):
+        async with window:
             return await retrying(observed)
     except TimeoutError as expiry:
+        if not window.expired():
+            # the operation itself raised TimeoutError (a real command
+            # timeout, PERMANENT): it must propagate untouched, never be
+            # relabeled as a closed retry window
+            raise
         cause = f"; last failure: {str(last)[:_CAUSE_CAP]}" if last is not None else ""
         raise TransportFailure(
             f"{op}: retry deadline ({policy.deadline_s:.1f}s) expired{cause}"

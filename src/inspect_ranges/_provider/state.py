@@ -16,11 +16,12 @@ from inspect_ai.util._sandbox.lifecycle import (
 )
 
 from .._channel.channel import MessageChannel
-from .._compiler.plan import PlanOptions, ResolvedPlan, Totals
+from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
 from .._runtime.down import DownResult, down
 from .._runtime.ownership import default_state_dir
 from .._runtime.up import UpOptions, UpResult, up
+from ..types import RangeSpec
 from .admission import HostCapacity, WeightedAdmission
 from .naming import CidAllocator
 from .retry import RetryConfig, RetryStats
@@ -32,7 +33,7 @@ logger = logging.getLogger("inspect_ranges.provider")
 
 UpFn = Callable[[Path, UpOptions], UpResult]
 DownFn = Callable[[str, Path], DownResult]
-RenderFn = Callable[..., ResolvedPlan]
+RenderFn = Callable[["RangeSpec", Path, PlanOptions | None], ResolvedPlan]
 ChannelFactory = Callable[[dict[str, int], str], MessageChannel]
 
 
@@ -72,6 +73,7 @@ class SampleHandle:
     channel: MessageChannel | None = None
     sessions: dict[str, str] = field(default_factory=dict[str, str])
     stats: RetryStats = field(default_factory=RetryStats)
+    retry: RetryConfig = field(default_factory=RetryConfig.from_env)
     booted: bool = False
     deferred: bool = False
     admission_charged: bool = False
@@ -92,6 +94,7 @@ class ProviderRuntime:
         self.registry: dict[str, SampleHandle] = {}
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None
+        self._resolved: dict[str | RangeSpec, tuple[RangeSpec, ResolvedPlan]] = {}
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -111,6 +114,21 @@ class ProviderRuntime:
         root = self.state_dir.parent / "staging"
         root.mkdir(parents=True, exist_ok=True)
         return root
+
+    def resolve_config(
+        self, config: "str | RangeSpec", resolver: Callable[[], RangeSpec]
+    ) -> tuple[RangeSpec, ResolvedPlan]:
+        """The validated spec and base plan for one config, resolved once per batch.
+
+        Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample.
+        """
+        cached = self._resolved.get(config)
+        if cached is not None:
+            return cached
+        spec = resolver()
+        plan = resolve_plan(spec, self.plan_options())
+        self._resolved[config] = (spec, plan)
+        return spec, plan
 
     def plan_options(self, cid_base: int | None = None) -> PlanOptions:
         if cid_base is None:

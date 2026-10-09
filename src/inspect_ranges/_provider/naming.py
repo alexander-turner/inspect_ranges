@@ -62,45 +62,50 @@ class CidAllocator:
         state_dir.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
-    def _locked(self) -> Generator[dict[str, CidLease]]:
+    def _locked(self, *, write: bool) -> Generator[dict[str, CidLease]]:
+        """The registry under the flock. Read-only operations never rewrite the file, so an entry this version cannot parse is never silently destroyed by a mere listing; writes preserve unparseable entries verbatim (another version's lease stays findable and its block stays reserved-looking to prune-era logic)."""
         with open(self._lock_path, "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                leases = self._read()
+                leases, extras = self._read()
                 yield leases
-                self._write(leases)
+                if write:
+                    self._write(leases, extras)
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def _read(self) -> dict[str, CidLease]:
+    def _read(self) -> tuple[dict[str, CidLease], dict[str, object]]:
         try:
             raw = json.loads(self._path.read_text())
         except (OSError, ValueError):
-            return {}
+            return {}, {}
         if not isinstance(raw, dict):
-            return {}
+            return {}, {}
         entries = cast("dict[str, object]", raw)
         leases: dict[str, CidLease] = {}
+        extras: dict[str, object] = {}
         for project, entry in entries.items():
             try:
                 leases[project] = CidLease.model_validate(entry)
             except ValueError:
-                continue  # a corrupt entry never blocks allocation; prune clears it
-        return leases
+                extras[project] = entry  # preserved verbatim, never silently dropped
+        return leases, extras
 
-    def _write(self, leases: dict[str, CidLease]) -> None:
-        payload = {
-            project: lease.model_dump() for project, lease in sorted(leases.items())
+    def _write(self, leases: dict[str, CidLease], extras: dict[str, object]) -> None:
+        payload: dict[str, object] = {
+            project: lease.model_dump() for project, lease in leases.items()
         }
+        for project, entry in extras.items():
+            payload.setdefault(project, entry)
         temporary = self._path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload, indent=2) + "\n")
+        temporary.write_text(json.dumps(dict(sorted(payload.items())), indent=2) + "\n")
         temporary.replace(self._path)
 
     def lease(self, project: str, count: int) -> CidLease:
         """Lease a contiguous block of `count` CIDs for `project` (first fit in the partition)."""
         if count < 1:
             raise ValueError(f"cannot lease {count} CIDs")
-        with self._locked() as leases:
+        with self._locked(write=True) as leases:
             if project in leases:
                 raise ValueError(f"project {project!r} already holds a lease")
             taken = sorted((lease.base, lease.count) for lease in leases.values())
@@ -115,17 +120,17 @@ class CidAllocator:
 
     def release(self, project: str) -> None:
         """Release `project`'s lease; idempotent, callable from any process."""
-        with self._locked() as leases:
+        with self._locked(write=True) as leases:
             leases.pop(project, None)
 
     def leased_projects(self) -> list[str]:
         """Projects currently holding leases (the provider-origin marker for fresh-process cleanup)."""
-        with self._locked() as leases:
+        with self._locked(write=False) as leases:
             return sorted(leases)
 
     def prune(self, live_projects: set[str]) -> list[str]:
         """Drop leases for projects not in `live_projects`; returns what was pruned."""
-        with self._locked() as leases:
+        with self._locked(write=True) as leases:
             stale = sorted(set(leases) - live_projects)
             for project in stale:
                 leases.pop(project, None)
