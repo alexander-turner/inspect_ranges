@@ -60,9 +60,12 @@ namespace VsockD
         public const byte FrameData = 0x44;
         public const byte FrameEnd = 0x45;
 
-        static readonly Regex RequestIdRe = new Regex("^[0-9a-f]{32}$");
-        static readonly Regex ErrnoRe = new Regex("^[A-Z][A-Z0-9]{1,15}$");
-        static readonly Regex Sha256Re = new Regex("^[0-9a-f]{64}$");
+        // \z, not $: .NET's $ also matches before a trailing newline,
+        // which Go's regexp and pydantic's Rust regex both reject
+        static readonly Regex RequestIdRe = new Regex("^[0-9a-f]{32}\\z");
+        static readonly Regex ErrnoRe = new Regex("^[A-Z][A-Z0-9]{1,15}\\z");
+        static readonly Regex Sha256Re = new Regex("^[0-9a-f]{64}\\z");
+        static readonly Regex SessionRe = new Regex("^[0-9a-f]{32}\\z");
 
         // ------------------------------------------------------------ JSON
 
@@ -485,7 +488,7 @@ namespace VsockD
         static readonly Dictionary<string, string[]> RequiredFields = new Dictionary<string, string[]>
         {
             { "ping", new string[0] },
-            { "pong", new[] { "daemon" } },
+            { "pong", new[] { "daemon", "session" } },
             { "exec", new[] { "cmd" } },
             { "read_file", new[] { "path" } },
             { "write_file", new[] { "path" } },
@@ -512,7 +515,7 @@ namespace VsockD
             { "pong", new[] { "protocol" } },
             { "exec", new[] { "cwd", "env", "user", "budget" } },
             { "read_file", new[] { "max_bytes", "budget" } },
-            { "write_file", new[] { "budget" } },
+            { "write_file", new[] { "budget", "mode" } },
             { "forward", new[] { "budget" } },
             { "poll", new string[0] },
             { "ack", new string[0] },
@@ -523,7 +526,7 @@ namespace VsockD
             { "pending", new string[0] },
             { "forward_ok", new string[0] },
             { "diag_result", new[] { "entries", "listener_restarts" } },
-            { "error", new[] { "layer" } },
+            { "error", new[] { "layer", "partial" } },
             { "realize", new[] { "grants" } },
             { "teardown", new string[0] },
             { "stage", new[] { "detail", "guests" } },
@@ -653,6 +656,12 @@ namespace VsockD
                     if (GetString(m, "path").Length == 0) throw new DecodeException(kind + ": empty path");
                     if (kind == "write_file" && !dataSize.HasValue)
                         throw new DecodeException("write_file requires data_size");
+                    if (kind == "write_file")
+                    {
+                        long? writeMode = GetLong(m, "mode");
+                        if (writeMode.HasValue && (writeMode.Value < 0 || writeMode.Value > 0xFFF))
+                            throw new DecodeException("write_file: mode out of range");
+                    }
                     break;
                 case "poll":
                 case "ack":
@@ -679,13 +688,23 @@ namespace VsockD
                 case "error":
                     if (!ErrnoRe.IsMatch(GetString(m, "errno")))
                         throw new DecodeException("error: bad errno shape");
-                    if (GetString(m, "message").Length > MaxMessageLen)
+                    if (Encoding.UTF8.GetByteCount(GetString(m, "message")) > MaxMessageLen)
                         throw new DecodeException("error: message too long");
                     string errno = (string)m["errno"];
                     if ((errno == "ETIME" || errno == "ETIMEDOUT") && !m.ContainsKey("layer"))
                         throw new DecodeException("error: budget errors must name their layer");
                     if (m.ContainsKey("layer") && !LayerLiterals.Contains(GetString(m, "layer")))
                         throw new DecodeException("error: unknown layer");
+                    if (m.ContainsKey("partial"))
+                    {
+                        if (errno != "ETIME" && errno != "ETIMEDOUT")
+                            throw new DecodeException("error: partial output is only legal on budget expiries");
+                        // UTF-8 BYTE length, matching the Go codec's len():
+                        // code-point or UTF-16 counts would accept non-ASCII
+                        // partials the other codecs reject
+                        if (Encoding.UTF8.GetByteCount(GetString(m, "partial")) > MaxMessageLen)
+                            throw new DecodeException("error: partial too long");
+                    }
                     break;
                 case "forward":
                     long port = RequireLong(m, "port");
@@ -693,11 +712,13 @@ namespace VsockD
                     GetString(m, "host");
                     break;
                 case "pong":
-                    if (GetString(m, "daemon").Length > MaxDaemonLen)
+                    if (Encoding.UTF8.GetByteCount(GetString(m, "daemon")) > MaxDaemonLen)
                         throw new DecodeException("pong: daemon too long");
                     long? pongProtocol = GetLong(m, "protocol");
                     if (pongProtocol.HasValue && pongProtocol.Value != ProtocolVersion)
                         throw new DecodeException("pong: protocol must be " + ProtocolVersion);
+                    if (!SessionRe.IsMatch(GetString(m, "session")))
+                        throw new DecodeException("pong: session must be 32 lowercase hex chars");
                     break;
                 case "forward_ok":
                     GetString(m, "handle");
@@ -706,7 +727,7 @@ namespace VsockD
                     if (!StageLiterals.Contains(GetString(m, "stage")))
                         throw new DecodeException("stage: unknown stage");
                     string stageDetail = GetString(m, "detail");
-                    if (stageDetail != null && stageDetail.Length > MaxStageDetailLen)
+                    if (stageDetail != null && Encoding.UTF8.GetByteCount(stageDetail) > MaxStageDetailLen)
                         throw new DecodeException("stage: detail too long");
                     ValidateGuests(m);
                     break;
@@ -776,13 +797,13 @@ namespace VsockD
                 if (level == null || !LevelLiterals.Contains(level))
                     throw new DecodeException("diag_result: unknown level");
                 string evt = GetString(entry, "event");
-                if (evt == null || evt.Length == 0 || evt.Length > MaxEventLen)
+                if (evt == null || evt.Length == 0 || Encoding.UTF8.GetByteCount(evt) > MaxEventLen)
                     throw new DecodeException("diag_result: bad event");
                 string requestId = GetString(entry, "request_id");
-                if (requestId != null && requestId.Length > MaxRequestIdLen)
+                if (requestId != null && Encoding.UTF8.GetByteCount(requestId) > MaxRequestIdLen)
                     throw new DecodeException("diag_result: request_id too long");
                 string detail = GetString(entry, "detail");
-                if (detail != null && detail.Length > MaxDiagDetailLen)
+                if (detail != null && Encoding.UTF8.GetByteCount(detail) > MaxDiagDetailLen)
                     throw new DecodeException("diag_result: detail too long");
             }
         }

@@ -8,6 +8,7 @@ Wire conventions, chosen so the Go and C# codecs cannot drift: every numeric fie
 from typing import Annotated, Literal, get_args
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -48,12 +49,27 @@ DAEMON_INBOUND_BULK_CAP = 256 * 1024 * 1024
 MAX_WIRE_INT = 2**53
 """Upper bound for unbounded-looking integer wire fields: safe in int64 and double codecs alike."""
 
+
+def utf8_capped(limit: int) -> AfterValidator:
+    """A length cap counted in UTF-8 BYTES, the Go daemon's `len()` semantics; a code-point cap would accept non-ASCII values the other codecs reject."""
+
+    def check(value: str) -> str:
+        if len(value.encode("utf-8")) > limit:
+            raise ValueError(f"value exceeds {limit} UTF-8 bytes")
+        return value
+
+    return AfterValidator(check)
+
+
 RequestId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 """Request ids are 32 lowercase hex chars (`uuid4().hex`); retries reuse the id, never regenerate it."""
 
 ErrnoName = Annotated[str, StringConstraints(pattern=r"^[A-Z][A-Z0-9]{1,15}$")]
 
 Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+SessionHex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
+"""A daemon boot/session id: 32 lowercase hex chars, minted once per daemon process. Wire exactly-once holds only within one session; the provider pins it per guest and treats a change as the restart signal (`SessionChangedError`). Post-compromise a hostile daemon can lie about its session: session honesty is a pre-compromise property, like layer attribution."""
 
 GuestState = Literal["pending", "booting", "ready", "failed"]
 
@@ -144,10 +160,14 @@ class ReadFileRequest(_MessageBase):
 
 
 class WriteFileRequest(_BulkMessage):
-    """Write a guest file; the request's bulk carries the bytes (zero-size bulk writes an empty file)."""
+    """Write a guest file; the request's bulk carries the bytes (zero-size bulk writes an empty file).
+
+    `mode` sets the created file's permission bits atomically with the write (no world-readable window between write and a chmod); `None` keeps the daemon default (0o644).
+    """
 
     kind: Literal["write_file"] = "write_file"
     path: str = Field(min_length=1)
+    mode: int | None = Field(default=None, ge=0, le=0o7777)
     budget: Budget = Field(default_factory=Budget)
 
     @model_validator(mode="after")
@@ -194,8 +214,10 @@ class DiagRequest(_MessageBase):
 
 class PongReply(_MessageBase):
     kind: Literal["pong"] = "pong"
-    daemon: str = Field(max_length=128)
+    daemon: Annotated[str, Field(max_length=128), utf8_capped(128)]
     protocol: Literal[3] = PROTOCOL_VERSION
+    session: SessionHex
+    """Required: an honest daemon always reports its session (provider-v1 layer 2b)."""
 
 
 class ExecResult(_BulkMessage):
@@ -256,9 +278,9 @@ class ForwardReply(_MessageBase):
 class DiagEntry(_WireModel):
     ts_ms: int = Field(ge=0, le=MAX_WIRE_INT)
     level: Literal["info", "warn", "error"]
-    event: str = Field(min_length=1, max_length=128)
-    request_id: str | None = Field(default=None, max_length=64)
-    detail: str = Field(default="", max_length=2048)
+    event: Annotated[str, Field(min_length=1, max_length=128), utf8_capped(128)]
+    request_id: Annotated[str, Field(max_length=64), utf8_capped(64)] | None = None
+    detail: Annotated[str, Field(max_length=2048), utf8_capped(2048)] = ""
 
 
 class DiagReply(_MessageBase):
@@ -278,13 +300,17 @@ class ErrorReply(_MessageBase):
 
     kind: Literal["error"] = "error"
     errno: ErrnoName
-    message: str = Field(max_length=4096)
+    message: Annotated[str, Field(max_length=4096), utf8_capped(4096)]
     layer: BudgetLayer | None = None
+    partial: Annotated[str, Field(max_length=4096), utf8_capped(4096)] | None = None
+    """The killed command's output tail (stdout when it produced any, else stderr) on a budget expiry (ETIME/ETIMEDOUT only: elsewhere a text side-channel an honest endpoint cannot produce). Deliberately a capped TEXT field, never bulk: the bulk-on-error side-channel stays closed."""
 
     @model_validator(mode="after")
     def _budget_errors_name_their_layer(self) -> "ErrorReply":
         if self.errno in ("ETIME", "ETIMEDOUT") and self.layer is None:
             raise ValueError("budget errors must name the layer that fired")
+        if self.partial is not None and self.errno not in ("ETIME", "ETIMEDOUT"):
+            raise ValueError("partial output is only legal on budget expiries")
         return self
 
 
@@ -309,7 +335,7 @@ class StageReport(_MessageBase):
 
     kind: Literal["stage"] = "stage"
     stage: Literal["fetch", "construct", "boot", "verify", "ready", "failed"]
-    detail: str = Field(default="", max_length=4096)
+    detail: Annotated[str, Field(max_length=4096), utf8_capped(4096)] = ""
     guests: dict[str, GuestState] = Field(default_factory=dict)
 
 

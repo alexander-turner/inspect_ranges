@@ -21,6 +21,7 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
+from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, resolve_plan
 from .._runtime.ownership import (
     list_projects,
@@ -148,10 +149,22 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         try:
             assert handle.channel is not None
             for guest in handle.guest_cids:
-                await handle.channel.ping(guest)
-                # the per-guest session id pin lands with the protocol's
-                # session field (slice 4); the ping stands as the provider's
-                # own liveness confirmation until then
+                # liveness confirmation and the layer-2b session pin in one
+                # probe: later ops compare against this to detect a daemon
+                # restart (which silently empties the dedupe store)
+                try:
+                    pong = await handle.channel.ping(guest)
+                except TamperError as tamper:
+                    if "session" in str(tamper):
+                        # the one honest cause of a session-less pong is a
+                        # pre-3.1.0 daemon baked into a stale golden; name the
+                        # operator's remedy ahead of the doctor check
+                        raise TamperError(
+                            f"{tamper}; golden predates daemon 3.1.0; "
+                            "re-derive images (see images derive)"
+                        ) from tamper
+                    raise
+                handle.sessions[guest] = pong.session
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes

@@ -19,6 +19,7 @@ from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUs
 from inspect_ranges._channel.mocks import HostileTransport
 from inspect_ranges._channel.protocol import ErrorReply, ExecRequest, Message
 from inspect_ranges._compiler.plan import Totals
+from inspect_ranges._provider.errors import SessionChangedError
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
 from inspect_ranges._provider.retry import RetryConfig, RetryPolicy
@@ -280,5 +281,196 @@ def test_daemon_stream_truncation_raises_output_limit(tmp_path: Path) -> None:
             # first and names the endpoint cap
             await env.exec(["sh", "-c", "head -c 16777217 /dev/zero"])
         assert "limit of 16 MiB was exceeded" in str(info.value)
+
+    asyncio.run(scenario())
+
+
+def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> None:
+    """Layer 2b: an exec whose delivery needed a same-id resend across a daemon restart surfaces `SessionChangedError` (the restart emptied the dedupe store, so exactly-once no longer holds); the re-pin lets the next op proceed."""
+
+    class RestartAcrossDelivery(LocalEndpoint):
+        """Loses the first exec reply in flight and restarts before the resend arrives."""
+
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if isinstance(message, ExecRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True  # the reply is lost in flight...
+                self.restart()  # ...and the daemon restarts before the resend
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartAcrossDelivery("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-restart")
+        handle = SampleHandle(
+            project="ir-session",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        pinned = endpoint.session  # what sample_init pins at boot
+        handle.sessions["box"] = pinned
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError) as info:
+            await env.exec(["echo", "hi"])
+        assert info.value.pinned == pinned
+        assert info.value.observed == endpoint.session
+        assert handle.sessions["box"] == endpoint.session, "re-pinned"
+        fresh = await env.exec(["echo", "again"])
+        assert fresh.success and fresh.stdout == "again\n"
+
+    asyncio.run(scenario())
+
+
+def test_session_stable_across_connections(tmp_path: Path) -> None:
+    """Every connection sees the same session until the endpoint restarts."""
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = LocalEndpoint("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-stable")
+        first = await channel.session("box")
+        assert first == await channel.session("box")
+        endpoint.restart()
+        assert await channel.session("box") != first
+
+    asyncio.run(scenario())
+
+
+def test_wrapper_upload_travels_with_mode_600(tmp_path: Path) -> None:
+    """The env-bearing wrapper script is written with mode 0600 atomically (no chmod round trip, no world-readable window)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        chunk = "w" * 40_000  # forces the wrapper path
+        result = await env.exec(["printf", "%s", chunk])
+        assert result.success and result.stdout == chunk
+        endpoint = transport.guests["box"]
+        wrapper_modes = [
+            mode for path, mode in endpoint.file_modes.items() if "/.ir-exec-" in path
+        ]
+        assert wrapper_modes == [0o600]
+
+    asyncio.run(scenario())
+
+
+def test_command_timeout_carries_partial_output(tmp_path: Path) -> None:
+    """The daemon's ETIME `partial` tail surfaces as `CommandTimeout.truncated_output` (closing the chunk-1 deviation: the field is no longer always `None`)."""
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        with pytest.raises(TimeoutError) as info:
+            await env.exec(["sh", "-c", "echo marker; sleep 30"], timeout=1)
+        truncated = getattr(info.value, "truncated_output", None)
+        assert truncated is not None and "marker" in truncated
+
+    asyncio.run(scenario())
+
+
+def test_env_touching_runuser_reset_keys_rides_the_wrapper(tmp_path: Path) -> None:
+    """HOME/SHELL/USER/LOGNAME/PATH are always reset by the daemon's runuser switch, so env naming them must ride the wrapper (whose exports run after the switch) even when the request would fit a control frame."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        result = await env.exec(["sh", "-c", "echo $HOME"], env={"HOME": "/elsewhere"})
+        assert result.success and result.stdout == "/elsewhere\n"
+        endpoint = transport.guests["box"]
+        assert endpoint.write_count == 1, "the wrapper upload"
+        plain = await env.exec(["sh", "-c", "echo $ANSWER"], env={"ANSWER": "42"})
+        assert plain.success and plain.stdout == "42\n"
+        assert endpoint.write_count == 1, "non-reset keys stay on the direct path"
+
+    asyncio.run(scenario())
+
+
+def test_wrapper_for_third_user_stays_0600_and_is_chowned(tmp_path: Path) -> None:
+    """The env-bearing wrapper is ALWAYS 0600 and agent-owned at creation; an explicit third user gets ownership via one root chown (never a mode widening, which would both leak the env world-readable and break the sticky-/tmp self-delete)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        endpoint = transport.guests["box"]
+        assert isinstance(endpoint, LocalEndpoint)
+        await env.exec(["sh", "-c", "echo $HOME"], env={"HOME": "/x"})
+        result = await env.exec(
+            ["sh", "-c", "echo $HOME"], env={"HOME": "/x"}, user="somebody-else"
+        )
+        assert not result.success, "the CI endpoint cannot switch users"
+        wrappers = [path for path in endpoint.file_modes if "/.ir-exec-" in path]
+        assert [endpoint.file_modes[path] for path in wrappers] == [0o600, 0o600]
+        owners = [endpoint.file_owners[path] for path in wrappers]
+        assert owners == ["agent", "somebody-else"], (
+            "the default run stays agent-owned; the third-user run is chowned"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_resent_exec_that_times_out_still_confirms_the_session(
+    tmp_path: Path,
+) -> None:
+    """A resent delivery that lands as a command-layer budget expiry is exactly as restart-risky as a resent success: the session verdict outranks the timeout verdict."""
+
+    class RestartAcrossDelivery(LocalEndpoint):
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if isinstance(message, ExecRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True
+                self.restart()
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartAcrossDelivery("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-etime")
+        handle = SampleHandle(
+            project="ir-session-etime",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        handle.sessions["box"] = endpoint.session
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError):
+            await env.exec(["sh", "-c", "sleep 30"], timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_write_mode_pins_bits_before_content(tmp_path: Path) -> None:
+    """Rewriting a pre-existing wider-mode file with mode 0600 ends 0600 with the fresh content: the endpoint mirrors the daemon's fchmod-then-truncate ordering, so the old bits never cover the new bytes."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        endpoint = transport.guests["box"]
+        assert isinstance(endpoint, LocalEndpoint)
+        target = endpoint.translate("/tmp/rewritten")
+        target.write_bytes(b"old public content")
+        target.chmod(0o644)
+        channel = env._handle.channel  # pyright: ignore[reportPrivateUsage]
+        assert channel is not None
+        await channel.write_file("box", "/tmp/rewritten", b"secret", mode=0o600)
+        assert (target.stat().st_mode & 0o777) == 0o600
+        assert target.read_bytes() == b"secret"
 
     asyncio.run(scenario())

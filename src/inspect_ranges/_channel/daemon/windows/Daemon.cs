@@ -194,7 +194,12 @@ namespace VsockD
         // supervised listener recoveries since start; surfaced in diag_result
         // so the storm battery can assert the accept loop never wedged
         static long _listenerRestarts;
-        public static string Version = "vsockd 3.0.0 (windows)";
+        public static string Version = "vsockd 3.1.0 (windows)";
+        // minted once per daemon process ("N" = 32 lowercase hex): a restart,
+        // which empties the dedupe store, surfaces to the host as a session
+        // change rather than a silent loss of exactly-once (provider-v1
+        // layer 2b)
+        public static readonly string Session = Guid.NewGuid().ToString("N");
 
         public static void Log(string msg)
         {
@@ -385,6 +390,7 @@ namespace VsockD
                 Dictionary<string, object> pong = Base(id, "pong");
                 pong["daemon"] = Version;
                 pong["protocol"] = (long)Wire.ProtocolVersion;
+                pong["session"] = Session;
                 return new StoredReply(pong, null);
             }
             if (kind == "diag")
@@ -488,9 +494,12 @@ namespace VsockD
             if (outcome.TimedOut)
             {
                 Ring.Add("warn", "exec-budget-killed", id, argv[0]);
-                return ErrorReply(id, "ETIME",
+                StoredReply expired = ErrorReply(id, "ETIME",
                     "command budget expired after " + commandMs + " ms (job-object kill; out-of-job children survive)",
                     "command");
+                string partial = PartialTail(outcome.Stdout, outcome.Stderr);
+                if (partial.Length > 0) expired.Message["partial"] = partial;
+                return expired;
             }
             Dictionary<string, object> result = Base(id, "exec_result");
             result["rc"] = outcome.Rc;
@@ -507,6 +516,23 @@ namespace VsockD
                 result["data_size"] = (long)payload.Length;
             }
             return new StoredReply(result, payload);
+        }
+
+        // the capped tail of a killed command's output for the ETIME reply:
+        // stdout when it produced any, else stderr. A small TEXT field, never
+        // bulk, so the bulk-on-error side channel stays closed. Invalid UTF-8
+        // bytes are DROPPED (the Go daemon's ToValidUTF8 behavior), never
+        // substituted: U+FFFD is three bytes per bad byte, which could mint a
+        // partial over the 4096-BYTE wire cap and have the host reject a
+        // genuine timeout as tamper.
+        const int PartialCap = 4096;
+        static readonly Encoding Utf8Dropping = Encoding.GetEncoding(
+            "utf-8", EncoderFallback.ReplacementFallback, new DecoderReplacementFallback(""));
+        static string PartialTail(byte[] stdout, byte[] stderr)
+        {
+            byte[] source = stdout.Length > 0 ? stdout : stderr;
+            int start = source.Length > PartialCap ? source.Length - PartialCap : 0;
+            return Utf8Dropping.GetString(source, start, source.Length - start);
         }
 
         static StoredReply ReadFile(Dictionary<string, object> request)
@@ -562,6 +588,9 @@ namespace VsockD
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 if (Directory.Exists(path))
                     return ErrorReply(id, "EISDIR", "Is a directory: " + path, null);
+                // "mode" is accepted by the codec for cross-codec parity but
+                // POSIX permission bits have no NTFS equivalent (ACLs), so
+                // the Windows daemon deliberately ignores it
                 File.WriteAllBytes(path, data);
                 return OkReply(id);
             }

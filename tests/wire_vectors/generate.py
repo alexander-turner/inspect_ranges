@@ -20,7 +20,33 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
     two_chunk = (bytes(range(256)) * 157)[:40000]
     return [
         ("ping", p.PingRequest(id=_rid(1)), None),
-        ("pong", p.PongReply(id=_rid(1), daemon="vsockd 3.0.0"), None),
+        (
+            "write-file-mode-600",
+            p.WriteFileRequest(
+                id=_rid(31), path="/tmp/secret.sh", mode=0o600, data_size=4
+            ),
+            b"blob",
+        ),
+        (
+            "error-etime-partial",
+            p.ErrorReply(
+                id=_rid(32),
+                errno="ETIME",
+                message="command budget expired after 1000 ms",
+                layer="command",
+                partial="tail of the killed command's stdout",
+            ),
+            None,
+        ),
+        (
+            "pong",
+            p.PongReply(
+                id=_rid(1),
+                daemon="vsockd 3.1.0",
+                session="ffffffffffffffffffffffffffffffff",
+            ),
+            None,
+        ),
         (
             "exec-with-stdin",
             p.ExecRequest(
@@ -317,9 +343,146 @@ def _rejects() -> list[dict[str, str]]:
             "guests-bad-state",
             d(**base, kind="heartbeat", uptime_ms=1, guests={"web": "exploding"}),
         ),
-        ("pong-protocol-nonint", d(**base, kind="pong", daemon="d", protocol="3")),
-        ("pong-protocol-wrong", d(**base, kind="pong", daemon="d", protocol=2)),
-        ("pong-daemon-overlong", d(**base, kind="pong", daemon="x" * 200)),
+        (
+            "pong-session-missing",
+            d(**base, kind="pong", daemon="d", protocol=3),
+        ),
+        (
+            "pong-session-short",
+            d(**base, kind="pong", daemon="d", protocol=3, session="abc123"),
+        ),
+        (
+            "pong-session-badchars",
+            d(**base, kind="pong", daemon="d", protocol=3, session="Z" * 32),
+        ),
+        (
+            "pong-session-nonstring",
+            d(**base, kind="pong", daemon="d", protocol=3, session=12345),
+        ),
+        (
+            "write-mode-negative",
+            d(**base, kind="write_file", path="/f", data_size=0, mode=-1),
+        ),
+        (
+            "write-mode-overrange",
+            d(**base, kind="write_file", path="/f", data_size=0, mode=4096),
+        ),
+        (
+            "write-mode-nonint",
+            d(**base, kind="write_file", path="/f", data_size=0, mode="0600"),
+        ),
+        (
+            "error-partial-overlong",
+            d(
+                **base,
+                kind="error",
+                errno="ETIME",
+                message="m",
+                layer="command",
+                partial="x" * 5000,
+            ),
+        ),
+        (
+            # trailing-newline class: .NET's $ matches before a final newline,
+            # so these four shaped fields pin the \z/end-of-text anchor in
+            # every codec
+            "ping-id-trailing-newline",
+            d(v=3, id="a" * 32 + "\n", kind="ping"),
+        ),
+        (
+            "pong-session-trailing-newline",
+            d(**base, kind="pong", daemon="d", protocol=3, session="f" * 32 + "\n"),
+        ),
+        (
+            "error-errno-trailing-newline",
+            d(**base, kind="error", errno="EIO\n", message="m"),
+        ),
+        (
+            "realize-digest-trailing-newline",
+            d(**base, kind="realize", bundle_digest="a" * 64 + "\n"),
+        ),
+        (
+            # byte-cap class: every length cap counts UTF-8 BYTES (the Go
+            # daemon's len()); each entry is under the code-point cap but
+            # over the byte cap
+            "pong-daemon-overlong-utf8",
+            d(
+                **base,
+                kind="pong",
+                daemon="\u00e9" * 100,
+                protocol=3,
+                session="f" * 32,
+            ),
+        ),
+        (
+            "error-message-overlong-utf8",
+            d(**base, kind="error", errno="EIO", message="\u00e9" * 3000),
+        ),
+        (
+            "stage-detail-overlong-utf8",
+            d(**base, kind="stage", stage="boot", detail="\u00e9" * 3000),
+        ),
+        (
+            "diag-entry-detail-overlong-utf8",
+            d(
+                **base,
+                kind="diag_result",
+                entries=[
+                    {
+                        "ts_ms": 1,
+                        "level": "info",
+                        "event": "x",
+                        "detail": "\u00e9" * 1200,
+                    }
+                ],
+            ),
+        ),
+        (
+            # 3000 code points but 6000 UTF-8 bytes: the cap counts BYTES in
+            # every codec (a code-point count would accept this)
+            "error-partial-overlong-utf8",
+            d(
+                **base,
+                kind="error",
+                errno="ETIME",
+                message="m",
+                layer="command",
+                partial="\u00e9" * 3000,
+            ),
+        ),
+        (
+            "error-partial-on-nonbudget",
+            d(**base, kind="error", errno="EIO", message="m", partial="sneaky"),
+        ),
+        (
+            "pong-protocol-nonint",
+            d(
+                **base,
+                kind="pong",
+                daemon="d",
+                protocol="3",
+                session="ffffffffffffffffffffffffffffffff",
+            ),
+        ),
+        (
+            "pong-protocol-wrong",
+            d(
+                **base,
+                kind="pong",
+                daemon="d",
+                protocol=2,
+                session="ffffffffffffffffffffffffffffffff",
+            ),
+        ),
+        (
+            "pong-daemon-overlong",
+            d(
+                **base,
+                kind="pong",
+                daemon="x" * 200,
+                session="ffffffffffffffffffffffffffffffff",
+            ),
+        ),
         (
             "command-ms-over-cap",
             d(**base, kind="exec", cmd=["true"], budget={"command_ms": 20_000_000}),

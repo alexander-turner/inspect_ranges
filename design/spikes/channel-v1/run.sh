@@ -37,39 +37,28 @@ if [[ "${IR_BATTERY_LOCK_HELD:-}" != "1" ]]; then
 fi
 
 docker compose -p "$PROJECT" down -v >/dev/null 2>&1 || true
-mkdir -p tmp/images tmp/render tmp/logs
+mkdir -p tmp/render tmp/logs
+rm -rf tmp/images tmp/artifacts && mkdir -p tmp/images
 
-echo "=== build the Go daemon (pinned toolchain) ==="
-( cd ../../../src/inspect_ranges/_channel/daemon/linux \
-  && CGO_ENABLED=0 GOARCH=amd64 "$GO" build -trimpath -buildvcs=false -ldflags="-s -w" -o "$OLDPWD/tmp/vsockd" . )
-./tmp/vsockd --version | tee tmp/logs/version.txt
-grep -q "protocol=3" tmp/logs/version.txt && ok "daemon builds and reports protocol 3" \
-  || bad "daemon builds and reports protocol 3"
+echo "=== build the daemon bundle (pinned toolchain, slice-4 re-pin) ==="
+HERE=$PWD
+cd ../../..   # repo root for uv
+DB_OUT=$(uv run inspect-ranges daemon-bundle -o "$HERE/tmp/artifacts") \
+  || { echo "daemon-bundle build failed (install the pinned Go toolchain)"; exit 1; }
+DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
+[[ -n "$DAEMON_SHA" ]] && ok "daemon bundle built and pinned" || bad "daemon bundle built"
 
-echo "=== bake the battery golden (vendor + v3 daemon) ==="
-rm -f tmp/images/guest.qcow2
-# relative backing ref: the images dir mounts whole into the container, so
-# the overlay must reference the vendor by bare name (the images.py lesson)
-cp -n "$VENDOR" tmp/images/vendor.img 2>/dev/null || true
-( cd tmp/images && qemu-img create -f qcow2 -F qcow2 -b vendor.img guest.qcow2 10G >/dev/null )
-cat > tmp/vsockd.service <<'EOF'
-[Unit]
-Description=inspect-ranges guest control daemon (v3)
-[Service]
-ExecStart=/opt/inspect-ranges/vsockd
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-virt-customize -a tmp/images/guest.qcow2 --no-network \
-  --mkdir /opt/inspect-ranges \
-  --copy-in tmp/vsockd:/opt/inspect-ranges \
-  --chmod 0755:/opt/inspect-ranges/vsockd \
-  --copy-in tmp/vsockd.service:/etc/systemd/system \
-  --run-command "systemctl enable vsockd.service" \
-  --run-command "systemctl mask ssh.service ssh.socket || true" \
-  >tmp/logs/customize.txt 2>&1 \
-  && ok "golden baked with the v3 daemon" || { bad "golden baked"; exit 1; }
+echo "=== derive the battery golden (recipe v4: daemon + agent user) ==="
+# the real derive pipeline replaces the spike-era bare bake, so the booted
+# guest carries the agent user slice 4 adds (self_check needs it for 44/44);
+# the cache dir mounts whole into the container and the overlay references
+# the vendor by bare name (the images.py lesson)
+VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
+uv run inspect-ranges images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name guest \
+  --image-cache "$HERE/tmp/images" --daemon-bundle "$HERE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" \
+  >"$HERE/tmp/logs/derive.txt" 2>&1 \
+  && ok "recipe-v4 golden derived" || { bad "recipe-v4 golden derived"; tail -5 "$HERE/tmp/logs/derive.txt"; exit 1; }
+cd "$HERE"
 
 echo "=== boot at CID $CID (chan band) ==="
 : > tmp/render/bridges.txt
@@ -116,6 +105,15 @@ if uv run python design/spikes/channel-v1/self_check3.py 2>&1 | tee design/spike
   ok "self_check within documented xfails"
 else
   bad "self_check"
+fi
+
+echo "=== provider self_check over vsock (slice 4: 44/44, EMPTY pin) ==="
+# serial (-n 0): the booted guest's filesystem is shared state across checks
+if uv run pytest tests/test_provider_self_check.py -q -n 0 2>&1 \
+     | tee design/spikes/channel-v1/tmp/logs/provider_self_check.txt | tail -3; then
+  ok "provider self_check 44/44 over vsock (no pins)"
+else
+  bad "provider self_check over vsock"
 fi
 
 echo "=== hostile-daemon shim through the real transport ==="

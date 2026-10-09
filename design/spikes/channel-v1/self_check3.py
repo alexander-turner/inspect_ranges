@@ -27,16 +27,21 @@ from inspect_ranges._channel.channel import request_id
 CID = int(os.environ["IR_VSOCK_BATTERY_CID"])
 PORT = int(os.environ.get("IR_VSOCK_BATTERY_PORT", "5000"))
 
+# since provider-v1 slice 4 the daemon's default identity is the agent user,
+# so sandbox-relative paths and the default cwd resolve to its home (the same
+# rule the real provider applies in ops.resolve_guest_path)
+AGENT_HOME = "/home/agent"
+
+
+def _resolve(path: str) -> str:
+    return path if path.startswith("/") else f"{AGENT_HOME}/{path}"
+
 _XFAILS: dict[str, frozenset[str]] = {
-    # linux: the daemon runs as root (default unprivileged exec user is
-    # build-phase image work); root reads/writes chmod-000 files happily
-    "linux": frozenset(
-        {
-            "test_read_file_not_allowed",
-            "test_write_binary_file_without_permissions",
-            "test_write_text_file_without_permissions",
-        }
-    ),
+    # linux: EMPTY since provider-v1 slice 4: the recipe-v4 golden creates
+    # the agent user and the daemon defaults exec and file ops to it, so the
+    # permission checks bind for real (the gate is two-sided: a regression
+    # here fails, and so would re-pinning)
+    "linux": frozenset(),
     # windows: platform facts per the vsockd-win spike README (NTFS has no
     # POSIX read bit; adduser/userdel provisioning; no POSIX signals). The
     # 1 MiB-argv case passes under v3: the wrapper-script path makes the big
@@ -111,7 +116,7 @@ class V3Sandbox(SandboxEnvironment):
         request = ExecRequest(
             id=request_id(),
             cmd=cmd,
-            cwd=cwd,
+            cwd=_resolve(cwd) if cwd is not None else AGENT_HOME,
             env=env or {},
             user=user,
             budget=budget,
@@ -139,14 +144,14 @@ class V3Sandbox(SandboxEnvironment):
     async def write_file(self, file: str, contents: str | bytes) -> None:
         data = contents.encode() if isinstance(contents, str) else contents
         try:
-            await self.channel.write_file("guest", file, data)
+            await self.channel.write_file("guest", _resolve(file), data)
         except GuestError as error:
             raise _map_guest_error(error, file) from error
 
     async def read_file(self, file: str, text: bool = True) -> Union[str, bytes]:  # type: ignore[override]
         limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         try:
-            body = await self.channel.read_file("guest", file, cap=limit)
+            body = await self.channel.read_file("guest", _resolve(file), cap=limit)
         except FileLimitExceeded as error:
             raise OutputLimitExceededError(
                 SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR, None

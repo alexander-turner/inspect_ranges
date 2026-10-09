@@ -31,7 +31,7 @@ from .._compiler.plan import image_file_name
 
 logger = logging.getLogger(__name__)
 
-RECIPE_VERSION = "3"
+RECIPE_VERSION = "4"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 Runner = Callable[[list[str], Path], None]
@@ -371,6 +371,10 @@ def _derive_locked(
                     "-a",
                     temp.name,
                     "--no-network",
+                    # the daemon's unprivileged default identity for exec and
+                    # file operations (provider-v1 slice 4)
+                    "--run-command",
+                    "useradd --create-home --home-dir /home/agent --shell /bin/sh agent",
                     "--mkdir",
                     "/opt/inspect-ranges",
                     "--copy-in",

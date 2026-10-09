@@ -43,6 +43,7 @@ var (
 	requestIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	errnoRe     = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,15}$`)
 	sha256Re    = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	sessionRe   = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // DecodeError is the typed failure for every malformed input; the daemon
@@ -73,6 +74,7 @@ type Message struct {
 	Budget   *Budget           `json:"budget,omitempty"`
 	Path     string            `json:"path,omitempty"`
 	MaxBytes *int64            `json:"max_bytes,omitempty"`
+	Mode     *int64            `json:"mode,omitempty"`
 	Host     string            `json:"host,omitempty"`
 	Port     *int64            `json:"port,omitempty"`
 
@@ -89,6 +91,7 @@ type Message struct {
 	// pong
 	Daemon   string `json:"daemon,omitempty"`
 	Protocol *int64 `json:"protocol,omitempty"`
+	Session  string `json:"session,omitempty"`
 
 	// exec_result / file_data
 	Rc              *int64 `json:"rc,omitempty"`
@@ -103,6 +106,7 @@ type Message struct {
 	Errno   string  `json:"errno,omitempty"`
 	Message string  `json:"message,omitempty"`
 	Layer   *string `json:"layer,omitempty"`
+	Partial *string `json:"partial,omitempty"`
 
 	// host plane
 	BundleDigest string            `json:"bundle_digest,omitempty"`
@@ -444,10 +448,10 @@ type kindSpec struct {
 
 var kindFields = map[string]kindSpec{
 	"ping":        {},
-	"pong":        {required: []string{"daemon"}, optional: []string{"protocol"}},
+	"pong":        {required: []string{"daemon", "session"}, optional: []string{"protocol"}},
 	"exec":        {required: []string{"cmd"}, optional: []string{"cwd", "env", "user", "budget"}},
 	"read_file":   {required: []string{"path"}, optional: []string{"max_bytes", "budget"}},
-	"write_file":  {required: []string{"path"}, optional: []string{"budget"}},
+	"write_file":  {required: []string{"path"}, optional: []string{"budget", "mode"}},
 	"forward":     {required: []string{"host", "port"}, optional: []string{"budget"}},
 	"poll":        {required: []string{"target_id"}},
 	"ack":         {required: []string{"target_id"}},
@@ -458,7 +462,7 @@ var kindFields = map[string]kindSpec{
 	"pending":     {required: []string{"target_id", "elapsed_ms"}},
 	"forward_ok":  {required: []string{"handle"}},
 	"diag_result": {optional: []string{"entries", "listener_restarts"}},
-	"error":       {required: []string{"errno", "message"}, optional: []string{"layer"}},
+	"error":       {required: []string{"errno", "message"}, optional: []string{"layer", "partial"}},
 	"realize":     {required: []string{"bundle_digest"}, optional: []string{"grants"}},
 	"teardown":    {},
 	"stage":       {required: []string{"stage"}, optional: []string{"detail", "guests"}},
@@ -725,6 +729,9 @@ func (m *Message) validate() error {
 		if m.Kind == "write_file" && m.DataSize == nil {
 			return decodeErrf("write_file requires data_size")
 		}
+		if m.Kind == "write_file" && m.Mode != nil && (*m.Mode < 0 || *m.Mode > 0o7777) {
+			return decodeErrf("write_file: mode out of range")
+		}
 	case "diag":
 		if m.MaxEntries != nil && (*m.MaxEntries < 1 || *m.MaxEntries > 1000) {
 			return decodeErrf("diag: max_entries out of bounds")
@@ -771,6 +778,14 @@ func (m *Message) validate() error {
 		if (m.Errno == "ETIME" || m.Errno == "ETIMEDOUT") && m.Layer == nil {
 			return decodeErrf("error: budget errors must name their layer")
 		}
+		if m.Partial != nil {
+			if m.Errno != "ETIME" && m.Errno != "ETIMEDOUT" {
+				return decodeErrf("error: partial output is only legal on budget expiries")
+			}
+			if len(*m.Partial) > maxMessageLen {
+				return decodeErrf("error: partial too long")
+			}
+		}
 	case "forward":
 		if m.Port == nil || *m.Port < 1 || *m.Port > 65535 {
 			return decodeErrf("forward: bad port")
@@ -785,6 +800,9 @@ func (m *Message) validate() error {
 		}
 		if m.Protocol != nil && *m.Protocol != ProtocolVersion {
 			return decodeErrf("pong: protocol must be %d", ProtocolVersion)
+		}
+		if !sessionRe.MatchString(m.Session) {
+			return decodeErrf("pong: session must be 32 lowercase hex chars")
 		}
 	case "stage":
 		if !stageLiterals[m.Stage] {

@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
-from inspect_ranges._channel.channel import LoopbackTransport, MessageChannel
+from inspect_ranges._channel.channel import (
+    LoopbackTransport,
+    MessageChannel,
+    TamperError,
+)
+from inspect_ranges._channel.mocks import HostileTransport
 from inspect_ranges._compiler.plan import (
     PlanOptions,
     ResolvedPlan,
@@ -360,3 +365,20 @@ def test_config_forms_and_registration() -> None:
     assert isinstance(round_tripped, RangeSpec)
     assert round_tripped == spec
     assert (Env.default_concurrency() or 0) >= 1
+
+
+def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
+    """A pre-3.1.0 daemon's session-less pong fails the strict decode tamper-shaped (the recorded stale-golden/new-host hazard); the boot-time failure must name the operator's remedy and still destroy the booted range."""
+
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, seams = rigged_runtime(tmp_path)
+            runtime.channel_factory = lambda cids, label: MessageChannel(
+                HostileTransport("sessionless-pong"), label=label
+            )
+            with pytest.raises(TamperError) as info:
+                await Env.sample_init("task", small_spec(), {"__sample_id__": "s9"})
+            assert "re-derive images" in str(info.value)
+            assert seams.down_calls, "the booted range must be destroyed"
+
+    asyncio.run(scenario())
