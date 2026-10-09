@@ -86,11 +86,22 @@ class LocalEndpoint(FakeGuest):
 
     def _write(self, request: WriteFileRequest, data: bytes) -> _StoredReply:
         self.write_count += 1
+        self.file_modes[request.path] = request.mode
         target = self.translate(request.path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "wb") as handle:
-                handle.write(data)
+            if request.mode is not None:
+                # mirror the daemon: the mode travels with the write (create
+                # with it, then chmod past umask and any pre-existing bits)
+                descriptor = os.open(
+                    target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, request.mode
+                )
+                with open(descriptor, "wb") as handle:
+                    handle.write(data)
+                os.chmod(target, request.mode)
+            else:
+                with open(target, "wb") as handle:
+                    handle.write(data)
         except OSError as error:
             return _StoredReply(self._errno_reply(request.id, error), None)
         return _StoredReply(OkReply(id=request.id), None)

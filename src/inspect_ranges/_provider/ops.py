@@ -77,25 +77,18 @@ def _channel(handle: SampleHandle) -> MessageChannel:
     return handle.channel
 
 
-def _session_of(pong: object) -> str | None:
-    """The daemon session id of a pong, once the protocol carries one (slice 4); `None` until then."""
-    session = getattr(pong, "session", None)
-    return session if isinstance(session, str) else None
-
-
 async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     """Raise `SessionChangedError` when the guest's daemon session changed since the pin.
 
-    No-op while no session is pinned (the protocol's session field arrives in slice 4). Called after a post-retry transient failure, and after a side-effecting success that needed a same-id resend, per the layer-2b design.
+    No-op while no session is pinned (boot not finished). Called after a post-retry transient failure, and after a side-effecting success that needed a same-id resend, per the layer-2b design: a restarted daemon forgot its dedupe store, so a resend there may have double-run.
     """
     pinned = handle.sessions.get(guest)
     if pinned is None:
         return
     from .errors import SessionChangedError
 
-    pong = await _channel(handle).ping(guest)
-    observed = _session_of(pong)
-    if observed is not None and observed != pinned:
+    observed = await _channel(handle).session(guest)
+    if observed != pinned:
         handle.sessions[guest] = observed  # re-pin so later samples/ops proceed
         raise SessionChangedError(guest, op, pinned, observed)
 
@@ -166,13 +159,9 @@ async def provider_exec(
                 + exports
                 + f"exec {first}{' ' if rest else ''}{rest}\n"
             )
-            await provider_write_file(handle, guest, script_path, script)
-            # best effort, tightly bounded: close the world-readable window
-            # before the wrapper runs (the daemon-side write mode is the real
-            # fix, recorded for slice 4)
-            await _bounded_exec(
-                channel, guest, ["chmod", "600", script_path], suppress=True
-            )
+            # mode 0600 travels with the write (`WriteFileRequest.mode`), so
+            # the env-bearing script is never world-readable, not even briefly
+            await provider_write_file(handle, guest, script_path, script, mode=0o600)
             run_cmd, run_env = ["sh", script_path], {}
         request = ExecRequest(
             id=request_id(),
@@ -204,7 +193,9 @@ async def provider_exec(
         )
     except ChannelBudgetError as failure:
         if failure.layer == "command":
-            raise timeout_error(failure, None) from failure
+            # the daemon's ETIME reply may carry the killed command's output
+            # tail (`ErrorReply.partial`); surface it on the TimeoutError
+            raise timeout_error(failure, failure.partial) from failure
         await confirm_session(handle, guest, "exec")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
@@ -286,15 +277,23 @@ async def provider_read_file(handle: SampleHandle, guest: str, file: str) -> byt
 
 
 async def provider_write_file(
-    handle: SampleHandle, guest: str, file: str, contents: str | bytes
+    handle: SampleHandle,
+    guest: str,
+    file: str,
+    contents: str | bytes,
+    *,
+    mode: int | None = None,
 ) -> None:
-    """The contract's `write_file`; parents are auto-created by the daemon."""
+    """The contract's `write_file`; parents are auto-created by the daemon.
+
+    `mode` sets the created file's permission bits atomically with the write; `None` keeps the daemon default.
+    """
     channel = _channel(handle)
     path = resolve_guest_path(file)
     data = contents.encode("utf-8") if isinstance(contents, str) else contents
 
     async def attempt() -> int:
-        return await channel.write_file(guest, path, data)
+        return await channel.write_file(guest, path, data, mode=mode)
 
     try:
         deliveries = await with_retry(

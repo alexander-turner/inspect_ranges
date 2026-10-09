@@ -63,6 +63,7 @@ namespace VsockD
         static readonly Regex RequestIdRe = new Regex("^[0-9a-f]{32}$");
         static readonly Regex ErrnoRe = new Regex("^[A-Z][A-Z0-9]{1,15}$");
         static readonly Regex Sha256Re = new Regex("^[0-9a-f]{64}$");
+        static readonly Regex SessionRe = new Regex("^[0-9a-f]{32}$");
 
         // ------------------------------------------------------------ JSON
 
@@ -485,7 +486,7 @@ namespace VsockD
         static readonly Dictionary<string, string[]> RequiredFields = new Dictionary<string, string[]>
         {
             { "ping", new string[0] },
-            { "pong", new[] { "daemon" } },
+            { "pong", new[] { "daemon", "session" } },
             { "exec", new[] { "cmd" } },
             { "read_file", new[] { "path" } },
             { "write_file", new[] { "path" } },
@@ -512,7 +513,7 @@ namespace VsockD
             { "pong", new[] { "protocol" } },
             { "exec", new[] { "cwd", "env", "user", "budget" } },
             { "read_file", new[] { "max_bytes", "budget" } },
-            { "write_file", new[] { "budget" } },
+            { "write_file", new[] { "budget", "mode" } },
             { "forward", new[] { "budget" } },
             { "poll", new string[0] },
             { "ack", new string[0] },
@@ -523,7 +524,7 @@ namespace VsockD
             { "pending", new string[0] },
             { "forward_ok", new string[0] },
             { "diag_result", new[] { "entries", "listener_restarts" } },
-            { "error", new[] { "layer" } },
+            { "error", new[] { "layer", "partial" } },
             { "realize", new[] { "grants" } },
             { "teardown", new string[0] },
             { "stage", new[] { "detail", "guests" } },
@@ -653,6 +654,12 @@ namespace VsockD
                     if (GetString(m, "path").Length == 0) throw new DecodeException(kind + ": empty path");
                     if (kind == "write_file" && !dataSize.HasValue)
                         throw new DecodeException("write_file requires data_size");
+                    if (kind == "write_file")
+                    {
+                        long? writeMode = GetLong(m, "mode");
+                        if (writeMode.HasValue && (writeMode.Value < 0 || writeMode.Value > 0xFFF))
+                            throw new DecodeException("write_file: mode out of range");
+                    }
                     break;
                 case "poll":
                 case "ack":
@@ -686,6 +693,13 @@ namespace VsockD
                         throw new DecodeException("error: budget errors must name their layer");
                     if (m.ContainsKey("layer") && !LayerLiterals.Contains(GetString(m, "layer")))
                         throw new DecodeException("error: unknown layer");
+                    if (m.ContainsKey("partial"))
+                    {
+                        if (errno != "ETIME" && errno != "ETIMEDOUT")
+                            throw new DecodeException("error: partial output is only legal on budget expiries");
+                        if (GetString(m, "partial").Length > MaxMessageLen)
+                            throw new DecodeException("error: partial too long");
+                    }
                     break;
                 case "forward":
                     long port = RequireLong(m, "port");
@@ -698,6 +712,8 @@ namespace VsockD
                     long? pongProtocol = GetLong(m, "protocol");
                     if (pongProtocol.HasValue && pongProtocol.Value != ProtocolVersion)
                         throw new DecodeException("pong: protocol must be " + ProtocolVersion);
+                    if (!SessionRe.IsMatch(GetString(m, "session")))
+                        throw new DecodeException("pong: session must be 32 lowercase hex chars");
                     break;
                 case "forward_ok":
                     GetString(m, "handle");

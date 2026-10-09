@@ -148,10 +148,11 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         try:
             assert handle.channel is not None
             for guest in handle.guest_cids:
-                await handle.channel.ping(guest)
-                # the per-guest session id pin lands with the protocol's
-                # session field (slice 4); the ping stands as the provider's
-                # own liveness confirmation until then
+                # liveness confirmation and the layer-2b session pin in one
+                # probe: later ops compare against this to detect a daemon
+                # restart (which silently empties the dedupe store)
+                pong = await handle.channel.ping(guest)
+                handle.sessions[guest] = pong.session
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes

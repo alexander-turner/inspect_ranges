@@ -115,5 +115,5 @@ def test_cli_daemon_bundle(tmp_path: Path) -> None:
     result = CliRunner().invoke(ranges, ["daemon-bundle", "-o", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "bundle sha256:" in result.output
-    assert (tmp_path / "vsockd-bundle-3.0.0.tar").exists()
+    assert (tmp_path / "vsockd-bundle-3.1.0.tar").exists()
     assert (tmp_path / "daemon.json").exists()

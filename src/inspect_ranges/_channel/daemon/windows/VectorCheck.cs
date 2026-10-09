@@ -140,9 +140,43 @@ namespace VsockD
             else Console.WriteLine("  FAIL store-hammer: " + hammerFailures + " violations");
             failures += hammerFailures;
 
+            failures += SessionCheck();
+
             Console.WriteLine("vectors: " + vectors.Count + ", kinds covered: " + kinds.Count +
                 ", failures: " + failures);
             return failures == 0 ? 0 : 1;
+        }
+
+        // The layer-2b session pin, mirroring the Go daemon test: every pong
+        // from one daemon process carries the same well-formed 32-hex session
+        // (a restart is a new process, so a fresh session by construction:
+        // Daemon.Session is static readonly, minted at type initialization),
+        // and the reply with the session must survive the strict codec.
+        static int SessionCheck()
+        {
+            Dictionary<string, object> ping = new Dictionary<string, object>();
+            ping["v"] = (long)Wire.ProtocolVersion;
+            ping["id"] = new string('a', 32);
+            ping["kind"] = "ping";
+            StoredReply first = Daemon.Dispatch(ping, null);
+            ping["id"] = new string('b', 32);
+            StoredReply second = Daemon.Dispatch(ping, null);
+            string session1 = (string)first.Message["session"];
+            string session2 = (string)second.Message["session"];
+            bool shaped = session1.Length == 32;
+            foreach (char c in session1)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) shaped = false;
+            bool encodes = true;
+            try { Wire.EncodeMessage(first.Message, null); }
+            catch (Exception) { encodes = false; }
+            if (shaped && session1 == session2 && encodes)
+            {
+                Console.WriteLine("  PASS session (stable, 32-hex, encodes)");
+                return 0;
+            }
+            Console.WriteLine("  FAIL session: shaped=" + shaped + " stable=" +
+                (session1 == session2) + " encodes=" + encodes);
+            return 1;
         }
 
         // The TOCTOU regression pin, ported from the Go daemon_test hammer:

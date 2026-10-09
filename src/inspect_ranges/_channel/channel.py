@@ -103,11 +103,17 @@ class _ConnectFailure(ConnectionError):
 
 
 class ChannelBudgetError(ChannelError):
-    """A time budget fired; `layer` names which one, so timeout triage is mechanical."""
+    """A time budget fired; `layer` names which one, so timeout triage is mechanical.
 
-    def __init__(self, layer: BudgetLayer, message: str) -> None:
+    `partial` carries the killed command's output tail when the guest's budget-expiry reply included one (`ErrorReply.partial`); host-side budget fires have none.
+    """
+
+    def __init__(
+        self, layer: BudgetLayer, message: str, partial: str | None = None
+    ) -> None:
         super().__init__(f"[{layer}] {message}")
         self.layer: BudgetLayer = layer
+        self.partial = partial
 
 
 class GuestError(ChannelError):
@@ -177,9 +183,12 @@ class RangeChannel(Protocol):
     async def read_file(
         self, guest: str, path: str, *, cap: int = DEFAULT_BULK_CAP
     ) -> bytes: ...
-    async def write_file(self, guest: str, path: str, data: bytes) -> int: ...
+    async def write_file(
+        self, guest: str, path: str, data: bytes, *, mode: int | None = None
+    ) -> int: ...
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply: ...
     async def ping(self, guest: str) -> PongReply: ...
+    async def session(self, guest: str) -> str: ...
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply: ...
     async def teardown(self) -> None: ...
 
@@ -396,7 +405,9 @@ class MessageChannel:
                 if ack_consumed:
                     await self._ack(endpoint, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
-                    raise stamped(ChannelBudgetError(reply.layer, reply.message))
+                    raise stamped(
+                        ChannelBudgetError(reply.layer, reply.message, reply.partial)
+                    )
                 raise stamped(GuestError(reply.errno, reply.message, reply.layer))
             self._log(
                 logging.DEBUG,
@@ -499,6 +510,13 @@ class MessageChannel:
         request = PingRequest(id=request_id())
         reply, _, _ = await self._exchange(guest, request)
         return self._expect(reply, PongReply, request, guest)
+
+    async def session(self, guest: str) -> str:
+        """The guest daemon's current session id, via a fresh ping.
+
+        The provider pins it per guest at boot and treats a later change as a daemon restart: the wire layer's exactly-once guarantee (dedupe, tombstones, durable replies) holds only within one session (`SessionHex`).
+        """
+        return (await self.ping(guest)).session
 
     async def exec(
         self,
@@ -636,6 +654,12 @@ class MessageChannel:
                 )
                 continue
             except (ConnectionError, ChannelClosed, TruncatedFrame) as failure:
+                if probe is request:
+                    # the connection died after the send: the request may well
+                    # have been delivered and only the reply lost, so this
+                    # counts as a delivery (the session-invalidation policy
+                    # must see the resend that follows)
+                    deliveries += 1
                 losses += 1
                 if losses > _RETRY_ATTEMPTS:
                     raise stamped(
@@ -699,7 +723,9 @@ class MessageChannel:
                     )
                 await self._ack(guest, request.id)
                 if reply.errno in ("ETIME", "ETIMEDOUT") and reply.layer is not None:
-                    raise stamped(ChannelBudgetError(reply.layer, reply.message))
+                    raise stamped(
+                        ChannelBudgetError(reply.layer, reply.message, reply.partial)
+                    )
                 raise stamped(GuestError(reply.errno, reply.message, reply.layer))
             break
         self._log(
@@ -737,8 +763,12 @@ class MessageChannel:
             raise FileLimitExceeded(path, bulk or b"")
         return bulk or b""
 
-    async def write_file(self, guest: str, path: str, data: bytes) -> int:
+    async def write_file(
+        self, guest: str, path: str, data: bytes, *, mode: int | None = None
+    ) -> int:
         """Write `data` to a guest file (exactly once per request id, even across retries).
+
+        `mode` sets the created file's permission bits atomically with the write (`WriteFileRequest.mode`); `None` keeps the daemon default.
 
         Returns the delivery-attempt count: above 1 means a same-id resend happened (the provider's session-invalidation policy reads this for side-effecting operations).
 
@@ -750,7 +780,9 @@ class MessageChannel:
                 f"write of {len(data)} bytes exceeds the daemon inbound cap "
                 f"({DAEMON_INBOUND_BULK_CAP} bytes)"
             )
-        request = WriteFileRequest(id=request_id(), path=path, data_size=len(data))
+        request = WriteFileRequest(
+            id=request_id(), path=path, data_size=len(data), mode=mode
+        )
         reply, _, deliveries = await self._exchange(
             guest, request, data, ack_consumed=True
         )
@@ -1155,7 +1187,11 @@ class FakeGuest:
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self.session = uuid.uuid4().hex
+        """The daemon boot session reported in every pong; `restart()` mints a fresh one."""
         self.files: dict[str, bytes] = {}
+        self.file_modes: dict[str, int | None] = {}
+        """The `mode` each write carried, keyed by path (an in-memory store has no permission bits to inspect)."""
         self.directories: set[str] = {"/", "/tmp"}
         self.exec_count = 0
         self.write_count = 0
@@ -1175,6 +1211,16 @@ class FakeGuest:
 
     def stored_reply_count(self) -> int:
         return len(self._stored)
+
+    def restart(self) -> None:
+        """Simulate a daemon restart: a fresh session, and the dedupe store (stored replies, tombstones, running commands) vanishes with the process."""
+        self.session = uuid.uuid4().hex
+        for task in self._running.values():
+            task.cancel()
+        self._stored.clear()
+        self._tombstones.clear()
+        self._running.clear()
+        self._running_started.clear()
 
     # -- daemon behavior ----------------------------------------------------
 
@@ -1243,7 +1289,10 @@ class FakeGuest:
     def _handle_fresh(self, message: Message, bulk: bytes | None) -> _StoredReply:
         if isinstance(message, PingRequest):
             return _StoredReply(
-                PongReply(id=message.id, daemon=f"fake {self.name}"), None
+                PongReply(
+                    id=message.id, daemon=f"fake {self.name}", session=self.session
+                ),
+                None,
             )
         if isinstance(message, DiagRequest):
             entries = self.diag_entries[-message.max_entries :]
@@ -1353,6 +1402,7 @@ class FakeGuest:
     def _write(self, request: WriteFileRequest, data: bytes) -> _StoredReply:
         self.write_count += 1
         self.files[request.path] = data
+        self.file_modes[request.path] = request.mode
         return _StoredReply(OkReply(id=request.id), None)
 
 

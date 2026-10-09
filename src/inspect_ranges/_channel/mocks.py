@@ -57,7 +57,7 @@ def _wrong_id(request: Message) -> bytes:
 
 
 def _wrong_kind(request: Message) -> bytes:
-    reply = PongReply(id=request.id, daemon="impostor")
+    reply = PongReply(id=request.id, daemon="impostor", session="f" * 32)
     return b"".join(encode_message(reply))
 
 

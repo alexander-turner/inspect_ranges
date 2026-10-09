@@ -19,6 +19,7 @@ from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUs
 from inspect_ranges._channel.mocks import HostileTransport
 from inspect_ranges._channel.protocol import ErrorReply, ExecRequest, Message
 from inspect_ranges._compiler.plan import Totals
+from inspect_ranges._provider.errors import SessionChangedError
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
 from inspect_ranges._provider.retry import RetryConfig, RetryPolicy
@@ -280,5 +281,85 @@ def test_daemon_stream_truncation_raises_output_limit(tmp_path: Path) -> None:
             # first and names the endpoint cap
             await env.exec(["sh", "-c", "head -c 16777217 /dev/zero"])
         assert "limit of 16 MiB was exceeded" in str(info.value)
+
+    asyncio.run(scenario())
+
+
+def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> None:
+    """Layer 2b: an exec whose delivery needed a same-id resend across a daemon restart surfaces `SessionChangedError` (the restart emptied the dedupe store, so exactly-once no longer holds); the re-pin lets the next op proceed."""
+
+    class RestartAcrossDelivery(LocalEndpoint):
+        """Loses the first exec reply in flight and restarts before the resend arrives."""
+
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if isinstance(message, ExecRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True  # the reply is lost in flight...
+                self.restart()  # ...and the daemon restarts before the resend
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartAcrossDelivery("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-restart")
+        handle = SampleHandle(
+            project="ir-session",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        pinned = endpoint.session  # what sample_init pins at boot
+        handle.sessions["box"] = pinned
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError) as info:
+            await env.exec(["echo", "hi"])
+        assert info.value.pinned == pinned
+        assert info.value.observed == endpoint.session
+        assert handle.sessions["box"] == endpoint.session, "re-pinned"
+        fresh = await env.exec(["echo", "again"])
+        assert fresh.success and fresh.stdout == "again\n"
+
+    asyncio.run(scenario())
+
+
+def test_session_stable_across_connections(tmp_path: Path) -> None:
+    """Every connection sees the same session until the endpoint restarts."""
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = LocalEndpoint("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-stable")
+        first = await channel.session("box")
+        assert first == await channel.session("box")
+        endpoint.restart()
+        assert await channel.session("box") != first
+
+    asyncio.run(scenario())
+
+
+def test_wrapper_upload_travels_with_mode_600(tmp_path: Path) -> None:
+    """The env-bearing wrapper script is written with mode 0600 atomically (no chmod round trip, no world-readable window)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        chunk = "w" * 40_000  # forces the wrapper path
+        result = await env.exec(["printf", "%s", chunk])
+        assert result.success and result.stdout == chunk
+        endpoint = transport.guests["box"]
+        wrapper_modes = [
+            mode for path, mode in endpoint.file_modes.items() if "/.ir-exec-" in path
+        ]
+        assert wrapper_modes == [0o600]
 
     asyncio.run(scenario())

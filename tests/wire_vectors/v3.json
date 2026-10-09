@@ -20,16 +20,52 @@
    ]
   },
   {
+   "name": "write-file-mode-600",
+   "message": {
+    "v": 3,
+    "id": "0000000000000000000000000000001f",
+    "data_size": 4,
+    "kind": "write_file",
+    "path": "/tmp/secret.sh",
+    "mode": 384,
+    "budget": {
+     "untimed_bound_ms": 14400000
+    }
+   },
+   "frames_hex": [
+    "0000009b437b22627564676574223a7b22756e74696d65645f626f756e645f6d73223a31343430303030307d2c22646174615f73697a65223a342c226964223a223030303030303030303030303030303030303030303030303030303030303166222c226b696e64223a2277726974655f66696c65222c226d6f6465223a3338342c2270617468223a222f746d702f7365637265742e7368222c2276223a337d",
+    "0000000444626c6f62",
+    "00000056457b22736861323536223a2266613263386363346632383137366262656564346237333664663536396133346337396364333732336539656334326639363734623464343661633662386238222c2273697a65223a347d"
+   ],
+   "bulk_hex": "626c6f62"
+  },
+  {
+   "name": "error-etime-partial",
+   "message": {
+    "v": 3,
+    "id": "00000000000000000000000000000020",
+    "kind": "error",
+    "errno": "ETIME",
+    "message": "command budget expired after 1000 ms",
+    "layer": "command",
+    "partial": "tail of the killed command's stdout"
+   },
+   "frames_hex": [
+    "000000c1437b226572726e6f223a224554494d45222c226964223a223030303030303030303030303030303030303030303030303030303030303230222c226b696e64223a226572726f72222c226c61796572223a22636f6d6d616e64222c226d657373616765223a22636f6d6d616e642062756467657420657870697265642061667465722031303030206d73222c227061727469616c223a227461696c206f6620746865206b696c6c656420636f6d6d616e642773207374646f7574222c2276223a337d"
+   ]
+  },
+  {
    "name": "pong",
    "message": {
     "v": 3,
     "id": "00000000000000000000000000000001",
     "kind": "pong",
-    "daemon": "vsockd 3.0.0",
-    "protocol": 3
+    "daemon": "vsockd 3.1.0",
+    "protocol": 3,
+    "session": "ffffffffffffffffffffffffffffffff"
    },
    "frames_hex": [
-    "00000062437b226461656d6f6e223a2276736f636b6420332e302e30222c226964223a223030303030303030303030303030303030303030303030303030303030303031222c226b696e64223a22706f6e67222c2270726f746f636f6c223a332c2276223a337d"
+    "0000008f437b226461656d6f6e223a2276736f636b6420332e312e30222c226964223a223030303030303030303030303030303030303030303030303030303030303031222c226b696e64223a22706f6e67222c2270726f746f636f6c223a332c2273657373696f6e223a226666666666666666666666666666666666666666666666666666666666666666222c2276223a337d"
    ]
   },
   {
@@ -612,16 +648,52 @@
    "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"heartbeat\", \"uptime_ms\": 1, \"guests\": {\"web\": \"exploding\"}}"
   },
   {
+   "name": "pong-session-missing",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 3}"
+  },
+  {
+   "name": "pong-session-short",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 3, \"session\": \"abc123\"}"
+  },
+  {
+   "name": "pong-session-badchars",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 3, \"session\": \"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\"}"
+  },
+  {
+   "name": "pong-session-nonstring",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 3, \"session\": 12345}"
+  },
+  {
+   "name": "write-mode-negative",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"write_file\", \"path\": \"/f\", \"data_size\": 0, \"mode\": -1}"
+  },
+  {
+   "name": "write-mode-overrange",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"write_file\", \"path\": \"/f\", \"data_size\": 0, \"mode\": 4096}"
+  },
+  {
+   "name": "write-mode-nonint",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"write_file\", \"path\": \"/f\", \"data_size\": 0, \"mode\": \"0600\"}"
+  },
+  {
+   "name": "error-partial-overlong",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"error\", \"errno\": \"ETIME\", \"message\": \"m\", \"layer\": \"command\", \"partial\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+  },
+  {
+   "name": "error-partial-on-nonbudget",
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"error\", \"errno\": \"EIO\", \"message\": \"m\", \"partial\": \"sneaky\"}"
+  },
+  {
    "name": "pong-protocol-nonint",
-   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": \"3\"}"
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": \"3\", \"session\": \"ffffffffffffffffffffffffffffffff\"}"
   },
   {
    "name": "pong-protocol-wrong",
-   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 2}"
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"d\", \"protocol\": 2, \"session\": \"ffffffffffffffffffffffffffffffff\"}"
   },
   {
    "name": "pong-daemon-overlong",
-   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+   "payload": "{\"v\": 3, \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"kind\": \"pong\", \"daemon\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", \"session\": \"ffffffffffffffffffffffffffffffff\"}"
   },
   {
    "name": "command-ms-over-cap",

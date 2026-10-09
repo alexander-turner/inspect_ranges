@@ -358,6 +358,11 @@ namespace VsockD
                 outReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 errReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 outcome.TimedOut = true;
+                // the ETIME reply carries the output tail as "partial";
+                // Snapshot copies under the reader lock, safe even when the
+                // join above timed out and a reader thread is still draining
+                outcome.Stdout = outReader.Snapshot();
+                outcome.Stderr = errReader.Snapshot();
             }
             else
             {

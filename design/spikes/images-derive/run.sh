@@ -118,6 +118,14 @@ LISTENERS=$(C $CID exec "ss -tuln | tail -n +2 | wc -l")
 SSH_STATE=$(C $CID exec "systemctl is-enabled ssh 2>&1 || true")
 [[ "$SSH_STATE" == *masked* ]] && ok "ssh masked" || bad "ssh masked (got: $SSH_STATE)"
 
+echo "=== slice-4 agent-user checks (provider mapping over vsock) ==="
+if (cd "$ROOT" && IR_VSOCK_BATTERY_CID=$CID uv run python design/spikes/images-derive/agent_user_checks.py) \
+     | tee tmp/agent_user.txt; then
+  ok "agent-user semantics through the provider"
+else
+  bad "agent-user semantics through the provider"
+fi
+
 docker compose exec -T range sh -c "$V destroy guest >/dev/null 2>&1 || true; $V undefine guest >/dev/null 2>&1 || true"
 docker compose down -v >/dev/null
 

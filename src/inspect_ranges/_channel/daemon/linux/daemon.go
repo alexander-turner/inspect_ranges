@@ -10,6 +10,8 @@ package main
 import (
 	"bytes"
 	"container/list"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,11 +19,17 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/user"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -32,7 +40,12 @@ const (
 	KillGrace      = 5 * time.Second // SIGTERM, then SIGKILL after grace
 	WaitDelay      = 5 * time.Second // bound on reaping pipe copiers after exit (cmd.WaitDelay)
 	MaxConnActive  = 512             // resource bound against floods; polls must outlive held exec slots
-	DaemonVersion  = "vsockd 3.0.0 (go)"
+	DaemonVersion  = "vsockd 3.1.0 (go)"
+	// exec must not PATH-resolve a privilege boundary: a range-writable PATH
+	// entry could shadow runuser, so the daemon invokes it absolutely
+	RunuserPath    = "/usr/sbin/runuser"
+	AgentUser      = "agent"
+	PartialCap     = 4096 // ETIME partial-output tail (a capped text field, never bulk)
 	DefaultPort    = 5000
 	TrustedPeerCID = 2
 	// inbound bulk (write_file payloads, exec stdin): generous but bounded;
@@ -244,12 +257,133 @@ func truncateString(s string, max int) string {
 type Daemon struct {
 	store *Store
 	diag  *Diag
+	// session: minted once per daemon process and reported in every pong.
+	// The host pins it per guest, so a daemon restart (which empties the
+	// dedupe store) surfaces as a session change instead of a silent loss of
+	// the exactly-once guarantee.
+	session string
+	// agent: the unprivileged default identity for exec and file operations,
+	// nil when the daemon cannot drop to it (pre-v4 golden without the user,
+	// or an unprivileged run)
+	agent *agentIdentity
 	// supervised listener recoveries since start; surfaced in diag_result
 	// so batteries can assert the storm never wedged the accept loop
 	listenerRestarts atomic.Int64
 }
 
-func NewDaemon() *Daemon { return &Daemon{store: NewStore(), diag: NewDiag()} }
+func NewDaemon() *Daemon {
+	daemon := &Daemon{store: NewStore(), diag: NewDiag(), session: newSessionID()}
+	daemon.agent = resolveAgent(daemon.diag)
+	return daemon
+}
+
+// newSessionID mints the daemon's boot session: 32 lowercase hex chars.
+func newSessionID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		panic(fmt.Sprintf("session entropy unavailable: %v", err))
+	}
+	return hex.EncodeToString(buf)
+}
+
+// agentIdentity is the unprivileged default identity for guest operations.
+type agentIdentity struct {
+	uid int
+	gid int
+}
+
+// resolveAgent returns the agent user's ids when the daemon can actually
+// drop to them: running as root on a guest whose image created the user.
+// Otherwise nil, with a diag warning: pre-v4 goldens have no agent user, and
+// operations there keep the daemon's own identity rather than hard-failing.
+func resolveAgent(diag *Diag) *agentIdentity {
+	if os.Geteuid() != 0 {
+		diag.Add("warn", "agent-user-unavailable", nil,
+			"not running as root; operations keep the daemon's identity")
+		return nil
+	}
+	record, err := user.Lookup(AgentUser)
+	if err != nil {
+		diag.Add("warn", "agent-user-unavailable", nil,
+			fmt.Sprintf("user %q missing (pre-v4 golden?); operations run as root: %v", AgentUser, err))
+		return nil
+	}
+	uid, uidErr := strconv.Atoi(record.Uid)
+	gid, gidErr := strconv.Atoi(record.Gid)
+	if uidErr != nil || gidErr != nil {
+		diag.Add("warn", "agent-user-unavailable", nil,
+			fmt.Sprintf("user %q has non-numeric ids; operations run as root", AgentUser))
+		return nil
+	}
+	return &agentIdentity{uid: uid, gid: gid}
+}
+
+// asAgentFS runs fn with this OS thread's FILESYSTEM identity dropped to the
+// agent user: fsuid, fsgid, and the supplementary groups (without setgroups
+// the daemon's root groups would still grant access). The identity is
+// restored afterwards; if any restoration step fails the thread stays locked
+// so Go destroys it on goroutine exit, and a half-privileged thread never
+// rejoins the scheduler pool. A panic in fn skips restoration entirely and
+// retires the thread the same way (dispatch's recover produces the reply).
+func (d *Daemon) asAgentFS(id string, fn func() *storedReply) *storedReply {
+	if d.agent == nil {
+		return fn()
+	}
+	runtime.LockOSThread()
+	restored := false
+	defer func() {
+		if restored {
+			runtime.UnlockOSThread()
+		}
+	}()
+	previousGroups, err := unix.Getgroups()
+	if err != nil {
+		restored = true // nothing dropped yet
+		return errorReply(id, "EIO", "getgroups: "+err.Error(), nil)
+	}
+	if err := unix.Setgroups([]int{d.agent.gid}); err != nil {
+		restored = true // nothing dropped yet
+		return errorReply(id, "EIO", "setgroups: "+err.Error(), nil)
+	}
+	previousFsgid, err := unix.SetfsgidRetGid(d.agent.gid)
+	if err != nil {
+		restored = unix.Setgroups(previousGroups) == nil
+		return errorReply(id, "EIO", "setfsgid: "+err.Error(), nil)
+	}
+	previousFsuid, err := unix.SetfsuidRetUid(d.agent.uid)
+	if err != nil {
+		gidBack := unix.Setfsgid(previousFsgid) == nil
+		groupsBack := unix.Setgroups(previousGroups) == nil
+		restored = gidBack && groupsBack
+		return errorReply(id, "EIO", "setfsuid: "+err.Error(), nil)
+	}
+	reply := fn()
+	uidBack := unix.Setfsuid(previousFsuid) == nil
+	gidBack := unix.Setfsgid(previousFsgid) == nil
+	groupsBack := unix.Setgroups(previousGroups) == nil
+	restored = uidBack && gidBack && groupsBack
+	if !restored {
+		d.diag.Add("error", "fs-identity-restore-failed", &id,
+			"retiring the locked OS thread")
+	}
+	return reply
+}
+
+// fileModeFromWire maps octal POSIX permission bits (the wire form) to
+// fs.FileMode, whose setuid/setgid/sticky bits live elsewhere.
+func fileModeFromWire(wire int64) fs.FileMode {
+	mode := fs.FileMode(wire & 0o777)
+	if wire&0o4000 != 0 {
+		mode |= fs.ModeSetuid
+	}
+	if wire&0o2000 != 0 {
+		mode |= fs.ModeSetgid
+	}
+	if wire&0o1000 != 0 {
+		mode |= fs.ModeSticky
+	}
+	return mode
+}
 
 // Serve handles one connection: one request, one reply, close.
 func (d *Daemon) Serve(conn io.ReadWriteCloser) {
@@ -292,6 +426,7 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 		return &storedReply{message: &Message{
 			V: ProtocolVersion, ID: request.ID, Kind: "pong",
 			Daemon: DaemonVersion, Protocol: i64(ProtocolVersion),
+			Session: d.session,
 		}}
 	case "diag":
 		limit := int64(100)
@@ -337,9 +472,9 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 		case "exec":
 			reply = d.runCommand(request, bulk)
 		case "read_file":
-			reply = d.readFile(request)
+			reply = d.asAgentFS(request.ID, func() *storedReply { return d.readFile(request) })
 		case "write_file":
-			reply = d.writeFile(request, bulk)
+			reply = d.asAgentFS(request.ID, func() *storedReply { return d.writeFile(request, bulk) })
 		default:
 			reply = errorReply(request.ID, "EPROTO", fmt.Sprintf("unsupported request %s", request.Kind), nil)
 		}
@@ -388,14 +523,48 @@ func (lb *limitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Snapshot copies the buffered bytes under the lock: after a WaitDelay
+// interruption a pipe copier may still be mid-write when the ETIME reply is
+// built, so an unlocked read would race.
+func (lb *limitedBuffer) Snapshot() []byte {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return append([]byte{}, lb.buf.Bytes()...)
+}
+
 func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	argv := request.Cmd
-	if request.User != nil {
-		argv = append([]string{"runuser", "-u", *request.User, "--"}, argv...)
+	usedRunuser := false
+	switch {
+	case request.User != nil:
+		argv = append([]string{RunuserPath, "-u", *request.User, "--"}, argv...)
+		usedRunuser = true
+	case d.agent != nil:
+		// the unprivileged agent user is the default exec identity; an
+		// unknown explicit user above stays a failed exec_result naming the
+		// user (runuser exits nonzero), never a channel error
+		argv = append([]string{RunuserPath, "-u", AgentUser, "--"}, argv...)
+		usedRunuser = true
 	}
+	// neither arm: no agent identity and no explicit user, so the command
+	// keeps the daemon's own identity (pre-v4 golden or unprivileged run;
+	// resolveAgent already left the diag warning)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own group: budget kills the tree
 	if request.Cwd != nil {
+		// pre-check: with the runuser prefix a missing cwd would otherwise
+		// surface as an ambiguous fork/exec ENOENT on the runuser binary;
+		// name the real cause, in the shape LocalEndpoint emulates
+		if _, err := os.Stat(*request.Cwd); err != nil {
+			errno := "ENOENT"
+			reason := "no such file or directory"
+			var pathError *fs.PathError
+			if errors.As(err, &pathError) {
+				errno = errnoName(pathError.Err)
+				reason = pathError.Err.Error()
+			}
+			return errorReply(request.ID, errno, fmt.Sprintf("chdir %s: %s", *request.Cwd, reason), nil)
+		}
 		cmd.Dir = *request.Cwd
 	}
 	cmd.Env = os.Environ()
@@ -448,14 +617,21 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	}
 	if timedOut {
 		d.diag.Add("warn", "exec-budget-killed", &request.ID, argv[0])
-		return errorReply(request.ID,
+		reply := errorReply(request.ID,
 			"ETIME",
 			fmt.Sprintf("command budget expired after %d ms (process-group kill; setsid descendants survive)", commandMs),
 			strp("command"))
+		if tail := partialTail(stdout.Snapshot(), stderr.Snapshot()); tail != "" {
+			reply.message.Partial = &tail
+		}
+		return reply
 	}
 	rc := int64(cmd.ProcessState.ExitCode())
 	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		rc = -int64(status.Signal()) // killed-by-signal convention: negative
+	}
+	if usedRunuser && rc == 1 {
+		rc = runuserExecFailureRc(stderr.Snapshot(), rc)
 	}
 	outBytes := stdout.buf.Bytes()
 	errBytes := stderr.buf.Bytes()
@@ -474,6 +650,30 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 		bulk = payload
 	}
 	return &storedReply{message: message, bulk: bulk}
+}
+
+// runuserExecFailureRc translates runuser's exec-failure reporting into the
+// shell's 126/127 convention. util-linux runuser (as shipped on noble) exits
+// 1 both when the target command is missing and when it is not executable,
+// unlike a shell; its single-line diagnostic is unambiguous, so the
+// user-switched path is mapped to match the direct-exec path
+// (execStartFailure) and the contract's expectations. A command that itself
+// exits 1 printing exactly this one-line signature would be misread — its
+// stderr is attacker-influenceable output anyway, and the blast radius is an
+// rc of 127/126 instead of 1.
+func runuserExecFailureRc(stderr []byte, rc int64) int64 {
+	text := strings.TrimSpace(string(stderr))
+	if !strings.HasPrefix(text, "runuser: failed to execute ") ||
+		strings.ContainsRune(text, '\n') {
+		return rc
+	}
+	switch {
+	case strings.HasSuffix(text, ": No such file or directory"):
+		return 127
+	case strings.HasSuffix(text, ": Permission denied"):
+		return 126
+	}
+	return rc
 }
 
 func execStartFailure(id, command string, err error) *storedReply {
@@ -553,14 +753,42 @@ func (d *Daemon) readFile(request *Message) *storedReply {
 	return &storedReply{message: message, bulk: bulk}
 }
 
+// partialTail returns the capped, UTF-8-sanitized tail of a killed
+// command's output for the ETIME reply: stdout when it produced any, else
+// stderr. Deliberately a small text field, never bulk, so the bulk-on-error
+// side channel stays closed.
+func partialTail(stdout, stderr []byte) string {
+	source := stdout
+	if len(source) == 0 {
+		source = stderr
+	}
+	if len(source) > PartialCap {
+		source = source[len(source)-PartialCap:]
+	}
+	return strings.ToValidUTF8(string(source), "")
+}
+
 func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 	if parent := parentDir(request.Path); parent != "" {
 		if err := os.MkdirAll(parent, 0o755); err != nil {
 			return fileError(request.ID, err)
 		}
 	}
-	if err := os.WriteFile(request.Path, data, 0o644); err != nil {
+	mode := fs.FileMode(0o644)
+	if request.Mode != nil {
+		mode = fileModeFromWire(*request.Mode)
+	}
+	if err := os.WriteFile(request.Path, data, mode); err != nil {
 		return fileError(request.ID, err)
+	}
+	if request.Mode != nil {
+		// O_CREATE filters the mode through umask and ignores it entirely
+		// for a pre-existing file: chmod pins the requested bits exactly.
+		// There is no world-readable window, because creation applied the
+		// requested mode minus umask bits, a subset of the request.
+		if err := os.Chmod(request.Path, mode); err != nil {
+			return fileError(request.ID, err)
+		}
 	}
 	return okReply(request.ID)
 }

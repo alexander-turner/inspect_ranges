@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -122,6 +123,122 @@ func TestAckedResultsAreNotTombstoned(t *testing.T) {
 	poll := daemon.poll(&Message{V: ProtocolVersion, ID: rid(4), Kind: "poll", TargetID: rid(3)})
 	if poll.message.Errno != "ENOENT" {
 		t.Fatalf("acked id should poll ENOENT, got %s", poll.message.Errno)
+	}
+}
+
+// TestSessionStableWithinDaemonFreshAcrossRestarts pins the layer-2b
+// contract: every pong from one daemon process reports the same well-formed
+// session, and a restarted daemon (whose dedupe store is empty) reports a
+// different one, so the host can detect the restart.
+func TestSessionStableWithinDaemonFreshAcrossRestarts(t *testing.T) {
+	ping := func(d *Daemon, id string) string {
+		reply := d.dispatch(&Message{V: ProtocolVersion, ID: id, Kind: "ping"}, nil)
+		if reply.message.Kind != "pong" {
+			t.Fatalf("ping: got %s", reply.message.Kind)
+		}
+		if !sessionRe.MatchString(reply.message.Session) {
+			t.Fatalf("malformed session %q", reply.message.Session)
+		}
+		return reply.message.Session
+	}
+	first := NewDaemon()
+	if ping(first, rid(6001)) != ping(first, rid(6002)) {
+		t.Fatal("session changed between pings of one daemon process")
+	}
+	restarted := NewDaemon()
+	if ping(first, rid(6003)) == ping(restarted, rid(6004)) {
+		t.Fatal("a restarted daemon must mint a fresh session")
+	}
+}
+
+// TestWriteFileHonorsMode pins the atomic-permissions contract: the mode
+// travels with the write (umask-proof), so a 0600 secret is never
+// world-readable between creation and a separate chmod.
+func TestWriteFileHonorsMode(t *testing.T) {
+	daemon := NewDaemon()
+	path := filepath.Join(t.TempDir(), "secret.sh")
+	mode := int64(0o600)
+	reply := daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6101), Kind: "write_file",
+		Path: path, Mode: &mode, DataSize: i64(4),
+	}, []byte("blob"))
+	if reply.message.Kind != "ok" {
+		t.Fatalf("write: got %s (%s)", reply.message.Kind, reply.message.Message)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o, want 600", info.Mode().Perm())
+	}
+}
+
+// TestEtimeCarriesPartialOutput pins the optional slice-4 extension: the
+// budget-expiry error reply carries the killed command's output tail as a
+// capped TEXT field (never bulk), and the reply still encodes.
+func TestEtimeCarriesPartialOutput(t *testing.T) {
+	daemon := NewDaemon()
+	message := execMessage(rid(6201), "sh", "-c", "echo marker; sleep 30")
+	budget := int64(200)
+	message.Budget = &Budget{CommandMs: &budget}
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "error" || reply.message.Errno != "ETIME" {
+		t.Fatalf("got %s/%s", reply.message.Kind, reply.message.Errno)
+	}
+	if reply.message.Partial == nil || !strings.Contains(*reply.message.Partial, "marker") {
+		t.Fatalf("partial should carry the stdout tail, got %v", reply.message.Partial)
+	}
+	if len(*reply.message.Partial) > PartialCap {
+		t.Fatalf("partial exceeds cap: %d", len(*reply.message.Partial))
+	}
+	if reply.bulk != nil {
+		t.Fatal("an error reply must never carry bulk")
+	}
+	if _, err := EncodeMessage(reply.message, nil); err != nil {
+		t.Fatalf("ETIME reply with partial failed to encode: %v", err)
+	}
+}
+
+// TestMissingCwdIsChdirEnoent pins the pre-check shape: with the runuser
+// prefix a missing cwd would otherwise surface as an ambiguous fork/exec
+// ENOENT on the runuser binary itself.
+func TestMissingCwdIsChdirEnoent(t *testing.T) {
+	daemon := NewDaemon()
+	message := execMessage(rid(6301), "true")
+	gone := filepath.Join(t.TempDir(), "gone")
+	message.Cwd = &gone
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "error" || reply.message.Errno != "ENOENT" {
+		t.Fatalf("got %s/%s (%s)", reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+	want := "chdir " + gone + ": no such file or directory"
+	if reply.message.Message != want {
+		t.Fatalf("message %q, want %q", reply.message.Message, want)
+	}
+}
+
+// TestRunuserExecFailureTranslation pins the 126/127 mapping of runuser's
+// rc-1 exec-failure diagnostics (util-linux breaks the shell convention),
+// and that anything else — including multi-line output that merely ends with
+// the signature — keeps its honest rc.
+func TestRunuserExecFailureTranslation(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   int64
+	}{
+		{"not-found", "runuser: failed to execute nope: No such file or directory\n", 127},
+		{"not-executable", "runuser: failed to execute /etc/passwd: Permission denied\n", 126},
+		{"unknown-user", "runuser: user nosuchuser does not exist\n", 1},
+		{"plain-failure", "some command output\n", 1},
+		{"multiline-suffix-spoof", "x\nrunuser: failed to execute y: Permission denied", 1},
+		{"other-exec-errno", "runuser: failed to execute z: Exec format error\n", 1},
+	}
+	for _, c := range cases {
+		if got := runuserExecFailureRc([]byte(c.stderr), 1); got != c.want {
+			t.Errorf("%s: rc %d, want %d", c.name, got, c.want)
+		}
 	}
 }
 

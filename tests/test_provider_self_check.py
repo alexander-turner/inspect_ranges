@@ -46,6 +46,9 @@ if os.geteuid() == 0:
             "running as root: file modes do not bind (the daemon agent-user fix is slice 4)"
         )
 
+VSOCK_CID = int(os.environ.get("IR_VSOCK_BATTERY_CID", "0"))
+"""Booted-guest gate: when a battery guest is up (compose harness, chan-band CID), the whole suite ALSO runs over real vsock with an EMPTY xfail pin — the booted range is where the CI pins must evaporate (the daemon's agent user makes `test_exec_as_user` and the permission checks real)."""
+
 LATENCY_RTT_S = 0.05
 EXCHANGES_BUDGET_PER_CHECK = 16
 """Measured: the chattiest honest check uses 10 exchanges across the whole
@@ -57,11 +60,17 @@ per-chunk-round-trip chattiness immediately."""
 def make_env(
     root: Path, transport_kind: str
 ) -> tuple[SandboxEnvironment, MessageChannel]:
-    loopback = LoopbackTransport(guests=())
-    loopback.guests["box"] = LocalEndpoint("box", root)
-    transport: Transport = loopback
-    if transport_kind == "latency":
-        transport = LatencyTransport(loopback, rtt_s=LATENCY_RTT_S)
+    transport: Transport
+    if transport_kind == "vsock":
+        from inspect_ranges._channel.vsock import VsockTransport
+
+        transport = VsockTransport({"box": VSOCK_CID})
+    else:
+        loopback = LoopbackTransport(guests=())
+        loopback.guests["box"] = LocalEndpoint("box", root)
+        transport = loopback
+        if transport_kind == "latency":
+            transport = LatencyTransport(loopback, rtt_s=LATENCY_RTT_S)
     channel = MessageChannel(transport, label=f"self-check-{transport_kind}")
     handle = SampleHandle(
         project="ir-self-check",
@@ -83,10 +92,12 @@ _LATENCY_SKIPS = frozenset(
 def _check_params() -> list[object]:
     """Every (check, transport) pair: CI xfails as collection-time STRICT marks (an XPASS fails the run and control-flow exceptions are never swallowed, unlike a hand-rolled try/except) and the latency 50 MiB skips as skip marks."""
     params: list[object] = []
-    for transport_kind in ("loopback", "latency"):
+    kinds = ("loopback", "latency") + (("vsock",) if VSOCK_CID else ())
+    for transport_kind in kinds:
         for name, check in CHECKS:
             marks: list[pytest.MarkDecorator] = []
-            if name in CI_XFAILS:
+            if name in CI_XFAILS and transport_kind != "vsock":
+                # the booted guest carries NO pins: every check must pass there
                 marks.append(pytest.mark.xfail(strict=True, reason=CI_XFAILS[name]))
             if transport_kind == "latency" and name in _LATENCY_SKIPS:
                 marks.append(
