@@ -61,13 +61,20 @@ Retry telemetry joins the existing request-id correlation story: every retry log
 
 Cross-process lease/reaper admission; a `connection()` console command; `forward`; evidence streaming; Windows through the provider (gated until the build phase); HostProvider/separated topology; checkpoint boot. Open risks stated for the review rounds: LocalEndpoint CI fidelity (the real gates are slices 4 and 5), the ESTALE double-run as a loud documented behavioral choice, session-field lockstep operator confusion, Go privilege-drop subtleties, and the `asyncio.to_thread(up)` executor ceiling (bounded by admission).
 
+## Deviations and corrections (chunk 1, recorded 2026-10-09)
+
+- **Large argv rides the wrapper script, not chunked control frames.** This record's slice-3 text assumed ~1 MiB argv could ride the chunked control frames; the protocol deliberately caps control payloads at ONE 32 KiB frame (only bulk chunks), exactly as channel-v1's clarification already documented. The provider implements the uploaded wrapper-script pattern (argv above 24 KB becomes `sh <uploaded script>`, written through the retried file path), and the full-size case is covered by self_check's own `test_exec_large_command`.
+- **Sample files and the setup script are Inspect's work, not `sample_init`'s.** The contract runs `copy_sandbox_environment_files` and the setup script itself, through the environments `sample_init` returns; the provider only returns them. The slice-2 text implying the provider copies files was wrong against the installed contract.
+- **Per-op shared deadlines default to attempts-bounded.** The retry engine supports a hard shared deadline (`RetryPolicy.deadline_s`, wall-time-true, with an in-flight attempt truncated and surfaced as `TransportFailure`), but the op surface does not derive one from the caller's exec `timeout`: a transient failure consumes none of the command's budget semantics, and retrying with the full timeout each attempt is the k8s-consistent reading. Callers needing a hard wall set it through the policy.
+- **The loopback endpoint's inbound cap was 32 MiB while the daemon accepts 256 MiB**; the 50 MiB self_check cases caught the fidelity gap and the reference endpoint now mirrors `DAEMON_INBOUND_BULK_CAP`.
+
 ## Ledger
 
 | Slice | Status |
 |---|---|
-| 1 retry engine + taxonomy | planned |
-| 2 skeleton + lifecycle + layer 3 | planned |
-| 3 op surface + CI self_check + latency | planned |
+| 1 retry engine + taxonomy | done (review: 10 findings fixed, incl. a hard wall-time deadline and the self-defending mapping table) |
+| 2 skeleton + lifecycle + layer 3 | done (review: 10 findings fixed, incl. int sample ids, FIFO admission, lease-registry preservation, cancellation drain of the boot thread, no blanket lease prune) |
+| 3 op surface + CI self_check + latency | done (self_check 44-check suite green on CI over loopback and the latency mock; two-sided CI xfail pin = test_exec_as_user only; review pending) |
 | 4 daemon/protocol batch | planned |
 | 5 booted integration + real eval | planned |
 | 6 docs + doctor + record | planned |
