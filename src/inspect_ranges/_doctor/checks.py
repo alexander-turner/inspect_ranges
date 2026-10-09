@@ -127,9 +127,17 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
                 fix="pip install inspect-ai",
             )
         )
-    elif floor is not None and (parse_version(installed) or ()) < (
-        parse_version(floor) or ()
-    ):
+    elif floor is None:
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "inspect-ai",
+                "warn",
+                f"{installed} installed, but the package's own floor could not be "
+                "read from its metadata, so the version check did not run",
+            )
+        )
+    elif (parse_version(installed) or ()) < (parse_version(floor) or ()):
         results.append(
             CheckResult(
                 PROVIDER,
@@ -142,30 +150,61 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
     else:
         results.append(CheckResult(PROVIDER, "inspect-ai", "ok", installed))
 
-    # a current-recipe golden: stale goldens carry a pre-3.1.0 daemon whose
-    # session-less pong the host rejects tamper-shaped at boot
+    # a current-recipe golden must exist as both sidecar AND image file;
+    # older-recipe goldens carry a pre-3.1.0 daemon whose session-less pong
+    # the host rejects tamper-shaped at boot
     current: list[str] = []
-    stale: list[tuple[str, str]] = []
+    other_recipe: list[tuple[str, str]] = []
+    missing_file: list[str] = []
     for sidecar in sorted(image_cache.glob("*.json")) if image_cache.is_dir() else []:
         try:
             meta = ImageMetadata.model_validate_json(sidecar.read_text())
         except (OSError, ValueError):
             continue
-        if meta.recipe_version == RECIPE_VERSION:
-            current.append(meta.file)
+        if meta.recipe_version != RECIPE_VERSION:
+            other_recipe.append((meta.file, meta.recipe_version))
+        elif not (image_cache / meta.file).is_file():
+            missing_file.append(meta.file)
         else:
-            stale.append((meta.file, meta.recipe_version))
+            current.append(meta.file)
     if current:
         results.append(CheckResult(PROVIDER, "golden image", "ok", ", ".join(current)))
-    elif stale:
+    elif missing_file:
         results.append(
             CheckResult(
                 PROVIDER,
                 "golden image",
                 "warn",
-                "only stale-recipe goldens: "
-                + ", ".join(f"{name} (v{version})" for name, version in stale)
-                + f"; their daemon predates the required pong session field, so a v{RECIPE_VERSION} host fails the boot ping tamper-shaped",
+                "sidecar(s) present but the image file is gone: "
+                + ", ".join(missing_file),
+                fix="re-derive: inspect-ranges images derive <vendor> --sha256 <digest> ...",
+            )
+        )
+    elif other_recipe:
+        details: list[str] = []
+        for name, version in other_recipe:
+            try:
+                older = int(version) < int(RECIPE_VERSION)
+            except ValueError:
+                older = None
+            if older:
+                details.append(
+                    f"{name} (recipe v{version}: its daemon predates the required "
+                    "pong session field, so this host fails the boot ping tamper-shaped)"
+                )
+            elif older is None:
+                details.append(f"{name} (recipe v{version}, not v{RECIPE_VERSION})")
+            else:
+                details.append(
+                    f"{name} (recipe v{version} is NEWER than this package's "
+                    f"v{RECIPE_VERSION}: upgrade inspect_ranges or re-derive)"
+                )
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "golden image",
+                "warn",
+                "no current-recipe golden: " + "; ".join(details),
                 fix="re-derive: inspect-ranges images derive <vendor> --sha256 <digest> ...",
             )
         )
@@ -180,7 +219,26 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
             )
         )
 
-    # the CID lease registry: provider sample admission depends on it parsing
+    # the CID lease registry: a STRICT read, deliberately stricter than the
+    # allocator's own forgiving reader. The file is a flat {project: lease}
+    # mapping; a corrupt file or an entry whose block cannot be determined
+    # makes `lease()` raise `CidRegistryError` at admission time, which is
+    # exactly the pre-eval failure doctor exists to catch.
+    from .._provider.naming import CidLease
+
+    def reservable(entry: object) -> bool:
+        try:
+            CidLease.model_validate(entry)
+            return True
+        except ValueError:
+            pass
+        if isinstance(entry, dict):
+            values = cast("dict[str, object]", entry)
+            return isinstance(values.get("base"), int) and isinstance(
+                values.get("count"), int
+            )
+        return False
+
     lease_path = state_dir / "cids.json"
     if not lease_path.exists():
         results.append(
@@ -188,19 +246,24 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
         )
     else:
         try:
-            import json as json_module
-
-            doc: dict[str, object] = json_module.loads(lease_path.read_text())
-            leases = doc.get("leases", {})
-            if not isinstance(leases, dict):
-                raise ValueError("leases is not an object")
-            leases = cast("dict[str, object]", leases)
+            raw = json.loads(lease_path.read_text())
+            if not isinstance(raw, dict):
+                raise ValueError("registry root is not an object")
+            entries = cast("dict[str, object]", raw)
+            blocked = sorted(
+                project for project, entry in entries.items() if not reservable(entry)
+            )
+            if blocked:
+                raise ValueError(
+                    "entries whose CID block cannot be determined: "
+                    + ", ".join(blocked)
+                )
             results.append(
                 CheckResult(
                     PROVIDER,
                     "cid leases",
                     "ok",
-                    f"{len(leases)} lease(s) at {lease_path}",
+                    f"{len(entries)} entr{'y' if len(entries) == 1 else 'ies'} at {lease_path}",
                 )
             )
         except (OSError, ValueError) as error:
@@ -220,16 +283,20 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
 
 
 def _inspect_ai_floor() -> str | None:
-    """The inspect-ai minimum from this package's own dependency metadata."""
+    """The inspect-ai minimum from this package's own dependency metadata.
+
+    Tolerates extras, parenthesized specifiers, and multi-clause pins; `None` means the floor could not be read (the caller reports that visibly rather than skipping silently).
+    """
     import importlib.metadata as metadata
-    import re
 
     try:
         requires = metadata.requires("inspect_ranges") or []
     except metadata.PackageNotFoundError:
         return None
     for requirement in requires:
-        match = re.match(r"inspect[-_]ai\s*>=\s*([0-9.]+)", requirement)
+        if not requirement.replace("_", "-").startswith("inspect-ai"):
+            continue
+        match = re.search(r">=\s*([0-9.]+)", requirement)
         if match:
             return match.group(1)
     return None

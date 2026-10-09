@@ -363,11 +363,50 @@ def test_check_provider_flags_stale_goldens_with_the_skew_guidance(
     assert "tamper-shaped" in golden.detail and "re-derive" in (golden.fix or "")
 
 
-def test_check_provider_flags_a_corrupt_lease_registry(tmp_path: Path) -> None:
+@pytest.mark.parametrize("content", ["{not json", "[]", "null"])
+def test_check_provider_flags_a_corrupt_lease_registry(
+    tmp_path: Path, content: str
+) -> None:
+    """Any registry the allocator cannot read is a fail row, never a doctor crash (valid-but-wrong JSON shapes included)."""
     state = tmp_path / "state"
     state.mkdir(parents=True)
-    (state / "cids.json").write_text("{not json")
+    (state / "cids.json").write_text(content)
     results = check_provider(state_dir=state, image_cache=tmp_path / "img")
     leases = next(result for result in results if result.name == "cid leases")
     assert leases.status == "fail"
     assert "inspect sandbox cleanup" in (leases.fix or "")
+
+
+def test_check_provider_counts_real_leases(tmp_path: Path) -> None:
+    """The lease count reads the allocator's actual flat format, not a wrapper key."""
+    from inspect_ranges._provider.naming import CidAllocator
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    CidAllocator(state).lease("ir-doctor-probe", 2)
+    results = check_provider(state_dir=state, image_cache=tmp_path / "img")
+    leases = next(result for result in results if result.name == "cid leases")
+    assert leases.status == "ok" and leases.detail.startswith("1 entry")
+
+
+def test_check_provider_warns_when_the_golden_file_is_gone(tmp_path: Path) -> None:
+    """A current-recipe sidecar whose image file was deleted is not a present golden."""
+    from inspect_ranges._runtime.images import RECIPE_VERSION, DaemonPin, ImageMetadata
+
+    cache = tmp_path / "img"
+    cache.mkdir(parents=True)
+    meta = ImageMetadata(
+        name="ghost",
+        file="ghost.qcow2",
+        recipe_version=RECIPE_VERSION,
+        derivation_key="k",
+        vendor_file="vendor.img",
+        vendor_sha256="0" * 64,
+        daemon=DaemonPin(name="vsockd", version="3.1.0", sha256="0" * 64),
+        golden_sha256="0" * 64,
+        created="2026-10-09T00:00:00+00:00",
+    )
+    (cache / "ghost.json").write_text(meta.model_dump_json())
+    results = check_provider(state_dir=tmp_path / "state", image_cache=cache)
+    golden = next(result for result in results if result.name == "golden image")
+    assert golden.status == "warn" and "image file is gone" in golden.detail

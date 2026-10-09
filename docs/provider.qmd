@@ -76,7 +76,7 @@ Commands run as the unprivileged `agent` user by default (home `/home/agent`, wh
 
 ## The retry contract
 
-Infrastructure flakes, and losing an entire sample when a retry would have recovered it is worse than the double-execution risk of retrying, so sandbox operations retry transient infrastructure failures by default. The caveat from `inspect_k8s_sandbox` applies verbatim: "Note that retries cannot guarantee idempotency - if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the source punctuates with an em dash, rendered here per house style.)
+Infrastructure flakes, and losing an entire sample when a retry would have recovered it is worse than the double-execution risk of retrying, so sandbox operations retry transient infrastructure failures by default. The caveat from `inspect_k8s_sandbox` applies verbatim: "Note that retries cannot guarantee idempotency — if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the em dash inside the quotation is the source's own punctuation, preserved for quote fidelity.)
 
 What bounds that risk, in order:
 
@@ -104,7 +104,7 @@ A destroyed range releases its CID lease, ownership record, staging, and admissi
 
 ## Concurrency and admission
 
-Samples run concurrently up to a host-derived bound (`max(1, min(cpus/2, memory_gb/8))` by default); each sample's range gets a distinct project name and disjoint guest CIDs. A range whose declared resources alone exceed the host is refused up front with a clear error rather than admitted to fail slowly.
+Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults to a host-derived value (`max(1, min(cpus/2, memory_gb/8))`); `INSPECT_RANGES_MAX_SANDBOXES` overrides that default. Independently, a resource-weighted admission gate charges each range's declared CPUs and memory against measured host capacity and queues samples FIFO when the host is full, whatever the concurrency setting says; a range whose declared resources alone exceed the host is refused up front with a clear error rather than admitted to fail slowly. Each sample's range gets a distinct project name and disjoint guest CIDs.
 
 ## Environment reference
 
@@ -112,10 +112,10 @@ Samples run concurrently up to a host-derived bound (`max(1, min(cpus/2, memory_
 |---|---|---|
 | `INSPECT_RANGES_IMAGE_CACHE` | `~/.cache/inspect-ranges/images` | Where goldens and vendor images live (`images derive` writes here). |
 | `XDG_STATE_HOME` | `~/.local/state` | Root of provider state: project ownership, CID leases, staging (`<state>/inspect-ranges/`). |
-| `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides the concurrent-sample admission bound. |
+| `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides Inspect's default sample concurrency for this provider (the resource-weighted admission gate still applies). |
 | `INSPECT_RANGES_RETRY_EXEC_ATTEMPTS` | 3 | Retry attempts for `exec`. |
 | `INSPECT_RANGES_RETRY_FILE_ATTEMPTS` | 5 | Retry attempts for file operations. |
 | `INSPECT_RANGES_RETRY_WAIT_INITIAL_S` | 1 | First retry backoff (exponential with jitter). |
 | `INSPECT_RANGES_RETRY_WAIT_MAX_S` | 10 | Backoff ceiling. |
 | `INSPECT_RANGES_RETRY_UP_ATTEMPTS` | 2 | Boot attempts per sample (a transient boot failure respins once with fresh identity). |
-| `INSPECT_RANGES_RETRY_DISABLE` | unset | Any non-empty value collapses every retry layer to a single attempt. |
+| `INSPECT_RANGES_RETRY_DISABLE` | unset | Any non-empty value collapses the retry layer (fresh-id attempts and the boot respin) to single attempts. The wire layer's same-id resend of a lost reply is delivery recovery, not retry policy, and stays on. |

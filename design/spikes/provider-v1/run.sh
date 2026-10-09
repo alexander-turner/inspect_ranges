@@ -107,7 +107,7 @@ RESIDUE=$(docker ps -a --format '{{.Names}}' | grep -c '^ir-' || true)
 LEASES=$(uv run python -c "
 import json, pathlib
 path = pathlib.Path('$XDG_STATE_HOME/inspect-ranges/projects/cids.json')
-print(len(json.loads(path.read_text()).get('leases', {})) if path.exists() else 0)
+print(len(json.loads(path.read_text())) if path.exists() else 0)
 ")
 [[ "$LEASES" == "0" ]] && ok "no CID leases remain" || bad "CID leases remain ($LEASES)"
 STAGING=$(find "$XDG_STATE_HOME/inspect-ranges/staging" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
