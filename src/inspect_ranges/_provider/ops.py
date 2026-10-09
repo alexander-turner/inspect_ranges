@@ -102,11 +102,13 @@ async def _bounded_exec(
     cmd: list[str],
     *,
     suppress: bool,
+    user: str | None = None,
 ) -> None:
-    """One tightly bounded, never-retried maintenance exec (wrapper chmod/scrub)."""
+    """One tightly bounded, never-retried maintenance exec (wrapper chown/scrub)."""
     request = ExecRequest(
         id=request_id(),
         cmd=cmd,
+        user=user,
         budget=Budget(command_ms=2_000, channel_ms=2_000, untimed_bound_ms=8_000),
     )
     try:
@@ -169,17 +171,25 @@ async def provider_exec(
                 + exports
                 + f"exec {first}{' ' if rest else ''}{rest}\n"
             )
-            # the mode travels with the write (`WriteFileRequest.mode`), so
-            # the env-bearing script is never world-readable, not even
-            # briefly, for the default (agent) and root identities. An
-            # explicit OTHER user cannot read an agent-owned 0600 file (the
-            # daemon writes as agent), so that rare combination widens to
-            # 0644: the caller's env rides guest-visible for that one exec,
-            # the same honestly-stated exposure the wrapper always had
-            wrapper_mode = 0o600 if user in (None, "root", "agent") else 0o644
-            await provider_write_file(
-                handle, guest, script_path, script, mode=wrapper_mode
-            )
+            # the mode travels with the write (`WriteFileRequest.mode`): the
+            # env-bearing script is 0600 and agent-owned at creation, so it is
+            # never world-readable, not even briefly. For an explicit third
+            # user (not agent, not root) one bounded root chown transfers
+            # ownership before the exec: only the daemon (root), the agent,
+            # and the requested user can ever read the env, and owner-only
+            # bits are also what lets the script self-delete under sticky
+            # /tmp (a non-owner's `rm -f -- "$0"` would be EPERM there,
+            # stranding the secrets world-readable had the mode been widened
+            # instead)
+            await provider_write_file(handle, guest, script_path, script, mode=0o600)
+            if user not in (None, "root", "agent"):
+                await _bounded_exec(
+                    channel,
+                    guest,
+                    ["chown", "--", user, script_path],
+                    suppress=False,
+                    user="root",
+                )
             run_cmd, run_env = ["sh", script_path], {}
         request = ExecRequest(
             id=request_id(),
@@ -211,6 +221,12 @@ async def provider_exec(
         )
     except ChannelBudgetError as failure:
         if failure.layer == "command":
+            # a resent delivery that then timed out is exactly as restart-risky
+            # as a resent success (delivered, reply lost, daemon restarted,
+            # resend double-ran into the budget): the session verdict outranks
+            # the timeout verdict
+            if (failure.attempts or 0) > 1:
+                await confirm_session(handle, guest, "exec")
             # the daemon's ETIME reply may carry the killed command's output
             # tail (`ErrorReply.partial`); surface it on the TimeoutError
             raise timeout_error(failure, failure.partial) from failure
@@ -219,7 +235,14 @@ async def provider_exec(
     except TransportFailure as failure:
         await confirm_session(handle, guest, "exec")
         raise unavailable(failure) from failure
-    # TamperError, SessionChangedError, GuestError, ValueError propagate unmapped
+    except GuestError as failure:
+        # an errno-tagged failure after a resent delivery still means the
+        # resend may have double-run on a restarted daemon; confirm before
+        # the honest error propagates
+        if (failure.attempts or 0) > 1:
+            await confirm_session(handle, guest, "exec")
+        raise
+    # TamperError, SessionChangedError, ValueError propagate unmapped
 
     if outcome.attempts > 1:
         await confirm_session(handle, guest, "exec")
@@ -322,12 +345,18 @@ async def provider_write_file(
             endpoint=guest,
         )
     except GuestError as failure:
+        # side-effecting op: a resent delivery that then failed may still have
+        # double-run on a restarted daemon; the session verdict comes first
+        if (failure.attempts or 0) > 1:
+            await confirm_session(handle, guest, "write_file")
         mapped = map_file_failure(failure, file)
         if mapped is failure:
             raise
         raise mapped from failure
     except ChannelBudgetError as failure:
         if failure.layer == "command":
+            if (failure.attempts or 0) > 1:
+                await confirm_session(handle, guest, "write_file")
             raise timeout_error(failure, None) from failure
         await confirm_session(handle, guest, "write_file")
         raise unavailable(failure) from failure

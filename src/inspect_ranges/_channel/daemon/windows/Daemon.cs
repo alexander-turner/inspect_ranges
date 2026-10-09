@@ -520,15 +520,19 @@ namespace VsockD
 
         // the capped tail of a killed command's output for the ETIME reply:
         // stdout when it produced any, else stderr. A small TEXT field, never
-        // bulk, so the bulk-on-error side channel stays closed. UTF-8 decode
-        // substitutes U+FFFD for invalid sequences, so the reply always
-        // encodes; the char count never exceeds the byte count (<= 4096).
+        // bulk, so the bulk-on-error side channel stays closed. Invalid UTF-8
+        // bytes are DROPPED (the Go daemon's ToValidUTF8 behavior), never
+        // substituted: U+FFFD is three bytes per bad byte, which could mint a
+        // partial over the 4096-BYTE wire cap and have the host reject a
+        // genuine timeout as tamper.
         const int PartialCap = 4096;
+        static readonly Encoding Utf8Dropping = Encoding.GetEncoding(
+            "utf-8", EncoderFallback.ReplacementFallback, new DecoderReplacementFallback(""));
         static string PartialTail(byte[] stdout, byte[] stderr)
         {
             byte[] source = stdout.Length > 0 ? stdout : stderr;
             int start = source.Length > PartialCap ? source.Length - PartialCap : 0;
-            return Encoding.UTF8.GetString(source, start, source.Length - start);
+            return Utf8Dropping.GetString(source, start, source.Length - start);
         }
 
         static StoredReply ReadFile(Dictionary<string, object> request)

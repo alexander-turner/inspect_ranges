@@ -394,20 +394,83 @@ def test_env_touching_runuser_reset_keys_rides_the_wrapper(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_wrapper_mode_widens_for_an_explicit_other_user(tmp_path: Path) -> None:
-    """An agent-owned 0600 wrapper is unreadable to an explicit third user, so that combination writes 0644 (the stated exposure); the default identity keeps 0600."""
+def test_wrapper_for_third_user_stays_0600_and_is_chowned(tmp_path: Path) -> None:
+    """The env-bearing wrapper is ALWAYS 0600 and agent-owned at creation; an explicit third user gets ownership via one root chown (never a mode widening, which would both leak the env world-readable and break the sticky-/tmp self-delete)."""
 
     async def scenario() -> None:
         env, transport = make_env(tmp_path)
         endpoint = transport.guests["box"]
+        assert isinstance(endpoint, LocalEndpoint)
         await env.exec(["sh", "-c", "echo $HOME"], env={"HOME": "/x"})
         result = await env.exec(
             ["sh", "-c", "echo $HOME"], env={"HOME": "/x"}, user="somebody-else"
         )
         assert not result.success, "the CI endpoint cannot switch users"
-        modes = [
-            mode for path, mode in endpoint.file_modes.items() if "/.ir-exec-" in path
-        ]
-        assert modes == [0o600, 0o644]
+        wrappers = [path for path in endpoint.file_modes if "/.ir-exec-" in path]
+        assert [endpoint.file_modes[path] for path in wrappers] == [0o600, 0o600]
+        owners = [endpoint.file_owners[path] for path in wrappers]
+        assert owners == ["agent", "somebody-else"], (
+            "the default run stays agent-owned; the third-user run is chowned"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_resent_exec_that_times_out_still_confirms_the_session(
+    tmp_path: Path,
+) -> None:
+    """A resent delivery that lands as a command-layer budget expiry is exactly as restart-risky as a resent success: the session verdict outranks the timeout verdict."""
+
+    class RestartAcrossDelivery(LocalEndpoint):
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if isinstance(message, ExecRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True
+                self.restart()
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartAcrossDelivery("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="session-etime")
+        handle = SampleHandle(
+            project="ir-session-etime",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        handle.sessions["box"] = endpoint.session
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError):
+            await env.exec(["sh", "-c", "sleep 30"], timeout=1)
+
+    asyncio.run(scenario())
+
+
+def test_write_mode_pins_bits_before_content(tmp_path: Path) -> None:
+    """Rewriting a pre-existing wider-mode file with mode 0600 ends 0600 with the fresh content: the endpoint mirrors the daemon's fchmod-then-truncate ordering, so the old bits never cover the new bytes."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        endpoint = transport.guests["box"]
+        assert isinstance(endpoint, LocalEndpoint)
+        target = endpoint.translate("/tmp/rewritten")
+        target.write_bytes(b"old public content")
+        target.chmod(0o644)
+        channel = env._handle.channel  # pyright: ignore[reportPrivateUsage]
+        assert channel is not None
+        await channel.write_file("box", "/tmp/rewritten", b"secret", mode=0o600)
+        assert (target.stat().st_mode & 0o777) == 0o600
+        assert target.read_bytes() == b"secret"
 
     asyncio.run(scenario())

@@ -60,10 +60,12 @@ namespace VsockD
         public const byte FrameData = 0x44;
         public const byte FrameEnd = 0x45;
 
-        static readonly Regex RequestIdRe = new Regex("^[0-9a-f]{32}$");
-        static readonly Regex ErrnoRe = new Regex("^[A-Z][A-Z0-9]{1,15}$");
-        static readonly Regex Sha256Re = new Regex("^[0-9a-f]{64}$");
-        static readonly Regex SessionRe = new Regex("^[0-9a-f]{32}$");
+        // \z, not $: .NET's $ also matches before a trailing newline,
+        // which Go's regexp and pydantic's Rust regex both reject
+        static readonly Regex RequestIdRe = new Regex("^[0-9a-f]{32}\\z");
+        static readonly Regex ErrnoRe = new Regex("^[A-Z][A-Z0-9]{1,15}\\z");
+        static readonly Regex Sha256Re = new Regex("^[0-9a-f]{64}\\z");
+        static readonly Regex SessionRe = new Regex("^[0-9a-f]{32}\\z");
 
         // ------------------------------------------------------------ JSON
 
@@ -686,7 +688,7 @@ namespace VsockD
                 case "error":
                     if (!ErrnoRe.IsMatch(GetString(m, "errno")))
                         throw new DecodeException("error: bad errno shape");
-                    if (GetString(m, "message").Length > MaxMessageLen)
+                    if (Encoding.UTF8.GetByteCount(GetString(m, "message")) > MaxMessageLen)
                         throw new DecodeException("error: message too long");
                     string errno = (string)m["errno"];
                     if ((errno == "ETIME" || errno == "ETIMEDOUT") && !m.ContainsKey("layer"))
@@ -710,7 +712,7 @@ namespace VsockD
                     GetString(m, "host");
                     break;
                 case "pong":
-                    if (GetString(m, "daemon").Length > MaxDaemonLen)
+                    if (Encoding.UTF8.GetByteCount(GetString(m, "daemon")) > MaxDaemonLen)
                         throw new DecodeException("pong: daemon too long");
                     long? pongProtocol = GetLong(m, "protocol");
                     if (pongProtocol.HasValue && pongProtocol.Value != ProtocolVersion)
@@ -725,7 +727,7 @@ namespace VsockD
                     if (!StageLiterals.Contains(GetString(m, "stage")))
                         throw new DecodeException("stage: unknown stage");
                     string stageDetail = GetString(m, "detail");
-                    if (stageDetail != null && stageDetail.Length > MaxStageDetailLen)
+                    if (stageDetail != null && Encoding.UTF8.GetByteCount(stageDetail) > MaxStageDetailLen)
                         throw new DecodeException("stage: detail too long");
                     ValidateGuests(m);
                     break;
@@ -795,13 +797,13 @@ namespace VsockD
                 if (level == null || !LevelLiterals.Contains(level))
                     throw new DecodeException("diag_result: unknown level");
                 string evt = GetString(entry, "event");
-                if (evt == null || evt.Length == 0 || evt.Length > MaxEventLen)
+                if (evt == null || evt.Length == 0 || Encoding.UTF8.GetByteCount(evt) > MaxEventLen)
                     throw new DecodeException("diag_result: bad event");
                 string requestId = GetString(entry, "request_id");
-                if (requestId != null && requestId.Length > MaxRequestIdLen)
+                if (requestId != null && Encoding.UTF8.GetByteCount(requestId) > MaxRequestIdLen)
                     throw new DecodeException("diag_result: request_id too long");
                 string detail = GetString(entry, "detail");
-                if (detail != null && detail.Length > MaxDiagDetailLen)
+                if (detail != null && Encoding.UTF8.GetByteCount(detail) > MaxDiagDetailLen)
                     throw new DecodeException("diag_result: detail too long");
             }
         }

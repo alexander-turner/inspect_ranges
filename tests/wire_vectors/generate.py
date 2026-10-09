@@ -383,6 +383,61 @@ def _rejects() -> list[dict[str, str]]:
             ),
         ),
         (
+            # trailing-newline class: .NET's $ matches before a final newline,
+            # so these four shaped fields pin the \z/end-of-text anchor in
+            # every codec
+            "ping-id-trailing-newline",
+            d(v=3, id="a" * 32 + "\n", kind="ping"),
+        ),
+        (
+            "pong-session-trailing-newline",
+            d(**base, kind="pong", daemon="d", protocol=3, session="f" * 32 + "\n"),
+        ),
+        (
+            "error-errno-trailing-newline",
+            d(**base, kind="error", errno="EIO\n", message="m"),
+        ),
+        (
+            "realize-digest-trailing-newline",
+            d(**base, kind="realize", bundle_digest="a" * 64 + "\n"),
+        ),
+        (
+            # byte-cap class: every length cap counts UTF-8 BYTES (the Go
+            # daemon's len()); each entry is under the code-point cap but
+            # over the byte cap
+            "pong-daemon-overlong-utf8",
+            d(
+                **base,
+                kind="pong",
+                daemon="\u00e9" * 100,
+                protocol=3,
+                session="f" * 32,
+            ),
+        ),
+        (
+            "error-message-overlong-utf8",
+            d(**base, kind="error", errno="EIO", message="\u00e9" * 3000),
+        ),
+        (
+            "stage-detail-overlong-utf8",
+            d(**base, kind="stage", stage="boot", detail="\u00e9" * 3000),
+        ),
+        (
+            "diag-entry-detail-overlong-utf8",
+            d(
+                **base,
+                kind="diag_result",
+                entries=[
+                    {
+                        "ts_ms": 1,
+                        "level": "info",
+                        "event": "x",
+                        "detail": "\u00e9" * 1200,
+                    }
+                ],
+            ),
+        ),
+        (
             # 3000 code points but 6000 UTF-8 bytes: the cap counts BYTES in
             # every codec (a code-point count would accept this)
             "error-partial-overlong-utf8",

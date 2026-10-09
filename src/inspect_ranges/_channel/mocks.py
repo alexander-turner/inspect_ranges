@@ -56,6 +56,20 @@ def _wrong_id(request: Message) -> bytes:
     return b"".join(encode_message(reply))
 
 
+def _sessionless_pong(request: Message) -> bytes:
+    # a pre-3.1.0 daemon's honest pong: well-formed v3 but no session field
+    payload = canonical_json(
+        {
+            "v": 3,
+            "id": request.id,
+            "kind": "pong",
+            "daemon": "vsockd 3.0.0 (go)",
+            "protocol": 3,
+        }
+    )
+    return _frame(FrameType.CONTROL, payload)
+
+
 def _wrong_kind(request: Message) -> bytes:
     reply = PongReply(id=request.id, daemon="impostor", session="f" * 32)
     return b"".join(encode_message(reply))
@@ -148,6 +162,7 @@ def _truncated_reply(request: Message) -> bytes:
 HOSTILE_GUEST_SCENARIOS: dict[str, tuple[Callable[[Message], bytes], str]] = {
     # scenario -> (reply crafter, channel operation that exercises the defense)
     "garbage-bytes": (_garbage, "read_file"),
+    "sessionless-pong": (_sessionless_pong, "ping"),
     "oversized-length-field": (_oversized_length_field, "read_file"),
     "bad-json": (_bad_json, "read_file"),
     "unknown-kind": (_unknown_kind, "read_file"),

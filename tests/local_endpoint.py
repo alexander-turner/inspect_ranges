@@ -38,6 +38,8 @@ class LocalEndpoint(FakeGuest):
     def __init__(self, name: str, root: Path) -> None:
         super().__init__(name)
         self.root = root
+        self.file_owners: dict[str, str] = {}
+        """Ownership emulation: who owns each written path (the daemon writes as agent; a root chown transfers). The CI host cannot really chown, so tests pin the third-user wrapper flow through this record."""
         root.mkdir(parents=True, exist_ok=True)
         (root / "tmp").mkdir(exist_ok=True)
 
@@ -87,6 +89,7 @@ class LocalEndpoint(FakeGuest):
     def _write(self, request: WriteFileRequest, data: bytes) -> _StoredReply:
         self.write_count += 1
         self.file_modes[request.path] = request.mode
+        self.file_owners[request.path] = "agent"  # the daemon's write identity
         target = self.translate(request.path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +129,15 @@ class LocalEndpoint(FakeGuest):
 
     async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
         self.exec_count += 1
+        if request.cmd and request.cmd[0] == "chown" and request.user == "root":
+            # ownership emulation: the CI host cannot chown as root, so record
+            # what the daemon-side chown would set (the third-user wrapper
+            # flow) and answer success
+            owner = next(part for part in request.cmd[1:] if part != "--")
+            self.file_owners[request.cmd[-1]] = owner
+            reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
+            self._store(request.id, reply)
+            return reply
         current_user = pwd.getpwuid(os.geteuid()).pw_name
         if request.user is not None and request.user != current_user:
             # the daemon's unknown/unswitchable-user shape: a failed result

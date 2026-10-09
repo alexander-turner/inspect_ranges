@@ -124,6 +124,30 @@ async def main() -> int:
         f"rc={result.returncode} out={result.stdout!r} err={result.stderr!r}",
     )
 
+    result = await provider_exec(
+        handle,
+        GUEST,
+        ["sh", "-c", "echo $PATH"],
+        None,
+        None,
+        {"PATH": "/custom-bin:/usr/bin:/bin"},
+        None,
+        30,
+    )
+    check(
+        "caller PATH survives the runuser reset (wrapper routing)",
+        result.success and result.stdout.strip() == "/custom-bin:/usr/bin:/bin",
+        f"rc={result.returncode} out={result.stdout!r} err={result.stderr!r}",
+    )
+
+    diag = await channel.diag(GUEST, max_entries=256)
+    fallback = [entry for entry in diag.entries if entry.event == "agent-user-unavailable"]
+    check(
+        "recipe-v4 golden never falls back to root (no agent-user-unavailable diag)",
+        not fallback,
+        "; ".join(entry.detail for entry in fallback),
+    )
+
     try:
         await provider_write_file(handle, GUEST, "/etc/ir-denied-probe", "nope")
         check(
