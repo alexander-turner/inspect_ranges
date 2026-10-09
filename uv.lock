@@ -1192,6 +1192,7 @@ dependencies = [
     { name = "inspect-ai" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "tenacity" },
 ]
 
 [package.dev-dependencies]
@@ -1234,6 +1235,7 @@ requires-dist = [
     { name = "inspect-ai", specifier = ">=0.3.266" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "tenacity", specifier = ">=8.2" },
 ]
 
 [package.metadata.requires-dev]

@@ -18,7 +18,10 @@ PROJECT_PREFIX = "ir-"
 
 
 class OwnerRecord(BaseModel):
-    """What `up` registers before touching docker: enough for any process to tear the project down."""
+    """What `up` registers before touching docker: enough for any process to tear the project down.
+
+    The optional provider-origin fields are written by the Inspect sandbox provider after a successful boot (the CID lease registry covers the crash window before that), so a fresh-process `cli_cleanup` can tell provider samples from operator-run projects.
+    """
 
     project: str
     range_name: str
@@ -26,6 +29,9 @@ class OwnerRecord(BaseModel):
     bundle: str
     created: str
     pid: int
+    origin: str | None = None
+    sample_id: str | None = None
+    cid_base: int | None = None
 
 
 def default_state_dir() -> Path:
