@@ -35,9 +35,21 @@ systemctl enable vsockd.service
 
 _UNIT = """[Unit]
 Description=inspect-ranges guest control daemon (v3)
+# no start limit: a retried in-guest `systemctl restart vsockd` is
+# self-amplifying (the op's reply dies with the daemon, the resend re-runs it
+# on the restarted daemon's empty dedupe store), and the default 5-in-10s
+# limit then kills the unit PERMANENTLY, bricking the control channel. The
+# daemon must always come back; the retry storm itself is bounded by the
+# host's retry budgets and surfaces as SessionChangedError (provider-v1
+# slice-5 battery finding). Residual: a daemon that cannot start at all now
+# restarts for the guest's lifetime at RestartSec pacing instead of stopping.
+StartLimitIntervalSec=0
 [Service]
 ExecStart=/opt/inspect-ranges/vsockd
 Restart=always
+# with the start limit off, a daemon that cannot start must back off rather
+# than hot-loop at the 100ms default for the guest's lifetime
+RestartSec=1
 [Install]
 WantedBy=multi-user.target
 """

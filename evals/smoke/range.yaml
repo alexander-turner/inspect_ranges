@@ -1,0 +1,26 @@
+# The smoke eval's range: one isolated segment, one named target ("web"),
+# one attacker box; both guests run the derived golden the image cache holds
+# under the name noble-range-guest.
+range:
+  name: provider-smoke
+  schema_version: "0.1"
+  description: >
+    Smoke-eval range: the solver execs on the attacker (default sandbox) and
+    the named web guest; the scorer reads a file off web.
+
+networks:
+  - name: lab
+    cidr: 10.91.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.91.10.10 }]
+
+attacker:
+  interfaces: [{ network: lab, ip: 10.91.10.2 }]
+  image: noble-range-guest
+  entry: external
+  egress: none

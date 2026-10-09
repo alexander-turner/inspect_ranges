@@ -83,7 +83,7 @@ def _channel(handle: SampleHandle) -> MessageChannel:
 async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     """Raise `SessionChangedError` when the guest's daemon session changed since the pin.
 
-    No-op while no session is pinned (boot not finished). Called after a post-retry transient failure, and after a side-effecting success that needed a same-id resend, per the layer-2b design: a restarted daemon forgot its dedupe store, so a resend there may have double-run.
+    No-op while no session is pinned (boot not finished). Called after any resent or re-attempted delivery of a side-effecting operation, whatever its outcome shape, per the layer-2b design: a restarted daemon forgot its dedupe store, so the earlier delivery may have double-run.
     """
     pinned = handle.sessions.get(guest)
     if pinned is None:
@@ -96,6 +96,29 @@ async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
         raise SessionChangedError(guest, op, pinned, observed)
 
 
+async def _confirm_session_best_effort(
+    handle: SampleHandle, guest: str, op: str
+) -> None:
+    """`confirm_session` for the arms that are about to raise their own failure.
+
+    The confirm ping racing a daemon outage (the restart window itself) cannot be distinguished from plain unavailability, and the caller is about to surface an honest failure anyway: only a POSITIVE session change (or a tamper verdict, which propagates) outranks it.
+    """
+    try:
+        await confirm_session(handle, guest, op)
+    except (TransportFailure, ChannelBudgetError):
+        return
+
+
+async def _confirm_session_or_unavailable(
+    handle: SampleHandle, guest: str, op: str
+) -> None:
+    """`confirm_session` after a SUCCESS that involved any re-delivery: a dead daemon at confirm time means exactly-once cannot be certified for the result in hand, which is unavailable-shaped, not silently fine."""
+    try:
+        await confirm_session(handle, guest, op)
+    except (TransportFailure, ChannelBudgetError) as failure:
+        raise unavailable(failure) from failure
+
+
 async def _bounded_exec(
     channel: MessageChannel,
     guest: str,
@@ -104,7 +127,10 @@ async def _bounded_exec(
     suppress: bool,
     user: str | None = None,
 ) -> None:
-    """One tightly bounded, never-retried maintenance exec (wrapper chown/scrub)."""
+    """One tightly bounded, never-retried maintenance exec (wrapper chown/scrub).
+
+    Deliberately outside the session-confirmation policy: both callers are idempotent (chown to a fixed owner, rm -f of one path), so a re-delivery cannot change state beyond what a single delivery does.
+    """
     request = ExecRequest(
         id=request_id(),
         cmd=cmd,
@@ -142,7 +168,11 @@ async def provider_exec(
         cmd, resolved_cwd, env or {}, user, budget
     ) or bool(_RUNUSER_RESET_KEYS & (env or {}).keys())
 
+    call_attempts = 0
+
     async def attempt() -> ExecOutcome:
+        nonlocal call_attempts
+        call_attempts += 1
         run_cmd, run_env = cmd, env or {}
         script_path: str | None = None
         if needs_wrapper:
@@ -221,31 +251,35 @@ async def provider_exec(
         )
     except ChannelBudgetError as failure:
         if failure.layer == "command":
-            # a resent delivery that then timed out is exactly as restart-risky
-            # as a resent success (delivered, reply lost, daemon restarted,
-            # resend double-ran into the budget): the session verdict outranks
-            # the timeout verdict
-            if (failure.attempts or 0) > 1:
-                await confirm_session(handle, guest, "exec")
+            # a re-delivered op that then timed out is exactly as restart-risky
+            # as a re-delivered success (the session verdict outranks the
+            # timeout verdict); re-delivery means a same-id wire resend OR a
+            # fresh-id retry attempt of THIS call
+            if (failure.attempts or 0) > 1 or call_attempts > 1:
+                await _confirm_session_best_effort(handle, guest, "exec")
             # the daemon's ETIME reply may carry the killed command's output
             # tail (`ErrorReply.partial`); surface it on the TimeoutError
             raise timeout_error(failure, failure.partial) from failure
-        await confirm_session(handle, guest, "exec")
+        await _confirm_session_best_effort(handle, guest, "exec")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "exec")
+        await _confirm_session_best_effort(handle, guest, "exec")
         raise unavailable(failure) from failure
     except GuestError as failure:
-        # an errno-tagged failure after a resent delivery still means the
-        # resend may have double-run on a restarted daemon; confirm before
-        # the honest error propagates
-        if (failure.attempts or 0) > 1:
-            await confirm_session(handle, guest, "exec")
+        # an errno-tagged failure after a re-delivery (same-id resend of this
+        # attempt, or an earlier fresh-id attempt of this call) still means a
+        # possible double-run on a restarted daemon; confirm before the
+        # honest error propagates
+        if (failure.attempts or 0) > 1 or call_attempts > 1:
+            await _confirm_session_best_effort(handle, guest, "exec")
         raise
     # TamperError, SessionChangedError, ValueError propagate unmapped
 
-    if outcome.attempts > 1:
-        await confirm_session(handle, guest, "exec")
+    if outcome.attempts > 1 or call_attempts > 1:
+        # either a same-id resend (wire layer) or a fresh-id re-attempt
+        # (retry layer) of this call delivered more than once: both are
+        # restart-risky
+        await _confirm_session_or_unavailable(handle, guest, "exec")
     if outcome.stdout_truncated or outcome.stderr_truncated:
         # the daemon's own per-stream cap fired before anything reached the host
         raise output_limit_error(
@@ -333,7 +367,11 @@ async def provider_write_file(
     path = resolve_guest_path(file)
     data = contents.encode("utf-8") if isinstance(contents, str) else contents
 
+    call_attempts = 0
+
     async def attempt() -> int:
+        nonlocal call_attempts
+        call_attempts += 1
         return await channel.write_file(guest, path, data, mode=mode)
 
     try:
@@ -345,23 +383,24 @@ async def provider_write_file(
             endpoint=guest,
         )
     except GuestError as failure:
-        # side-effecting op: a resent delivery that then failed may still have
-        # double-run on a restarted daemon; the session verdict comes first
-        if (failure.attempts or 0) > 1:
-            await confirm_session(handle, guest, "write_file")
+        # side-effecting op: a re-delivered attempt that then failed may still
+        # have double-run on a restarted daemon; the session verdict comes
+        # first
+        if (failure.attempts or 0) > 1 or call_attempts > 1:
+            await _confirm_session_best_effort(handle, guest, "write_file")
         mapped = map_file_failure(failure, file)
         if mapped is failure:
             raise
         raise mapped from failure
     except ChannelBudgetError as failure:
         if failure.layer == "command":
-            if (failure.attempts or 0) > 1:
-                await confirm_session(handle, guest, "write_file")
+            if (failure.attempts or 0) > 1 or call_attempts > 1:
+                await _confirm_session_best_effort(handle, guest, "write_file")
             raise timeout_error(failure, None) from failure
-        await confirm_session(handle, guest, "write_file")
+        await _confirm_session_best_effort(handle, guest, "write_file")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "write_file")
+        await _confirm_session_best_effort(handle, guest, "write_file")
         raise unavailable(failure) from failure
-    if deliveries > 1:
-        await confirm_session(handle, guest, "write_file")
+    if deliveries > 1 or call_attempts > 1:
+        await _confirm_session_or_unavailable(handle, guest, "write_file")

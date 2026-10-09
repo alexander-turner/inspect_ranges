@@ -49,6 +49,19 @@ class CidLease(BaseModel):
     count: int
 
 
+def entry_block(entry: object) -> tuple[int, int] | None:
+    """The CID block a registry entry reserves, or `None` when it cannot be determined.
+
+    This is THE rule `lease()` enforces for foreign entries (integer `base`, integer `count >= 1`); doctor shares it so its health verdict matches what allocation will actually do.
+    """
+    fields = cast("dict[str, object]", entry) if isinstance(entry, dict) else {}
+    base = fields.get("base")
+    count = fields.get("count")
+    if isinstance(base, int) and isinstance(count, int) and count >= 1:
+        return base, count
+    return None
+
+
 class CidRegistryError(RuntimeError):
     """The on-disk lease registry holds an entry whose CID block cannot be determined."""
 
@@ -138,11 +151,9 @@ class CidAllocator:
         """Blocks reserved by entries this version cannot fully parse (loud beats clever: an undeterminable block fails allocation outright)."""
         reserved: list[tuple[int, int]] = []
         for project, entry in self._extras_snapshot.items():
-            fields = cast("dict[str, object]", entry) if isinstance(entry, dict) else {}
-            base = fields.get("base")
-            count = fields.get("count")
-            if isinstance(base, int) and isinstance(count, int) and count >= 1:
-                reserved.append((base, count))
+            block = entry_block(entry)
+            if block is not None:
+                reserved.append(block)
                 continue
             raise CidRegistryError(
                 f"lease entry {project!r} in {self._path} is unparseable and its "
