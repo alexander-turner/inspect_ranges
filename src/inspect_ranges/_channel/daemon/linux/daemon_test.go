@@ -218,6 +218,60 @@ func TestMissingCwdIsChdirEnoent(t *testing.T) {
 	}
 }
 
+// TestFileCwdIsChdirEnotdir pins the other pre-check arm: a cwd that exists
+// but is a regular file names the real cause instead of resurfacing as the
+// ambiguous fork/exec error on argv[0].
+func TestFileCwdIsChdirEnotdir(t *testing.T) {
+	daemon := NewDaemon()
+	file := filepath.Join(t.TempDir(), "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	message := execMessage(rid(6302), "true")
+	message.Cwd = &file
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "error" || reply.message.Errno != "ENOTDIR" {
+		t.Fatalf("got %s/%s (%s)", reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+	want := "chdir " + file + ": not a directory"
+	if reply.message.Message != want {
+		t.Fatalf("message %q, want %q", reply.message.Message, want)
+	}
+}
+
+// TestWriteFileModeNarrowsBeforeContent pins the rewrite ordering: writing a
+// pre-existing wider-mode file with mode=0600 must end 0600 (O_TRUNC alone
+// would ignore the mode and leave the old bits covering the fresh content).
+func TestWriteFileModeNarrowsBeforeContent(t *testing.T) {
+	daemon := NewDaemon()
+	path := filepath.Join(t.TempDir(), "rewritten")
+	if err := os.WriteFile(path, []byte("old public content"), 0o644); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	mode := int64(0o600)
+	reply := daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6102), Kind: "write_file",
+		Path: path, Mode: &mode, DataSize: i64(6),
+	}, []byte("secret"))
+	if reply.message.Kind != "ok" {
+		t.Fatalf("rewrite: got %s (%s)", reply.message.Kind, reply.message.Message)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o, want 600", info.Mode().Perm())
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(content) != "secret" {
+		t.Fatalf("content %q, want the fresh bytes", content)
+	}
+}
+
 // TestRunuserExecFailureTranslation pins the 126/127 mapping of runuser's
 // rc-1 exec-failure diagnostics (util-linux breaks the shell convention),
 // and that anything else — including multi-line output that merely ends with

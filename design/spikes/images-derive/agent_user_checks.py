@@ -99,6 +99,31 @@ async def main() -> int:
         f"rc={result.returncode} out={result.stdout!r} err={result.stderr!r}",
     )
 
+    result = await provider_exec(
+        handle, GUEST, ["sh", "-c", "echo $HOME"], None, None, None, None, 30
+    )
+    check(
+        "default HOME is the agent home",
+        result.success and result.stdout.strip() == "/home/agent",
+        f"rc={result.returncode} out={result.stdout!r}",
+    )
+
+    result = await provider_exec(
+        handle,
+        GUEST,
+        ["sh", "-c", "echo $HOME"],
+        None,
+        None,
+        {"HOME": "/custom-home"},
+        None,
+        30,
+    )
+    check(
+        "caller HOME survives the runuser reset (wrapper routing)",
+        result.success and result.stdout.strip() == "/custom-home",
+        f"rc={result.returncode} out={result.stdout!r} err={result.stderr!r}",
+    )
+
     try:
         await provider_write_file(handle, GUEST, "/etc/ir-denied-probe", "nope")
         check(

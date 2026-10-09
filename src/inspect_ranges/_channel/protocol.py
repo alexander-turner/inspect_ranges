@@ -296,8 +296,13 @@ class ErrorReply(_MessageBase):
     def _budget_errors_name_their_layer(self) -> "ErrorReply":
         if self.errno in ("ETIME", "ETIMEDOUT") and self.layer is None:
             raise ValueError("budget errors must name the layer that fired")
-        if self.partial is not None and self.errno not in ("ETIME", "ETIMEDOUT"):
-            raise ValueError("partial output is only legal on budget expiries")
+        if self.partial is not None:
+            if self.errno not in ("ETIME", "ETIMEDOUT"):
+                raise ValueError("partial output is only legal on budget expiries")
+            if len(self.partial.encode("utf-8")) > 4096:
+                # UTF-8 BYTE length, matching the Go codec's len(): a
+                # code-point count would accept non-ASCII partials Go rejects
+                raise ValueError("partial output exceeds 4096 UTF-8 bytes")
         return self
 
 

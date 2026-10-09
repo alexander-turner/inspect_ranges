@@ -363,3 +363,51 @@ def test_wrapper_upload_travels_with_mode_600(tmp_path: Path) -> None:
         assert wrapper_modes == [0o600]
 
     asyncio.run(scenario())
+
+
+def test_command_timeout_carries_partial_output(tmp_path: Path) -> None:
+    """The daemon's ETIME `partial` tail surfaces as `CommandTimeout.truncated_output` (closing the chunk-1 deviation: the field is no longer always `None`)."""
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        with pytest.raises(TimeoutError) as info:
+            await env.exec(["sh", "-c", "echo marker; sleep 30"], timeout=1)
+        truncated = getattr(info.value, "truncated_output", None)
+        assert truncated is not None and "marker" in truncated
+
+    asyncio.run(scenario())
+
+
+def test_env_touching_runuser_reset_keys_rides_the_wrapper(tmp_path: Path) -> None:
+    """HOME/SHELL/USER/LOGNAME/PATH are always reset by the daemon's runuser switch, so env naming them must ride the wrapper (whose exports run after the switch) even when the request would fit a control frame."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        result = await env.exec(["sh", "-c", "echo $HOME"], env={"HOME": "/elsewhere"})
+        assert result.success and result.stdout == "/elsewhere\n"
+        endpoint = transport.guests["box"]
+        assert endpoint.write_count == 1, "the wrapper upload"
+        plain = await env.exec(["sh", "-c", "echo $ANSWER"], env={"ANSWER": "42"})
+        assert plain.success and plain.stdout == "42\n"
+        assert endpoint.write_count == 1, "non-reset keys stay on the direct path"
+
+    asyncio.run(scenario())
+
+
+def test_wrapper_mode_widens_for_an_explicit_other_user(tmp_path: Path) -> None:
+    """An agent-owned 0600 wrapper is unreadable to an explicit third user, so that combination writes 0644 (the stated exposure); the default identity keeps 0600."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        endpoint = transport.guests["box"]
+        await env.exec(["sh", "-c", "echo $HOME"], env={"HOME": "/x"})
+        result = await env.exec(
+            ["sh", "-c", "echo $HOME"], env={"HOME": "/x"}, user="somebody-else"
+        )
+        assert not result.success, "the CI endpoint cannot switch users"
+        modes = [
+            mode for path, mode in endpoint.file_modes.items() if "/.ir-exec-" in path
+        ]
+        assert modes == [0o600, 0o644]
+
+    asyncio.run(scenario())

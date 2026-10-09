@@ -41,6 +41,9 @@ AGENT_HOME = "/home/agent"
 _WRAPPER_MARGIN = 1_024
 """Headroom under the control-frame cap when deciding whether a request needs the wrapper (id and data_size fields vary a little between the probe and the real request)."""
 
+_RUNUSER_RESET_KEYS = frozenset({"HOME", "SHELL", "USER", "LOGNAME", "PATH"})
+"""Env keys util-linux runuser unconditionally resets on its user switch (its whitelist option ignores exactly these five); caller values for them only survive via the wrapper script's exports."""
+
 
 def _request_fits(
     cmd: list[str],
@@ -128,7 +131,14 @@ async def provider_exec(
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME
     budget = Budget(command_ms=timeout * 1000 if timeout is not None else None)
-    needs_wrapper = not _request_fits(cmd, resolved_cwd, env or {}, user, budget)
+    # two reasons to ride the wrapper: the encoded request does not fit one
+    # control frame, or the env touches a key util-linux runuser always resets
+    # (HOME, SHELL, USER, LOGNAME, PATH; --whitelist-environment ignores those
+    # five) and the daemon's user switch would clobber the caller's value: the
+    # wrapper's exports run after runuser, so they stick
+    needs_wrapper = not _request_fits(
+        cmd, resolved_cwd, env or {}, user, budget
+    ) or bool(_RUNUSER_RESET_KEYS & (env or {}).keys())
 
     async def attempt() -> ExecOutcome:
         run_cmd, run_env = cmd, env or {}
@@ -159,9 +169,17 @@ async def provider_exec(
                 + exports
                 + f"exec {first}{' ' if rest else ''}{rest}\n"
             )
-            # mode 0600 travels with the write (`WriteFileRequest.mode`), so
-            # the env-bearing script is never world-readable, not even briefly
-            await provider_write_file(handle, guest, script_path, script, mode=0o600)
+            # the mode travels with the write (`WriteFileRequest.mode`), so
+            # the env-bearing script is never world-readable, not even
+            # briefly, for the default (agent) and root identities. An
+            # explicit OTHER user cannot read an agent-owned 0600 file (the
+            # daemon writes as agent), so that rare combination widens to
+            # 0644: the caller's env rides guest-visible for that one exec,
+            # the same honestly-stated exposure the wrapper always had
+            wrapper_mode = 0o600 if user in (None, "root", "agent") else 0o644
+            await provider_write_file(
+                handle, guest, script_path, script, mode=wrapper_mode
+            )
             run_cmd, run_env = ["sh", script_path], {}
         request = ExecRequest(
             id=request_id(),

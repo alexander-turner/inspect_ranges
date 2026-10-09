@@ -37,7 +37,7 @@ def _resolve(path: str) -> str:
     return path if path.startswith("/") else f"{AGENT_HOME}/{path}"
 
 _XFAILS: dict[str, frozenset[str]] = {
-    # linux: EMPTY since provider-v1 slice 4 — the recipe-v4 golden creates
+    # linux: EMPTY since provider-v1 slice 4: the recipe-v4 golden creates
     # the agent user and the daemon defaults exec and file ops to it, so the
     # permission checks bind for real (the gate is two-sided: a regression
     # here fails, and so would re-pinning)

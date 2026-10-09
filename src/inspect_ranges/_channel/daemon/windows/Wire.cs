@@ -697,7 +697,10 @@ namespace VsockD
                     {
                         if (errno != "ETIME" && errno != "ETIMEDOUT")
                             throw new DecodeException("error: partial output is only legal on budget expiries");
-                        if (GetString(m, "partial").Length > MaxMessageLen)
+                        // UTF-8 BYTE length, matching the Go codec's len():
+                        // code-point or UTF-16 counts would accept non-ASCII
+                        // partials the other codecs reject
+                        if (Encoding.UTF8.GetByteCount(GetString(m, "partial")) > MaxMessageLen)
                             throw new DecodeException("error: partial too long");
                     }
                     break;

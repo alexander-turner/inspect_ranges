@@ -47,7 +47,7 @@ if os.geteuid() == 0:
         )
 
 VSOCK_CID = int(os.environ.get("IR_VSOCK_BATTERY_CID", "0"))
-"""Booted-guest gate: when a battery guest is up (compose harness, chan-band CID), the whole suite ALSO runs over real vsock with an EMPTY xfail pin — the booted range is where the CI pins must evaporate (the daemon's agent user makes `test_exec_as_user` and the permission checks real)."""
+"""Booted-guest gate: when a battery guest is up (compose harness, chan-band CID), the whole suite ALSO runs over real vsock with an EMPTY xfail pin: the booted range is where the CI pins must evaporate (the daemon's agent user makes `test_exec_as_user` and the permission checks real)."""
 
 LATENCY_RTT_S = 0.05
 EXCHANGES_BUDGET_PER_CHECK = 16

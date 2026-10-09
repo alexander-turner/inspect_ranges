@@ -383,6 +383,19 @@ def _rejects() -> list[dict[str, str]]:
             ),
         ),
         (
+            # 3000 code points but 6000 UTF-8 bytes: the cap counts BYTES in
+            # every codec (a code-point count would accept this)
+            "error-partial-overlong-utf8",
+            d(
+                **base,
+                kind="error",
+                errno="ETIME",
+                message="m",
+                layer="command",
+                partial="\u00e9" * 3000,
+            ),
+        ),
+        (
             "error-partial-on-nonbudget",
             d(**base, kind="error", errno="EIO", message="m", partial="sneaky"),
         ),

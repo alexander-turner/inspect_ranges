@@ -345,21 +345,21 @@ func (d *Daemon) asAgentFS(id string, fn func() *storedReply) *storedReply {
 		restored = true // nothing dropped yet
 		return errorReply(id, "EIO", "setgroups: "+err.Error(), nil)
 	}
-	previousFsgid, err := unix.SetfsgidRetGid(d.agent.gid)
-	if err != nil {
+	previousFsgid, gidDropped := swapFsgid(d.agent.gid)
+	if !gidDropped {
 		restored = unix.Setgroups(previousGroups) == nil
-		return errorReply(id, "EIO", "setfsgid: "+err.Error(), nil)
+		return errorReply(id, "EIO", "setfsgid did not take", nil)
 	}
-	previousFsuid, err := unix.SetfsuidRetUid(d.agent.uid)
-	if err != nil {
-		gidBack := unix.Setfsgid(previousFsgid) == nil
+	previousFsuid, uidDropped := swapFsuid(d.agent.uid)
+	if !uidDropped {
+		_, gidBack := swapFsgid(previousFsgid)
 		groupsBack := unix.Setgroups(previousGroups) == nil
 		restored = gidBack && groupsBack
-		return errorReply(id, "EIO", "setfsuid: "+err.Error(), nil)
+		return errorReply(id, "EIO", "setfsuid did not take", nil)
 	}
 	reply := fn()
-	uidBack := unix.Setfsuid(previousFsuid) == nil
-	gidBack := unix.Setfsgid(previousFsgid) == nil
+	_, uidBack := swapFsuid(previousFsuid)
+	_, gidBack := swapFsgid(previousFsgid)
 	groupsBack := unix.Setgroups(previousGroups) == nil
 	restored = uidBack && gidBack && groupsBack
 	if !restored {
@@ -367,6 +367,30 @@ func (d *Daemon) asAgentFS(id string, fn func() *storedReply) *storedReply {
 			"retiring the locked OS thread")
 	}
 	return reply
+}
+
+// swapFsuid sets this thread's filesystem uid and reports whether the change
+// VERIFIABLY took. setfsuid(2) gives no error indication (it returns the
+// previous id unconditionally, per its BUGS section), so the only honest
+// check is a read-back through a second call with the same value.
+func swapFsuid(uid int) (previous int, ok bool) {
+	previous, err := unix.SetfsuidRetUid(uid)
+	if err != nil {
+		return previous, false
+	}
+	current, err := unix.SetfsuidRetUid(uid)
+	return previous, err == nil && current == uid
+}
+
+// swapFsgid mirrors swapFsuid for the filesystem gid (setfsgid(2) has the
+// same no-error-reporting contract).
+func swapFsgid(gid int) (previous int, ok bool) {
+	previous, err := unix.SetfsgidRetGid(gid)
+	if err != nil {
+		return previous, false
+	}
+	current, err := unix.SetfsgidRetGid(gid)
+	return previous, err == nil && current == gid
 }
 
 // fileModeFromWire maps octal POSIX permission bits (the wire form) to
@@ -532,6 +556,14 @@ func (lb *limitedBuffer) Snapshot() []byte {
 	return append([]byte{}, lb.buf.Bytes()...)
 }
 
+// Len reports the buffered byte count under the lock (a cheap pre-filter so
+// multi-MiB streams are never copied just to probe for a short signature).
+func (lb *limitedBuffer) Len() int {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.Len()
+}
+
 func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	argv := request.Cmd
 	usedRunuser := false
@@ -552,10 +584,12 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own group: budget kills the tree
 	if request.Cwd != nil {
-		// pre-check: with the runuser prefix a missing cwd would otherwise
-		// surface as an ambiguous fork/exec ENOENT on the runuser binary;
-		// name the real cause, in the shape LocalEndpoint emulates
-		if _, err := os.Stat(*request.Cwd); err != nil {
+		// pre-check: with the runuser prefix a missing or non-directory cwd
+		// would otherwise surface as an ambiguous fork/exec error on the
+		// runuser binary; name the real cause, in the shape LocalEndpoint
+		// emulates
+		info, err := os.Stat(*request.Cwd)
+		if err != nil {
 			errno := "ENOENT"
 			reason := "no such file or directory"
 			var pathError *fs.PathError
@@ -565,8 +599,18 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 			}
 			return errorReply(request.ID, errno, fmt.Sprintf("chdir %s: %s", *request.Cwd, reason), nil)
 		}
+		if !info.IsDir() {
+			return errorReply(request.ID, "ENOTDIR",
+				fmt.Sprintf("chdir %s: not a directory", *request.Cwd), nil)
+		}
 		cmd.Dir = *request.Cwd
 	}
+	// NOTE: when the runuser prefix is active, util-linux runuser always
+	// resets HOME, SHELL, USER, LOGNAME, and PATH to the target user's values
+	// (its --whitelist-environment explicitly ignores those five), so caller
+	// values for them do not survive this path; the provider routes env that
+	// touches those keys through the wrapper script, whose exports run after
+	// runuser. All other keys pass through untouched.
 	cmd.Env = os.Environ()
 	for _, key := range sortedKeys(request.Env) {
 		cmd.Env = append(cmd.Env, key+"="+request.Env[key])
@@ -630,7 +674,7 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		rc = -int64(status.Signal()) // killed-by-signal convention: negative
 	}
-	if usedRunuser && rc == 1 {
+	if usedRunuser && rc == 1 && stderr.Len() <= runuserSignatureBound {
 		rc = runuserExecFailureRc(stderr.Snapshot(), rc)
 	}
 	outBytes := stdout.buf.Bytes()
@@ -652,16 +696,25 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	return &storedReply{message: message, bulk: bulk}
 }
 
+// runuserSignatureBound caps how much stderr runuserExecFailureRc inspects:
+// the one-line diagnostic is "runuser: failed to execute <path>: <reason>",
+// and paths over PATH_MAX cannot reach exec, so anything longer cannot be
+// the signature.
+const runuserSignatureBound = 4096 + 128
+
 // runuserExecFailureRc translates runuser's exec-failure reporting into the
 // shell's 126/127 convention. util-linux runuser (as shipped on noble) exits
 // 1 both when the target command is missing and when it is not executable,
 // unlike a shell; its single-line diagnostic is unambiguous, so the
 // user-switched path is mapped to match the direct-exec path
 // (execStartFailure) and the contract's expectations. A command that itself
-// exits 1 printing exactly this one-line signature would be misread — its
+// exits 1 printing exactly this one-line signature would be misread; its
 // stderr is attacker-influenceable output anyway, and the blast radius is an
 // rc of 127/126 instead of 1.
 func runuserExecFailureRc(stderr []byte, rc int64) int64 {
+	if len(stderr) > runuserSignatureBound {
+		return rc
+	}
 	text := strings.TrimSpace(string(stderr))
 	if !strings.HasPrefix(text, "runuser: failed to execute ") ||
 		strings.ContainsRune(text, '\n') {
@@ -774,21 +827,34 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 			return fileError(request.ID, err)
 		}
 	}
-	mode := fs.FileMode(0o644)
-	if request.Mode != nil {
-		mode = fileModeFromWire(*request.Mode)
-	}
-	if err := os.WriteFile(request.Path, data, mode); err != nil {
-		return fileError(request.ID, err)
-	}
-	if request.Mode != nil {
-		// O_CREATE filters the mode through umask and ignores it entirely
-		// for a pre-existing file: chmod pins the requested bits exactly.
-		// There is no world-readable window, because creation applied the
-		// requested mode minus umask bits, a subset of the request.
-		if err := os.Chmod(request.Path, mode); err != nil {
+	if request.Mode == nil {
+		if err := os.WriteFile(request.Path, data, 0o644); err != nil {
 			return fileError(request.ID, err)
 		}
+		return okReply(request.ID)
+	}
+	// mode-carrying writes pin the permission bits BEFORE any content lands:
+	// O_CREATE filters the mode through umask and ignores it entirely for a
+	// pre-existing file (whose old, possibly wider bits would otherwise cover
+	// the fresh secret until a trailing chmod), so open without truncating,
+	// fchmod to the exact bits, then truncate and write
+	mode := fileModeFromWire(*request.Mode)
+	handle, err := os.OpenFile(request.Path, os.O_WRONLY|os.O_CREATE, mode)
+	if err != nil {
+		return fileError(request.ID, err)
+	}
+	defer handle.Close()
+	if err := handle.Chmod(mode); err != nil {
+		return fileError(request.ID, err)
+	}
+	if err := handle.Truncate(0); err != nil {
+		return fileError(request.ID, err)
+	}
+	if _, err := handle.Write(data); err != nil {
+		return fileError(request.ID, err)
+	}
+	if err := handle.Close(); err != nil {
+		return fileError(request.ID, err)
 	}
 	return okReply(request.ID)
 }

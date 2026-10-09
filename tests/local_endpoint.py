@@ -91,14 +91,15 @@ class LocalEndpoint(FakeGuest):
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if request.mode is not None:
-                # mirror the daemon: the mode travels with the write (create
-                # with it, then chmod past umask and any pre-existing bits)
-                descriptor = os.open(
-                    target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, request.mode
-                )
+                # mirror the daemon's ordering: pin the permission bits BEFORE
+                # any content lands (a pre-existing file's old, wider bits must
+                # never cover the fresh bytes), so open without truncating,
+                # fchmod, then truncate and write
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT, request.mode)
                 with open(descriptor, "wb") as handle:
+                    os.fchmod(handle.fileno(), request.mode)
+                    handle.truncate(0)
                     handle.write(data)
-                os.chmod(target, request.mode)
             else:
                 with open(target, "wb") as handle:
                     handle.write(data)
@@ -156,14 +157,16 @@ class LocalEndpoint(FakeGuest):
         ]
         host_cwd = self.translate(request.cwd) if request.cwd else self.root
         if not host_cwd.is_dir():
-            # the real daemon reports a missing cwd as an errno error, never as
-            # command-not-found (a spawn FileNotFoundError is ambiguous between
-            # the two: distinguish before spawning)
+            # the real daemon reports a missing or non-directory cwd as an
+            # errno error, never as command-not-found (a spawn error is
+            # ambiguous between the two: distinguish before spawning)
+            not_dir = host_cwd.exists()
             reply = _StoredReply(
                 ErrorReply(
                     id=request.id,
-                    errno="ENOENT",
-                    message=f"chdir {request.cwd}: no such file or directory",
+                    errno="ENOTDIR" if not_dir else "ENOENT",
+                    message=f"chdir {request.cwd}: "
+                    + ("not a directory" if not_dir else "no such file or directory"),
                 ),
                 None,
             )
@@ -202,20 +205,26 @@ class LocalEndpoint(FakeGuest):
             if request.budget.command_ms is not None and not self.ignore_command_budget
             else None
         )
+        partial_sink: dict[str, bytes] = {}
         try:
             async with asyncio.timeout(budget_s):
                 (stdout, stdout_truncated), (stderr, stderr_truncated) = await _pump(
-                    process, stdin
+                    process, stdin, partial_sink
                 )
         except TimeoutError:
             self._group_kill(process)
             await process.wait()  # SIGKILL closes the pipes; wait reaps
+            # the daemon-shaped partial: the killed command's output tail
+            # (stdout when it produced any, else stderr), capped, text-only
+            source = partial_sink.get("stdout") or partial_sink.get("stderr") or b""
+            tail = source[-4096:].decode("utf-8", errors="ignore") or None
             reply = _StoredReply(
                 ErrorReply(
                     id=request.id,
                     errno="ETIME",
                     message=f"command budget expired after {request.budget.command_ms} ms",
                     layer="command",
+                    partial=tail,
                 ),
                 None,
             )
@@ -251,9 +260,14 @@ class LocalEndpoint(FakeGuest):
 
 
 async def _pump(
-    process: asyncio.subprocess.Process, stdin: bytes
+    process: asyncio.subprocess.Process,
+    stdin: bytes,
+    partial_sink: dict[str, bytes] | None = None,
 ) -> tuple[tuple[bytes, bool], tuple[bytes, bool]]:
-    """Feed stdin and read both streams with the per-stream cap applied WHILE reading, mirroring the daemon's bounded memory (never buffer-then-slice)."""
+    """Feed stdin and read both streams with the per-stream cap applied WHILE reading, mirroring the daemon's bounded memory (never buffer-then-slice).
+
+    `partial_sink` (keys `stdout`/`stderr`) receives whatever had been read so far even when this coroutine is cancelled by the caller's budget, so the ETIME reply can carry the daemon-shaped `partial` tail.
+    """
 
     async def feed() -> None:
         writer = process.stdin
@@ -268,19 +282,27 @@ async def _pump(
         finally:
             writer.close()
 
-    async def read_capped(reader: asyncio.StreamReader | None) -> tuple[bytes, bool]:
+    async def read_capped(
+        reader: asyncio.StreamReader | None, sink_key: str
+    ) -> tuple[bytes, bool]:
         if reader is None:
             return b"", False
         buffer = bytearray()
-        while chunk := await reader.read(1 << 16):
-            if len(buffer) <= STREAM_CAP:
-                buffer.extend(chunk[: STREAM_CAP + 1 - len(buffer)])
-            # keep draining so the child never blocks on a full pipe
+        try:
+            while chunk := await reader.read(1 << 16):
+                if len(buffer) <= STREAM_CAP:
+                    buffer.extend(chunk[: STREAM_CAP + 1 - len(buffer)])
+                # keep draining so the child never blocks on a full pipe
+        finally:
+            if partial_sink is not None:
+                partial_sink[sink_key] = bytes(buffer[:STREAM_CAP])
         truncated = len(buffer) > STREAM_CAP
         return bytes(buffer[:STREAM_CAP]), truncated
 
     _, out, err = await asyncio.gather(
-        feed(), read_capped(process.stdout), read_capped(process.stderr)
+        feed(),
+        read_capped(process.stdout, "stdout"),
+        read_capped(process.stderr, "stderr"),
     )
     await process.wait()
     return out, err
