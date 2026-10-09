@@ -74,7 +74,7 @@ Cross-process lease/reaper admission; a `connection()` console command; `forward
 |---|---|
 | 1 retry engine + taxonomy | done (review: 10 findings fixed, incl. a hard wall-time deadline and the self-defending mapping table) |
 | 2 skeleton + lifecycle + layer 3 | done (review: 10 findings fixed, incl. int sample ids, FIFO admission, lease-registry preservation, cancellation drain of the boot thread, no blanket lease prune) |
-| 3 op surface + CI self_check + latency | done (self_check 44-check suite green on CI over loopback and the latency mock; two-sided CI xfail pin = test_exec_as_user only; review pending) |
+| 3 op surface + CI self_check + latency | done (self_check 44-check suite green on CI over loopback and the latency mock; two-sided strict xfail pin = test_exec_as_user only; review: 9 findings fixed, incl. encoded-size wrapper decision, self-deleting wrapper with env exports, xdist-isolated endpoint tmp) |
 | 4 daemon/protocol batch | planned |
 | 5 booted integration + real eval | planned |
 | 6 docs + doctor + record | planned |
