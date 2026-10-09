@@ -65,6 +65,11 @@ else
 fi
 
 echo "=== kill -9 recovery from a fresh shell ==="
+# gate: earlier stages must not have leaked (an id-less sweep here would
+# silently absorb their leaks and make the final residue checks vacuous)
+PRE_KILL9=$(docker ps -a --format '{{.Names}}' | grep -c '^ir-' || true)
+[[ "$PRE_KILL9" == "0" ]] && ok "no ir- residue before the kill-9 stage" \
+  || bad "earlier stages leaked $PRE_KILL9 ir- container(s)"
 uv run python design/spikes/provider-v1/boot_and_die.py >"$SPIKE/tmp/logs/kill9.txt" 2>&1 || true
 PROJECT=$(uv run python -c "import json;print(json.load(open('$SPIKE/tmp/kill9.json'))['project'])")
 if docker ps --format '{{.Names}}' | grep -q "${PROJECT}-range-1"; then
@@ -72,9 +77,9 @@ if docker ps --format '{{.Names}}' | grep -q "${PROJECT}-range-1"; then
 else
   bad "kill -9 scenario: range not found running"
 fi
-if uv run inspect sandbox cleanup libvirt_range >"$SPIKE/tmp/logs/cli_cleanup.txt" 2>&1 \
+if uv run inspect sandbox cleanup libvirt_range "$PROJECT" >"$SPIKE/tmp/logs/cli_cleanup.txt" 2>&1 \
      && ! docker ps --format '{{.Names}}' | grep -q "${PROJECT}-range-1"; then
-  ok "inspect sandbox cleanup recovered the orphan from on-disk state"
+  ok "inspect sandbox cleanup recovered the orphan from on-disk state (scoped to its project)"
 else
   bad "inspect sandbox cleanup recovery"; tail -5 "$SPIKE/tmp/logs/cli_cleanup.txt"
 fi

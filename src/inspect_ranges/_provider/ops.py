@@ -165,7 +165,11 @@ async def provider_exec(
         cmd, resolved_cwd, env or {}, user, budget
     ) or bool(_RUNUSER_RESET_KEYS & (env or {}).keys())
 
+    call_attempts = 0
+
     async def attempt() -> ExecOutcome:
+        nonlocal call_attempts
+        call_attempts += 1
         run_cmd, run_env = cmd, env or {}
         script_path: str | None = None
         if needs_wrapper:
@@ -234,7 +238,6 @@ async def provider_exec(
                 )
             raise
 
-    retries_before = handle.stats.counters("exec").retries
     try:
         outcome = await with_retry(
             attempt,
@@ -245,11 +248,11 @@ async def provider_exec(
         )
     except ChannelBudgetError as failure:
         if failure.layer == "command":
-            # a resent delivery that then timed out is exactly as restart-risky
-            # as a resent success (delivered, reply lost, daemon restarted,
-            # resend double-ran into the budget): the session verdict outranks
-            # the timeout verdict
-            if (failure.attempts or 0) > 1:
+            # a re-delivered op that then timed out is exactly as restart-risky
+            # as a re-delivered success (the session verdict outranks the
+            # timeout verdict); re-delivery means a same-id wire resend OR a
+            # fresh-id retry attempt of THIS call
+            if (failure.attempts or 0) > 1 or call_attempts > 1:
                 await _confirm_session_best_effort(handle, guest, "exec")
             # the daemon's ETIME reply may carry the killed command's output
             # tail (`ErrorReply.partial`); surface it on the TimeoutError
@@ -260,17 +263,19 @@ async def provider_exec(
         await _confirm_session_best_effort(handle, guest, "exec")
         raise unavailable(failure) from failure
     except GuestError as failure:
-        # an errno-tagged failure after a resent delivery still means the
-        # resend may have double-run on a restarted daemon; confirm before
-        # the honest error propagates
-        if (failure.attempts or 0) > 1:
+        # an errno-tagged failure after a re-delivery (same-id resend of this
+        # attempt, or an earlier fresh-id attempt of this call) still means a
+        # possible double-run on a restarted daemon; confirm before the
+        # honest error propagates
+        if (failure.attempts or 0) > 1 or call_attempts > 1:
             await _confirm_session_best_effort(handle, guest, "exec")
         raise
     # TamperError, SessionChangedError, ValueError propagate unmapped
 
-    if outcome.attempts > 1 or handle.stats.counters("exec").retries > retries_before:
+    if outcome.attempts > 1 or call_attempts > 1:
         # either a same-id resend (wire layer) or a fresh-id re-attempt
-        # (retry layer) delivered more than once: both are restart-risky
+        # (retry layer) of this call delivered more than once: both are
+        # restart-risky
         await _confirm_session_or_unavailable(handle, guest, "exec")
     if outcome.stdout_truncated or outcome.stderr_truncated:
         # the daemon's own per-stream cap fired before anything reached the host
@@ -359,10 +364,13 @@ async def provider_write_file(
     path = resolve_guest_path(file)
     data = contents.encode("utf-8") if isinstance(contents, str) else contents
 
+    call_attempts = 0
+
     async def attempt() -> int:
+        nonlocal call_attempts
+        call_attempts += 1
         return await channel.write_file(guest, path, data, mode=mode)
 
-    retries_before = handle.stats.counters("write_file").retries
     try:
         deliveries = await with_retry(
             attempt,
@@ -372,9 +380,10 @@ async def provider_write_file(
             endpoint=guest,
         )
     except GuestError as failure:
-        # side-effecting op: a resent delivery that then failed may still have
-        # double-run on a restarted daemon; the session verdict comes first
-        if (failure.attempts or 0) > 1:
+        # side-effecting op: a re-delivered attempt that then failed may still
+        # have double-run on a restarted daemon; the session verdict comes
+        # first
+        if (failure.attempts or 0) > 1 or call_attempts > 1:
             await _confirm_session_best_effort(handle, guest, "write_file")
         mapped = map_file_failure(failure, file)
         if mapped is failure:
@@ -382,7 +391,7 @@ async def provider_write_file(
         raise mapped from failure
     except ChannelBudgetError as failure:
         if failure.layer == "command":
-            if (failure.attempts or 0) > 1:
+            if (failure.attempts or 0) > 1 or call_attempts > 1:
                 await _confirm_session_best_effort(handle, guest, "write_file")
             raise timeout_error(failure, None) from failure
         await _confirm_session_best_effort(handle, guest, "write_file")
@@ -390,5 +399,5 @@ async def provider_write_file(
     except TransportFailure as failure:
         await _confirm_session_best_effort(handle, guest, "write_file")
         raise unavailable(failure) from failure
-    if deliveries > 1 or handle.stats.counters("write_file").retries > retries_before:
+    if deliveries > 1 or call_attempts > 1:
         await _confirm_session_or_unavailable(handle, guest, "write_file")

@@ -46,6 +46,9 @@ StartLimitIntervalSec=0
 [Service]
 ExecStart=/opt/inspect-ranges/vsockd
 Restart=always
+# with the start limit off, a daemon that cannot start must back off rather
+# than hot-loop at the 100ms default for the guest's lifetime
+RestartSec=1
 [Install]
 WantedBy=multi-user.target
 """

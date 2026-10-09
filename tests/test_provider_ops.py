@@ -474,3 +474,55 @@ def test_write_mode_pins_bits_before_content(tmp_path: Path) -> None:
         assert target.read_bytes() == b"secret"
 
     asyncio.run(scenario())
+
+
+def test_fresh_id_retry_across_restart_confirms_even_on_errno_failure(
+    tmp_path: Path,
+) -> None:
+    """A fresh-id retry attempt (layer 2) whose re-attempt lands as an errno GuestError still confirms the session: the FIRST attempt executed before the restart, so a double-run cannot be ruled out whatever the final outcome shape."""
+
+    class EstaleThenRestart(LocalEndpoint):
+        """First exec answers ESTALE (a delivered-then-evicted truth) and the daemon restarts before the fresh-id retry arrives."""
+
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.tripped = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            if isinstance(message, ExecRequest) and not self.tripped:
+                self.tripped = True
+                reply = _StoredReply(
+                    ErrorReply(
+                        id=message.id,
+                        errno="ESTALE",
+                        message="executed, result lost before acknowledgement",
+                    ),
+                    None,
+                )
+                self.restart()
+                return reply
+            return await super().handle(message, bulk)
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = EstaleThenRestart("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="estale-errno")
+        handle = SampleHandle(
+            project="ir-estale-errno",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        handle.sessions["box"] = endpoint.session
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError):
+            # the retry's second attempt fails ENOENT (missing cwd), an errno
+            # shape that previously skipped the confirm entirely
+            await env.exec(["true"], cwd="/no/such/dir")
+
+    asyncio.run(scenario())

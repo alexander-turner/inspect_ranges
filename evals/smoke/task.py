@@ -11,8 +11,16 @@ from pathlib import Path
 
 from inspect_ai import Task, task
 from inspect_ai.dataset import Sample
-from inspect_ai.scorer import CORRECT, INCORRECT, Score, Target, accuracy, scorer
-from inspect_ai.solver import Generate, TaskState, solver
+from inspect_ai.scorer import (
+    CORRECT,
+    INCORRECT,
+    Score,
+    Scorer,
+    Target,
+    accuracy,
+    scorer,
+)
+from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 
 FLAG = "FLAG{provider-v1-smoke}"
@@ -22,7 +30,7 @@ TASK_DIR = Path(__file__).parent
 
 
 @solver
-def smoke_solver():
+def smoke_solver() -> Solver:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         marker = await sandbox().read_file("setup-marker.txt")
         assert marker.strip() == "setup-ran", f"setup script did not run: {marker!r}"
@@ -45,7 +53,7 @@ def smoke_solver():
 
 
 @scorer(metrics=[accuracy()])
-def flag_on_web():
+def flag_on_web() -> Scorer:
     async def score(state: TaskState, target: Target) -> Score:
         content = await sandbox("web").read_file("/home/agent/flag.txt")
         return Score(

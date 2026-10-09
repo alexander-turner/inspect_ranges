@@ -163,9 +163,11 @@ async def retry_suspend_recovers(attacker: object, project: str) -> None:
     await resumer
     elapsed = time.monotonic() - started
     check(
-        "exec recovers across suspend/resume within deadline",
-        result.success and result.stdout == "alive\n" and elapsed < 60,
-        f"rc={result.returncode} elapsed={elapsed:.1f}s",
+        "exec recovers across suspend/resume within deadline (and provably spanned the pause)",
+        result.success
+        and result.stdout == "alive\n"
+        and 4.5 <= elapsed < 60,
+        f"rc={result.returncode} elapsed={elapsed:.1f}s (resume was scheduled at +5s)",
     )
 
 
@@ -184,10 +186,13 @@ async def retry_restart_surfaces_session_change(web: object) -> None:
     # AccuracySec pinned: systemd timers default to 1 MINUTE of coalescing
     # slack, which would fire the restart anywhere in the next minute
     # (measured), not inside the in-flight exec below
+    # on-active=2 leaves comfortable room for the probe below to be DELIVERED
+    # to the old daemon first (an on-active=1 timer can beat the probe's
+    # delivery on a loaded host, letting it run wholly on the new daemon)
     armed = await web.exec(  # type: ignore[attr-defined]
         [
             "systemd-run",
-            "--on-active=1",
+            "--on-active=2",
             "--timer-property=AccuracySec=100ms",
             "systemctl",
             "restart",
@@ -213,11 +218,11 @@ async def retry_restart_surfaces_session_change(web: object) -> None:
         verdict,
     )
     retries_after = handle.stats.counters("exec").retries
-    print(f"       retry counters across the fault: {retries_before} -> {retries_after}")
-    check(
-        "the fault's re-delivery is accounted for (retry counter moved, or the wire resend carried it as the SessionChangedError proves)",
-        retries_after > retries_before or verdict.startswith("SessionChangedError"),
-        f"retries {retries_before} -> {retries_after}; verdict {verdict}",
+    # evidence for the record, not a separate check: the SessionChangedError
+    # above IS the proof the re-delivery was seen (either layer); the counter
+    # shows which layer absorbed this particular run's fault
+    print(
+        f"       retry counters across the fault: {retries_before} -> {retries_after}"
     )
     # the re-pin lets the sample continue (and teardown proceed) honestly
     fresh = await web.exec(["echo", "post-restart"])  # type: ignore[attr-defined]
@@ -246,14 +251,16 @@ async def main() -> int:
         handle = attacker._handle  # type: ignore[attr-defined]
         project: str = handle.project
         cids: dict[str, int] = dict(handle.guest_cids)
-        check(
-            "provider CID band (10000+) and disjoint guest CIDs",
-            all(cid >= 10_000 for cid in cids.values()) and len(set(cids.values())) == 2,
-            str(cids),
-        )
-        (SPIKE / "tmp" / "range.json").write_text(json.dumps({"project": project, "cids": cids}))
-
         try:
+            check(
+                "provider CID band (10000+) and disjoint guest CIDs",
+                all(cid >= 10_000 for cid in cids.values())
+                and len(set(cids.values())) == 2,
+                str(cids),
+            )
+            (SPIKE / "tmp" / "range.json").write_text(
+                json.dumps({"project": project, "cids": cids})
+            )
             await basic_ops(attacker, web)
             await self_check_44(attacker)
             await asyncio.to_thread(portable_conformance, cids["attacker"])
@@ -262,8 +269,13 @@ async def main() -> int:
             await retry_suspend_recovers(attacker, project)
             await retry_restart_surfaces_session_change(web)
         finally:
-            await env_type.sample_cleanup(TASK, str(SPEC), envs, False)
-            await env_type.task_cleanup(TASK, str(SPEC), True)
+            # nested so a sample_cleanup failure still reaches task_cleanup:
+            # the range must never leak because a scenario (or its cleanup)
+            # raised
+            try:
+                await env_type.sample_cleanup(TASK, str(SPEC), envs, False)
+            finally:
+                await env_type.task_cleanup(TASK, str(SPEC), True)
         gone = subprocess.run(
             ["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True
         )

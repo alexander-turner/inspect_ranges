@@ -101,14 +101,26 @@ async def cleanup_false_prints_the_recovery_command(env_type: type) -> None:
 
 
 async def concurrent_samples_are_disjoint(env_type: type) -> None:
+    async def timed_boot(sample_id: str) -> tuple[float, float, dict]:
+        start = time.monotonic()
+        envs = await env_type.sample_init(
+            "matrix-pair", str(SPEC), {"__sample_id__": sample_id}
+        )
+        return start, time.monotonic(), envs
+
     with sandbox_lifecycle_scope():
         await env_type.task_init("matrix-pair", str(SPEC))
         started = time.monotonic()
-        pair = await asyncio.gather(
-            env_type.sample_init("matrix-pair", str(SPEC), {"__sample_id__": "pairA"}),
-            env_type.sample_init("matrix-pair", str(SPEC), {"__sample_id__": "pairB"}),
+        (start_a, end_a, envs_a), (start_b, end_b, envs_b) = await asyncio.gather(
+            timed_boot("pairA"), timed_boot("pairB")
         )
+        pair = [envs_a, envs_b]
         booted = time.monotonic() - started
+        check(
+            "the two boots overlapped in time (not serialized)",
+            start_a < end_b and start_b < end_a,
+            f"A [{start_a:.1f},{end_a:.1f}] B [{start_b:.1f},{end_b:.1f}]",
+        )
         handles = [next(iter(envs.values()))._handle for envs in pair]
         projects = [h.project for h in handles]
         cids = [set(h.guest_cids.values()) for h in handles]
@@ -154,12 +166,29 @@ async def concurrent_samples_are_disjoint(env_type: type) -> None:
         )
 
 
+async def _sweep(env_type: type, task_name: str) -> None:
+    """Failure containment: whatever a scenario left in the registry goes down."""
+    try:
+        await env_type.task_cleanup(task_name, str(SPEC), True)
+    except Exception as error:  # noqa: BLE001 - best effort, reported
+        print(f"       sweep after failure also failed: {error}")
+
+
 async def main() -> int:
     ensure_entry_points()
     env_type = registry_find_sandboxenv("libvirt_range")
-    await interrupt_defers_then_sweeps(env_type)
-    await cleanup_false_prints_the_recovery_command(env_type)
-    await concurrent_samples_are_disjoint(env_type)
+    for scenario, task_name in (
+        (interrupt_defers_then_sweeps, "matrix-interrupt"),
+        (cleanup_false_prints_the_recovery_command, "matrix-keep"),
+        (concurrent_samples_are_disjoint, "matrix-pair"),
+    ):
+        try:
+            await scenario(env_type)
+        except Exception as error:  # noqa: BLE001 - fail the run, never leak
+            failures.append(f"{task_name}: {type(error).__name__}")
+            print(f"FAIL  {task_name} raised {type(error).__name__}: {error}")
+            with sandbox_lifecycle_scope():
+                await _sweep(env_type, task_name)
     if failures:
         print(f"{len(failures)} matrix checks failed: {failures}")
         return 1
