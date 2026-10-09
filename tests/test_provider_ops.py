@@ -17,7 +17,13 @@ from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUs
     _StoredReply,
 )
 from inspect_ranges._channel.mocks import HostileTransport
-from inspect_ranges._channel.protocol import ErrorReply, ExecRequest, Message
+from inspect_ranges._channel.protocol import (
+    ErrorReply,
+    ExecRequest,
+    Message,
+    PingRequest,
+    WriteFileRequest,
+)
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._provider.errors import SessionChangedError
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
@@ -524,5 +530,87 @@ def test_fresh_id_retry_across_restart_confirms_even_on_errno_failure(
             # the retry's second attempt fails ENOENT (missing cwd), an errno
             # shape that previously skipped the confirm entirely
             await env.exec(["true"], cwd="/no/such/dir")
+
+    asyncio.run(scenario())
+
+
+def test_resent_write_across_restart_confirms_the_session(tmp_path: Path) -> None:
+    """write_file's re-delivery arms share the exec policy: a same-id resend across a daemon restart surfaces `SessionChangedError`, never a silent possibly-double write."""
+
+    class RestartAcrossWrite(LocalEndpoint):
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if isinstance(message, WriteFileRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True
+                self.restart()
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartAcrossWrite("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="write-restart")
+        handle = SampleHandle(
+            project="ir-write-restart",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        handle.sessions["box"] = endpoint.session
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SessionChangedError):
+            await env.write_file("note.txt", "contents")
+        fresh = await env.exec(["echo", "ok"])
+        assert fresh.success, "the re-pin lets the sample continue"
+
+    asyncio.run(scenario())
+
+
+def test_uncertifiable_success_downgrades_to_unavailable(tmp_path: Path) -> None:
+    """A resent success whose confirm ping finds the daemon transport-dead is unavailable-shaped: the result is in hand but exactly-once cannot be certified, and silence would be a lie."""
+
+    class RestartThenDeafToPings(LocalEndpoint):
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.interrupted = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            if isinstance(message, PingRequest) and self.interrupted:
+                self.drop_next_reply = True  # every confirm ping dies in flight
+            reply = await super().handle(message, bulk)
+            if isinstance(message, ExecRequest) and not self.interrupted:
+                self.interrupted = True
+                self.drop_next_reply = True
+                self.restart()
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = RestartThenDeafToPings("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="deaf-pings")
+        handle = SampleHandle(
+            project="ir-deaf-pings",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        handle.sessions["box"] = endpoint.session
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        with pytest.raises(SandboxUnavailableError):
+            await env.exec(["echo", "hi"])
 
     asyncio.run(scenario())

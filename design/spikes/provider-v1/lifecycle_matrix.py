@@ -25,6 +25,8 @@ SPEC = SPIKE / "range.yaml"
 ROOT = SPIKE.parent.parent.parent
 
 failures: list[str] = []
+single_boot_s: list[float] = []
+"""The interrupt scenario's single-range boot time: the concurrency scenario's overlap evidence compares against it."""
 
 
 def check(name: str, good: bool, detail: str = "") -> None:
@@ -43,9 +45,11 @@ def project_container_up(project: str) -> bool:
 async def interrupt_defers_then_sweeps(env_type: type) -> None:
     with sandbox_lifecycle_scope():
         await env_type.task_init("matrix-interrupt", str(SPEC))
+        boot_started = time.monotonic()
         envs = await env_type.sample_init(
             "matrix-interrupt", str(SPEC), {"__sample_id__": "int1"}
         )
+        single_boot_s.append(time.monotonic() - boot_started)
         project = next(iter(envs.values()))._handle.project
         await env_type.sample_cleanup("matrix-interrupt", str(SPEC), envs, True)
         check(
@@ -101,25 +105,27 @@ async def cleanup_false_prints_the_recovery_command(env_type: type) -> None:
 
 
 async def concurrent_samples_are_disjoint(env_type: type) -> None:
-    async def timed_boot(sample_id: str) -> tuple[float, float, dict]:
-        start = time.monotonic()
-        envs = await env_type.sample_init(
-            "matrix-pair", str(SPEC), {"__sample_id__": sample_id}
-        )
-        return start, time.monotonic(), envs
-
     with sandbox_lifecycle_scope():
         await env_type.task_init("matrix-pair", str(SPEC))
         started = time.monotonic()
-        (start_a, end_a, envs_a), (start_b, end_b, envs_b) = await asyncio.gather(
-            timed_boot("pairA"), timed_boot("pairB")
+        pair = list(
+            await asyncio.gather(
+                env_type.sample_init(
+                    "matrix-pair", str(SPEC), {"__sample_id__": "pairA"}
+                ),
+                env_type.sample_init(
+                    "matrix-pair", str(SPEC), {"__sample_id__": "pairB"}
+                ),
+            )
         )
-        pair = [envs_a, envs_b]
         booted = time.monotonic() - started
+        # overlap evidence that cannot pass vacuously: serialized boots would
+        # take ~2x the single-boot baseline measured by the interrupt scenario
+        baseline = single_boot_s[0] if single_boot_s else None
         check(
-            "the two boots overlapped in time (not serialized)",
-            start_a < end_b and start_b < end_a,
-            f"A [{start_a:.1f},{end_a:.1f}] B [{start_b:.1f},{end_b:.1f}]",
+            "the two boots overlapped in time (pair wall time under 1.5x one boot)",
+            baseline is not None and booted < 1.5 * baseline,
+            f"pair {booted:.1f}s vs single {baseline if baseline is not None else 'unmeasured'}s",
         )
         handles = [next(iter(envs.values()))._handle for envs in pair]
         projects = [h.project for h in handles]
@@ -167,11 +173,11 @@ async def concurrent_samples_are_disjoint(env_type: type) -> None:
 
 
 async def _sweep(env_type: type, task_name: str) -> None:
-    """Failure containment: whatever a scenario left in the registry goes down."""
+    """Failure containment via ON-DISK recovery: the scenario's lifecycle scope (and its in-memory registry) is gone, so cli_cleanup is the only sweep that can see its ranges."""
     try:
-        await env_type.task_cleanup(task_name, str(SPEC), True)
+        await env_type.cli_cleanup(None)
     except Exception as error:  # noqa: BLE001 - best effort, reported
-        print(f"       sweep after failure also failed: {error}")
+        print(f"       sweep after {task_name} failure also failed: {error}")
 
 
 async def main() -> int:
@@ -187,8 +193,7 @@ async def main() -> int:
         except Exception as error:  # noqa: BLE001 - fail the run, never leak
             failures.append(f"{task_name}: {type(error).__name__}")
             print(f"FAIL  {task_name} raised {type(error).__name__}: {error}")
-            with sandbox_lifecycle_scope():
-                await _sweep(env_type, task_name)
+            await _sweep(env_type, task_name)
     if failures:
         print(f"{len(failures)} matrix checks failed: {failures}")
         return 1

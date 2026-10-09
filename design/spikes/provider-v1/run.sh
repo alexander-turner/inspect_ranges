@@ -104,6 +104,10 @@ echo "$SWEEP"
   || bad "down --all found residue"
 RESIDUE=$(docker ps -a --format '{{.Names}}' | grep -c '^ir-' || true)
 [[ "$RESIDUE" == "0" ]] && ok "no ir- containers remain" || bad "ir- containers remain ($RESIDUE)"
+NET_RESIDUE=$(docker network ls --format '{{.Name}}' | grep -c '^ir-' || true)
+[[ "$NET_RESIDUE" == "0" ]] && ok "no ir- networks remain" || bad "ir- networks remain ($NET_RESIDUE)"
+VOL_RESIDUE=$(docker volume ls --format '{{.Name}}' | grep -c '^ir-' || true)
+[[ "$VOL_RESIDUE" == "0" ]] && ok "no ir- volumes remain" || bad "ir- volumes remain ($VOL_RESIDUE)"
 LEASES=$(uv run python -c "
 import json, pathlib
 path = pathlib.Path('$XDG_STATE_HOME/inspect-ranges/projects/cids.json')

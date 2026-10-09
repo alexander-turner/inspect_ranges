@@ -224,20 +224,14 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
     # mapping; a corrupt file or an entry whose block cannot be determined
     # makes `lease()` raise `CidRegistryError` at admission time, which is
     # exactly the pre-eval failure doctor exists to catch.
-    from .._provider.naming import CidLease
+    from .._provider.naming import CidLease, entry_block
 
     def reservable(entry: object) -> bool:
         try:
             CidLease.model_validate(entry)
             return True
         except ValueError:
-            pass
-        if isinstance(entry, dict):
-            values = cast("dict[str, object]", entry)
-            return isinstance(values.get("base"), int) and isinstance(
-                values.get("count"), int
-            )
-        return False
+            return entry_block(entry) is not None
 
     lease_path = state_dir / "cids.json"
     if not lease_path.exists():
@@ -272,7 +266,7 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
                     PROVIDER,
                     "cid leases",
                     "fail",
-                    f"{lease_path} unreadable or corrupt ({error}); sample admission cannot lease CIDs",
+                    f"{lease_path} unreadable or corrupt ({error}): undeterminable entries block all leasing, and a corrupt file reads as EMPTY to the allocator, so fresh leases could silently overlap CIDs of still-running VMs",
                     fix=(
                         "tear everything down, then remove the registry: "
                         f"inspect sandbox cleanup libvirt_range && rm {lease_path}"

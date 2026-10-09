@@ -41,7 +41,8 @@ Description=inspect-ranges guest control daemon (v3)
 # limit then kills the unit PERMANENTLY, bricking the control channel. The
 # daemon must always come back; the retry storm itself is bounded by the
 # host's retry budgets and surfaces as SessionChangedError (provider-v1
-# slice-5 battery finding).
+# slice-5 battery finding). Residual: a daemon that cannot start at all now
+# restarts for the guest's lifetime at RestartSec pacing instead of stopping.
 StartLimitIntervalSec=0
 [Service]
 ExecStart=/opt/inspect-ranges/vsockd

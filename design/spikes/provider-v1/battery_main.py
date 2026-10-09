@@ -166,7 +166,7 @@ async def retry_suspend_recovers(attacker: object, project: str) -> None:
         "exec recovers across suspend/resume within deadline (and provably spanned the pause)",
         result.success
         and result.stdout == "alive\n"
-        and 4.5 <= elapsed < 60,
+        and 5.0 <= elapsed < 60,
         f"rc={result.returncode} elapsed={elapsed:.1f}s (resume was scheduled at +5s)",
     )
 

@@ -127,7 +127,10 @@ async def _bounded_exec(
     suppress: bool,
     user: str | None = None,
 ) -> None:
-    """One tightly bounded, never-retried maintenance exec (wrapper chown/scrub)."""
+    """One tightly bounded, never-retried maintenance exec (wrapper chown/scrub).
+
+    Deliberately outside the session-confirmation policy: both callers are idempotent (chown to a fixed owner, rm -f of one path), so a re-delivery cannot change state beyond what a single delivery does.
+    """
     request = ExecRequest(
         id=request_id(),
         cmd=cmd,

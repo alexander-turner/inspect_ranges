@@ -1,12 +1,12 @@
-# provider-v1 slice-5 battery spec: the provider-driven multi-guest range.
-# One isolated segment, one named target ("web"), one attacker box; both run
-# the recipe-v4 golden (vsockd 3.1.0 + the agent user).
+# The smoke eval's range: one isolated segment, one named target ("web"),
+# one attacker box; both guests run the derived golden the image cache holds
+# under the name noble-range-guest.
 range:
-  name: provider-battery
+  name: provider-smoke
   schema_version: "0.1"
   description: >
-    Slice-5 battery range: provider-driven lifecycle, self_check, retry
-    faults, and the third-user wrapper path against realizer-booted VMs.
+    Smoke-eval range: the solver execs on the attacker (default sandbox) and
+    the named web guest; the scorer reads a file off web.
 
 networks:
   - name: lab
