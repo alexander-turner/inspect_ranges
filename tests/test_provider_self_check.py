@@ -47,10 +47,11 @@ if os.geteuid() == 0:
         )
 
 LATENCY_RTT_S = 0.05
-EXCHANGES_BUDGET_PER_CHECK = 120
-"""Generous but real: the chattiest honest check (~20 ops at <=3 exchanges each,
-plus wrapper-script uploads) stays far under this; a per-chunk-round-trip
-regression blows through it immediately."""
+EXCHANGES_BUDGET_PER_CHECK = 16
+"""Measured: the chattiest honest check uses 10 exchanges across the whole
+44-check suite (ops at <=3 exchanges each, incl. acks and wrapper uploads);
+16 leaves headroom for timing-dependent ack retries while still gating any
+per-chunk-round-trip chattiness immediately."""
 
 
 def make_env(

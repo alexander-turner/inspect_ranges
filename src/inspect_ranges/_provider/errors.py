@@ -19,7 +19,7 @@ PERMISSION_DENIED_RC = 126
 def exec_permission_error(rc: int, stderr: str) -> PermissionError | None:
     """The contract's rc-126 sniff: an unexecutable command raises `PermissionError`.
 
-    The daemon has no distinct errno channel for exec-time EACCES; it reports rc 126 with "permission denied" on stderr (the shell convention), so the provider sniffs exactly that pair. Any other rc-126 (a command that itself exits 126) passes through as an ordinary result.
+    The daemon has no distinct errno channel for exec-time EACCES; it reports rc 126 with "permission denied" on stderr (the shell convention), so the provider sniffs exactly that pair. Any other rc-126 (a command that itself exits 126) passes through as an ordinary result. A command that itself exits 126 AND prints "permission denied" is a false positive, an accepted risk of the same class the Docker provider's string sniffing carries.
     """
     if rc == PERMISSION_DENIED_RC and "permission denied" in stderr.lower():
         return PermissionError(stderr.strip() or "permission denied")

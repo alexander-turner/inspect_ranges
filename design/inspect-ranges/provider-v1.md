@@ -67,6 +67,8 @@ Cross-process lease/reaper admission; a `connection()` console command; `forward
 - **Sample files and the setup script are Inspect's work, not `sample_init`'s.** The contract runs `copy_sandbox_environment_files` and the setup script itself, through the environments `sample_init` returns; the provider only returns them. The slice-2 text implying the provider copies files was wrong against the installed contract.
 - **Per-op shared deadlines default to attempts-bounded.** The retry engine supports a hard shared deadline (`RetryPolicy.deadline_s`, wall-time-true, with an in-flight attempt truncated and surfaced as `TransportFailure`), but the op surface does not derive one from the caller's exec `timeout`: a transient failure consumes none of the command's budget semantics, and retrying with the full timeout each attempt is the k8s-consistent reading. Callers needing a hard wall set it through the policy.
 - **The loopback endpoint's inbound cap was 32 MiB while the daemon accepts 256 MiB**; the 50 MiB self_check cases caught the fidelity gap and the reference endpoint now mirrors `DAEMON_INBOUND_BULK_CAP`.
+- **`CommandTimeout.truncated_output` is always `None` in v1**: the daemon's ETIME reply carries no bulk, so there is no partial output to attach (the record's text and the Docker prior art implied one). Slice 4 MAY add partial-output carriage to the ETIME `ErrorReply` as an optional protocol extension if the daemon batch finds it cheap; recorded, not promised.
+- **Process honesty note**: the slice-1 review fixes were committed folded into the slice-2 feature commit (9c586dc) rather than as their own fix commit; recorded here rather than rewritten. Slices 2 and 3 kept the separate-fix-commit discipline, as does everything after.
 
 ## Ledger
 

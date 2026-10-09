@@ -1,6 +1,6 @@
 """Layer-2 retry: bounded fresh-id retries around whole sandbox operations.
 
-The channel below already recovers lost replies by resending the SAME request id with endpoint dedupe (layer 1, exactly-once within one daemon lifetime), so by the time a failure reaches this layer the completion oracle has reduced it to "provably never delivered" or "executed, result lost". Retrying here mints a fresh request id, which is where the idempotency assumption enters. Per the settled policy (provider-v1.md), losing an entire sample when a retry would have recovered it is worse than the double-execution risk, so operations retry by default. The inspect_k8s_sandbox caveat applies verbatim: "Note that retries cannot guarantee idempotency - if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md).
+The channel below already recovers lost replies by resending the SAME request id with endpoint dedupe (layer 1, exactly-once within one daemon lifetime), so by the time a failure reaches this layer the completion oracle has reduced it to "provably never delivered" or "executed, result lost". Retrying here mints a fresh request id, which is where the idempotency assumption enters. Per the settled policy (provider-v1.md), losing an entire sample when a retry would have recovered it is worse than the double-execution risk, so operations retry by default. The inspect_k8s_sandbox caveat applies verbatim: "Note that retries cannot guarantee idempotency - if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the source punctuates with an em dash, rendered here per house style).
 
 Classification: the deny-list outranks the allow-list, and unknown failures default to PERMANENT. The ordering matters because Python's exception hierarchy makes broad allow-lists dangerous: `TimeoutError`, `PermissionError`, `FileNotFoundError`, and friends are `OSError` subclasses, so a bare "retry OSError" rule would retry permanent failures forever (the inspect_k8s_sandbox lesson).
 
@@ -26,7 +26,13 @@ from tenacity import (
 )
 from tenacity.stop import stop_base
 
-from .._channel.channel import ChannelBudgetError, TransportFailure
+from .._channel.channel import (
+    ChannelBudgetError,
+    FileLimitExceeded,
+    GuestError,
+    TamperError,
+    TransportFailure,
+)
 from .errors import SessionChangedError
 
 logger = logging.getLogger("inspect_ranges.provider.retry")
@@ -50,6 +56,12 @@ _PERMANENT_TYPES: tuple[type[BaseException], ...] = (
     IsADirectoryError,
     NotADirectoryError,
     ValueError,  # covers UnicodeDecodeError (a ValueError subclass) and stdin-mismatch refusals
+    # defense-in-depth: these already match no transient type today, but a
+    # hypothetical future subclass mixing in OSError must still classify
+    # permanent (the deny-list outranks the allow-list by construction)
+    TamperError,
+    GuestError,
+    FileLimitExceeded,
 )
 """Deny-list, checked before the transient allow-list. `TimeoutError` and the file errors are `OSError` subclasses and MUST stay here or the `OSError` allow-list entry would silently retry them. `TamperError`, `GuestError`, `FileLimitExceeded`, and `OutputLimitExceededError` are permanent through the default (they match no transient type)."""
 
@@ -257,6 +269,9 @@ async def with_retry[T](
         async with window:
             return await retrying(observed)
     except TimeoutError as expiry:
+        # the relabel below is ONLY legal when OUR window fired: an operation's
+        # own TimeoutError is a real command timeout (PERMANENT) and must
+        # propagate untouched
         if not window.expired():
             # the operation itself raised TimeoutError (a real command
             # timeout, PERMANENT): it must propagate untouched, never be

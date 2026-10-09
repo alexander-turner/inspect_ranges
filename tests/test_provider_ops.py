@@ -10,12 +10,14 @@ from inspect_ai.util._sandbox.limits import (
     override_max_exec_output_size,
     override_max_read_file_size,
 )
-from inspect_ranges._channel.channel import (
+from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
     LoopbackTransport,
     MessageChannel,
     TamperError,
+    _StoredReply,
 )
 from inspect_ranges._channel.mocks import HostileTransport
+from inspect_ranges._channel.protocol import ErrorReply, ExecRequest, Message
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
@@ -160,6 +162,59 @@ def test_escape_heavy_argv_and_large_env_ride_the_wrapper(tmp_path: Path) -> Non
         assert result.success and result.stdout == big_env["BLOB"]
         endpoint = transport.guests["box"]
         assert endpoint.write_count == 2, "both oversized requests used the wrapper"
+
+    asyncio.run(scenario())
+
+
+def test_estale_retry_reruns_a_fresh_wrapper(tmp_path: Path) -> None:
+    """The blocking shape from the chunk-1 verification: the first wrapper exec runs for real but its reply is replaced by ESTALE (executed, result lost); the fresh-id retry must re-upload the wrapper and return the RE-RUN's honest outcome, never exec a self-deleted file and fabricate a missing-file failure."""
+
+    class EstaleOnce(LocalEndpoint):
+        def __init__(self, name: str, root: Path) -> None:
+            super().__init__(name, root)
+            self.estale_fired = False
+
+        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+            reply = await super().handle(message, bulk)
+            if (
+                isinstance(message, ExecRequest)
+                and message.cmd[0] == "sh"
+                and not self.estale_fired
+            ):
+                self.estale_fired = True
+                return _StoredReply(
+                    ErrorReply(
+                        id=message.id,
+                        errno="ESTALE",
+                        message="executed, result lost before acknowledgement",
+                    ),
+                    None,
+                )
+            return reply
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = EstaleOnce("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="estale-wrapper")
+        handle = SampleHandle(
+            project="ir-estale",
+            task_name="ops",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=256),
+            cid_base=10_000,
+            guest_cids={"box": 10_000},
+            channel=channel,
+            retry=FAST_RETRY,
+        )
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        chunk = "w" * 40_000  # forces the wrapper path
+        result = await env.exec(["printf", "%s", chunk])
+        assert result.success, f"fabricated failure leaked: {result.stderr!r}"
+        assert result.stdout == chunk, "the retry must return the re-run's real output"
+        assert endpoint.write_count == 2, "each attempt uploads a fresh wrapper"
+        # the double-run is the accepted ESTALE policy, visible and honest
+        assert endpoint.estale_fired
 
     asyncio.run(scenario())
 

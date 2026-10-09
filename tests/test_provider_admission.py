@@ -97,21 +97,41 @@ def test_deadline_wrapper_passes_through_a_real_timeout() -> None:
     asyncio.run(scenario())
 
 
-def test_unparseable_lease_entries_survive_reads_and_writes(tmp_path: Path) -> None:
-    """A lease another version wrote stays in the file through listings and mutations."""
+def test_cross_version_lease_entries_reserve_their_blocks(tmp_path: Path) -> None:
+    """An entry this version cannot fully parse still RESERVES its block (base/count readable), survives reads and writes verbatim, and never gets overlapped."""
     allocator = CidAllocator(tmp_path)
-    allocator.lease("ir-mine", 2)
+    allocator.lease("ir-mine", 2)  # 10000-10001
     registry = tmp_path / "cids.json"
     import json
 
     raw = json.loads(registry.read_text())
-    raw["ir-future-version"] = {"base": "not-an-int", "shape": "unknown"}
+    # fails CidLease validation (project must be a string) but its block is readable
+    raw["ir-future-version"] = {"base": 10002, "count": 5, "project": 123}
     registry.write_text(json.dumps(raw))
     assert allocator.leased_projects() == ["ir-mine"]  # read-only: no rewrite
-    assert "ir-future-version" in json.loads(registry.read_text())
-    allocator.lease("ir-other", 1)  # a write preserves the foreign entry verbatim
+    lease = allocator.lease("ir-other", 2)
+    assert lease.base >= 10007, "the foreign entry's block must stay reserved"
     persisted = json.loads(registry.read_text())
-    assert persisted["ir-future-version"] == {"base": "not-an-int", "shape": "unknown"}
+    assert persisted["ir-future-version"] == {"base": 10002, "count": 5, "project": 123}
+
+
+def test_undeterminable_lease_entry_fails_allocation_loudly(tmp_path: Path) -> None:
+    """When a foreign entry's block cannot be determined, leasing refuses with a named error instead of risking a silent CID overlap under live VMs."""
+    from inspect_ranges._provider.naming import CidRegistryError
+
+    allocator = CidAllocator(tmp_path)
+    allocator.lease("ir-mine", 1)
+    registry = tmp_path / "cids.json"
+    import json
+
+    raw = json.loads(registry.read_text())
+    raw["ir-broken"] = {"base": "not-an-int", "shape": "unknown"}
+    registry.write_text(json.dumps(raw))
+    with pytest.raises(CidRegistryError, match="repair or prune"):
+        allocator.lease("ir-other", 1)
+    # read-only listings still work and never destroy the entry
+    assert allocator.leased_projects() == ["ir-mine"]
+    assert "ir-broken" in json.loads(registry.read_text())
 
 
 def test_int_sample_ids_are_stringified(tmp_path: Path) -> None:

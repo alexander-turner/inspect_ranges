@@ -9,7 +9,7 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 from inspect_ai.util._sandbox.environment import (
     SandboxConnection,
@@ -152,8 +152,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 # the per-guest session id pin lands with the protocol's
                 # session field (slice 4); the ping stands as the provider's
                 # own liveness confirmation until then
-        except BaseException:
-            await cls._destroy(runtime, handle)
+        except BaseException as failure:
+            # the ping diagnosis stays primary; a teardown failure chains
+            # underneath it, never substitutes
+            try:
+                await cls._destroy(runtime, handle)
+            except Exception as teardown_error:
+                raise failure from teardown_error
             raise
 
         default = _default_guest(spec)
@@ -178,7 +183,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         last_error: UpError | None = None
         for attempt in range(1, attempts + 1):
             project = sample_project(spec.meta.name, sample_id)
-            # the allocator takes a blocking cross-process flock: off the loop
+            # the allocator takes a blocking cross-process flock: off the loop.
+            # A cancellation landing between this lease and the registry line
+            # below leaves only the lease on disk; cli_cleanup recovers it
+            # (leases are a provider-origin marker by construction).
             lease = await asyncio.to_thread(
                 runtime.allocator.lease, project, plan.totals.guests
             )
@@ -194,40 +202,67 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
             runtime.registry[handle.project] = handle
+            unwound = False
+
+            async def unwind_once(target: SampleHandle = handle) -> None:
+                # default-bound (B023): the closure must act on THIS
+                # iteration's handle even though respins rebind the name
+                nonlocal unwound
+                if not unwound:
+                    unwound = True
+                    await cls._unwind_attempt(runtime, target)
+
             try:
-                await asyncio.to_thread(
-                    runtime.render_fn,
-                    spec,
-                    staging / "bundle",
-                    runtime.plan_options(cid_base=lease.base),
-                )
-                boot = asyncio.ensure_future(
+                # render runs in a worker thread and is not abortable either:
+                # drain it on cancellation the same way as the boot below
+                render = asyncio.ensure_future(
                     asyncio.to_thread(
-                        runtime.up_fn,
+                        runtime.render_fn,
+                        spec,
                         staging / "bundle",
-                        UpOptions(
-                            project=project,
-                            image_cache=runtime.image_cache,
-                            state_dir=runtime.state_dir,
-                        ),
+                        runtime.plan_options(cid_base=lease.base),
                     )
                 )
+                boot: asyncio.Future[UpResult] | None = None
                 try:
+                    await asyncio.shield(render)
+                    boot = asyncio.ensure_future(
+                        asyncio.to_thread(
+                            runtime.up_fn,
+                            staging / "bundle",
+                            UpOptions(
+                                project=project,
+                                image_cache=runtime.image_cache,
+                                state_dir=runtime.state_dir,
+                            ),
+                        )
+                    )
                     result: UpResult = await asyncio.shield(boot)
                 except asyncio.CancelledError:
-                    # the boot thread cannot be aborted and keeps creating
-                    # resources; drain it (up is internally bounded) so the
+                    # neither thread can be aborted and both keep creating
+                    # resources; drain them (up is internally bounded) so the
                     # unwind sees everything the attempt created, then
-                    # propagate the cancellation
+                    # propagate the cancellation. The drain itself tolerates a
+                    # second cancellation: the unwind must still run exactly
+                    # once.
+                    pending = [
+                        cast("asyncio.Future[object]", f)
+                        for f in (render, boot)
+                        if f is not None
+                    ]
                     try:
                         await asyncio.shield(
-                            asyncio.gather(boot, return_exceptions=True)
+                            asyncio.gather(*pending, return_exceptions=True)
                         )
+                    except asyncio.CancelledError:
+                        pass
                     finally:
-                        await cls._unwind_attempt(runtime, handle)
+                        await unwind_once()
                     raise
+            except asyncio.CancelledError:
+                raise  # already unwound above; never unwind twice
             except UpError as error:
-                await cls._unwind_attempt(runtime, handle)
+                await unwind_once()
                 if error.stage in TRANSIENT_UP_STAGES and attempt < attempts:
                     last_error = error
                     logger.warning(
@@ -242,12 +277,22 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     continue
                 raise
             except BaseException:
-                await cls._unwind_attempt(runtime, handle)
+                await unwind_once()
                 raise
             handle.booted = True
-            handle.guest_cids = {state.name: state.cid for state in result.guests}
-            handle.channel = runtime.channel_factory(handle.guest_cids, project)
-            cls._mark_provider_owned(runtime, handle, sample_id)
+            try:
+                handle.guest_cids = {state.name: state.cid for state in result.guests}
+                handle.channel = runtime.channel_factory(handle.guest_cids, project)
+                cls._mark_provider_owned(runtime, handle, sample_id)
+            except BaseException as failure:
+                # the range is BOOTED: a post-boot failure destroys it rather
+                # than leaving it running until task_cleanup while the sample's
+                # admission charge is already refunded
+                try:
+                    await cls._destroy(runtime, handle)
+                except Exception as teardown_error:
+                    raise failure from teardown_error
+                raise
             return handle
         raise last_error if last_error is not None else AssertionError("unreachable")
 

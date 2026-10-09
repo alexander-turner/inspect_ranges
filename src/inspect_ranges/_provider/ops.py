@@ -100,6 +100,26 @@ async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
         raise SessionChangedError(guest, op, pinned, observed)
 
 
+async def _bounded_exec(
+    channel: MessageChannel,
+    guest: str,
+    cmd: list[str],
+    *,
+    suppress: bool,
+) -> None:
+    """One tightly bounded, never-retried maintenance exec (wrapper chmod/scrub)."""
+    request = ExecRequest(
+        id=request_id(),
+        cmd=cmd,
+        budget=Budget(command_ms=2_000, channel_ms=2_000, untimed_bound_ms=8_000),
+    )
+    try:
+        await channel.exec(guest, request)
+    except Exception:
+        if not suppress:
+            raise
+
+
 async def provider_exec(
     handle: SampleHandle,
     guest: str,
@@ -115,41 +135,64 @@ async def provider_exec(
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME
     budget = Budget(command_ms=timeout * 1000 if timeout is not None else None)
-    if not _request_fits(cmd, resolved_cwd, env or {}, user, budget):
-        # the control frame is deliberately a single bounded frame (32 KiB,
-        # never chunked), so an oversized request (huge or escape-heavy argv,
-        # a large env) rides an uploaded wrapper script instead, the
-        # guest-exec-lessons pattern channel-v1 documents. The script removes
-        # itself (sh keeps reading from the unlinked-but-open fd), carries the
-        # env as exports, and force-quotes the first word so a NAME=value
-        # cmd[0] stays a command (ENOENT), never a shell assignment.
-        script_path = f"/tmp/.ir-exec-{request_id()}.sh"
-        exports = "".join(
-            f"export {shlex.quote(key)}={shlex.quote(value)}\n"
-            for key, value in (env or {}).items()
-        )
-        first = "'" + cmd[0].replace("'", "'\\''") + "'"
-        rest = " ".join(shlex.quote(part) for part in cmd[1:])
-        script = (
-            '#!/bin/sh\nrm -f -- "$0"\n'
-            + exports
-            + f"exec {first}{' ' if rest else ''}{rest}\n"
-        )
-        await provider_write_file(handle, guest, script_path, script)
-        cmd = ["sh", script_path]
-        env = {}
+    needs_wrapper = not _request_fits(cmd, resolved_cwd, env or {}, user, budget)
 
     async def attempt() -> ExecOutcome:
+        run_cmd, run_env = cmd, env or {}
+        script_path: str | None = None
+        if needs_wrapper:
+            # the control frame is deliberately a single bounded frame (32 KiB,
+            # never chunked), so an oversized request (huge or escape-heavy
+            # argv, a large env) rides an uploaded wrapper script instead, the
+            # guest-exec-lessons pattern channel-v1 documents. The upload
+            # happens INSIDE each attempt: the script's first line removes it,
+            # so a fresh-id retry (the accepted ESTALE double-run) must re-run
+            # a freshly uploaded script, never exec a deleted file and return
+            # a fabricated missing-file result. Env rides the script as
+            # exports, which persists those values on the guest disk until the
+            # script self-deletes (or the failure-path scrub removes it): an
+            # accepted exposure, stated here honestly. The first word is
+            # force-quoted so a NAME=value cmd[0] stays a command (ENOENT),
+            # never a shell assignment.
+            script_path = f"/tmp/.ir-exec-{request_id()}.sh"
+            exports = "".join(
+                f"export {shlex.quote(key)}={shlex.quote(value)}\n"
+                for key, value in (env or {}).items()
+            )
+            first = "'" + cmd[0].replace("'", "'\\''") + "'"
+            rest = " ".join(shlex.quote(part) for part in cmd[1:])
+            script = (
+                '#!/bin/sh\nrm -f -- "$0"\n'
+                + exports
+                + f"exec {first}{' ' if rest else ''}{rest}\n"
+            )
+            await provider_write_file(handle, guest, script_path, script)
+            # best effort, tightly bounded: close the world-readable window
+            # before the wrapper runs (the daemon-side write mode is the real
+            # fix, recorded for slice 4)
+            await _bounded_exec(
+                channel, guest, ["chmod", "600", script_path], suppress=True
+            )
+            run_cmd, run_env = ["sh", script_path], {}
         request = ExecRequest(
             id=request_id(),
-            cmd=cmd,
+            cmd=run_cmd,
             cwd=resolved_cwd,
-            env=env or {},
+            env=run_env,
             user=user,
             budget=budget,
             data_size=len(stdin) if stdin is not None else None,
         )
-        return await channel.exec(guest, request, stdin=stdin)
+        try:
+            return await channel.exec(guest, request, stdin=stdin)
+        except BaseException:
+            if script_path is not None:
+                # single-attempt scrub so failed attempts never accumulate
+                # env-bearing scripts in guest /tmp; suppressed, never retried
+                await _bounded_exec(
+                    channel, guest, ["rm", "-f", "--", script_path], suppress=True
+                )
+            raise
 
     try:
         outcome = await with_retry(

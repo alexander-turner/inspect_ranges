@@ -27,7 +27,9 @@ from inspect_ranges._channel.protocol import (
 from inspect_ranges._provider.ops import AGENT_HOME
 
 STREAM_CAP = DEFAULT_BULK_CAP
-"""Per-stream output cap, mirroring the daemon's 16 MiB `OutputCap`."""
+"""Per-stream output cap, mirroring the daemon's 16 MiB `OutputCap`.
+
+Known emulation limits, stated: paths embedded inside `sh -c` COMMAND STRINGS are not translated (only path-shaped argv elements and file-op paths are), and the budget kill is TERM-then-immediate-KILL with zero grace (the real daemon waits its kill grace between the two)."""
 
 
 class LocalEndpoint(FakeGuest):

@@ -1147,8 +1147,11 @@ class _StoredReply:
 class FakeGuest:
     """A deterministic in-memory guest endpoint speaking protocol v3.
 
-    Implements the daemon-side contract the conformance suite checks: EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
+    Implements the daemon-side contract the conformance suite checks (one deliberate gap: no per-stream `OutputCap`, so daemon-side truncation flags never fire here; `LocalEndpoint` and the real daemon cover that path): EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
     """
+
+    exec_count: int
+    write_count: int
 
     def __init__(self, name: str) -> None:
         self.name = name

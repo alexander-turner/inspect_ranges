@@ -27,7 +27,7 @@ _MAX_COMPONENT = 24
 
 def _sanitize(value: str) -> str:
     cleaned = _SANITIZE.sub("-", value.lower()).strip("-") or "x"
-    return cleaned[:_MAX_COMPONENT]
+    return cleaned[:_MAX_COMPONENT].rstrip("-") or "x"
 
 
 def sample_project(range_name: str, sample_id: str) -> str:
@@ -49,6 +49,10 @@ class CidLease(BaseModel):
     count: int
 
 
+class CidRegistryError(RuntimeError):
+    """The on-disk lease registry holds an entry whose CID block cannot be determined."""
+
+
 class CidAllocator:
     """Cross-process CID block leasing over a flock-guarded `cids.json`.
 
@@ -59,6 +63,7 @@ class CidAllocator:
         self._path = state_dir / "cids.json"
         self._lock_path = state_dir / ".cids.lock"
         self._base = base
+        self._extras_snapshot: dict[str, object] = {}
         state_dir.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
@@ -68,6 +73,7 @@ class CidAllocator:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 leases, extras = self._read()
+                self._extras_snapshot = extras
                 yield leases
                 if write:
                     self._write(leases, extras)
@@ -102,13 +108,23 @@ class CidAllocator:
         temporary.replace(self._path)
 
     def lease(self, project: str, count: int) -> CidLease:
-        """Lease a contiguous block of `count` CIDs for `project` (first fit in the partition)."""
+        """Lease a contiguous block of `count` CIDs for `project` (first fit in the partition).
+
+        Entries another version wrote still RESERVE their blocks (best-effort `base`/`count` parse); an entry whose block cannot be determined fails the allocator loudly rather than risking a silent CID overlap under live VMs.
+
+        Raises:
+            CidRegistryError: An entry's block cannot be determined; the operator must repair or prune the registry.
+            ValueError: `count` is not positive, or `project` already holds a lease.
+        """
         if count < 1:
             raise ValueError(f"cannot lease {count} CIDs")
         with self._locked(write=True) as leases:
             if project in leases:
                 raise ValueError(f"project {project!r} already holds a lease")
-            taken = sorted((lease.base, lease.count) for lease in leases.values())
+            taken = sorted(
+                [(lease.base, lease.count) for lease in leases.values()]
+                + self._reserved_extras()
+            )
             base = self._base
             for existing_base, existing_count in taken:
                 if base + count <= existing_base:
@@ -117,6 +133,23 @@ class CidAllocator:
             lease = CidLease(project=project, base=base, count=count)
             leases[project] = lease
             return lease
+
+    def _reserved_extras(self) -> list[tuple[int, int]]:
+        """Blocks reserved by entries this version cannot fully parse (loud beats clever: an undeterminable block fails allocation outright)."""
+        reserved: list[tuple[int, int]] = []
+        for project, entry in self._extras_snapshot.items():
+            fields = cast("dict[str, object]", entry) if isinstance(entry, dict) else {}
+            base = fields.get("base")
+            count = fields.get("count")
+            if isinstance(base, int) and isinstance(count, int) and count >= 1:
+                reserved.append((base, count))
+                continue
+            raise CidRegistryError(
+                f"lease entry {project!r} in {self._path} is unparseable and its "
+                "CID block cannot be determined; repair or prune the registry "
+                "before leasing (never silently overlap live CIDs)"
+            )
+        return reserved
 
     def release(self, project: str) -> None:
         """Release `project`'s lease; idempotent, callable from any process."""
@@ -129,7 +162,10 @@ class CidAllocator:
             return sorted(leases)
 
     def prune(self, live_projects: set[str]) -> list[str]:
-        """Drop leases for projects not in `live_projects`; returns what was pruned."""
+        """Drop leases for projects not in `live_projects`; returns what was pruned.
+
+        Intended callers are sweep-shaped: a full `cli_cleanup`-style pass that just enumerated every live project, or an operator repairing the registry. Per-project paths use `release`; nothing in the sample lifecycle calls this.
+        """
         with self._locked(write=True) as leases:
             stale = sorted(set(leases) - live_projects)
             for project in stale:
