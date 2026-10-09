@@ -10,8 +10,11 @@ from inspect_ranges.schema import revalidate_range
 from inspect_ranges.types import IssueError, RangeSpec
 
 DOCS = Path(__file__).parent.parent / "docs"
-PAGES = ("ranges.qmd", "guests.qmd", "networks.qmd")
-MIN_BLOCKS = {"ranges.qmd": 3, "guests.qmd": 10, "networks.qmd": 9}
+PAGES = ("ranges.qmd", "guests.qmd", "networks.qmd", "provider.qmd")
+MIN_BLOCKS = {"ranges.qmd": 3, "guests.qmd": 10, "networks.qmd": 9, "provider.qmd": 1}
+# YAML/Python tab parity is a definition-language property; the provider page
+# documents the eval surface and its Python blocks are usage fragments
+DEFINITION_PAGES = ("ranges.qmd", "guests.qmd", "networks.qmd")
 
 # fences: "```yaml" or "``` yaml" (plain), or "``` {.yaml .plan-invalid}"
 # (attributed). Test semantics ride as fence classes so the published blocks
@@ -122,7 +125,7 @@ def test_docs_python_examples_construct(classes: set[str], text: str) -> None:
             resolve_plan(spec)
 
 
-@pytest.mark.parametrize("page", PAGES)
+@pytest.mark.parametrize("page", DEFINITION_PAGES)
 def test_yaml_and_python_tabs_agree(page: str, tmp_path: Path) -> None:
     """The two tabs of every example define the same range, so they cannot drift apart."""
     yaml_specs: dict[str, RangeSpec] = {}

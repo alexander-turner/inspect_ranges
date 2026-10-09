@@ -12,6 +12,7 @@ from .result import CheckResult, CheckStatus
 
 PLATFORM = "Platform"
 REALIZER = "Realizer"
+PROVIDER = "Provider"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
@@ -46,6 +47,10 @@ def run_checks() -> list[CheckResult]:
     else:
         results.append(_skip(NETWORKING, "all checks", "requires Linux x86_64"))
         results.append(_skip(IMAGE_TOOLING, "all checks", "requires Linux x86_64"))
+    results += check_provider(
+        state_dir=_provider_state_dir(),
+        image_cache=_provider_image_cache(),
+    )
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
     else:
@@ -67,6 +72,167 @@ def run_checks() -> list[CheckResult]:
             ),
         )
     return results
+
+
+def _provider_state_dir() -> Path:
+    from .._runtime.ownership import default_state_dir
+
+    return default_state_dir()
+
+
+def _provider_image_cache() -> Path:
+    from .._provider.state import default_image_cache
+
+    return default_image_cache()
+
+
+def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
+    """The Inspect sandbox provider surface: entry-point registration, the inspect-ai floor, a current-recipe golden, and the CID lease registry's health."""
+    import importlib.metadata as metadata
+
+    from .._runtime.images import RECIPE_VERSION, ImageMetadata
+
+    results: list[CheckResult] = []
+
+    # entry point: the only registration path `inspect eval` has
+    entries = {e.name: e.value for e in metadata.entry_points(group="inspect_ai")}
+    if entries.get("inspect_ranges") == "inspect_ranges._registry":
+        results.append(
+            CheckResult(PROVIDER, "entry point", "ok", "libvirt_range registered")
+        )
+    else:
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "entry point",
+                "fail",
+                "inspect_ranges is not registered in the inspect_ai entry-point group",
+                fix="reinstall the package: pip install -e . (or uv sync)",
+            )
+        )
+
+    # inspect-ai floor, read from this package's own dependency pin
+    floor = _inspect_ai_floor()
+    try:
+        installed = metadata.version("inspect-ai")
+    except metadata.PackageNotFoundError:
+        installed = None
+    if installed is None:
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "inspect-ai",
+                "fail",
+                "inspect-ai is not installed",
+                fix="pip install inspect-ai",
+            )
+        )
+    elif floor is not None and (parse_version(installed) or ()) < (
+        parse_version(floor) or ()
+    ):
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "inspect-ai",
+                "fail",
+                f"{installed} is below the verified floor {floor}",
+                fix=f"pip install 'inspect-ai>={floor}'",
+            )
+        )
+    else:
+        results.append(CheckResult(PROVIDER, "inspect-ai", "ok", installed))
+
+    # a current-recipe golden: stale goldens carry a pre-3.1.0 daemon whose
+    # session-less pong the host rejects tamper-shaped at boot
+    current: list[str] = []
+    stale: list[tuple[str, str]] = []
+    for sidecar in sorted(image_cache.glob("*.json")) if image_cache.is_dir() else []:
+        try:
+            meta = ImageMetadata.model_validate_json(sidecar.read_text())
+        except (OSError, ValueError):
+            continue
+        if meta.recipe_version == RECIPE_VERSION:
+            current.append(meta.file)
+        else:
+            stale.append((meta.file, meta.recipe_version))
+    if current:
+        results.append(CheckResult(PROVIDER, "golden image", "ok", ", ".join(current)))
+    elif stale:
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "golden image",
+                "warn",
+                "only stale-recipe goldens: "
+                + ", ".join(f"{name} (v{version})" for name, version in stale)
+                + f"; their daemon predates the required pong session field, so a v{RECIPE_VERSION} host fails the boot ping tamper-shaped",
+                fix="re-derive: inspect-ranges images derive <vendor> --sha256 <digest> ...",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                PROVIDER,
+                "golden image",
+                "warn",
+                f"no goldens in {image_cache}; derive one before running evals",
+                fix="inspect-ranges images derive <vendor> --sha256 <digest> ...",
+            )
+        )
+
+    # the CID lease registry: provider sample admission depends on it parsing
+    lease_path = state_dir / "cids.json"
+    if not lease_path.exists():
+        results.append(
+            CheckResult(PROVIDER, "cid leases", "ok", "no lease file yet (clean state)")
+        )
+    else:
+        try:
+            import json as json_module
+
+            doc: dict[str, object] = json_module.loads(lease_path.read_text())
+            leases = doc.get("leases", {})
+            if not isinstance(leases, dict):
+                raise ValueError("leases is not an object")
+            leases = cast("dict[str, object]", leases)
+            results.append(
+                CheckResult(
+                    PROVIDER,
+                    "cid leases",
+                    "ok",
+                    f"{len(leases)} lease(s) at {lease_path}",
+                )
+            )
+        except (OSError, ValueError) as error:
+            results.append(
+                CheckResult(
+                    PROVIDER,
+                    "cid leases",
+                    "fail",
+                    f"{lease_path} unreadable or corrupt ({error}); sample admission cannot lease CIDs",
+                    fix=(
+                        "tear everything down, then remove the registry: "
+                        f"inspect sandbox cleanup libvirt_range && rm {lease_path}"
+                    ),
+                )
+            )
+    return results
+
+
+def _inspect_ai_floor() -> str | None:
+    """The inspect-ai minimum from this package's own dependency metadata."""
+    import importlib.metadata as metadata
+    import re
+
+    try:
+        requires = metadata.requires("inspect_ranges") or []
+    except metadata.PackageNotFoundError:
+        return None
+    for requirement in requires:
+        match = re.match(r"inspect[-_]ai\s*>=\s*([0-9.]+)", requirement)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _range_image_tag() -> str:

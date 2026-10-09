@@ -1,0 +1,121 @@
+---
+title: "Sandbox Provider"
+description: "Running Inspect evals against ranges: the libvirt_range sandbox provider, its configuration forms, retry contract, cleanup semantics, and environment knobs."
+llms-description: "The libvirt_range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), named sandboxes, the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
+---
+
+## Overview
+
+Installing `inspect_ranges` registers the `libvirt_range` sandbox provider with Inspect. A task that names it gets a freshly booted range per sample: the attacker box is the default sandbox, every other guest is reachable as a named sandbox, and the whole range is torn down when the sample ends.
+
+``` {.python .fragment}
+from inspect_ai import Task, task
+from inspect_ai.dataset import Sample
+
+@task
+def my_task() -> Task:
+    return Task(
+        dataset=[Sample(input="Recover the flag from the web host.")],
+        solver=my_solver(),
+        sandbox=("libvirt_range", "range.yaml"),
+    )
+```
+
+Before the first eval on a machine, derive a golden image and check the host (see [CLI](cli.qmd)): `inspect-ranges doctor` verifies the host end to end, and `inspect-ranges images derive` bakes the guest control daemon into a golden the range definition references.
+
+## Configuration
+
+The sandbox config is a range definition (see [Defining Ranges](ranges.qmd)), in either form:
+
+- **A `range.yaml` path**: `sandbox=("libvirt_range", "range.yaml")`. A bare `sandbox="libvirt_range"` picks up a `range.yaml` next to the task file.
+- **A typed spec**: pass a `RangeSpec` constructed with the Python API, via `SandboxEnvironmentSpec("libvirt_range", spec)`. The spec round-trips through the eval log typed.
+
+``` {.python .fragment}
+from inspect_ai.util import SandboxEnvironmentSpec
+
+sandbox = SandboxEnvironmentSpec("libvirt_range", spec)  # spec: a RangeSpec
+```
+
+A valid two-guest definition for the examples on this page:
+
+``` yaml
+range:
+  name: provider-example
+  description: One isolated segment, one target, one attacker box.
+
+networks:
+  - name: lab
+    cidr: 10.91.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.91.10.10 }]
+
+attacker:
+  interfaces: [{ network: lab, ip: 10.91.10.2 }]
+  image: noble-range-guest
+  entry: external
+  egress: none
+```
+
+## Named sandboxes
+
+`sandbox()` is the attacker's foothold host (or the attacker box itself); every other guest is addressable by its spec name:
+
+``` {.python .fragment}
+from inspect_ai.util import sandbox
+
+await sandbox().exec(["id", "-un"])                 # the attacker box
+await sandbox("web").read_file("/home/agent/flag")  # the named target
+```
+
+Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts.
+
+## The retry contract
+
+Infrastructure flakes, and losing an entire sample when a retry would have recovered it is worse than the double-execution risk of retrying, so sandbox operations retry transient infrastructure failures by default. The caveat from `inspect_k8s_sandbox` applies verbatim: "Note that retries cannot guarantee idempotency - if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the source punctuates with an em dash, rendered here per house style.)
+
+What bounds that risk, in order:
+
+1. **The wire layer is exactly-once per daemon session.** Lost replies are recovered by resending the same request id; the in-guest daemon deduplicates, stores results durably until acknowledged, and answers `ESTALE` for an executed request whose result was evicted before acknowledgement. An `ESTALE` is surfaced as a transient failure and retried with a FRESH request id: **the command runs again**. This double run is a deliberate, documented choice, the same trade the retry policy makes everywhere.
+2. **Session invalidation detects daemon restarts.** Exactly-once holds only within one daemon lifetime, so the provider pins each guest's session id at boot and re-checks it after any re-delivery of a side-effecting operation (a same-id resend or a fresh-id retry attempt), whatever the outcome. A change surfaces as a loud `SessionChangedError` sample failure, never a silent possibly-double-run. Detection is post-hoc and pre-compromise honest: a hostile daemon can lie about its session.
+3. **`timeout` is enforced in-guest** (a process-tree kill inside the daemon), so a timed-out command genuinely timed out; `TimeoutError.truncated_output` carries the killed command's output tail when the daemon captured one. The contract's `timeout_retry` flag is therefore advisory and ignored: re-running a command that hit its deadline is destructive in a range, and the transient-infrastructure class it exists for is handled by the layered retry instead.
+
+Failures that survive the retry budget map to the contract: transport and channel-budget failures become `SandboxUnavailableError`; errno-tagged guest failures become the matching `FileNotFoundError`/`PermissionError`/`IsADirectoryError`/`NotADirectoryError`; protocol violations an honest endpoint cannot produce are tamper verdicts and never retried.
+
+## Execution identity
+
+The daemon runs commands as the `agent` user via an absolute-path `runuser` unless the call names a user. Two consequences worth knowing:
+
+- **`runuser` always resets `HOME`, `SHELL`, `USER`, `LOGNAME`, and `PATH`** to the target user's values. Caller env entries for those five keys still work: the provider routes them through an uploaded wrapper script whose exports apply after the user switch.
+- **Oversized or env-carrying commands ride a wrapper script** uploaded to guest `/tmp` with mode `0600`, agent-owned, self-deleting on execution. For an explicit third user (not `agent`, not `root`) one root `chown` transfers ownership before the exec, so only the daemon (root), the agent, and the requested user can ever read the script's env, and owner-only bits are what let the script delete itself under sticky `/tmp`. The env values exist on the guest disk between upload and self-deletion (or the failure-path scrub); that window is the surface's stated exposure.
+
+## Cleanup semantics
+
+- **Normal completion**: each sample's range is destroyed at sample end; the eval's remaining ranges are swept at task end.
+- **Interrupted samples** (Ctrl-C): teardown is deferred to task end, the Docker provider's convention, so cancellation never stalls on a slow teardown. The range stays booted but hypervisor-isolated and egress-controlled until the run finishes: containment does not depend on teardown having happened.
+- **`--no-sandbox-cleanup`**: ranges stay up, and the log names the removal commands per project: `inspect-ranges down <project>` or `inspect sandbox cleanup libvirt_range <project>`.
+- **Crash recovery**: `inspect sandbox cleanup libvirt_range` (no project argument) removes EVERY provider-origin project found in on-disk state (the CID lease registry plus provider-marked ownership records), from any shell, after any crash. It does not touch ranges booted by the CLI or other tools.
+
+A destroyed range releases its CID lease, ownership record, staging, and admission charge only after the teardown actually succeeded, so a failed teardown stays visible and recoverable rather than leaking.
+
+## Concurrency and admission
+
+Samples run concurrently up to a host-derived bound (`max(1, min(cpus/2, memory_gb/8))` by default); each sample's range gets a distinct project name and disjoint guest CIDs. A range whose declared resources alone exceed the host is refused up front with a clear error rather than admitted to fail slowly.
+
+## Environment reference
+
+| Variable | Default | Effect |
+|---|---|---|
+| `INSPECT_RANGES_IMAGE_CACHE` | `~/.cache/inspect-ranges/images` | Where goldens and vendor images live (`images derive` writes here). |
+| `XDG_STATE_HOME` | `~/.local/state` | Root of provider state: project ownership, CID leases, staging (`<state>/inspect-ranges/`). |
+| `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides the concurrent-sample admission bound. |
+| `INSPECT_RANGES_RETRY_EXEC_ATTEMPTS` | 3 | Retry attempts for `exec`. |
+| `INSPECT_RANGES_RETRY_FILE_ATTEMPTS` | 5 | Retry attempts for file operations. |
+| `INSPECT_RANGES_RETRY_WAIT_INITIAL_S` | 1 | First retry backoff (exponential with jitter). |
+| `INSPECT_RANGES_RETRY_WAIT_MAX_S` | 10 | Backoff ceiling. |
+| `INSPECT_RANGES_RETRY_UP_ATTEMPTS` | 2 | Boot attempts per sample (a transient boot failure respins once with fresh identity). |
+| `INSPECT_RANGES_RETRY_DISABLE` | unset | Any non-empty value collapses every retry layer to a single attempt. |

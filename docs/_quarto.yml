@@ -22,6 +22,8 @@ inspect-docs:
           href: networks.qmd
     - text: Running Ranges
       href: cli.qmd
+    - text: Sandbox Provider
+      href: provider.qmd
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk

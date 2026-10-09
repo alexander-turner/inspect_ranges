@@ -17,6 +17,7 @@ from inspect_ranges._doctor.checks import (
     check_image_tools,
     check_ipv6,
     check_kernel_readable,
+    check_provider,
     check_virtualization,
     parse_version,
 )
@@ -321,3 +322,52 @@ def test_check_realizer_branches(
     # full artifact present
     write_bundle(artifact, b"fake", version="9.9.9-test")
     assert status_of(check_realizer(image_inspect=ok_proc), "daemon artifact") == "ok"
+
+
+def _provider_results(tmp_path: Path) -> dict[str, CheckResult]:
+    results = check_provider(state_dir=tmp_path / "state", image_cache=tmp_path / "img")
+    return {result.name: result for result in results}
+
+
+def test_check_provider_on_this_environment(tmp_path: Path) -> None:
+    """The installed package registers the entry point and satisfies its own inspect-ai floor; empty cache and state report honestly."""
+    results = _provider_results(tmp_path)
+    assert results["entry point"].status == "ok"
+    assert results["inspect-ai"].status == "ok"
+    assert results["golden image"].status == "warn", "no goldens in an empty cache"
+    assert results["cid leases"].status == "ok"
+
+
+def test_check_provider_flags_stale_goldens_with_the_skew_guidance(
+    tmp_path: Path,
+) -> None:
+    from inspect_ranges._runtime.images import DaemonPin, ImageMetadata
+
+    cache = tmp_path / "img"
+    cache.mkdir(parents=True)
+    stale = ImageMetadata(
+        name="old-golden",
+        file="old-golden.qcow2",
+        recipe_version="3",
+        derivation_key="k",
+        vendor_file="vendor.img",
+        vendor_sha256="0" * 64,
+        daemon=DaemonPin(name="vsockd", version="3.0.0", sha256="0" * 64),
+        golden_sha256="0" * 64,
+        created="2026-10-01T00:00:00+00:00",
+    )
+    (cache / "old-golden.json").write_text(stale.model_dump_json())
+    results = check_provider(state_dir=tmp_path / "state", image_cache=cache)
+    golden = next(result for result in results if result.name == "golden image")
+    assert golden.status == "warn"
+    assert "tamper-shaped" in golden.detail and "re-derive" in (golden.fix or "")
+
+
+def test_check_provider_flags_a_corrupt_lease_registry(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "cids.json").write_text("{not json")
+    results = check_provider(state_dir=state, image_cache=tmp_path / "img")
+    leases = next(result for result in results if result.name == "cid leases")
+    assert leases.status == "fail"
+    assert "inspect sandbox cleanup" in (leases.fix or "")
