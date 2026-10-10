@@ -18,7 +18,8 @@ from pathlib import Path
 SPIKE = Path(__file__).parent
 SPEC = SPIKE / "range.yaml"
 ROOT = SPIKE.parent.parent.parent
-SOCKET = SPIKE / "tmp" / "applier.sock"
+# short /tmp socket: AF_UNIX paths cap at ~107 bytes (see battery_main)
+SOCKET = Path(f"/tmp/ir-rh-{os.getuid()}") / "applier.sock"
 TASK = "range-host-matrix"
 TTL_S = 12.0
 
@@ -36,10 +37,16 @@ def check(name: str, good: bool, detail: str = "") -> None:
 
 
 def start_applier(state_dir: Path, log_name: str) -> "subprocess.Popen[bytes]":
-    log = open(SPIKE / "tmp" / "logs" / log_name, "wb")  # noqa: SIM115
+    import socket as socket_module
+
+    SOCKET.unlink(missing_ok=True)  # a stale file would fake readiness below
+    log = open(SPIKE / "tmp" / "logs" / log_name, "ab")  # noqa: SIM115
     proc = subprocess.Popen(
         [
-            "uv", "run", "inspect-ranges", "applier",
+            # the venv binary DIRECTLY: a `uv run` wrapper absorbs kill()
+            # (SIGKILL cannot be forwarded), so the wedge scenario would
+            # "kill" the wrapper while the real applier kept serving
+            str(ROOT / ".venv" / "bin" / "inspect-ranges"), "applier",
             "--socket", str(SOCKET),
             "--state-dir", str(state_dir),
             "--image-cache", os.environ["INSPECT_RANGES_IMAGE_CACHE"],
@@ -49,11 +56,19 @@ def start_applier(state_dir: Path, log_name: str) -> "subprocess.Popen[bytes]":
         stderr=subprocess.STDOUT,
     )
     deadline = time.monotonic() + 60
-    while not SOCKET.exists():
+    while True:  # readiness means CONNECTABLE, not merely present
         if proc.poll() is not None or time.monotonic() > deadline:
             raise RuntimeError("applier never came up")
+        if SOCKET.exists():
+            probe = socket_module.socket(socket_module.AF_UNIX)
+            try:
+                probe.connect(str(SOCKET))
+                return proc
+            except OSError:
+                pass
+            finally:
+                probe.close()
         time.sleep(0.1)
-    return proc
 
 
 def running_project_containers(project: str) -> int:
@@ -182,7 +197,11 @@ def kill9_and_reaper(state_dir: Path) -> None:
         text=True,
         timeout=600,
     )
-    check("the driver died by SIGKILL", proc.returncode == -9, f"rc={proc.returncode} err={proc.stderr[-200:]}")
+    check(
+        "the driver died by SIGKILL",
+        proc.returncode in (-9, 137),  # 137 = 128+9 through the uv wrapper
+        f"rc={proc.returncode} err={proc.stderr[-200:]}",
+    )
     info = json.loads((SPIKE / "tmp" / "kill9.json").read_text())
     project, lease_id = info["project"], info["lease_id"]
     check("kill -9 left the range running", running_project_containers(project) > 0)
