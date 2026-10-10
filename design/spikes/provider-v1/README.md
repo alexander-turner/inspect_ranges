@@ -29,3 +29,5 @@ Not run. The `devbox-b` instance (i-xxxxxxxxxxxxxxxxx, x.x.x.x) was STOPPED at b
 - `run.sh`: the orchestrator (setup, batteries, eval, residue sweep)
 - `battery_main.py`, `lifecycle_matrix.py`, `boot_and_die.py`: the scenarios
 - `../../..//evals/smoke/`: the real-eval task (sample files, setup script, solver, scorer)
+
+Convention note (2026-10-10): timing summaries from battery runs belong in this committed README, per the realizer/channel spike convention; tmp/ evidence is ephemeral, so a number only the logs carry is a number the record loses.

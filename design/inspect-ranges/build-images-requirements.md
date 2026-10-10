@@ -1,0 +1,171 @@
+---
+type: analysis
+title: "Build and images: requirements and inventory preceding the architecture design"
+status: draft
+tags: [inspect-ranges, build, images, distribution, requirements, analysis]
+timestamp: 2026-10-10
+---
+
+# Build and images: requirements and inventory preceding the architecture design
+
+*Requirements and inventory pass for the build/images arc. This document is deliberately not a design: it gathers what the system must do (demand), what has already been decided (commitments), what has been measured (facts), where the existing records disagree or underspecify each other, and the open questions the forthcoming architecture document must answer. That architecture document will reconcile and where necessary supersede the three partial records ([range-build](range-build.md), [recipe-references](recipe-references.md), [image-distribution](image-distribution.md)); until then those records stand. Fact classes used throughout: REQUIREMENT (the architecture must satisfy it), COMMITMENT (already decided, cited), MEASURED (a number with a source), UNMEASURED (a number we need and do not have), FINDING (a qualitative spike result, cited), AS-IS (what the code does today), OPEN (a question for the architecture document).*
+
+## 1. Purpose and scope
+
+The build/images arc is the work that turns `range.yaml` definitions into runnable, distributable ranges with their guest content realized: recipe execution, golden and scenario image production, checkpoint capture, artifact publication and consumption, and the deletion of the planning gates that currently keep guest content honest-but-inert. The user's framing names four requirement areas: flexible build paths, easy consumption of prebuilt artifacts, efficiency in time and storage, and overall usability and understandability. Section 5 elaborates each as requirements with evidence. The frontmatter `type: analysis` is a record type minted for this document: it carries no decisions. Scope excludes challenges/scoring (its own phase), evidence streaming, and the separated deployment topology, except where they impose constraints noted here.
+
+## 2. Demand inventory: what actually requires build/images work
+
+### 2.1 The six example ranges, one by one
+
+Every example validates today and refuses at planning via the guest-config gate; the build phase is, by definition, what deletes those refusals. Their image references also demonstrate that image naming is currently a free-text provenance note, not a resolvable reference (see section 3.4).
+
+- **vulhub-zabbix** (`ranges/vulhub-zabbix/range.yaml`): four images named as docker tags, two of them with a command annotation smuggled into the name (`"vulhub/zabbix:3.0.3-server (command: server)"`). Demands: scenario images or recipes for a four-service application stack (mysql 5, zabbix server/agent/web), services-and-vulnerability verification, and a decision on whether upstream app stacks become prebuilt scenario images or build-time recipes (section 6, Q4). Its deferred.yaml retains goals (task-side) and attack_path.
+- **kypo-demo** (`ranges/kypo-demo/range.yaml`): images `debian-9-x86_64` and `ubuntu-focal-x86_64` (OpenStack image names upstream). Demands: a legacy distro golden (debian 9 predates reliable cloud-init expectations and carries no python3 guarantee; the Go daemon decision already absorbed that), users/services/vulnerability realization, and variables interaction with build (its telnet port and flags are per-instance variables; see randomization gate below).
+- **cyris-basic** (`ranges/cyris-basic/range.yaml`): images named as libvirt base-VM XML references (`basevm_firewall.xml (KVM)`). Demands: router-flavored and desktop-flavored goldens, users (including a router account), services, planted data files; its upstream inline task verbs remain deferred as recipe-language material (COMMITMENT, [guest-config-v0.3](guest-config-v0.3.md)).
+- **goad-light** (`ranges/goad-light/range.yaml`): three Windows guests from a Vagrant box reference (`StefanScherer/windows_2019 (v2021.05.15)`), plus roles (domain-controller, dns, adcs, member-server, iis, mssql, webdav), per-host defense toggles, scheduled_activity bot scripts, and the full two-domain `active_directory` section with the seeded ACL chain. Demands: Windows goldens in two flavors (plain and sysprep-generalized; MEASURED evidence below), the unattend injector, AD realization via wrapped upstream recipes, checkpoint capture (the 17-minute build to 48-second restore economics), ADCS content, and scheduled-task realization. This is the forcing example for most of the build phase.
+- **attack-range-windows** (`ranges/attack-range-windows/range.yaml`): an Ubuntu AMI name and a Windows Server 2022 AMI name as images; an Ansible role as a `provisioning` reference; a D2 defense posture with Sysmon-to-Splunk telemetry. Demands: a Splunk-class service stack (recipe territory), Windows golden, telemetry realization, and the first real consumer of the recipe-references execution contract.
+- **mhbench-equifax-small** (`ranges/mhbench-equifax-small/range.yaml`): six `Ubuntu20` hosts plus an attacker image named `Kali`. Demands: a Kali-class attack golden (also the schema's promised default, below), an older Ubuntu golden, and the Struts vulnerability stack (recipe or scenario image). Its deferred.yaml retains count-expansion material (generation layer, out of build scope).
+
+### 2.2 Schema promises not yet honored
+
+- REQUIREMENT: the standard attack image. `attacker:` without `image:` is documented as selecting "the backend's standard attack image" (docs/guests.qmd); no such image exists. mhbench's `Kali` reference is the concrete demand.
+- REQUIREMENT: the default router appliance. Routers may omit `os`/`image` ("the backend's default router appliance is used", docs/guests.qmd); every battery today names an explicit image.
+- REQUIREMENT: delete the planning gates. The build phase's definition is the lockstep deletion of `guest-config-not-realized` (per section: users, services, vulnerabilities, misconfigurations, data, defense, provisioning, roles, scheduled_activity, active_directory) and `windows-render-not-supported` (src/inspect_ranges/_compiler/plan.py). `randomization-not-realized` belongs to the generation layer but interacts with build (draw-versus-bake, section 6 Q10). `image-not-in-cache` is an error contract that stays, but its meaning changes once a pull path exists (today it means "derive it yourself").
+- AS-IS: `images derive` supports exactly one vendor class (Ubuntu noble, digest-pinned) and one product (the daemon-baked golden). Everything else in this section is unbuilt.
+
+### 2.3 Residual demand from the completed phases
+
+- The provider phase consumes goldens per sample and left two build-relevant residuals: Windows-through-provider waits on Windows render support, and the recipe-v4 golden requirement is now load-bearing for permission semantics (the agent user is created at derive time, src/inspect_ranges/_runtime/images.py).
+- The realizer's three-command cold start (`images derive`, `render`, `up`) is MEASURED at 55 s on a warm-caches host (realizer-v1.md phase exit) and is the baseline the consumption story must beat or justify.
+- channel-v1 carries the Windows CI runner follow-up (the C# drift guard needs a Windows runner) and notes Windows goldens take ~3 minutes to produce unattended in the spike harness (design/spikes/channel-v1/README.md).
+
+## 3. Existing commitments, and where the records disagree
+
+### 3.1 range-build.md (accepted)
+
+COMMITMENTS: the build/run split (build per range version, expensive, cached; runtime per sample, cheap, from the manifest); the range build manifest with identity, resolved digests, recipe versions, captured artifacts, verification results, and seeds but never secrets; the checkpoint as a bundle (disks plus memory plus domain XML, whole-range quiesce) with cold boot as the universal default; the five-layer content criterion (vendor bases, golden derivation, build recipes, declarative spec content, per-sample proof planting); boot ordering as a build-time dependency graph; config injection as a per-image capability with a five-item menu (cloud-init seed, baked at build, unattend plus qemu-ga, DHCP-only, pre-configured checkpoint); and the rule that examples remain fixtures until they pass a build and carry a manifest.
+
+### 3.2 recipe-references.md (proposed)
+
+COMMITMENTS: a recipe is a content-addressed bundle (name, version, entrypoint, inputs, offline/online mode) resolved from the range directory then a local cache, digested into the manifest, invoked with validated vars and a target, judged by exit status with our verifiers deciding success; the recipe language itself permanently out of scope; runner toolchain pinning and any remote registry deferred.
+
+### 3.3 image-distribution.md (draft) and memory-restore-ad.md (accepted)
+
+COMMITMENTS (distribution): published blobs are canonical and digest-verified before use; the local cache has ownership rules (atomic materialization, whole-chain eviction, backing-chain validation); three delivery modes (`registry | granted-urls | pre-seeded`) as deployment capabilities under one integrity contract; eager verified pull as the fleet baseline with lazy boot an explicitly bounded option; publication as chained qcow2 layers over an OCI registry, with CDC chunking held until base-rebuild churn hurts. COMMITMENTS (checkpoints): cold boot default, memory restore an experimental opt-in with preconditions; checkpoint freshness policy recorded in the manifest with a max age; named CPU models for checkpointed ranges; the aging spike (disk arm) owed before the freshness number is anything but folklore.
+
+### 3.4 Inter-record conflicts and underspecifications
+
+This subsection is the highest-value finding of the pass. Each item is an OPEN question in section 6.
+
+1. **Nobody owns image naming.** The schema accepts any string; the six examples use five upstream namespaces (docker tags with annotations, AMI names, Vagrant boxes, libvirt XML names, OpenStack names) as provenance notes; the as-is cache resolves names through one shared file-name rule (plan and derive unified in the realizer phase) that those strings were never meant to satisfy; range-build demands "every image as a content digest (never a logical name)" in the manifest; image-distribution assumes OCI manifests naming digest-pinned layers. The logical-name-to-artifact mapping, who declares it, and what the in-spec string is allowed to mean are specified nowhere. The vulhub command-annotation smell is a symptom: authors need somewhere to put per-guest boot variation and the name is the only slot.
+2. **Recipe outputs have no artifact identity.** recipe-references specifies recipe inputs end to end, and range-build says outputs are captured into images and checkpoints, but no record gives a recipe's output an artifact identity: a name, a key, or a publishable form (a scenario image in the cache, a checkpoint member, or only an anonymous contribution to a captured bundle). image-distribution's layer taxonomy covers vendor bases and derived deltas but never places recipe outputs or checkpoints in the publishable tiers, even though its own pull sizing assumes checkpoint memory images travel ("Windows/AD sets (10 to 25 GB incl. checkpoint memory images)"). Checkpoint memory images are not qcow2 chains, so the chained-layer publication model does not cover them as written.
+3. **Two manifests, one name.** The implemented realization-bundle manifest (format_version 1, spec and plan hashes, per-file digests; src/inspect_ranges/_compiler/render.py) and range-build's unimplemented range build manifest (resolved digests, recipe versions, verification results, seeds, CPU model) overlap in content and differ in scope, and their relationship (wraps, references, or replaces) is unspecified. The provider consumes the former; the build phase will produce the latter; the runtime contract says a host "refuses to instantiate from a manifest whose digests it cannot verify", which today is true only of the bundle manifest.
+4. **The invalidation algebra is fragmented across four key regimes** (detail in 5.3): the derivation key (recipe version, vendor digest, daemon-bundle digest), the render bundle (spec and plan hashes plus image digests resolved at render time), the daemon bundle (its own digest and version), and recipe bundles (digest per recipe-references). No record states the cross-artifact consequences, and at least one hazard is live today: re-deriving a golden (same cache file name, new digest) silently invalidates every previously rendered bundle that resolved the old digest, surfacing only as a digest-mismatch refusal at `up` with no hint that a re-render fixes it.
+5. **No publisher exists and no record names one.** image-distribution designs the pull side; the push side (who builds goldens and daemon bundles, where fleet pins come from, what CI signs off) is absent: the nearest text anywhere is docs/cli.qmd's "`daemon-bundle` publishes the artifact once per fleet", which names no publisher. The operator journey (5.4) dead-ends here.
+6. **Scenario images versus recipes is undecided in practice.** The five-layer criterion (range-build) sends big stacks to recipes captured into checkpoints, but the vulhub translation references prebuilt upstream app images as if layer-1 bases, and attack-range references an Ansible role as a recipe. Both readings are defensible per example; the architecture must give authors a rule, because it determines what the build executes versus what the cache must hold.
+7. **Checkpoint portability constraints are stated but not wired.** memory-restore and range-build require named CPU models and host-compatibility statements for checkpoints; the as-is compiler exposes `--cpu-model` at render, but nothing records or checks fleet CPU policy, and doctor has no check (the records anticipate one).
+
+## 4. Measured facts
+
+All numbers below have sources; nothing here is estimated. Where the records quote an estimate it is labeled as such in its source.
+
+| Fact | Number | Source | Constrains |
+|---|---|---|---|
+| Golden derive input, noble vendor image | ~600 MB base; golden is a small overlay | image-distribution.md section 1 | storage tiers, pull sizing |
+| 4-guest range, bundle apply to enforced-ready (metal) | 47.3 s | design/spikes/bundle/README.md | per-sample boot economics |
+| up to enforced-ready, 4 guests via product CLI (metal) | 52.3 s | design/spikes/up-core/README.md | same |
+| Three-command cold start (derive, render, up; warm range image and Go caches) | 55 s | realizer-v1.md phase exit | consumption baseline |
+| Boot storm: 48 concurrent ranges (96 VMs) | 47 s solo to 77 s median at 48x, zero failures, disk reads 0 MB warm | design/spikes/boot-storm/README.md | host density; page-cache dependence of goldens |
+| Nested tax (r8i.8xlarge vs metal) | enforced-ready +12% (55.8 s vs 50 s); VM boot +51%; vsock I/O parity; checkpoint restore 3 s on both | design/spikes/nested-virt/README.md | fleet instance choice; nested is viable |
+| AD pair: promotion to converged | 177 s promotion; 208 s sysprep; 554 s total first build (incl. the refusal detour); 394 s parallelized | design/spikes/ad-domain, checkpoint-clone READMEs | why build-time convergence exists |
+| GOAD-light forest build to verified | 1007 s (~17 min); child promotion 467 s is the long pole | design/spikes/goad-forest/README.md | build-time budget for AD ranges |
+| Checkpoint capture / restore (2-VM AD) | 19 s capture; 3 s restore; bundle 3.5 GB for 2x4 GB guests | checkpoint-clone README | checkpoint economics and sizes |
+| Forest restore (4 VMs) | 48 s, trust and secure channels intact | goad-forest README | per-sample AD economics |
+| S3 eager pull throughput | 31 MB/s at 1 stream to 617 MB/s at 32 | design/spikes/s3-pull/README.md | fleet cold start; implied ~2 s per 1 GB Linux set, ~20 s per 12 GB Windows set, ~41 s per 25 GB AD set at P=32 |
+| S3 ranged-read latency (lazy-boot pattern) | 146 ms median, 225 ms p95 TTFB (64 KiB reads) | s3-pull README | lazy boot is TTFB-bound against S3 |
+| Lazy HTTP boot vs local (same-host cache) | 10.2 s vs 9.8 s; first boot fetched 123% of a small chain; warm second boot 7.2 s, 11 MB | design/spikes/lazy-pull/README.md | lazy pull wins on time not bytes for small images |
+| Windows golden production (unattended, in spike harness) | ~3 min | design/spikes/channel-v1/README.md | Windows derive budget |
+| Cold boot vs memory restore by class | Linux ~10-15 s vs 1-3 s; simple Windows 6.5 s vs 1.3 s; AD cold-boot post-reboot convergence best-case 6-42 s (restore path: 3 s pair, 48 s forest) | memory-restore-ad.md table; ad-domain README | why cold boot is the default |
+
+UNMEASURED (needed, no number exists): provider sample boot time and the concurrent-pair timing (reported by the chunk-3 battery run as ~50 s single and 47.9 s for the pair, but the evidence file was not committed and the spike README carries no timings; the next lifecycle-matrix run regenerates it); max safe checkpoint age (the shrunk aging spike in memory-restore-ad.md is specified but unrun); Windows image lazy-pull fetch ratio (lazy-pull README names it as the measurement that matters); multi-GB CRT/multipart pull rates above the P=32 floor; derive wall time itself (the batteries time boots, not virt-customize); storage footprint of a realistic mixed cache (Linux plus Windows plus checkpoints) under the chained layout; nested-leg re-run numbers on the current stack (in flight on devbox-b at the time of writing); checkpoint restore-order tolerance (assumed rather than proven, range-build boot-ordering section).
+
+## 5. The four requirement areas
+
+### 5.1 Flexible build paths
+
+REQUIREMENT: the architecture must cover three realization paths (recipe-applied at build, baked into a derived image, captured into a checkpoint) and at least five image classes (cloud Linux, legacy no-agent Linux, Windows plain, Windows generalized for AD, unmodifiable appliance), with the config-injection menu (range-build) deciding how compiler output reaches each class. The classes and paths are each evidenced (the six examples collectively hit every class except appliance, with cyris's firewall VM adjacent); whether every path applies to every class and content item is the architecture's question, not a requirement here. The ad-domain spike's sysprep result (FINDING: domain membership requires generalized images; non-AD Windows keeps 6.5 s boots) forces the two-flavor Windows split per host role at compile time. A standing constraint on the bake path: derivation is offline-only and package installation belongs in Packer-style CI, because virt-customize --install is broken on noble hosts (architecture.md, Images).
+
+REQUIREMENT: who chooses the path must be explicit. Today the choice is implicit in what exists (only goldens derive). The records assign defaults (declarative content applied by the generic pipeline; big stacks via recipes into checkpoints; bases never built by us) but no mechanism expresses an author override or records the choice in the manifest. The build manifest commitment already requires recording which injector each image uses; a mechanism for expressing and recording the realization-path choice must likewise exist, and where it lives is the architecture's call.
+
+REQUIREMENT: dependency-ordered, convergence-gated build orchestration with health gates (COMMITMENT, range-build boot-ordering section), including the explicit provision-after edges the resolved plan does not yet carry, and the goad-forest pattern (root before child before member) as the proven shape.
+
+### 5.2 Easy consumption of prebuilt artifacts
+
+AS-IS artifact taxonomy, with identity and verification today: vendor image (operator-supplied digest pin; verified at derive), daemon bundle (byte-deterministic tar, sidecar digests; `inspect-ranges daemon-bundle`), golden (derivation-key cache entry with provenance sidecar; verified on cache hit), recipe bundle (specified, unexecuted), realization bundle (digest-manifested directory; verified at `up`), checkpoint bundle (spiked, no product form). Consumption today is strictly local: every artifact is produced on the consuming host; nothing pulls, and `image-not-in-cache` means "go derive it".
+
+REQUIREMENT: the consumption endpoint is "fetch by name at a pinned digest, verify, run" with no build tooling on the consuming host for the common case. The provider makes the demand concrete: an eval runner should reach `inspect eval` with a `range.yaml` plus one fetch command (or zero under pre-seeded delivery), against the measured pull budgets in section 4. The three delivery modes and the integrity contract are COMMITMENTS; what is missing is the artifact index (what names exist, at which digests, with which compatibility statements) and the tier list of what is publishable at all (conflict 3.4.2: recipe outputs and checkpoints have no defined publishable form; memory images do not fit the qcow2 chain model).
+
+REQUIREMENT: trust and pin UX per tier. Today's pins are operator-carried strings on the CLI (`--sha256`, `--daemon-sha256`), appropriate for the trusted-operator v1 posture but fleet-unfriendly; the docs' once-per-fleet phrasing (docs/cli.qmd) presumes a publisher that does not exist. Whether realizer-v1's bundle trust model statement (integrity, not provenance) extends uniformly to every tier is OPEN for the architecture to state; the constraint is that it must not invent signing machinery before image-distribution's contract asks for it.
+
+### 5.3 Efficiency: time and storage
+
+AS-IS invalidation algebra, enumerated (the fragmentation named in 3.4.4):
+
+- Golden derivation key: `recipe:{RECIPE_VERSION}|vendor:{digest}|daemon:{bundle digest}` (src/inspect_ranges/_runtime/images.py). Bumping RECIPE_VERSION or the daemon invalidates every golden; cache hits re-verify golden, vendor copy, and daemon pin.
+- Realization bundle: spec hash plus plan hash plus per-file digests, with image digests resolved from the cache at render time (src/inspect_ranges/_compiler/render.py). Nothing ties a bundle to the golden generation that produced its digests; the stale-bundle-after-re-derive hazard follows.
+- Daemon bundle: own digest, DAEMON_VERSION 3.1.0, byte-deterministic (src/inspect_ranges/_channel/bundle.py).
+- Recipes: bundle digest per recipe-references; rebuild-on-change committed but unimplemented.
+- Checkpoints: no key yet; range-build commits capture time, CPU model, and freshness to the manifest.
+
+REQUIREMENT: one invalidation story across the chain, stated as what each input change rebuilds and what it must not rebuild. The driving cases from the demand inventory: a one-line recipe edit must rebuild that recipe's outputs and dependent checkpoints, not goldens; a daemon bump must re-derive goldens and re-bake checkpoints (the daemon lives inside them) but should not force re-authoring anything; a vendor refresh is a new base generation; a spec edit must re-render cheaply without touching images (render is byte-deterministic per its tests; its wall time is UNMEASURED but bounded by the batteries' end-to-end timings). GOAD's 17-minute build and 467-second child promotion are the budget argument: rebuild granularity is the difference between usable and unusable AD iteration.
+
+REQUIREMENT: storage economics follow the chained-layer COMMITMENT (shallow chains, deltas off pinned bases, CDC held in reserve), extended to answer what it deliberately excluded: checkpoint members (memory images dominate AD bundle size: 2.4 of 3.5 GB in the measured pair) and multi-range sharing of scenario layers. The boot-storm MEASURED fact that warm hosts serve goldens entirely from page cache makes local layout quality a runtime performance input, not just a disk-space concern.
+
+### 5.4 Usability and understandability: the three journeys as they exist today
+
+Journey A, range author iterating on guest content: write the spec; `inspect-ranges validate` (good diagnostics); `inspect-ranges plan` refuses with `guest-config-not-realized`. Dead end: there is no build to run, no recipe runner to iterate against, and no way to see guest content realized. The closest living path is networking-only authoring, which works end to end in three commands. Gap list: recipe execution, a build command, per-section verification output the author can read, and a failing-recipe iteration loop with logs (the stage-log pattern from the realizer is the obvious seam and currently stops at `up`).
+
+Journey B, eval runner consuming prebuilt ranges: today they must become a builder: install toolchains (Go pin for `daemon-bundle`), obtain and pin a vendor image, run `daemon-bundle`, `images derive --sha256 ... --daemon-sha256 ...`, then `inspect eval`. Concept count before first eval: vendor digest, daemon bundle digest, image cache, state dir, recipe version generations, CID bands if debugging. Doctor explains gaps well (AS-IS: entry point, inspect-ai floor, golden presence with skew direction, lease health, platform, docker, kvm checks in src/inspect_ranges/_doctor/checks.py). Gap list: pull-by-digest consumption, a published index to pull from, and reducing the pin ceremony (several per-artifact digests carried by hand today) to something an eval runner can hold easily, whose shape is Q1/Q3 territory.
+
+Journey C, operator publishing, pinning, pruning: publishing is manual S3 copies in spike runbooks (nested-virt moved artifacts via `s3://SCRATCH-BUCKET/inspect-ranges/` with a sha256 manifest); there is no publish command, no fleet pin file, no provenance beyond local sidecars. Pruning: `images list` flags legacy names, stale recipes, and missing goldens, but nothing prunes, and cache eviction rules are committed only on the distribution side. Gap list: push tooling, the pin authority (CI), prune/GC with the whole-chain eviction rule including large checkpoint members (memory images) in hot caches, and fleet CPU-model policy for checkpoints.
+
+REQUIREMENT: the architecture document must contain these three journeys rewritten as the target experience, and the gap between sections here and there is its usability acceptance test. A journey needing more than a handful of commands or concepts is a design bug to fix on paper first.
+
+## 6. Open design questions for the architecture document
+
+Each question lists constraints and evidence, and what resolves it (analysis, measurement, or a user decision).
+
+1. **Image reference grammar.** What may `image:` mean (logical name, name plus digest, name plus variant parameters), who maps logical names to artifacts, and where per-guest boot variation (the vulhub command annotation) actually belongs. Constraints: schema strictness, six incompatible upstream namespaces as provenance, range-build's digest-only manifest rule, the shared file-name rule in code. Resolves by: analysis plus a user decision on surface syntax; interacts with Q4.
+2. **The unified invalidation algebra.** One declared key regime across vendor, daemon, golden, recipe, scenario image, checkpoint, bundle, with the stale-bundle-after-re-derive hazard closed explicitly (generation identity, or re-render guidance surfaced at refusal). Constraints: the four as-is regimes (5.3); byte-determinism where it exists today must survive. Resolves by: analysis; no measurement needed.
+3. **Artifact taxonomy and publishable tiers.** The definitive artifact list with identity, verification, compatibility statement, and publishability per tier, including the checkpoint bundle's non-qcow2 members and whether recipe bundles themselves publish. Constraints: integrity contract and delivery modes (COMMITMENT), measured pull budgets, the two-manifest overlap (3.4.3, resolved by making their relationship explicit). Resolves by: analysis; this is the architecture's spine.
+4. **Scenario images versus recipes.** The author-facing rule for when application content is a prebuilt scenario image versus a build-time recipe, and whether scenario images are first-class publishable tiers. Constraints: the five-layer criterion (COMMITMENT), vulhub versus attack-range as live counterexamples, recipe-references' by-reference-only stance. Resolves by: analysis plus a user decision; vulhub is the test case to write out both ways.
+5. **Checkpoints in distribution.** Format, keying, the max-age value, CPU-model fleet policy and its doctor check, and transport (eager-only until a chunked story exists for memory images). The enforcement point itself is a COMMITMENT, not open: the manifest records capture time and a max age and the provider refuses stale checkpoints (memory-restore-ad mitigation 2). Constraints: memory-restore COMMITMENTS, 3.5 GB per small pair MEASURED, the unrun aging spike. Resolves by: analysis plus the aging spike measurement for the freshness number.
+6. **Incremental rebuild semantics.** The dependency graph the build walks, what partial rebuild means for a captured checkpoint (re-run recipes against restored state, or full rebuild), and build caching between CI and laptops. Constraints: 17-minute forest builds, per-section verification demands, recipe digests. Resolves by: analysis, then a measurement pass on the GOAD rebuild cases.
+7. **Laptop versus fleet asymmetry.** Which journeys must work with no registry and no CI (author laptop) versus which assume the publisher exists; where pre-seeded delivery and the cache-in-AMI note fit. Constraints: delivery-mode COMMITMENT, journey B's current builder burden. Resolves by: analysis plus a user decision on the minimum supported laptop story.
+8. **CLI surface shape.** Whether build/consume verbs join the existing surface (`validate plan render up down images daemon-bundle doctor schema devbox`) as `build`, `pull`, `push`, `prune`, or compose differently; how journeys read as command sequences. Constraints: journey acceptance test (5.4), existing verbs are load-bearing in batteries and docs. Resolves by: design proposal reviewed by the user.
+9. **Build observability.** Where build logs, per-section verification evidence, and failing-recipe diagnostics live; the stage-log pattern (ownership.py) and the debug-bundle pattern are the proven seams. Constraints: Journey A's iteration loop, the manifest's verification-results commitment. Resolves by: analysis.
+10. **Build interaction with randomization.** Which declared variables may bake (fixed at build) versus must apply per sample, and how the manifest records the split; the generation layer owns draws but the build decides bakeability. Constraints: guest-config-v0.3 COMMITMENTS, scoring's per-sample proof-material rule. Resolves by: analysis now, generation-phase design later.
+11. **Publisher and pin authority.** What CI builds and signs off (daemon bundles, goldens, scenario images, checkpoints), where fleet pins live, and how operators consume them. Constraints: the docs' once-per-fleet phrasing (docs/cli.qmd) presumes a publisher; no record owns this today (3.4.5). Resolves by: analysis plus a user decision on CI scope.
+12. **Vendor catalog policy.** Which vendor bases the project blesses (noble today; kali, debian 9-class, focal, Windows Server flavors demanded by examples), per-class injector declarations, and how a new vendor class is added without code. Constraints: demand inventory 2.1, derive's noble-only AS-IS, offline-only derivation with package installation in Packer-style CI (architecture.md, Images). Resolves by: analysis; mostly mechanical once Q1 and Q3 land.
+
+## 7. Appendices
+
+### 7.1 CLI surface today
+
+`inspect-ranges validate | plan | render | up | down | images derive | images list | daemon-bundle | doctor | schema | devbox` (src/inspect_ranges/_cli/main.py). Provider-side: `inspect sandbox cleanup libvirt_range` and the `libvirt_range` sandbox type. No build, pull, push, or prune verbs exist.
+
+### 7.2 Artifact and key inventory today
+
+| Artifact | Identity | Verified | Published |
+|---|---|---|---|
+| Vendor image | operator-pinned sha256 | at derive and on cache hit | no (operator-fetched) |
+| Daemon bundle | bundle digest, DAEMON_VERSION 3.1.0, deterministic | sidecar digests before extraction | no |
+| Golden | derivation key (recipe 4, vendor, daemon) plus provenance sidecar | digest re-check on hit | no |
+| Recipe bundle | digest per recipe-references | specified | no (unimplemented) |
+| Realization bundle | manifest with spec/plan hashes and per-file digests | at `up`, traversal-safe | no |
+| Checkpoint bundle | none yet (spike form only) | n/a | no |
+
+### 7.3 Gates whose deletion defines the arc
+
+`guest-config-not-realized` (per section, demand-ordered: services and vulnerabilities first per the phase sequencing discussion), `windows-render-not-supported`; adjacent but owned by the generation layer: `randomization-not-realized`. The networking validation gates (`ipv6-not-realized`, `egress-fqdn-not-realized`, `egress-with-router-not-realized`) are out of scope for this arc.
