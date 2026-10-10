@@ -37,10 +37,18 @@ def reaper(state_dir: Path | None, interval: float | None) -> None:
     """
     target = state_dir if state_dir is not None else default_state_dir()
     while True:
-        outcomes = sweep(target)
+        try:
+            outcomes = sweep(target)
+        except Exception as error:
+            # the long-lived daemon must survive one bad pass; one-shot
+            # surfaces the failure to its caller
+            if interval is None:
+                raise
+            click.echo(f"sweep failed (retrying in {interval}s): {error}", err=True)
+            outcomes = []
         _report(outcomes)
         if interval is None:
-            if any(outcome.action == "down-failed" for outcome in outcomes):
+            if any(outcome.action != "reaped" for outcome in outcomes):
                 raise SystemExit(1)
             return
         time.sleep(interval)

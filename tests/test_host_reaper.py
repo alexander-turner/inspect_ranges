@@ -162,6 +162,30 @@ def test_sweep_leaves_healthy_leases_alone(tmp_path: Path) -> None:
     assert current is not None and current.state == "active"
 
 
+def test_release_failure_is_contained_and_the_next_sweep_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-teardown bookkeeping error must not escape the sweep (a long-lived reaper survives it); the lease stays reaping and the next pass completes the reclaim."""
+    rig = Rig(tmp_path)
+    original = CidAllocator.release
+    failures = ["flock hiccup"]
+
+    def flaky(self: CidAllocator, project: str) -> None:
+        if failures:
+            raise OSError(failures.pop())
+        original(self, project)
+
+    monkeypatch.setattr(CidAllocator, "release", flaky)
+    first = rig.sweep()
+    assert [(o.action, o.error) for o in first] == [("release-failed", "flock hiccup")]
+    survivor = rig.store.get(rig.lease.lease_id)
+    assert survivor is not None and survivor.state == "reaping"
+    second = rig.sweep()
+    assert [o.action for o in second] == ["reaped"]
+    assert rig.store.leases() == []
+    assert rig.allocator.leased_projects() == []
+
+
 def test_reaper_cli_one_shot_on_a_clean_state_dir(tmp_path: Path) -> None:
     result = CliRunner().invoke(ranges, ["reaper", "--state-dir", str(tmp_path)])
     assert result.exit_code == 0

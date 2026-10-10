@@ -3,6 +3,7 @@
 A lease is identity plus expiry, nothing else (`host-provider.md`): a sample that outlives its lease is reclaimed, and release is destruction. Renewal is a compare-and-swap under the flock at a third of the TTL (`INSPECT_RANGES_LEASE_TTL_S`, default 600); a lost CAS raises `LeaseLostError` and the sample fails loudly as lease loss. The reaper reclaims on expiry alone and never probes liveness: a healthy sample never expires because renewal is independent of sample activity, so the only way to expire mid-sample is a dead or wedged driver, which is exactly the reaper's job (`range-host-v1.md`).
 """
 
+import math
 import os
 import uuid
 from collections.abc import Callable
@@ -43,8 +44,10 @@ def lease_ttl_s() -> float:
         raise ValueError(
             f"INSPECT_RANGES_LEASE_TTL_S must be a number of seconds, got {raw!r}"
         ) from error
-    if value <= 0:
-        raise ValueError(f"INSPECT_RANGES_LEASE_TTL_S must be positive, got {raw!r}")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(
+            f"INSPECT_RANGES_LEASE_TTL_S must be a positive finite number, got {raw!r}"
+        )
     return value
 
 
@@ -179,7 +182,12 @@ class LeaseStore:
         ]
 
     def mark_reaping(self) -> list[HostLease]:
-        """One sweep selection under the flock: every lease already `reaping` (crash resume) plus every `active` lease whose expiry, re-checked against now, has passed (a renewal may have landed since the sweep was scheduled), marked `reaping`. Teardown happens outside the lock; a marked lease refuses renewal, so the race is settled here, atomically, in one direction or the other."""
+        """One sweep selection under the flock: every lease already `reaping` (crash resume) plus every `active` lease whose expiry, re-checked against now, has passed (a renewal may have landed since the sweep was scheduled), marked `reaping`. Teardown happens outside the lock; a marked lease refuses renewal, so the race is settled here, atomically, in one direction or the other.
+
+        A sweep that selects nothing never rewrites the file (an idle `--interval` reaper must not churn `leases.json`), so candidates are probed read-only first and the marking write re-checks under its own lock.
+        """
+        if not self._candidates():
+            return []
         now = self._now()
         with self._registry.locked(write=True) as view:
             selected: list[HostLease] = []
@@ -192,3 +200,11 @@ class LeaseStore:
                     view.entries[lease_id] = marked
                     selected.append(marked)
             return selected
+
+    def _candidates(self) -> bool:
+        now = self._now()
+        with self._registry.locked(write=False) as view:
+            return any(
+                lease.state == "reaping" or lease.expires() <= now
+                for lease in view.entries.values()
+            )

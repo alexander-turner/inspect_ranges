@@ -25,10 +25,13 @@ from inspect_ranges._compiler.plan import (
     resolve_plan,
 )
 from inspect_ranges._host import (
+    HostLease,
     HostNotReadyError,
     LeaseLostError,
+    LeasePlacement,
     LeaseStore,
     LocalHostProvider,
+    SampleSpec,
 )
 from inspect_ranges._provider.admission import AdmissionRefused, HostCapacity
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as Env
@@ -441,6 +444,11 @@ def test_sample_holds_one_lease_and_logs_the_isolation_claim(
             ]
             assert len(isolation_lines) == 1
             assert len(renewal_tasks()) == 1
+            handle = next(iter(runtime.registry.values()))
+            assert handle.host is not None
+            assert handle.host.channel is handle.channel, (
+                "the host carries the post-boot channel (the RangeHost contract)"
+            )
             await Env.sample_cleanup("task", None, envs, interrupted=False)
             assert lease_store(runtime).leases() == []
             assert renewal_tasks() == []
@@ -584,12 +592,61 @@ def test_readiness_gate_runs_once_per_task(tmp_path: Path) -> None:
             runtime.host_provider = LocalHostProvider(
                 runtime.state_dir, gate=counting_gate
             )
-            for sample in ("s1", "s2"):
-                envs = await Env.sample_init(
-                    "task", small_spec(), {"__sample_id__": sample}
-                )
-                await Env.sample_cleanup("task", None, envs, interrupted=False)
+            # concurrent first acquires share one gate run (the locked fill)
+            spec = small_spec()
+            first, second = await asyncio.gather(
+                Env.sample_init("task", spec, {"__sample_id__": "s1"}),
+                Env.sample_init("task", spec, {"__sample_id__": "s2"}),
+            )
+            await Env.sample_cleanup("task", None, first, interrupted=False)
+            await Env.sample_cleanup("task", None, second, interrupted=False)
             assert calls == 1, "the gate is cached per task, not re-run per sample"
+
+    asyncio.run(scenario())
+
+
+def test_renewal_survives_a_transient_store_failure(tmp_path: Path) -> None:
+    """One flock or IO hiccup in the lease store must neither kill the renewal task (the lease would expire under a healthy sample) nor poison release."""
+
+    class FlakyStore(LeaseStore):
+        def __init__(self, state_dir: Path) -> None:
+            super().__init__(state_dir)
+            self.failures = 1
+
+        def renew(self, lease_id: str, ttl_s: float | None = None) -> HostLease:
+            if self.failures:
+                self.failures -= 1
+                raise OSError("flock hiccup")
+            return super().renew(lease_id, ttl_s)
+
+    async def scenario() -> None:
+        store = FlakyStore(tmp_path / "state")
+        provider = LocalHostProvider(
+            tmp_path / "state", gate=lambda: [], store=store, ttl_s=0.09
+        )
+        host = await provider.acquire(
+            SampleSpec(
+                sample_id="s1",
+                task_name="task",
+                spec_sha256="a" * 64,
+                bundle_digest="b" * 64,
+                totals=Totals(guests=1, cpus=1, memory_mb=512),
+            ),
+            LeasePlacement(project="ir-flaky", bundle_path="/b", staging="/s"),
+        )
+        minted = host.lease.expires_at
+        # at TTL/3 = 30ms per tick: tick one fails, later ticks must still renew
+        for _ in range(50):
+            await asyncio.sleep(0.03)
+            if store.failures == 0 and host.lease.expires_at != minted:
+                break
+        assert store.failures == 0, "the failing tick happened"
+        assert len(renewal_tasks()) == 1, "renewal survived the failure"
+        assert host.lease.expires_at != minted, "a later tick renewed"
+        host.check_lease()  # a store hiccup is not lease loss
+        await provider.release(host)  # never poisoned by the task's error
+        assert renewal_tasks() == []
+        assert store.leases() == []
 
     asyncio.run(scenario())
 

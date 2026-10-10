@@ -5,6 +5,7 @@ Cleanup must never depend on the original driver process reaching `finally` (`ho
 For `uds:` leases the reaper prefers teardown through the applier socket, which also releases the applier's admission charge and relay map; with no applier teardown available (or on its failure) it falls back to direct `down` with a logged warning that a live applier's charge leaks until restart (recorded v1 risk). The applier connector arrives in slice 3; until then every `uds:` lease takes the fallback.
 """
 
+import fcntl
 import logging
 import shutil
 from collections.abc import Callable
@@ -31,7 +32,7 @@ class ReapOutcome:
 
     lease_id: str
     project: str
-    action: Literal["reaped", "down-failed"]
+    action: Literal["reaped", "down-failed", "release-failed"]
     error: str | None = None
 
 
@@ -48,15 +49,23 @@ def sweep(
 ) -> list[ReapOutcome]:
     """One reaper pass over `state_dir`: one outcome per expired or `reaping` lease, one summary log line each.
 
-    `store` (which carries the injectable clock) and `down_fn` default to the real thing; tests inject both.
+    `store` (which carries the injectable clock) and `down_fn` default to the real thing; tests inject both. The whole pass holds a sweep-level flock, so concurrent reapers (a cron pass overlapping a manual one-shot) serialize instead of double-tearing the same lease; a crashed holder releases the flock with its process, so it can never wedge.
     """
     lease_store = store if store is not None else LeaseStore(state_dir)
     teardown = down_fn if down_fn is not None else _default_down
     allocator = CidAllocator(state_dir)
-    return [
-        _reap_one(lease, state_dir, lease_store, allocator, teardown, applier_teardown)
-        for lease in lease_store.mark_reaping()
-    ]
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with open(state_dir / ".reaper.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return [
+                _reap_one(
+                    lease, state_dir, lease_store, allocator, teardown, applier_teardown
+                )
+                for lease in lease_store.mark_reaping()
+            ]
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _reap_one(
@@ -104,9 +113,22 @@ def _reap_one(
                 error,
             )
             return ReapOutcome(lease.lease_id, lease.project, "down-failed", str(error))
-    allocator.release(lease.project)
-    store.release(lease.lease_id)
-    shutil.rmtree(Path(lease.staging), ignore_errors=True)
-    remove_project(state_dir, lease.project)
+    try:
+        allocator.release(lease.project)
+        store.release(lease.lease_id)
+        shutil.rmtree(Path(lease.staging), ignore_errors=True)
+        remove_project(state_dir, lease.project)
+    except Exception as error:
+        # the lease stays reaping; the next sweep re-runs the (idempotent)
+        # teardown and release steps, and a long-lived --interval reaper
+        # must survive one bad pass
+        logger.error(
+            "reaper: releasing lease=%s project=%s after teardown failed; "
+            "the next sweep retries: %s",
+            lease.lease_id,
+            lease.project,
+            error,
+        )
+        return ReapOutcome(lease.lease_id, lease.project, "release-failed", str(error))
     logger.info("reaper: reaped lease=%s project=%s", lease.lease_id, lease.project)
     return ReapOutcome(lease.lease_id, lease.project, "reaped")

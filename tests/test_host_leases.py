@@ -145,10 +145,22 @@ def test_lease_ttl_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert lease_ttl_s() == 600.0
     monkeypatch.setenv("INSPECT_RANGES_LEASE_TTL_S", "90")
     assert lease_ttl_s() == 90.0
-    for bad in ("soon", "0", "-5"):
+    for bad in ("soon", "0", "-5", "nan", "inf"):
         monkeypatch.setenv("INSPECT_RANGES_LEASE_TTL_S", bad)
         with pytest.raises(ValueError, match="INSPECT_RANGES_LEASE_TTL_S"):
             lease_ttl_s()
+
+
+def test_a_no_op_sweep_never_touches_the_file(tmp_path: Path) -> None:
+    """An idle `--interval` reaper must not churn `leases.json`: a sweep selecting nothing never rewrites (or creates) the file."""
+    clock = Clock()
+    store = LeaseStore(tmp_path, now_fn=clock)
+    assert store.mark_reaping() == []
+    assert not (tmp_path / "leases.json").exists()
+    acquire(store, ttl_s=600)
+    before = (tmp_path / "leases.json").read_bytes()
+    assert store.mark_reaping() == []
+    assert (tmp_path / "leases.json").read_bytes() == before
 
 
 _CONTENDER = """

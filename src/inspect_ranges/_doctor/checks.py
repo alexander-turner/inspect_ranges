@@ -27,16 +27,8 @@ COMMAND_TIMEOUT = 30
 
 def run_checks() -> list[CheckResult]:
     """Check this machine, returning results in report order."""
-    host = check_platform(platform.system(), platform.machine())
-    results = [host]
-    if host.status == "ok":
-        results += check_virtualization(Path("/dev"))
-    else:
-        results.append(_skip(VIRTUALIZATION, "all checks", "requires Linux x86_64"))
-    results += check_docker(
-        info=_run(["docker", "info", "--format", "{{json .}}"]),
-        compose=_run(["docker", "compose", "version", "--format", "json"]),
-    )
+    results = _readiness_results()
+    host = results[0]
     if host.status == "ok":
         results += [
             check_br_netfilter(Path("/proc/sys")),
@@ -74,22 +66,29 @@ def run_checks() -> list[CheckResult]:
     return results
 
 
+def _readiness_results() -> list[CheckResult]:
+    """The readiness subset (platform first, then virtualization devices and docker): the opening segment of `run_checks` and the whole of `readiness_failures`, defined once so the doctor report and the acquire gate can never disagree."""
+    host = check_platform(platform.system(), platform.machine())
+    results = [host]
+    if host.status == "ok":
+        results += check_virtualization(Path("/dev"))
+    else:
+        results.append(_skip(VIRTUALIZATION, "all checks", "requires Linux x86_64"))
+    results += check_docker(
+        info=_run(["docker", "info", "--format", "{{json .}}"]),
+        compose=_run(["docker", "compose", "version", "--format", "json"]),
+    )
+    return results
+
+
 def readiness_failures() -> list[str]:
     """The fast readiness subset host backends gate `acquire` on (`host-provider.md:94`): platform, virtualization devices, docker.
 
     Failure lines only; `warn` and `skip` results pass (an optional module must never fail acquisition). The full battery stays `run_checks`; this subset is cheap enough to run once per task.
     """
-    host = check_platform(platform.system(), platform.machine())
-    results = [host]
-    if host.status == "ok":
-        results += check_virtualization(Path("/dev"))
-    results += check_docker(
-        info=_run(["docker", "info", "--format", "{{json .}}"]),
-        compose=_run(["docker", "compose", "version", "--format", "json"]),
-    )
     return [
         f"{result.group}: {result.name}: {result.detail}"
-        for result in results
+        for result in _readiness_results()
         if result.status == "fail"
     ]
 

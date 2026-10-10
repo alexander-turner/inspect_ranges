@@ -91,12 +91,19 @@ class LocalRangeHost:
 
     async def stop_renewal(self) -> None:
         if self._renewal is not None:
-            self._renewal.cancel()
+            task, self._renewal = self._renewal, None
+            task.cancel()
             try:
-                await self._renewal
+                await task
             except asyncio.CancelledError:
                 pass
-            self._renewal = None
+            except Exception:
+                # teardown must never fail on a dead renewal task; the error
+                # was the task's, not the caller's
+                logger.exception(
+                    "lease renewal task for %s ended with an error",
+                    self.lease.lease_id,
+                )
 
     async def _renew_forever(self) -> None:
         while True:
@@ -105,6 +112,15 @@ class LocalRangeHost:
                 await self.renew_now()
             except LeaseLostError:
                 return  # recorded; check_lease surfaces it at the next op
+            except Exception:
+                # a transient store failure (flock, disk) must not silently
+                # kill renewal under a healthy sample: keep trying at TTL/3.
+                # Only failure persisting a full TTL lets the lease expire,
+                # at which point this driver is indistinguishable from a dead
+                # one and the reaper's reclaim is the designed outcome.
+                logger.exception(
+                    "lease renewal for %s failed; retrying", self.lease.lease_id
+                )
 
 
 class LocalHostProvider:
@@ -124,6 +140,7 @@ class LocalHostProvider:
         self._store = store if store is not None else LeaseStore(state_dir)
         self._gate = gate if gate is not None else readiness_failures
         self._gate_failures: list[str] | None = None
+        self._gate_lock = asyncio.Lock()
         self._ttl_s = ttl_s if ttl_s is not None else lease_ttl_s()
 
     async def acquire(
@@ -134,8 +151,11 @@ class LocalHostProvider:
         Raises:
             HostNotReadyError: The cached doctor-readiness subset reports failures.
         """
-        if self._gate_failures is None:
-            self._gate_failures = await asyncio.to_thread(self._gate)
+        async with self._gate_lock:
+            # locked fill: parallel first acquires must share one gate run,
+            # not each probe the host
+            if self._gate_failures is None:
+                self._gate_failures = await asyncio.to_thread(self._gate)
         if self._gate_failures:
             raise HostNotReadyError(
                 "the local host fails doctor readiness: "

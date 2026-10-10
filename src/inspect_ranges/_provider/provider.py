@@ -23,7 +23,7 @@ from typing_extensions import override
 
 from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, resolve_plan
-from .._host.host import LeasePlacement, RangeHost, SampleSpec
+from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
 from .._runtime.ownership import (
     list_projects,
@@ -239,16 +239,19 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     )
                 )
                 boot: asyncio.Future[UpResult] | None = None
-                acquire: asyncio.Future[RangeHost] | None = None
+                acquire: asyncio.Future[None] | None = None
                 try:
                     await asyncio.shield(render)
-                    # record ordering: render, bundle digest, host lease, boot
+                    # record ordering: render, bundle digest, host lease, boot.
+                    # _acquire_host assigns handle.host itself, so even a
+                    # drained-but-never-received acquire leaves the lease on
+                    # the handle for the unwind to release.
                     acquire = asyncio.ensure_future(
                         cls._acquire_host(
-                            runtime, plan, task_name, sample_id, project, staging
+                            runtime, handle, plan, task_name, sample_id, staging
                         )
                     )
-                    handle.host = await asyncio.shield(acquire)
+                    await asyncio.shield(acquire)
                     boot = asyncio.ensure_future(
                         asyncio.to_thread(
                             runtime.up_fn,
@@ -278,17 +281,14 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                             asyncio.gather(*pending, return_exceptions=True)
                         )
                     except asyncio.CancelledError:
-                        pass
+                        # a second cancellation abandons the drain; cancel
+                        # what's left so a still-pending acquire cannot start
+                        # a renewal task nothing will ever stop. A lease the
+                        # cancelled acquire still writes has no renewal, so
+                        # the reaper reclaims it after expiry.
+                        for future in pending:
+                            future.cancel()
                     finally:
-                        # a lease the drained acquire minted must reach the
-                        # handle, or the unwind cannot release it
-                        if (
-                            acquire is not None
-                            and acquire.done()
-                            and not acquire.cancelled()
-                            and acquire.exception() is None
-                        ):
-                            handle.host = acquire.result()
                         await unwind_once()
                     raise
             except asyncio.CancelledError:
@@ -315,6 +315,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             try:
                 handle.guest_cids = {state.name: state.cid for state in result.guests}
                 handle.channel = runtime.channel_factory(handle.guest_cids, project)
+                if handle.host is not None:
+                    # the RangeHost contract: the local backend's channel is
+                    # attached post-boot (None only between acquire and boot)
+                    handle.host.channel = handle.channel
                 cls._mark_provider_owned(runtime, handle, sample_id)
             except BaseException as failure:
                 # the range is BOOTED: a post-boot failure destroys it rather
@@ -332,15 +336,18 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     async def _acquire_host(
         cls,
         runtime: ProviderRuntime,
+        handle: SampleHandle,
         plan: ResolvedPlan,
         task_name: str,
         sample_id: str,
-        project: str,
         staging: Path,
-    ) -> RangeHost:
-        """Digest the rendered bundle and lease a host for it (the backend gates on readiness, writes the lease, logs the isolation claim, and starts renewal)."""
+    ) -> None:
+        """Digest the rendered bundle and lease a host for it (the backend gates on readiness, writes the lease, logs the isolation claim, and starts renewal).
+
+        Assigns `handle.host` directly: the assignment runs in the same synchronous segment as the backend's return (no await between them), so once a renewal task exists the handle always carries the host that owns it, even when the awaiting caller was cancelled and never received the result.
+        """
         digest = await asyncio.to_thread(bundle_digest, staging / "bundle")
-        return await runtime.host_provider.acquire(
+        handle.host = await runtime.host_provider.acquire(
             SampleSpec(
                 sample_id=sample_id,
                 task_name=task_name,
@@ -349,7 +356,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 totals=plan.totals,
             ),
             LeasePlacement(
-                project=project,
+                project=handle.project,
                 bundle_path=str(staging / "bundle"),
                 staging=str(staging),
             ),
