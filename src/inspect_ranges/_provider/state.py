@@ -100,6 +100,20 @@ class ProviderRuntime:
         self._allocator: CidAllocator | None = None
         self._host_provider: HostProvider | None = None
         self._resolved: dict[str | RangeSpec, tuple[RangeSpec, ResolvedPlan]] = {}
+        if self.host_backend.startswith("uds:"):
+            # the derived seams install at construction, not lazily: paths
+            # that never touch host_provider (cli_cleanup foremost) must
+            # still tear down THROUGH the applier, or its admission charge
+            # and relay map leak silently behind a direct down
+            self._install_remote_seams()
+
+    def _install_remote_seams(self) -> None:
+        from .._host.remote import remote_seams
+
+        socket_path = Path(self.host_backend.removeprefix("uds:"))
+        self.up_fn, self.down_fn, self.channel_factory = remote_seams(
+            socket_path, self.state_dir
+        )
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -116,10 +130,9 @@ class ProviderRuntime:
 
     @property
     def host_provider(self) -> HostProvider:
-        """The lease-granting backend `INSPECT_RANGES_HOST` selects (default `local`); mutable like the other seams.
+        """The lease-granting backend `INSPECT_RANGES_HOST` selects (default `local`); mutable like the other seams. For `uds:` the derived channel seams (re-)install here too, so a test that flips `host_backend` after construction gets the matching seams.
 
         Raises:
-            NotImplementedError: `uds:<socket>` is selected before slice 3 lands.
             ValueError: The variable names a backend that does not exist.
         """
         if self._host_provider is None:
@@ -128,8 +141,11 @@ class ProviderRuntime:
 
                 self._host_provider = LocalHostProvider(self.state_dir)
             elif self.host_backend.startswith("uds:"):
-                raise NotImplementedError(
-                    "INSPECT_RANGES_HOST=uds:<socket> arrives in range-host-v1 slice 3"
+                from .._host.remote import RemoteHostProvider
+
+                self._install_remote_seams()
+                self._host_provider = RemoteHostProvider(
+                    Path(self.host_backend.removeprefix("uds:")), self.state_dir
                 )
             else:
                 raise ValueError(

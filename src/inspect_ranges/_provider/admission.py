@@ -117,6 +117,29 @@ class WeightedAdmission:
         )
         self._serve_head()
 
+    def charge_now(self, totals: Totals) -> bool:
+        """Charge `totals` only if capacity is free RIGHT NOW; never waits.
+
+        The applier's refuse-rather-than-queue gate (`range-host-v1.md`): `False` means full-now (`EAGAIN`, a transient the driver respins on), and FIFO is respected (a waiter at the head is never jumped). Queued silence would blow the realize per-report budget, so queuing stays the recorded growth path.
+
+        Raises:
+            AdmissionRefused: The range alone exceeds the host (`ENOSPC`, permanent).
+        """
+        if (
+            totals.cpus > self.capacity.cpus
+            or totals.memory_mb > self.capacity.memory_mb
+        ):
+            raise AdmissionRefused(
+                f"range needs {totals.cpus} vCPUs / {totals.memory_mb} MiB but the "
+                f"host has {self.capacity.cpus} vCPUs / {self.capacity.memory_mb} MiB; "
+                "it cannot run here at any concurrency"
+            )
+        if self._waiters or not self._fits(totals):
+            return False
+        self._free_cpus -= totals.cpus
+        self._free_memory_mb -= totals.memory_mb
+        return True
+
     async def release(self, totals: Totals) -> None:
         """Refund `totals`; idempotence is the caller's job (release exactly what was acquired, once)."""
         self._refund(totals)

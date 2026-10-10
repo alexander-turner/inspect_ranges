@@ -1,0 +1,27 @@
+# range-host-v1 slice-4 battery spec: the separated topology's multi-guest range.
+# One isolated segment, one named target ("web"), one attacker box; both run
+# the recipe-v4 golden (vsockd 3.1.0 + the agent user).
+range:
+  name: range-host-battery
+  schema_version: "0.1"
+  description: >
+    Slice-4 battery range: realize-to-ready through a real applier process,
+    self_check and the portable suite over the UDS relay, and the lease
+    lifecycle matrix against realizer-booted VMs.
+
+networks:
+  - name: lab
+    cidr: 10.92.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.92.10.10 }]
+
+attacker:
+  interfaces: [{ network: lab, ip: 10.92.10.2 }]
+  image: noble-range-guest
+  entry: external
+  egress: none

@@ -41,8 +41,10 @@ from .state import ProviderRuntime, SampleHandle, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
 
-TRANSIENT_UP_STAGES = frozenset({"range-container", "guest-boot", "readiness"})
-"""Acquisition stages worth one respin: docker and boot flakes, and the readiness timeout (the one re-boot). Verification and preparation failures are permanent (a bad bundle or missing image never improves on retry)."""
+TRANSIENT_UP_STAGES = frozenset(
+    {"range-container", "guest-boot", "readiness", "admission"}
+)
+"""Acquisition stages worth one respin: docker and boot flakes, the readiness timeout (the one re-boot), and an applier full-now refusal (`EAGAIN` folds to the `admission` stage). Verification and preparation failures are permanent (a bad bundle or missing image never improves on retry)."""
 
 
 def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:

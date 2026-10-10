@@ -7,18 +7,30 @@ The checks run through the house convention (`asyncio.run` per case) rather than
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import inspect_ai.util._sandbox.self_check as self_check_module
 import pytest
 from inspect_ai.util import SandboxEnvironment
-from inspect_ranges._channel.channel import LoopbackTransport, MessageChannel, Transport
+from inspect_ranges._channel.channel import (
+    ChannelError,
+    LoopbackTransport,
+    MessageChannel,
+    Transport,
+)
 from inspect_ranges._channel.mocks import LatencyTransport
 from inspect_ranges._compiler.plan import Totals
+from inspect_ranges._host import LeasePlacement, RemoteHostProvider, SampleSpec
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
 from inspect_ranges._provider.state import SampleHandle
 
+from tests.applier_fixture import wait_for_socket
 from tests.local_endpoint import LocalEndpoint
 
 Check = Callable[[SandboxEnvironment], Awaitable[None]]
@@ -89,10 +101,99 @@ _LATENCY_SKIPS = frozenset(
 )
 
 
+# -- the separated topology: a subprocess applier behind RemoteRangeHost ---------
+
+
+@dataclass(frozen=True)
+class UdsSelfCheckFixture:
+    socket_path: Path
+    state_dir: Path
+
+
+@pytest.fixture(scope="module")
+def uds_selfcheck(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[UdsSelfCheckFixture]:
+    """One applier fixture subprocess for the module; `self-check` mode roots a `LocalEndpoint` guest (`box`) under each lease's staging dir."""
+    root = tmp_path_factory.mktemp("uds-selfcheck")
+    socket_path = root / "sock" / "applier.sock"
+    state_dir = root / "state"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "tests.applier_fixture",
+            "--socket",
+            str(socket_path),
+            "--state-dir",
+            str(state_dir),
+            "--mode",
+            "self-check",
+        ],
+        cwd=Path(__file__).parent.parent,
+    )
+    try:
+        wait_for_socket(socket_path)
+        yield UdsSelfCheckFixture(socket_path, state_dir)
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def _run_uds_check(fixture: UdsSelfCheckFixture, check: Check, tmp_path: Path) -> None:
+    """One self_check through a real `RemoteRangeHost`: lease acquired, channel over the two-process UDS relay, released afterward."""
+    provider = RemoteHostProvider(fixture.socket_path, fixture.state_dir)
+    staging = tmp_path / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        host = await provider.acquire(
+            SampleSpec(
+                sample_id=uuid.uuid4().hex,
+                task_name="self_check",
+                spec_sha256="a" * 64,
+                bundle_digest="b" * 64,
+                totals=Totals(guests=1, cpus=1, memory_mb=1024),
+            ),
+            LeasePlacement(
+                project=f"ir-selfcheck-{uuid.uuid4().hex[:6]}",
+                bundle_path=str(staging / "bundle"),
+                staging=str(staging),
+            ),
+        )
+        try:
+            assert host.channel is not None
+            deadline = time.monotonic() + 15.0
+            while True:  # the fixture's registrar polls the store at 25 ms
+                try:
+                    await host.channel.ping("box")
+                    break
+                except (ChannelError, ConnectionError):
+                    if time.monotonic() > deadline:
+                        raise
+                    await asyncio.sleep(0.05)
+            handle = SampleHandle(
+                project=host.lease.project,
+                task_name="self_check",
+                staging=staging,
+                totals=Totals(guests=1, cpus=1, memory_mb=1024),
+                cid_base=20_000,
+                guest_cids={"box": 20_000},
+                channel=host.channel,  # pyright: ignore[reportArgumentType] - MessageChannel in practice
+                host=host,
+            )
+            env = LibvirtRangeSandboxEnvironment("box", handle)
+            await check(env)
+        finally:
+            await provider.release(host)
+
+    asyncio.run(scenario())
+
+
 def _check_params() -> list[object]:
     """Every (check, transport) pair: CI xfails as collection-time STRICT marks (an XPASS fails the run and control-flow exceptions are never swallowed, unlike a hand-rolled try/except) and the latency 50 MiB skips as skip marks."""
     params: list[object] = []
-    kinds = ("loopback", "latency") + (("vsock",) if VSOCK_CID else ())
+    kinds = ("loopback", "latency", "uds") + (("vsock",) if VSOCK_CID else ())
     for transport_kind in kinds:
         for name, check in CHECKS:
             marks: list[pytest.MarkDecorator] = []
@@ -117,8 +218,17 @@ def _check_params() -> list[object]:
 
 @pytest.mark.parametrize(("name", "check", "transport_kind"), _check_params())
 def test_self_check(
-    name: str, check: Check, transport_kind: str, tmp_path: Path
+    name: str,
+    check: Check,
+    transport_kind: str,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
+    if transport_kind == "uds":
+        fixture = request.getfixturevalue("uds_selfcheck")
+        assert isinstance(fixture, UdsSelfCheckFixture)
+        _run_uds_check(fixture, check, tmp_path)
+        return
     env, channel = make_env(tmp_path, transport_kind)
 
     async def scenario() -> None:
