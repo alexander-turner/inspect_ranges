@@ -65,6 +65,10 @@ class PortableChannelSuite:
         lines += [f"{key}={value}" for key, value in sorted(env.items())]
         return ("\n".join(lines) + "\n").encode()
 
+    def realize_digest(self) -> str:
+        """The bundle digest `test_realize_streams_stages_to_ready` requests; a real-applier subclass points this at a genuinely rendered bundle."""
+        return "ab" * 32
+
     def run(self, scenario: Callable[[], Coroutine[None, None, None]]) -> None:
         asyncio.run(scenario())
 
@@ -262,8 +266,26 @@ class PortableChannelSuite:
             pytest.skip("deployment provides no host-plane endpoint")
 
         async def scenario() -> None:
-            stages = [report.stage async for report in channel.realize("ab" * 32, [])]
+            stages = [
+                report.stage
+                async for report in channel.realize(self.realize_digest(), [])
+            ]
             assert stages == ["fetch", "construct", "boot", "verify", "ready"]
+
+        self.run(scenario)
+
+    def test_heartbeat_reports_guest_state(self, channel: MessageChannel) -> None:
+        """One round trip polls the applier's heartbeat (RTT budget 1)."""
+        if not self.has_host_plane:
+            pytest.skip("deployment provides no host-plane endpoint")
+
+        async def scenario() -> None:
+            before = channel.stats.exchanges
+            beat = await channel.heartbeat()
+            assert beat.uptime_ms >= 0
+            assert isinstance(beat.guests, dict)
+            used = channel.stats.exchanges - before
+            assert used <= 1, f"heartbeat used {used} round trips (budget 1)"
 
         self.run(scenario)
 

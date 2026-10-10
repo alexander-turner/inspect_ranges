@@ -244,6 +244,19 @@ def test_hostile_stage_reports_are_tamper(scenario: str) -> None:
     asyncio.run(scenario_run())
 
 
+def test_hostile_heartbeat_reply_kind_is_tamper() -> None:
+    """A guest-reply kind answering the host-plane heartbeat poll is tamper, never a parse fallback."""
+    channel = MessageChannel(
+        HostileApplierTransport("heartbeat-wrong-kind"), label="hostile-applier"
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(TamperError):
+            await channel.heartbeat()
+
+    asyncio.run(scenario_run())
+
+
 # -- budget layers under hostile transports ------------------------------------
 
 

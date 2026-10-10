@@ -6,6 +6,7 @@ The applier consumes a digest-verified bundle and nothing else: every manifest d
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -29,8 +30,13 @@ from .ownership import (
 )
 from .rangeimage import ensure_range_image
 
+logger = logging.getLogger("inspect_ranges.up")
+
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 """Executes a command: `run(argv, env=None, input=None)`; injectable for tests."""
+
+OnStage = Callable[[str, str, dict[str, Any]], None]
+"""Mirrors every stage-log write as `(stage, status, fields)`; exceptions are logged and never alter `up`'s outcome. The mirror begins where the stage log does (after ownership registration); earlier failures surface as `UpError` only."""
 
 
 def run_command(
@@ -81,17 +87,49 @@ class UpResult(BaseModel):
     seconds: float
 
 
-def verify_bundle(bundle: Path) -> dict[str, Any]:
-    """Verify every manifest digest and that nothing unlisted is present; returns the manifest.
+def bundle_digest(bundle: Path) -> str:
+    """The canonical bundle digest: sha256 of `manifest.json` bytes (`range-host-v1.md`).
+
+    Render emits the manifest deterministically, so the digest is stable per spec and options; it is what `RealizeRequest.bundle_digest` names and what the applier verifies before acting.
 
     Raises:
-        UpError: Any missing, unreadable, mismatched, unlisted, or symlinked file, a malformed manifest, or a required render file absent from the manifest (all reported at once); acting on an unverified bundle is never attempted.
+        UpError: The bundle has no readable manifest.
+    """
+    try:
+        return hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+    except OSError as error:
+        raise UpError(
+            "verify-bundle", f"{bundle} has no readable manifest.json: {error}"
+        ) from error
+
+
+def verify_bundle(bundle: Path, expected_digest: str | None = None) -> dict[str, Any]:
+    """Verify every manifest digest and that nothing unlisted is present; returns the manifest.
+
+    With `expected_digest`, the bundle's canonical digest (sha256 of the manifest bytes) must match before anything else is checked: the applier refuses a bundle other than the one the driver named.
+
+    Raises:
+        UpError: Any missing, unreadable, mismatched, unlisted, or symlinked file, a malformed manifest, a required render file absent from the manifest (all reported at once), or a canonical-digest mismatch; acting on an unverified bundle is never attempted.
     """
     manifest_path = bundle / "manifest.json"
     if not manifest_path.is_file():
         raise UpError("verify-bundle", f"{bundle} has no manifest.json")
+    # one read: the digest-verified bytes ARE the bytes parsed and acted on
     try:
-        parsed: object = json.loads(manifest_path.read_text())
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as error:
+        raise UpError(
+            "verify-bundle", f"{bundle} has no readable manifest.json: {error}"
+        ) from error
+    if expected_digest is not None:
+        actual = hashlib.sha256(manifest_bytes).hexdigest()
+        if actual != expected_digest:
+            raise UpError(
+                "verify-bundle",
+                f"bundle digest {actual} does not match the requested {expected_digest}",
+            )
+    try:
+        parsed: object = json.loads(manifest_bytes)
         if not isinstance(parsed, dict):
             raise ValueError("manifest is not a JSON object")
         manifest = cast(dict[str, Any], parsed)
@@ -225,6 +263,26 @@ def boot_script(boot: BootPlan) -> str:
     return "\n".join(lines) + "\n"
 
 
+class _StageTee:
+    """Mirrors every stage-log write to an optional `OnStage` callback.
+
+    The JSONL write happens first and identically (the tee passes arguments through verbatim), so the stage log stays byte-identical with or without a callback; a raising callback is logged and ignored, never altering `up`'s outcome.
+    """
+
+    def __init__(self, log: StageLog, on_stage: OnStage | None) -> None:
+        self._log = log
+        self._on_stage = on_stage
+
+    def log(self, stage: str, status: str, **fields: Any) -> None:
+        self._log.log(stage, status, **fields)
+        if self._on_stage is None:
+            return
+        try:
+            self._on_stage(stage, status, dict(fields))
+        except Exception:
+            logger.exception("on_stage callback failed (ignored)")
+
+
 CLOUD_INIT_PROBE = ["sh", "-c", "cloud-init status --wait >/dev/null 2>&1"]
 """The readiness exec: the exit status of `cloud-init status --wait` IS the signal (0 done; nonzero error or degraded, both meaning the declared configuration did not fully apply)."""
 
@@ -303,8 +361,16 @@ def _compose_argv(project: str, bundle: Path, *args: str) -> list[str]:
     ]
 
 
-def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResult:
+def up(
+    bundle: Path,
+    options: UpOptions,
+    runner: Runner | None = None,
+    *,
+    on_stage: OnStage | None = None,
+) -> UpResult:
     """Realize a verified bundle; returns the project name and per-guest state.
+
+    `on_stage` mirrors every stage-log write (the applier's stage-translation hook); it never alters the log or the outcome.
 
     Raises:
         UpError: Stage-named failure (`verify-bundle`, `prepare`, `verify-images`, `range-image`, `range-container`, `guest-boot`, `readiness`), with per-guest diagnostics on readiness failures. Unless `keep_on_failure`, a failed `up` tears its project down before raising (state and console logs are kept for diagnosis).
@@ -355,7 +421,7 @@ def up(bundle: Path, options: UpOptions, runner: Runner | None = None) -> UpResu
 
     # ownership registers before the first compose resource (cleanup registry)
     write_owner(options.state_dir, owner_record(project, range_name, spec_sha, bundle))
-    log = StageLog(options.state_dir, project)
+    log = _StageTee(StageLog(options.state_dir, project), on_stage)
     log.log("verify-bundle", "ok", files=len(cast(dict[str, Any], manifest["files"])))
     log.log("verify-images", "ok", guests=len(guests))
     log.log("range-image", "ok", tag=range_image)

@@ -11,6 +11,7 @@ from inspect_ranges._channel.channel import (
     ChannelBudgetError,
     ChannelError,
     GuestError,
+    HostRefused,
     IllegalTransition,
     LoopbackTransport,
     MessageChannel,
@@ -173,6 +174,40 @@ def test_realize_failure_is_a_terminal_stage(
         fleet.applier.fail_at_stage = "boot"
         stages = [report.stage async for report in channel.realize("cd" * 32, [])]
         assert stages[-1] == "failed"
+
+    asyncio.run(scenario())
+
+
+def test_realize_refusal_is_typed_and_never_memoized(
+    channel: MessageChannel, fleet: LoopbackTransport
+) -> None:
+    """A first-reply error with the request id is `HostRefused` (errno carried), not tamper, and a refusal never enters the replay log: the next realize executes fresh."""
+
+    async def scenario() -> None:
+        fleet.applier.refuse_realize = "EAGAIN"
+        with pytest.raises(HostRefused) as refusal:
+            async for _ in channel.realize("ab" * 32, []):
+                pass
+        assert refusal.value.errno == "EAGAIN"
+        assert fleet.applier.realize_executions == 0, "a refusal must not execute"
+        fleet.applier.refuse_realize = None
+        stages = [report.stage async for report in channel.realize("ab" * 32, [])]
+        assert stages[-1] == "ready"
+        assert fleet.applier.realize_executions == 1
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_polls_applier_uptime_and_guests(
+    channel: MessageChannel, fleet: LoopbackTransport
+) -> None:
+    """The driver-polled heartbeat verb: ping to the host endpoint, Heartbeat back, id-matched."""
+
+    async def scenario() -> None:
+        fleet.applier.guest_states = {"web": "ready", "db": "booting"}
+        beat = await channel.heartbeat()
+        assert beat.uptime_ms >= 0
+        assert beat.guests == {"web": "ready", "db": "booting"}
 
     asyncio.run(scenario())
 

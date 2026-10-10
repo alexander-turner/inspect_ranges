@@ -11,7 +11,7 @@ from .images import (
     derive_golden,
     list_images,
 )
-from .up import UpError, UpOptions, UpResult, up, verify_bundle
+from .up import OnStage, UpError, UpOptions, UpResult, bundle_digest, up, verify_bundle
 
 __all__ = [
     "DaemonPin",
@@ -19,9 +19,11 @@ __all__ = [
     "DownError",
     "DownResult",
     "ImageMetadata",
+    "OnStage",
     "UpError",
     "UpOptions",
     "UpResult",
+    "bundle_digest",
     "derive_golden",
     "down",
     "down_all",
