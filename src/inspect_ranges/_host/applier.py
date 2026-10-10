@@ -56,6 +56,8 @@ ApplierDownFn = Callable[[str, Path], DownResult]
 GuestConnector = Callable[[int], Awaitable[ByteStream]]
 
 _PREAMBLE_TIMEOUT_S = 5.0
+_HOST_REQUEST_TIMEOUT_S = 30.0
+"""Post-ack budget for the host plane's single request frame to arrive."""
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
 _COMPLETED_RUN_CAP = 64
@@ -164,8 +166,13 @@ class Applier:
                 "cli_cleanup)",
                 len(live),
             )
-        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self._socket_path.parent, 0o700)
+        parent = self._socket_path.parent
+        if not parent.exists():
+            # 0700 only on a directory the applier itself creates; rewriting
+            # the permissions of an operator's existing directory (worst
+            # case: their home) is never ours to do
+            parent.mkdir(parents=True)
+            os.chmod(parent, 0o700)
         self._socket_path.unlink(missing_ok=True)
         self._server = await asyncio.start_unix_server(
             self._serve, path=str(self._socket_path)
@@ -191,6 +198,10 @@ class Applier:
         """One connection: route (refuse without the ack), then serve or relay. Never crashes the server."""
         try:
             await self._serve_routed(reader, writer)
+        except (ConnectionError, OSError) as loss:
+            # a client vanishing mid-operation is the designed loss-resume
+            # path (same-id resend), not a handler failure
+            logger.debug("connection dropped mid-operation (loss-resume): %s", loss)
         except Exception:
             logger.exception("applier connection handler failed (connection dropped)")
         finally:
@@ -316,7 +327,10 @@ class Applier:
             lambda: reader.read(_PUMP_CHUNK), bulk_cap=DAEMON_INBOUND_BULK_CAP
         )
         try:
-            message, _ = await message_reader.next()
+            # bounded like the preamble: an acked-but-silent client must not
+            # pin a server task for the applier's lifetime
+            async with asyncio.timeout(_HOST_REQUEST_TIMEOUT_S):
+                message, _ = await message_reader.next()
         except (DecodeError, ChannelClosed, TimeoutError):
             return
         if isinstance(message, PingRequest):
@@ -411,7 +425,7 @@ class Applier:
     async def _refusal(
         self, lease: HostLease, request: RealizeRequest
     ) -> tuple[str, str] | None:
-        """The typed-refusal gate for a FRESH realize: grants, lease state, digest, admission."""
+        """The typed-refusal gate for a FRESH realize: grants, lease state and expiry, one-realize-per-lease, digest, admission."""
         if request.grants:
             return (
                 "ENOTSUP",
@@ -419,6 +433,19 @@ class Applier:
             )
         if lease.state != "active":
             return ("EINVAL", f"lease {lease.lease_id} is {lease.state}")
+        if lease.expires() <= datetime.now(UTC):
+            # mirror the guest plane: an expired lease must not start a boot
+            # the reaper's imminent teardown would race
+            return ("EINVAL", f"lease {lease.lease_id} is expired")
+        if lease.lease_id in self._charges:
+            # one realize per lease: the held charge means a realize already
+            # charged admission (and ran or is running up); a fresh-id
+            # realize here would double-charge and re-run up against the
+            # live project. Teardown releases the charge and re-opens the gate.
+            return (
+                "EBUSY",
+                f"lease {lease.lease_id} already holds a realize; teardown first",
+            )
         bundle = Path(lease.bundle_path)
         try:
             manifest_bytes = await asyncio.to_thread(
