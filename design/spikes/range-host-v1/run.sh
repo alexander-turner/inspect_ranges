@@ -39,8 +39,9 @@ flock 9
 cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp/cache" "$SPIKE/tmp/logs"
-# the battery socket lives under a short /tmp dir (AF_UNIX ~107-byte cap)
-SOCK_DIR="/tmp/ir-rh-$(id -u)"
+# the battery socket lives under a short user-private dir (AF_UNIX ~107-byte
+# cap): XDG_RUNTIME_DIR when present, else a uid-keyed /tmp dir
+SOCK_DIR="${XDG_RUNTIME_DIR:-/tmp/ir-rh-$(id -u)}/ir-rh-battery"
 rm -rf "$SOCK_DIR"
 
 echo "=== setup: daemon bundle + recipe-v4 golden (noble-range-guest) ==="

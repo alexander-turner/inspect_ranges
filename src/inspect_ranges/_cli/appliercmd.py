@@ -47,21 +47,33 @@ def applier(
             if image_cache is not None
             else default_image_cache(),
         )
-        await endpoint.start()
-        click.echo(f"applier serving on {socket_path}")
-        # SIGTERM must reach the finally: a killed applier that leaves its
-        # stale socket file behind makes the next applier's startup racy for
-        # anything watching the path
+        # SIGTERM must reach the finally, and from BEFORE start(): the
+        # readiness gate plus bind is a multi-second window, and a killed
+        # applier that leaves a stale socket file behind makes the next
+        # applier's startup racy for anything watching the path
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
+
+        def request_stop() -> None:
+            # one graceful stop; further signals regain the default
+            # disposition, so a hung shutdown stays killable without the
+            # SIGKILL that would recreate the stale-socket hazard
+            stop.set()
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                loop.remove_signal_handler(signum)
+
         for signum in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(signum, stop.set)
+            loop.add_signal_handler(signum, request_stop)
         try:
+            await endpoint.start()
+            click.echo(f"applier serving on {socket_path}")
             await stop.wait()
         finally:
             await endpoint.aclose()
+        click.echo("applier stopped")
 
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:
-        click.echo("applier stopped")
+        # only reachable in the sliver before the loop installs handlers
+        click.echo("applier stopped (interrupted during startup)")

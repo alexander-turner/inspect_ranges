@@ -129,6 +129,7 @@ class Applier:
         self._preamble_timeout_s = preamble_timeout_s
         self._admission: WeightedAdmission | None = None
         self._server: asyncio.Server | None = None
+        self._bound_stat: os.stat_result | None = None
         self._started = time.monotonic()
         self._runs: dict[str, _RealizeRun] = {}
         self._relays: dict[str, dict[str, int]] = {}
@@ -178,6 +179,7 @@ class Applier:
             self._serve, path=str(self._socket_path)
         )
         os.chmod(self._socket_path, 0o600)
+        self._bound_stat = self._socket_path.stat()
         self._started = time.monotonic()
         logger.info("applier serving on %s", self._socket_path)
 
@@ -186,7 +188,18 @@ class Applier:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        self._socket_path.unlink(missing_ok=True)
+        # unlink only OUR bind: a replacement applier may already own a
+        # fresh socket at this path (start-new-then-stop-old supervision),
+        # and the old process's shutdown must never delete it
+        try:
+            current = self._socket_path.stat()
+            if self._bound_stat is not None and (
+                current.st_ino,
+                current.st_dev,
+            ) == (self._bound_stat.st_ino, self._bound_stat.st_dev):
+                self._socket_path.unlink()
+        except OSError:
+            pass
         for task in list(self._tasks):
             task.cancel()
 
