@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """range-host-v1 slice-4 lifecycle matrix: the lease lifecycle against real VMs and a real applier.
 
-Scenarios, in order: two concurrent samples through ONE applier (distinct leases, non-vacuous boot overlap, same-name guests reaching their own guests, disjoint CID blocks, independent teardowns); a failing teardown under `RemoteRangeHost` (the applier killed mid-sample) leaving lease, CID lease, and registry findable with NOTHING freed, then an applier restart serving a NEW sample cleanly while the old sample's teardown recovers from disk; kill -9 of a driver mid-sample with a fresh-shell `inspect-ranges reaper` reclaiming through the live applier after expiry; and forced expiry mid-sample (the reaper-versus-renewal race pinned both ways against the real store) with the driver failing loudly as `LeaseLostError`.
+Scenarios, in order: two concurrent samples through ONE applier (distinct leases, wall-time concurrency proven as total elapsed well under the sum of the two boot durations, same-name guests reaching their own guests, disjoint CID blocks, independent teardowns); a failing teardown under `RemoteRangeHost` (the applier killed mid-sample) leaving lease, CID lease, and registry findable with NOTHING freed, then an applier restart serving a NEW sample cleanly while the old sample's teardown recovers from disk; kill -9 of a driver mid-sample with a fresh-shell `inspect-ranges reaper` reclaiming through the live applier after expiry; and forced expiry mid-sample (the reaper-versus-renewal race pinned both ways against the real store) with the driver failing loudly as `LeaseLostError`.
 
 Runs with a short lease TTL (`INSPECT_RANGES_LEASE_TTL_S=12`, renewal every 4 s) so expiry-driven scenarios complete in seconds.
 """
@@ -69,21 +69,26 @@ def run_reaper(state_dir: Path) -> "subprocess.CompletedProcess[str]":
 async def concurrent_samples(env_type: object, state_dir: Path) -> None:
     from inspect_ranges._host import LeaseStore
 
-    windows: dict[str, tuple[float, float]] = {}
+    durations: dict[str, float] = {}
 
     async def boot(sample: str) -> dict[str, object]:
         started = time.monotonic()
         envs = await env_type.sample_init(TASK, str(SPEC), {"__sample_id__": sample})
-        windows[sample] = (started, time.monotonic())
+        durations[sample] = time.monotonic() - started
         return envs
 
+    gathered = time.monotonic()
     first, second = await asyncio.gather(boot("c1"), boot("c2"))
+    elapsed_total = time.monotonic() - gathered
     try:
-        (a_start, a_end), (b_start, b_end) = windows["c1"], windows["c2"]
+        # window-overlap checks around gathered awaits are vacuous (they
+        # overlap by construction); wall time versus the sum of durations is
+        # what actually proves concurrency
+        serial_sum = durations["c1"] + durations["c2"]
         check(
-            "boot windows overlap (non-vacuous concurrency)",
-            a_start < b_end and b_start < a_end,
-            str(windows),
+            "two boots complete in well under the sum of their durations",
+            elapsed_total < 0.8 * serial_sum,
+            f"total={elapsed_total:.1f}s vs sum={serial_sum:.1f}s",
         )
         leases = LeaseStore(state_dir).leases()
         check("two distinct leases held", len(leases) == 2 and leases[0].lease_id != leases[1].lease_id)
@@ -101,7 +106,11 @@ async def concurrent_samples(env_type: object, state_dir: Path) -> None:
             one == "sample-one" and two == "sample-two",
             f"{one!r} {two!r}",
         )
-        evidence["concurrency"] = {"windows": windows, "spans": spans}
+        evidence["concurrency"] = {
+            "durations": durations,
+            "elapsed_total": round(elapsed_total, 1),
+            "spans": spans,
+        }
         await env_type.sample_cleanup(TASK, str(SPEC), first, False)
         still = await second["web"].exec(["echo", "alive"])
         check("the surviving sample serves ops after the other's teardown", still.success and still.stdout == "alive\n")

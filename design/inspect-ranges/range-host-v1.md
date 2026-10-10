@@ -46,7 +46,7 @@ In: the full one-host topology per the user's decision. Out, recorded not implie
 
 ## Lifecycle matrix (slice 4; CI shadows in slices 2 and 3)
 
-`kill -9` of the driver mid-sample leaves the range up and the lease unrenewed; a fresh-shell reaper reclaims after expiry through the live applier with zero residue and the admission capacity returning. Forced expiry mid-sample reclaims a running sample and the driver fails loudly with `LeaseLostError` (the deliberate policy). Two concurrent samples through one applier hold distinct leases with non-vacuous boot overlap, identical guest names reaching their own guests, disjoint CID blocks, and independent teardowns. A failing down under `RemoteRangeHost` leaves lease, CID lease, and registry findable with nothing freed until a later pass completes. Heartbeat reads pending/booting during realize, ready after, and connect-refusal after teardown. The reaper-versus-renewal race holds both ways against the real store. An applier restart between samples serves the new sample cleanly while the old sample's teardown recovers from disk.
+`kill -9` of the driver mid-sample leaves the range up and the lease unrenewed; a fresh-shell reaper reclaims after expiry through the live applier with zero residue and the admission capacity returning. Forced expiry mid-sample reclaims a running sample and the driver fails loudly with `LeaseLostError` (the deliberate policy). Two concurrent samples through one applier hold distinct leases and complete in well under the sum of their individual boot durations (wall-time concurrency; a gather-window overlap check would be vacuous by construction), identical guest names reaching their own guests, disjoint CID blocks, and independent teardowns. A failing down under `RemoteRangeHost` leaves lease, CID lease, and registry findable with nothing freed until a later pass completes. Heartbeat reads pending/booting during realize, ready after, and connect-refusal after teardown. The reaper-versus-renewal race holds both ways against the real store. An applier restart between samples serves the new sample cleanly while the old sample's teardown recovers from disk.
 
 Every row above ran green on the devbox 2026-10-10 (45 checks, timings in `design/spikes/range-host-v1/README.md`); the reaper reclaim went through the live applier in 1.6 s, and UDS boot+teardown landed inside run-to-run noise of the local path (47.2 s versus 46.7 s).
 
@@ -61,6 +61,8 @@ Lease ids join the request-id and project correlation story: acquire, renew-fail
 ## Review discipline
 
 Every slice closes with a fresh-context review scoped to the slice diff, findings fixed in their own commits. The slice-3 review reads the never-left analysis line by line. The wire vectors and codec files are untouched by design; a reviewer should verify that.
+
+Pattern note for future reviews: this is the second phase whose first-draft concurrency evidence was vacuous by construction. Timestamp windows around gathered awaits always overlap and prove nothing; wall-time versus the sum of individual durations is the assertion that actually demonstrates concurrency.
 
 ## Non-goals and recorded follow-ups
 
