@@ -622,3 +622,117 @@ def test_readiness_failure_logs_the_swallowed_cause(
     events = StageLog(state_root, project).events()
     fails = [e for e in events if e["stage"] == "readiness" and e["status"] == "fail"]
     assert fails and any("exited 2" in str(e.get("cause", "")) for e in fails)
+
+
+# -- range-host-v1 slice 1: bundle digest + on_stage mirroring -------------------
+
+
+def test_bundle_digest_is_the_manifest_sha256(bundle: Path) -> None:
+    import hashlib
+
+    from inspect_ranges._runtime import bundle_digest
+
+    expected = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+    assert bundle_digest(bundle) == expected
+    verify_bundle(bundle, expected_digest=expected)  # matching digest verifies
+    with pytest.raises(UpError, match="does not match the requested"):
+        verify_bundle(bundle, expected_digest="0" * 64)
+
+
+def _frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic clocks for byte-identity comparisons, reset to the same origin per call: stage-log timestamps count up, and the wall-time `seconds` field reads a constant (no timers run in these faked-up paths)."""
+    import time as time_module
+
+    # constants, not counters: logging and other bystanders also read the
+    # clock, and their call counts must not perturb the stage-log bytes
+    monkeypatch.setattr(time_module, "time", lambda: 0.0)
+    monkeypatch.setattr(time_module, "monotonic", lambda: 1000.0)
+
+
+def test_on_stage_mirror_leaves_the_jsonl_byte_identical(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same up run, with and without a callback, writes byte-identical stage logs, and the callback sees exactly the logged (stage, status) sequence."""
+    ready_probes(monkeypatch)
+
+    _frozen_clock(monkeypatch)
+    plain_state = tmp_path / "plain" / "state"
+    result = up(bundle, options(cache, tmp_path / "plain"), runner=FakeDocker())
+    plain_log = (plain_state / result.project / "stages.jsonl").read_bytes()
+
+    _frozen_clock(monkeypatch)
+    seen: list[tuple[str, str, dict[str, object]]] = []
+    mirrored_state = tmp_path / "mirrored" / "state"
+    result = up(
+        bundle,
+        options(cache, tmp_path / "mirrored"),
+        runner=FakeDocker(),
+        on_stage=lambda stage, status, fields: seen.append((stage, status, fields)),
+    )
+    mirrored_log = (mirrored_state / result.project / "stages.jsonl").read_bytes()
+
+    assert mirrored_log == plain_log
+    events = StageLog(mirrored_state, result.project).events()
+    assert [(s, st) for s, st, _ in seen] == [(e["stage"], e["status"]) for e in events]
+    assert [f for _, _, f in seen] == [
+        {k: v for k, v in e.items() if k not in ("ts", "stage", "status")}
+        for e in events
+    ]
+
+
+@pytest.mark.parametrize("failure", ["range-container", "guest-boot", "readiness"])
+def test_on_stage_mirrors_every_stage_named_failure(
+    failure: str,
+    bundle: Path,
+    cache: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docker = FakeDocker()
+    if failure == "range-container":
+        ready_probes(monkeypatch)
+        docker.fail_prefix = ("docker", "compose")
+    elif failure == "guest-boot":
+        ready_probes(monkeypatch)
+        docker.fail_on_input = True
+    else:
+        use_channel(monkeypatch, FakeChannel(ping_ok=False))
+    seen: list[tuple[str, str]] = []
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path),
+            runner=docker,
+            on_stage=lambda stage, status, fields: seen.append((stage, status)),
+        )
+    assert error.value.stage == failure
+    state_root = tmp_path / "state"
+    project = next(entry.name for entry in state_root.iterdir())
+    events = StageLog(state_root, project).events()
+    assert seen == [(e["stage"], e["status"]) for e in events]
+    assert (failure, "fail") in seen
+
+
+def test_raising_on_stage_callback_never_alters_up(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready_probes(monkeypatch)
+
+    def explode(stage: str, status: str, fields: dict[str, object]) -> None:
+        raise RuntimeError("callback bug")
+
+    _frozen_clock(monkeypatch)
+    broken_state = tmp_path / "broken" / "state"
+    result = up(
+        bundle,
+        options(cache, tmp_path / "broken"),
+        runner=FakeDocker(),
+        on_stage=explode,
+    )
+    assert all(guest.ready for guest in result.guests)
+    _frozen_clock(monkeypatch)
+    plain_state = tmp_path / "plain" / "state"
+    plain = up(bundle, options(cache, tmp_path / "plain"), runner=FakeDocker())
+    assert (broken_state / result.project / "stages.jsonl").read_bytes() == (
+        plain_state / plain.project / "stages.jsonl"
+    ).read_bytes()

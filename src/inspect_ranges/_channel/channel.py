@@ -43,6 +43,7 @@ from .protocol import (
     FileData,
     ForwardReply,
     GuestState,
+    Heartbeat,
     Message,
     OkReply,
     PendingReply,
@@ -135,6 +136,17 @@ class FileLimitExceeded(ChannelError):
         self.partial = partial
 
 
+class HostRefused(ChannelError):
+    """The applier refused a realize before emitting any stage report.
+
+    A refusal is an `ErrorReply` carrying the realize request's own id as the very first reply of the stream: typed, errno-tagged (`EAGAIN` capacity-full, `ENOSPC` range-exceeds-host, `EINVAL` digest mismatch, `ENOTSUP` unsupported grants), and never a re-runnable stream (refusals are not memoized applier-side). An error reply with a wrong id, or one arriving after any stage report, is tamper, not a refusal.
+    """
+
+    def __init__(self, errno: str, message: str) -> None:
+        super().__init__(f"{errno}: {message}")
+        self.errno = errno
+
+
 class IllegalTransition(ChannelError):
     """A sample lifecycle transition the state machine does not permit."""
 
@@ -190,6 +202,7 @@ class RangeChannel(Protocol):
     async def ping(self, guest: str) -> PongReply: ...
     async def session(self, guest: str) -> str: ...
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply: ...
+    async def heartbeat(self) -> Heartbeat: ...
     async def teardown(self) -> None: ...
 
 
@@ -804,6 +817,15 @@ class MessageChannel:
 
     # -- host lifecycle plane -----------------------------------------------
 
+    async def heartbeat(self) -> Heartbeat:
+        """Poll the applier for uptime and per-guest state (the driver-initiated heartbeat verb).
+
+        The seam's "periodic heartbeat" (`host-provider.md`) is driver-polled: a pull verb fits per-operation-connect and connectionless transports where an unsolicited push does not. The poll reuses the existing `PingRequest` to the host endpoint and expects the existing `Heartbeat` reply with the matching id, so no wire kind was added; a dedicated `HeartbeatRequest` kind is the recorded multi-host growth path (`range-host-v1.md`).
+        """
+        request = PingRequest(id=request_id())
+        reply, _, _ = await self._exchange(HOST_APPLIER, request)
+        return self._expect(reply, Heartbeat, request, HOST_APPLIER)
+
     async def realize(
         self, bundle_digest: Sha256Hex, grants: Sequence[str]
     ) -> AsyncIterator[StageReport]:
@@ -902,6 +924,23 @@ class MessageChannel:
                     received += 1
                     if received > MAX_STAGE_REPORTS:
                         self._tamper(request, HOST_APPLIER, "stage report flood")
+                    if (
+                        isinstance(message, ErrorReply)
+                        and message.id == request.id
+                        and not seen
+                        and received == 1
+                    ):
+                        # a typed refusal: legal only as the very first reply,
+                        # before any stage report (wrong-id or post-stage error
+                        # replies fall through to the tamper verdict below)
+                        self._log(
+                            logging.WARNING,
+                            "refused",
+                            rid=request.id,
+                            endpoint=HOST_APPLIER,
+                            detail=f"{message.errno}: {message.message}",
+                        )
+                        raise HostRefused(message.errno, message.message)
                     report = self._expect(message, StageReport, request, HOST_APPLIER)
                     if report.id != request.id:
                         self._tamper(
@@ -1431,7 +1470,10 @@ async def _default_handler(context: ExecContext) -> tuple[int, bytes, bytes]:
 
 
 class FakeApplier:
-    """In-memory host applier endpoint: realize streams stage reports with id-keyed replay (dedupe), teardown acknowledges."""
+    """In-memory host applier endpoint: realize streams stage reports with id-keyed replay (dedupe), teardown acknowledges, and a ping answers with the heartbeat.
+
+    `refuse_realize` holds an errno; while set, every realize answers a typed refusal as its first (and only) reply, and the refusal is never memoized into the replay log (a refusal is not a stream).
+    """
 
     def __init__(self) -> None:
         self.fail_at_stage: str | None = None
@@ -1441,6 +1483,9 @@ class FakeApplier:
         self.torn_down = False
         self.realize_executions = 0
         self.realized_digests: list[str] = []
+        self.refuse_realize: str | None = None
+        self.guest_states: dict[str, GuestState] = {}
+        self.started = time.monotonic()
         self._report_log: dict[str, list[StageReport]] = {}
 
     def stage_reports(self, request: RealizeRequest) -> list[StageReport]:
@@ -1536,7 +1581,24 @@ class LoopbackTransport:
         await stream.aclose()
 
     async def _serve_host(self, message: Message, stream: MemoryStream) -> None:
-        if isinstance(message, RealizeRequest):
+        if isinstance(message, PingRequest):
+            beat = Heartbeat(
+                id=message.id,
+                uptime_ms=int((time.monotonic() - self.applier.started) * 1000),
+                guests=dict(self.applier.guest_states),
+            )
+            for frame in encode_message(beat, None):
+                await stream.send(frame)
+        elif isinstance(message, RealizeRequest) and self.applier.refuse_realize:
+            # a typed refusal: the first reply, never memoized as a stream
+            refusal = ErrorReply(
+                id=message.id,
+                errno=self.applier.refuse_realize,
+                message="injected realize refusal",
+            )
+            for frame in encode_message(refusal, None):
+                await stream.send(frame)
+        elif isinstance(message, RealizeRequest):
             reports = self.applier.stage_reports(message)
             limit = len(reports)
             if self.applier.drop_after_reports is not None:

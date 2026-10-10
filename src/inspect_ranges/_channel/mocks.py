@@ -16,6 +16,7 @@ from .channel import ByteStream, MemoryStream, Transport, stream_pair
 from .codec import FrameType, MessageStreamReader, canonical_json, encode_message
 from .protocol import (
     DEFAULT_BULK_CAP,
+    ErrorReply,
     FileData,
     Message,
     OkReply,
@@ -242,10 +243,33 @@ def _honest_stages(request: Message) -> bytes:
     return frames
 
 
+def _refusal_wrong_id(request: Message) -> bytes:
+    # a "refusal" carrying a forged id is tamper, never a typed HostRefused
+    reply = ErrorReply(id="e" * 32, errno="EAGAIN", message="forged refusal")
+    return b"".join(encode_message(reply))
+
+
+def _error_after_stage(request: Message) -> bytes:
+    # refusals are legal only as the FIRST reply: an error after any stage
+    # report is tamper even with the honest id
+    late = ErrorReply(id=request.id, errno="EAGAIN", message="late refusal")
+    return _stage(request, "fetch") + b"".join(encode_message(late))
+
+
+def _heartbeat_wrong_kind(request: Message) -> bytes:
+    # a guest-reply kind on the host plane: heartbeat() must tamper, and a
+    # realize fed this shape must tamper too
+    reply = PongReply(id=request.id, daemon="impostor", session="f" * 32)
+    return b"".join(encode_message(reply))
+
+
 HOSTILE_APPLIER_SCENARIOS: dict[str, Callable[[Message], bytes]] = {
     "stage-wrong-id": _stage_wrong_id,
     "stage-ready-first": _stage_ready_first,
     "stage-spam": _stage_spam,
+    "refusal-wrong-id": _refusal_wrong_id,
+    "error-after-stage": _error_after_stage,
+    "heartbeat-wrong-kind": _heartbeat_wrong_kind,
 }
 
 HOSTILE_APPLIER_HANGS = ("hang-connect", "no-close-after-ready")

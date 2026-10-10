@@ -9,6 +9,7 @@ from .channel import (
     ExecOutcome,
     FileLimitExceeded,
     GuestError,
+    HostRefused,
     IllegalTransition,
     LoopbackTransport,
     MessageChannel,
@@ -45,7 +46,7 @@ from .mocks import (
     HostileTransport,
     LatencyTransport,
 )
-from .protocol import PROTOCOL_VERSION, Budget, Message
+from .protocol import PROTOCOL_VERSION, Budget, Heartbeat, Message
 from .vsock import VsockTransport
 
 __all__ = [
@@ -63,6 +64,8 @@ __all__ = [
     "FrameType",
     "GuestError",
     "HOSTILE_APPLIER_SCENARIOS",
+    "Heartbeat",
+    "HostRefused",
     "HOSTILE_GUEST_SCENARIOS",
     "DribbleTransport",
     "HostileApplierTransport",
