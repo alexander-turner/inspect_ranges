@@ -16,6 +16,10 @@ namespace VsockD
 {
     static class Native
     {
+        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool GetUserProfileDirectoryW(IntPtr token, StringBuilder path, ref uint size);
+
+
         [StructLayout(LayoutKind.Sequential)]
         public struct SECURITY_ATTRIBUTES
         {
@@ -197,13 +201,42 @@ namespace VsockD
 
     static class ExecEngine
     {
+        // pure cwd pre-check, extracted so the host-side drift harness can pin
+        // the errno and message shapes without a Windows guest; the message
+        // shapes match the Linux daemon's chdir errors exactly
+        public static ExecOutcome PrecheckCwd(string cwd)
+        {
+            if (File.Exists(cwd)) return ExecOutcome.Error("ENOTDIR", "chdir " + cwd + ": not a directory");
+            if (!Directory.Exists(cwd)) return ExecOutcome.Error("ENOENT", "chdir " + cwd + ": no such file or directory");
+            return null;
+        }
+
+        static string ProfileDirOr(IntPtr token, string fallback)
+        {
+            if (token == IntPtr.Zero) return fallback;
+            uint size = 0;
+            Native.GetUserProfileDirectoryW(token, null, ref size);
+            if (size == 0) return fallback;
+            StringBuilder buf = new StringBuilder((int)size);
+            if (!Native.GetUserProfileDirectoryW(token, buf, ref size)) return fallback;
+            // LogonUserW never loads a profile: the registry path can name a
+            // directory that does not exist on disk; a defaulted cwd must not
+            // hard-fail a request that never asked for one
+            string dir = buf.ToString();
+            return Directory.Exists(dir) ? dir : fallback;
+        }
+
         public static ExecOutcome Run(List<string> argv, string cwd, Dictionary<string, string> envOverrides,
             string user, long commandMs, byte[] stdin)
         {
-            if (cwd != null)
+            // an explicit ROOTED cwd prechecks before logon, preserving the
+            // cross-platform error precedence (bad cwd + bad user reports the
+            // cwd, as the Linux daemon does); a relative cwd needs the exec
+            // identity's home, so it resolves and checks after logon
+            if (cwd != null && PathRules.IsRooted(cwd))
             {
-                if (File.Exists(cwd)) return ExecOutcome.Error("ENOTDIR", "not a directory: " + cwd);
-                if (!Directory.Exists(cwd)) return ExecOutcome.Error("ENOENT", "no such directory: " + cwd);
+                ExecOutcome early = PrecheckCwd(cwd);
+                if (early != null) return early;
             }
 
             IntPtr token = IntPtr.Zero;
@@ -218,7 +251,17 @@ namespace VsockD
                         Marshal.GetLastWin32Error() + ")");
             }
 
-            try { return RunWithToken(argv, cwd, envOverrides, token, commandMs, stdin); }
+            try
+            {
+                // the exec identity's home: logon profile for user= execs
+                // (when it exists on disk), the daemon's work dir otherwise.
+                // Default cwd is the home; a relative cwd joins it.
+                string home = ProfileDirOr(token, Daemon.WorkDir);
+                cwd = cwd == null ? home : PathRules.Resolve(cwd, home);
+                ExecOutcome bad = PrecheckCwd(cwd);
+                if (bad != null) return bad;
+                return RunWithToken(argv, cwd, envOverrides, token, commandMs, stdin);
+            }
             finally { if (token != IntPtr.Zero) Native.CloseHandle(token); }
         }
 
