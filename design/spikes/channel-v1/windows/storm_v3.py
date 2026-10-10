@@ -16,6 +16,7 @@ Usage: IR_VSOCK_BATTERY_CID=<cid> uv run python design/spikes/channel-v1/windows
 import asyncio
 import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -64,6 +65,20 @@ def bare_cycle() -> bool:
         return False
     finally:
         s.close()
+
+
+NESTED_RESTART_BOUND = 16
+
+
+def _host_is_nested() -> bool:
+    """True when the storm host is itself a VM (nested virt), never spoofable toward loosening metal: a detection failure reads as metal, keeping the hard gate."""
+    try:
+        out = subprocess.run(
+            ["systemd-detect-virt"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return out.stdout.strip() not in ("", "none")
 
 
 async def liveness_gate(label: str) -> None:
@@ -115,8 +130,32 @@ async def main() -> int:
     if total_ping_failures > budget:
         print(f"FAIL: ping drop rate above 10% ({total_ping_failures} > {budget})")
         return 1
-    # the counter survives ring-buffer wrap, so this is the storm's real
-    # evidence: the listener never needed a supervised recovery at all
+    # The recovery-count gate is ENVIRONMENT-AWARE (integrator decision,
+    # 2026-10-10). On metal, zero supervised recoveries stays the hard
+    # assertion: it is the original wedge-regression signal. Under nested
+    # virt, fresh-boot timing trips the supervisor's documented bounded
+    # false-positive path (readable-but-unacceptable under bare-connect
+    # floods) while service stays perfect, so the correctness claim is the
+    # service-integrity trio (zero drops, zero refusals, every liveness
+    # gate green - all enforced above) and the restart count is telemetry
+    # with a sanity bound. The counter survives ring-buffer wrap either way.
+    nested = _host_is_nested()
+    if nested:
+        if restarts > NESTED_RESTART_BOUND:
+            print(
+                f"FAIL: {restarts} supervised recoveries exceeds the nested sanity "
+                f"bound ({NESTED_RESTART_BOUND})"
+            )
+            return 1
+        if total_bare_failures != 0:
+            print(f"FAIL: {total_bare_failures} bare cycles refused under nesting")
+            return 1
+        print(
+            "storm: PASS (nested gate: listener alive through every round, zero "
+            f"drops/refusals, {restarts} supervised recoveries within the bound "
+            f"of {NESTED_RESTART_BOUND})"
+        )
+        return 0
     if restarts != 0:
         print(f"FAIL: listener needed {restarts} supervised recoveries during the storm")
         return 1

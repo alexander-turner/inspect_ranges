@@ -183,12 +183,47 @@ namespace VsockD
 
     // ------------------------------------------------------------- daemon
 
+    // Windows path semantics for guest paths. The daemon owns these on its
+    // platform (the provider's host-side resolver is Linux-only; see the
+    // divergence note in _provider/ops.py). Rooted shapes pass through
+    // untouched: drive-absolute (C:\x, C:/x), UNC (\\srv\share, //srv/share),
+    // and rootless-rooted (\x, /x). Drive-relative (C:foo) has no stable
+    // meaning for a service process, so it also passes through rather than
+    // being mangled by a join. Everything else joins the home with a single
+    // backslash, with forward slashes normalized.
+    static class PathRules
+    {
+        public static bool IsRooted(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            char c0 = path[0];
+            if (c0 == '\\' || c0 == '/') return true;  // rootless-rooted or UNC
+            if (path.Length >= 2 && path[1] == ':' &&
+                ((c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z')))
+                return true;  // drive-absolute or drive-relative: never join
+            return false;
+        }
+
+        public static string Resolve(string path, string home)
+        {
+            // empty passes through: downstream stat gives the same ENOENT
+            // the Linux daemon emits, instead of silently targeting home
+            if (string.IsNullOrEmpty(path)) return path;
+            if (IsRooted(path)) return path;
+            return home.TrimEnd('\\', '/') + "\\" + path.Replace('/', '\\');
+        }
+    }
+
     static class Daemon
     {
         public const int PORT = 5000;
         public const int KillGraceMs = 5000;  // pinned by the wire vectors
         public const int WaitDelayMs = 5000;  // pinned by the wire vectors
         public static string BaseDir = "C:\\vsockd";
+        // the daemon identity's sandbox home: relative guest paths and the
+        // default exec cwd resolve here (per-user execs default to the
+        // logon profile instead; see ExecEngine)
+        public static string WorkDir { get { return Path.Combine(BaseDir, "work"); } }
         public static readonly Store Replies = new Store();
         public static readonly Diag Ring = new Diag();
         // supervised listener recoveries since start; surfaced in diag_result
@@ -215,7 +250,7 @@ namespace VsockD
 
         public static void ListenLoop()
         {
-            string work = Path.Combine(BaseDir, "work");
+            string work = WorkDir;
             Directory.CreateDirectory(work);
             Directory.SetCurrentDirectory(work);
             Native.timeBeginPeriod(1);
@@ -538,7 +573,7 @@ namespace VsockD
         static StoredReply ReadFile(Dictionary<string, object> request)
         {
             string id = (string)request["id"];
-            string path = (string)request["path"];
+            string path = PathRules.Resolve((string)request["path"], WorkDir);
             long limit = Wire.DefaultBulkCap;
             object maxBytes;
             if (request.TryGetValue("max_bytes", out maxBytes)) limit = (long)maxBytes;
@@ -580,7 +615,7 @@ namespace VsockD
         static StoredReply WriteFile(Dictionary<string, object> request, byte[] data)
         {
             string id = (string)request["id"];
-            string path = (string)request["path"];
+            string path = PathRules.Resolve((string)request["path"], WorkDir);
             if (data == null) data = new byte[0];
             try
             {

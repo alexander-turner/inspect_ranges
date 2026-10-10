@@ -27,13 +27,32 @@ from inspect_ranges._channel.channel import request_id
 CID = int(os.environ["IR_VSOCK_BATTERY_CID"])
 PORT = int(os.environ.get("IR_VSOCK_BATTERY_PORT", "5000"))
 
-# since provider-v1 slice 4 the daemon's default identity is the agent user,
-# so sandbox-relative paths and the default cwd resolve to its home (the same
-# rule the real provider applies in ops.resolve_guest_path)
+# Path resolution is PER PLATFORM (keyed off the same env var as the xfail
+# pins). Linux mirrors the provider's host-side rule (ops.resolve_guest_path:
+# relative joins the agent home). Windows mirrors the daemon-owned rule
+# (Daemon.cs PathRules): rooted shapes (drive-absolute, UNC, rootless-rooted)
+# and drive-relative pass through; relative joins the daemon's work dir with
+# a backslash. The nested-leg regression was this harness applying the POSIX
+# rule to a Windows guest, prefixing /home/agent onto C:\ paths.
+PLATFORM = os.environ.get("IR_SELF_CHECK_XFAILS", "linux")
 AGENT_HOME = "/home/agent"
+WINDOWS_HOME = "C:\\vsockd\\work"
+
+
+def _windows_rooted(path: str) -> bool:
+    if path.startswith(("\\", "/")):
+        return True  # UNC or rootless-rooted
+    # ASCII letters only, matching Daemon.cs PathRules exactly
+    return len(path) >= 2 and path[1] == ":" and ("A" <= path[0] <= "Z" or "a" <= path[0] <= "z")
 
 
 def _resolve(path: str) -> str:
+    if PLATFORM == "windows":
+        if not path:
+            return path  # empty passes through, matching PathRules
+        if _windows_rooted(path):
+            return path
+        return WINDOWS_HOME + "\\" + path.replace("/", "\\")
     return path if path.startswith("/") else f"{AGENT_HOME}/{path}"
 
 _XFAILS: dict[str, frozenset[str]] = {
@@ -54,7 +73,7 @@ _XFAILS: dict[str, frozenset[str]] = {
         }
     ),
 }
-DOCUMENTED_XFAILS = _XFAILS[os.environ.get("IR_SELF_CHECK_XFAILS", "linux")]
+DOCUMENTED_XFAILS = _XFAILS[PLATFORM]
 
 _ERRNO_EXC: dict[str, type[Exception]] = {
     "ENOENT": FileNotFoundError,
@@ -116,7 +135,9 @@ class V3Sandbox(SandboxEnvironment):
         request = ExecRequest(
             id=request_id(),
             cmd=cmd,
-            cwd=_resolve(cwd) if cwd is not None else AGENT_HOME,
+            cwd=_resolve(cwd)
+            if cwd is not None
+            else (WINDOWS_HOME if PLATFORM == "windows" else AGENT_HOME),
             env=env or {},
             user=user,
             budget=budget,

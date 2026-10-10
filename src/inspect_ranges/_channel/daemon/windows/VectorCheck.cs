@@ -68,6 +68,14 @@ namespace VsockD
                 return 1;
             }
 
+            // Windows path semantics, pinned host-side so a Daemon.cs
+            // regression here never needs a Windows guest to catch (the
+            // nested-leg finding: byte-level drift guards cannot see path
+            // semantics; these unit pins are the cheap first line, the
+            // in-guest battery stays the gate)
+            int pathFailures = PathRulesCheck.Run();
+            if (pathFailures != 0) return 1;
+
             int failures = 0;
             List<object> vectors = (List<object>)doc["vectors"];
             HashSet<string> kinds = new HashSet<string>();
@@ -240,4 +248,67 @@ namespace VsockD
             return true;
         }
     }
+
+    static class PathRulesCheck
+    {
+        static int _failures;
+
+        static void Expect(string name, bool condition)
+        {
+            if (condition) { Console.WriteLine("  PASS path " + name); return; }
+            Console.WriteLine("  FAIL path " + name);
+            _failures++;
+        }
+
+        public static int Run()
+        {
+            string home = "C:\\vsockd\\work";
+            // rooted shapes pass through untouched
+            Expect("drive-absolute backslash", PathRules.Resolve("C:\\x\\y", home) == "C:\\x\\y");
+            Expect("drive-absolute forward", PathRules.Resolve("C:/x/y", home) == "C:/x/y");
+            Expect("drive-absolute lowercase", PathRules.Resolve("c:\\x", home) == "c:\\x");
+            Expect("unc backslash", PathRules.Resolve("\\\\srv\\share\\f", home) == "\\\\srv\\share\\f");
+            Expect("unc forward", PathRules.Resolve("//srv/share/f", home) == "//srv/share/f");
+            Expect("rootless-rooted backslash", PathRules.Resolve("\\x", home) == "\\x");
+            Expect("rootless-rooted forward", PathRules.Resolve("/x", home) == "/x");
+            // drive-relative is ambiguous for a service process: pass through,
+            // never mangle by joining
+            Expect("drive-relative", PathRules.Resolve("C:foo", home) == "C:foo");
+            // relative joins the home with one backslash, slashes normalized
+            Expect("relative backslash", PathRules.Resolve("a\\b", home) == "C:\\vsockd\\work\\a\\b");
+            Expect("relative forward", PathRules.Resolve("a/b", home) == "C:\\vsockd\\work\\a\\b");
+            Expect("relative mixed", PathRules.Resolve("a/b\\c", home) == "C:\\vsockd\\work\\a\\b\\c");
+            Expect("home trailing sep", PathRules.Resolve("a", home + "\\") == "C:\\vsockd\\work\\a");
+            Expect("empty passes through", PathRules.Resolve("", home) == "");
+            // the regression shape that escaped to the guest: a POSIX home
+            // must never be prefixed onto a drive-absolute path
+            Expect("no posix prefix on drive path",
+                PathRules.Resolve("C:\\vsockd\\work\\argdump.ps1", "/home/agent") == "C:\\vsockd\\work\\argdump.ps1");
+
+            // cwd pre-check shapes (pure, filesystem-local: runs on the drift
+            // host too). ENOENT names chdir and the target; a FILE as cwd is
+            // ENOTDIR.
+            string probe = Path.Combine(Path.GetTempPath(), "ir-pathcheck-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(probe);
+            try
+            {
+                string missing = Path.Combine(probe, "absent");
+                ExecOutcome enoent = ExecEngine.PrecheckCwd(missing);
+                Expect("cwd missing errno", enoent != null && enoent.Errno == "ENOENT");
+                Expect("cwd missing shape", enoent != null &&
+                    enoent.ErrorMessage == "chdir " + missing + ": no such file or directory");
+                string file = Path.Combine(probe, "f");
+                File.WriteAllBytes(file, new byte[] { 1 });
+                ExecOutcome enotdir = ExecEngine.PrecheckCwd(file);
+                Expect("cwd file errno", enotdir != null && enotdir.Errno == "ENOTDIR");
+                Expect("cwd ok", ExecEngine.PrecheckCwd(probe) == null);
+            }
+            finally { Directory.Delete(probe, true); }
+
+            if (_failures != 0)
+                Console.Error.WriteLine("path semantics failures: " + _failures);
+            return _failures;
+        }
+    }
+
 }

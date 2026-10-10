@@ -67,7 +67,10 @@ def _request_fits(
 
 
 def resolve_guest_path(path: str) -> str:
-    """A caller path as the absolute in-guest path (relative joins the per-sample working directory)."""
+    """A caller path as the absolute in-guest path (relative joins the per-sample working directory).
+
+    This rule is Linux-only by design: PurePosixPath treats drive-letter and backslash-UNC paths as relative and would mangle them (forward-slash UNC happens to survive as absolute). Windows guests are gated in provider v1; when they un-gate, the daemon owns Windows path semantics (`Daemon.cs` `PathRules`: rooted and drive-relative shapes pass through, relative joins the exec identity's home) and this resolver must branch per guest platform rather than apply the POSIX join.
+    """
     pure = PurePosixPath(path)
     if pure.is_absolute():
         return str(pure)
