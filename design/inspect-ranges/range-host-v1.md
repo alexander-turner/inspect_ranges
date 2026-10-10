@@ -68,7 +68,7 @@ TCP/mTLS; multi-host dispatch and applier-side CID allocation; granted-URL and r
 
 | Slice | Status |
 |---|---|
-| 1 host-plane completion + seam types | planned |
+| 1 host-plane completion + seam types | done (79cbfd8; review fixed: `StageTranslator` latches terminal `ready`/`failed` so one up failure never emits two terminal reports, fail detail reads `cause` and names the guest, pre-stage-log failures documented as applier-fed synthetic events, `verify_bundle` hashes and parses one read of the manifest bytes, `SampleSpec` digests reuse `Sha256Hex`, seam vocabulary pinned to the wire `StageReport` literal; decisions: `HOST_APPLIER` stays unexported, heartbeat reuses `PingRequest` with `HeartbeatRequest` named as the growth path, ready-never-first raises `ValueError` as an applier bug) |
 | 2 leases, reaper, LocalRangeHost | planned |
 | 3 UDS, applier, RemoteRangeHost | planned |
 | 4 VM battery | planned |

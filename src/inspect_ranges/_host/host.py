@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from .._channel.channel import RangeChannel
+from .._channel.protocol import Sha256Hex
 from .._compiler.plan import Totals
 
 IsolationLevel = Literal["instance", "shared"]
@@ -21,8 +22,8 @@ class SampleSpec(BaseModel):
 
     sample_id: str
     task_name: str
-    spec_sha256: str
-    bundle_digest: str
+    spec_sha256: Sha256Hex
+    bundle_digest: Sha256Hex
     """The canonical bundle digest: sha256 of the rendered bundle's `manifest.json` bytes."""
     totals: Totals
 

@@ -114,15 +114,22 @@ def verify_bundle(bundle: Path, expected_digest: str | None = None) -> dict[str,
     manifest_path = bundle / "manifest.json"
     if not manifest_path.is_file():
         raise UpError("verify-bundle", f"{bundle} has no manifest.json")
+    # one read: the digest-verified bytes ARE the bytes parsed and acted on
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except OSError as error:
+        raise UpError(
+            "verify-bundle", f"{bundle} has no readable manifest.json: {error}"
+        ) from error
     if expected_digest is not None:
-        actual = bundle_digest(bundle)
+        actual = hashlib.sha256(manifest_bytes).hexdigest()
         if actual != expected_digest:
             raise UpError(
                 "verify-bundle",
                 f"bundle digest {actual} does not match the requested {expected_digest}",
             )
     try:
-        parsed: object = json.loads(manifest_path.read_text())
+        parsed: object = json.loads(manifest_bytes)
         if not isinstance(parsed, dict):
             raise ValueError("manifest is not a JSON object")
         manifest = cast(dict[str, Any], parsed)

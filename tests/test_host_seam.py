@@ -1,14 +1,19 @@
 """The range-host seam types and the stage translator (range-host-v1 slice 1)."""
 
+from typing import get_args
+
 import pytest
+from inspect_ranges._channel.protocol import StageReport
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._host import (
+    SEAM_STAGES,
     HostCapabilities,
     HostFacts,
     SampleSpec,
     StageTranslator,
     TranslatedStage,
 )
+from pydantic import ValidationError
 
 UP_STAGES = (
     "verify-bundle",
@@ -91,6 +96,36 @@ def test_the_honest_up_sequence_translates_to_the_seam_sequence() -> None:
     assert emitted == ["fetch", "construct", "boot", "verify", "ready"]
 
 
+def test_failed_is_terminal_and_emitted_once() -> None:
+    """One up failure logs several fail events (per-guest cause, summary, a teardown fail); only the first becomes a report, everything after a terminal report is None (the client tampers on post-terminal data)."""
+    translator = StageTranslator()
+    first = translator.translate("readiness", "fail", {"guest": "web", "cause": "boom"})
+    assert first == TranslatedStage("failed", "readiness: web: boom")
+    assert translator.translate("readiness", "fail", {"error": "summary"}) is None
+    assert translator.translate("teardown", "fail", {"error": "cleanup"}) is None
+    assert translator.translate("ready", "ok") is None
+
+
+def test_fail_detail_falls_back_to_the_cause_field() -> None:
+    """Per-guest readiness failures log their diagnostic as `cause`, not `error`; the detail must carry it."""
+    translator = StageTranslator()
+    report = translator.translate(
+        "readiness",
+        "fail",
+        {"guest": "db", "cause": "cloud-init status --wait exited 2"},
+    )
+    assert report == TranslatedStage(
+        "failed", "readiness: db: cloud-init status --wait exited 2"
+    )
+
+
+def test_ready_is_terminal() -> None:
+    translator = StageTranslator()
+    for stage in ("verify-images", "range-image", "guest-boot", "readiness", "ready"):
+        assert translator.translate(stage, "ok") is not None
+    assert translator.translate("teardown", "fail", {"error": "late"}) is None
+
+
 def test_ready_is_never_the_first_emission() -> None:
     translator = StageTranslator()
     with pytest.raises(ValueError, match="ready cannot be the first"):
@@ -117,3 +152,21 @@ def test_seam_types_validate_and_pin_v1_capabilities() -> None:
     assert capabilities.egress_grant is False
     facts = HostFacts(arch="x86_64", hostname="devbox", host_class="metal")
     assert facts.host_class == "metal"
+
+
+def test_sample_spec_refuses_malformed_digests() -> None:
+    """Digest fields reuse the wire `Sha256Hex` shape, so a prefixed or truncated digest refuses at the seam, not downstream in `RealizeRequest`."""
+    with pytest.raises(ValidationError):
+        SampleSpec(
+            sample_id="s1",
+            task_name="task",
+            spec_sha256="a" * 64,
+            bundle_digest="sha256:" + "b" * 57,
+            totals=Totals(guests=1, cpus=1, memory_mb=512),
+        )
+
+
+def test_seam_stage_vocabulary_matches_the_wire_schema() -> None:
+    """`SEAM_STAGES` must stay the wire `StageReport.stage` vocabulary verbatim; a stage added to one without the other drifts silently otherwise."""
+    wire = get_args(StageReport.model_fields["stage"].annotation)
+    assert SEAM_STAGES == wire

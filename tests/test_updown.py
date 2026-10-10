@@ -640,7 +640,7 @@ def test_bundle_digest_is_the_manifest_sha256(bundle: Path) -> None:
 
 
 def _frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Deterministic clocks for byte-identity comparisons, reset to the same origin per call: stage-log timestamps count up, and the wall-time `seconds` field reads a constant (no timers run in these faked-up paths)."""
+    """Deterministic constant clocks for byte-identity comparisons, reset to the same values per call: every stage-log timestamp reads 0.0 and the `seconds` field 0 (no timers run in these faked-up paths)."""
     import time as time_module
 
     # constants, not counters: logging and other bystanders also read the
