@@ -41,12 +41,15 @@ async def wait(channel: MessageChannel, guest: str, timeout: float) -> int:
     return 1
 
 
-async def run_exec(channel: MessageChannel, guest: str, command: str) -> int:
+async def run_exec(
+    channel: MessageChannel, guest: str, command: str, user: str | None = None
+) -> int:
     outcome = await channel.exec(
         guest,
         ExecRequest(
             id=request_id(),
             cmd=["sh", "-c", command],
+            user=user,
             budget=Budget(command_ms=120_000),
         ),
     )
@@ -60,6 +63,7 @@ def main() -> int:
     parser.add_argument("--cid", type=int, default=None)
     parser.add_argument("--boot", default=None)
     parser.add_argument("--guest", default=GUEST)
+    parser.add_argument("--user", default=None)
     parser.add_argument("op", choices=["wait", "exec", "diag"])
     parser.add_argument("arg", nargs="?")
     args = parser.parse_args()
@@ -79,7 +83,7 @@ def main() -> int:
         if args.op == "diag":
             return await diag()
         assert args.arg is not None, "exec needs a command"
-        return await run_exec(channel, guest, args.arg)
+        return await run_exec(channel, guest, args.arg, args.user)
 
     return asyncio.run(dispatch())
 
