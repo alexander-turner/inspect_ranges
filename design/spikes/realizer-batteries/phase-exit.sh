@@ -12,7 +12,8 @@ VENDOR="${VENDOR:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64
 echo "########## phase exit: realizer-v1 ##########"
 run() {
   echo; echo "===== $1 ====="
-  local log="$SPIKE/tmp/phase-$(echo "$1" | tr ' :/' '---').log"
+  mkdir -p "$SPIKE/tmp-phase"  # slice 4's runner wipes $SPIKE/tmp, so phase logs live beside it
+  local log="$SPIKE/tmp-phase/phase-$(echo "$1" | tr ' :/' '---').log"
   if ! bash "$2" > "$log" 2>&1; then
     echo "----- $1 FAILED; last 25 lines -----"; tail -25 "$log"; exit 1
   fi

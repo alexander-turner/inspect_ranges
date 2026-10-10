@@ -56,6 +56,8 @@ $IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name noble-range-guest \
 
 BUNDLE=""; PROJECT=""
 gx() { uv run python design/spikes/_shared/chexec.py --boot "$BUNDLE/boot.json" --guest "$1" exec "$2"; }
+# privileged in-guest reads (nft) need root now that the daemon defaults exec to the agent user
+gxr() { uv run python design/spikes/_shared/chexec.py --boot "$BUNDLE/boot.json" --guest "$1" --user root exec "$2"; }
 in_range() { docker exec "${PROJECT}-range-1" sh -c "$1"; }
 
 bring_up() {  # bring_up <spec-path> [extra up args...]; returns 1 (never aborts) on failure
@@ -111,7 +113,7 @@ drop_check web 10.80.20.10/8080 && ok "A5b CIDR endpoint excludes others" || bad
 drop_check db 10.80.10.10/22 && ok "A6 default deny asymmetry" || bad "A6"
 ping_check attacker 10.80.10.10 && ok "A7 same-segment L2 intact" || bad "A7"
 [[ "$(ip -o link | grep -c 'br-dmz\|br-internal')" -eq 0 ]] && ok "A8 host netns invisibility" || bad "A8"
-gx router 'nft list chain inet fw forward | grep -q "tcp dport 22 drop" && nft list chain inet fw forward | grep -q "policy drop" && echo LIVE' | grep -q LIVE \
+gxr router 'nft list chain inet fw forward | grep -q "tcp dport 22 drop" && nft list chain inet fw forward | grep -q "policy drop" && echo LIVE' | grep -q LIVE \
   && ok "A9 rendered ruleset live on the router" || bad "A9"
 tear_down
 fi
@@ -128,7 +130,7 @@ ping_check app 10.80.10.2 && ok "R3b gateway election functional" || bad "R3b"
 drop_check safe 10.80.10.2/22 && ok "R4 reverse chain default deny" || bad "R4"
 gx r1 'ip route | grep -q "10.80.30.0/24 via 10.80.20.2" && echo OK' | grep -q OK && ok "R5a static route live on r1" || bad "R5a"
 gx r2 'ip route | grep -q "10.80.10.0/24 via 10.80.20.1" && echo OK' | grep -q OK && ok "R5b static route live on r2" || bad "R5b"
-gx r2 'nft list chain inet fw forward | grep -q "ip saddr 10.80.10.0/24" && echo OK' | grep -q OK && ok "R6 transit subnet match" || bad "R6"
+gxr r2 'nft list chain inet fw forward | grep -q "ip saddr 10.80.10.0/24" && echo OK' | grep -q OK && ok "R6 transit subnet match" || bad "R6"
 [[ "$(ip -o link | grep -c 'br-dmz\|br-core\|br-vault')" -eq 0 ]] && ok "R7 host netns invisibility" || bad "R7"
 tear_down
 fi
