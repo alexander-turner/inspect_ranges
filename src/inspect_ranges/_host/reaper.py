@@ -2,7 +2,7 @@
 
 Cleanup must never depend on the original driver process reaching `finally` (`host-provider.md`); the reaper runs in a fresh process, reads `leases.json`, and reclaims on expiry alone, never probing liveness (a healthy sample never expires because its driver renews independently of sample activity). Sweep shape, per `range-host-v1.md`: select and mark under the flock (`LeaseStore.mark_reaping`, which re-checks expiry so a just-landed renewal is spared), tear down OUTSIDE the lock, and only after a successful teardown release the project's CID lease, clear the staging and owner record, and remove the host lease LAST: the lease is the retry anchor, so any failure earlier in the release phase leaves it `reaping` and the next sweep genuinely retries. A failed teardown frees nothing (crash-resume works the same way).
 
-For `uds:` leases the reaper prefers teardown through the applier socket, which also releases the applier's admission charge and relay map; with no applier teardown available (or on its failure) it falls back to direct `down` with a logged warning that a live applier's charge leaks until restart (recorded v1 risk). The applier connector arrives in slice 3; until then every `uds:` lease takes the fallback.
+For `uds:` leases the reaper prefers teardown through the applier socket (`remote.applier_teardown`, the default connector), which also releases the applier's admission charge and relay map; on connect failure it falls back to direct `down` with a logged warning that a live applier's charge leaks until restart (recorded v1 risk).
 """
 
 import fcntl
@@ -23,7 +23,7 @@ logger = logging.getLogger("inspect_ranges.reaper")
 
 DownFn = Callable[[str, Path], DownResult]
 ApplierTeardown = Callable[[HostLease], None]
-"""Teardown through the lease's applier socket; raises on connect failure (slice 3 provides the real connector)."""
+"""Teardown through the lease's applier socket; raises on connect failure (`remote.applier_teardown` is the real connector)."""
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,10 @@ def sweep(
     """
     lease_store = store if store is not None else LeaseStore(state_dir)
     teardown = down_fn if down_fn is not None else _default_down
+    if applier_teardown is None:
+        from .remote import applier_teardown as default_applier_teardown
+
+        applier_teardown = default_applier_teardown
     allocator = CidAllocator(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     with open(state_dir / ".reaper.lock", "a+") as lock:
@@ -77,29 +81,19 @@ def _reap_one(
     applier_teardown: ApplierTeardown | None,
 ) -> ReapOutcome:
     torn_down = False
-    if lease.origin.startswith("uds:"):
-        if applier_teardown is None:
+    if lease.origin.startswith("uds:") and applier_teardown is not None:
+        try:
+            applier_teardown(lease)
+            torn_down = True
+        except Exception as error:
             logger.warning(
-                "reaper: no applier teardown available for lease=%s project=%s "
-                "(origin %s); direct down (a live applier's admission charge "
-                "leaks until restart)",
+                "reaper: applier teardown of lease=%s project=%s failed (%s); "
+                "falling back to direct down (a live applier's admission "
+                "charge leaks until restart)",
                 lease.lease_id,
                 lease.project,
-                lease.origin,
+                error,
             )
-        else:
-            try:
-                applier_teardown(lease)
-                torn_down = True
-            except Exception as error:
-                logger.warning(
-                    "reaper: applier teardown of lease=%s project=%s failed (%s); "
-                    "falling back to direct down (a live applier's admission "
-                    "charge leaks until restart)",
-                    lease.lease_id,
-                    lease.project,
-                    error,
-                )
     if not torn_down:
         try:
             down_fn(lease.project, state_dir)

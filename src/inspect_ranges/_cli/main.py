@@ -2,6 +2,7 @@ import click
 
 from .. import __version__
 from .._devbox import devbox_group
+from .appliercmd import applier
 from .daemonbundle import daemon_bundle
 from .doctor import doctor
 from .imagescmd import images
@@ -18,6 +19,7 @@ def ranges() -> None:
     """Inspect Ranges CLI."""
 
 
+ranges.add_command(applier)
 ranges.add_command(daemon_bundle)
 ranges.add_command(devbox_group)
 ranges.add_command(doctor)
