@@ -1,6 +1,7 @@
 """`inspect-ranges applier`: serve the host plane and guest relay on a unix socket."""
 
 import asyncio
+import signal
 from pathlib import Path
 
 import click
@@ -48,8 +49,15 @@ def applier(
         )
         await endpoint.start()
         click.echo(f"applier serving on {socket_path}")
+        # SIGTERM must reach the finally: a killed applier that leaves its
+        # stale socket file behind makes the next applier's startup racy for
+        # anything watching the path
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signum, stop.set)
         try:
-            await asyncio.Event().wait()
+            await stop.wait()
         finally:
             await endpoint.aclose()
 

@@ -39,6 +39,9 @@ flock 9
 cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp/cache" "$SPIKE/tmp/logs"
+# the battery socket lives under a short /tmp dir (AF_UNIX ~107-byte cap)
+SOCK_DIR="/tmp/ir-rh-$(id -u)"
+rm -rf "$SOCK_DIR"
 
 echo "=== setup: daemon bundle + recipe-v4 golden (noble-range-guest) ==="
 DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
@@ -90,7 +93,7 @@ print(len(json.loads(path.read_text())) if path.exists() else 0)
 [[ "$LEASES" == "0" ]] && ok "no HOST leases remain" || bad "host leases remain ($LEASES)"
 STAGING=$(find "$XDG_STATE_HOME/inspect-ranges/staging" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 [[ "$STAGING" == "0" ]] && ok "no staging residue" || bad "staging residue ($STAGING)"
-[[ ! -S "$SPIKE/tmp/applier.sock" ]] && ok "applier socket removed" || bad "applier socket remains"
+[[ ! -S "$SOCK_DIR/applier.sock" ]] && ok "applier socket removed" || bad "applier socket remains"
 
 echo
 echo "$PASS passed, $FAIL failed"
