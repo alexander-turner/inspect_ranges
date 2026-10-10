@@ -43,9 +43,17 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 `inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. A failed removal keeps the ownership record so a retry can still find the project.
 
+## applier
+
+`inspect-ranges applier --socket <path>` serves the separated topology's host plane and guest relay on a unix socket (see [Host Topology](topology.qmd)). It runs the doctor readiness subset at startup and refuses to serve an unhealthy host; drivers reach it via `INSPECT_RANGES_HOST=uds:<path>`.
+
+## reaper
+
+`inspect-ranges reaper` reclaims expired host leases from on-disk state in one sweep (`--interval <s>` runs it as a daemon). It reclaims on expiry alone, never probing liveness; a failed teardown frees nothing and the next sweep retries. See [Host Topology](topology.qmd) for the lease contract.
+
 ## doctor
 
-`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet). `--fix-script` emits the shell commands for whatever failed.
+`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet), plus the provider and host groups (entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one). `--fix-script` emits the shell commands for whatever failed.
 
 ::: {.callout-note}
 ## The v1 boundary, honestly

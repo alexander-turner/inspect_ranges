@@ -410,3 +410,127 @@ def test_check_provider_warns_when_the_golden_file_is_gone(tmp_path: Path) -> No
     results = check_provider(state_dir=tmp_path / "state", image_cache=cache)
     golden = next(result for result in results if result.name == "golden image")
     assert golden.status == "warn" and "image file is gone" in golden.detail
+
+
+# -- the Host group (range-host-v1 slice 5) -----------------------------------------
+
+
+def _host_lease(state: Path, project: str = "ir-h", ttl_s: float = 600) -> str:
+    from inspect_ranges._host import LeaseStore
+
+    from tests.test_host_leases import facts
+
+    lease = LeaseStore(state).acquire(
+        project=project,
+        task_name="task",
+        sample_id="s1",
+        isolation="shared",
+        origin="local",
+        bundle_path="/b",
+        bundle_digest="ab" * 32,
+        staging="/s",
+        host_facts=facts(),
+        ttl_s=ttl_s,
+    )
+    return lease.lease_id
+
+
+def test_check_host_clean_state(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_host
+
+    results = check_host(state_dir=tmp_path / "state", backend="local")
+    assert [(r.name, r.status) for r in results] == [("host leases", "ok")]
+
+
+def test_check_host_counts_current_leases(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_host
+
+    state = tmp_path / "state"
+    _host_lease(state)
+    results = {r.name: r for r in check_host(state_dir=state, backend="local")}
+    assert results["host leases"].status == "ok"
+    assert results["expired leases"].status == "ok"
+
+
+def test_check_host_hints_the_reaper_for_expired_leases(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from inspect_ranges._doctor.checks import check_host
+    from inspect_ranges._host import LeaseStore
+
+    from tests.test_host_leases import acquire
+
+    state = tmp_path / "state"
+    past = datetime.now(UTC) - timedelta(seconds=600)
+    store = LeaseStore(state, now_fn=lambda: past)
+    acquire(store, project="ir-stale", ttl_s=10)
+    results = {r.name: r for r in check_host(state_dir=state, backend="local")}
+    expired = results["expired leases"]
+    assert expired.status == "warn"
+    assert "ir-stale" in expired.detail
+    assert expired.fix is not None and "inspect-ranges reaper" in expired.fix
+
+
+def test_check_host_is_stricter_than_the_store(tmp_path: Path) -> None:
+    """An entry the store would preserve-but-skip is a lease the reaper cannot see: doctor fails it loudly."""
+    from inspect_ranges._doctor.checks import check_host
+
+    state = tmp_path / "state"
+    _host_lease(state)
+    registry = state / "leases.json"
+    entries = json.loads(registry.read_text())
+    entries["future-lease"] = {"schema": 99}
+    registry.write_text(json.dumps(entries))
+    results = {r.name: r for r in check_host(state_dir=state, backend="local")}
+    leases = results["host leases"]
+    assert leases.status == "fail"
+    assert "future-lease" in leases.detail
+
+
+def test_check_host_fails_a_corrupt_registry(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_host
+
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    (state / "leases.json").write_text("{not json")
+    results = {r.name: r for r in check_host(state_dir=state, backend="local")}
+    assert results["host leases"].status == "fail"
+
+
+def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
+    """Missing socket fails; a routing-answering listener (clean close, no ack) is ok; a bogus ack warns."""
+    import asyncio
+
+    from inspect_ranges._doctor.checks import check_host
+
+    missing = tmp_path / "none.sock"
+    results = {
+        r.name: r
+        for r in check_host(state_dir=tmp_path / "state", backend=f"uds:{missing}")
+    }
+    assert results["applier socket"].status == "fail"
+
+    async def scenario(answer: bytes | None, path: Path) -> CheckResult:
+        async def server(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            await reader.read(64)
+            if answer is not None:
+                writer.write(answer)
+                await writer.drain()
+            writer.close()
+
+        listener = await asyncio.start_unix_server(server, path=str(path))
+        try:
+            probe = await asyncio.to_thread(
+                check_host, state_dir=tmp_path / "state", backend=f"uds:{path}"
+            )
+            return next(r for r in probe if r.name == "applier socket")
+        finally:
+            listener.close()
+            await listener.wait_closed()
+
+    closing = asyncio.run(scenario(None, tmp_path / "closing.sock"))
+    assert closing.status == "ok", closing.detail
+    acking = asyncio.run(scenario(b"\x06", tmp_path / "acking.sock"))
+    assert acking.status == "warn", acking.detail
