@@ -23,13 +23,15 @@ from typing_extensions import override
 
 from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, resolve_plan
+from .._host.host import LeasePlacement, RangeHost, SampleSpec
+from .._host.leases import LeaseStore
 from .._runtime.ownership import (
     list_projects,
     read_owner,
     remove_project,
     write_owner,
 )
-from .._runtime.up import UpError, UpOptions, UpResult
+from .._runtime.up import UpError, UpOptions, UpResult, bundle_digest
 from ..schema import load_range, revalidate_range
 from ..types import RangeSpec
 from .admission import default_max_sandboxes
@@ -237,8 +239,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     )
                 )
                 boot: asyncio.Future[UpResult] | None = None
+                acquire: asyncio.Future[RangeHost] | None = None
                 try:
                     await asyncio.shield(render)
+                    # record ordering: render, bundle digest, host lease, boot
+                    acquire = asyncio.ensure_future(
+                        cls._acquire_host(
+                            runtime, plan, task_name, sample_id, project, staging
+                        )
+                    )
+                    handle.host = await asyncio.shield(acquire)
                     boot = asyncio.ensure_future(
                         asyncio.to_thread(
                             runtime.up_fn,
@@ -252,7 +262,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     )
                     result: UpResult = await asyncio.shield(boot)
                 except asyncio.CancelledError:
-                    # neither thread can be aborted and both keep creating
+                    # none of these can be aborted and all keep creating
                     # resources; drain them (up is internally bounded) so the
                     # unwind sees everything the attempt created, then
                     # propagate the cancellation. The drain itself tolerates a
@@ -260,7 +270,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # once.
                     pending = [
                         cast("asyncio.Future[object]", f)
-                        for f in (render, boot)
+                        for f in (render, acquire, boot)
                         if f is not None
                     ]
                     try:
@@ -270,6 +280,15 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     except asyncio.CancelledError:
                         pass
                     finally:
+                        # a lease the drained acquire minted must reach the
+                        # handle, or the unwind cannot release it
+                        if (
+                            acquire is not None
+                            and acquire.done()
+                            and not acquire.cancelled()
+                            and acquire.exception() is None
+                        ):
+                            handle.host = acquire.result()
                         await unwind_once()
                     raise
             except asyncio.CancelledError:
@@ -310,6 +329,42 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         raise last_error if last_error is not None else AssertionError("unreachable")
 
     @classmethod
+    async def _acquire_host(
+        cls,
+        runtime: ProviderRuntime,
+        plan: ResolvedPlan,
+        task_name: str,
+        sample_id: str,
+        project: str,
+        staging: Path,
+    ) -> RangeHost:
+        """Digest the rendered bundle and lease a host for it (the backend gates on readiness, writes the lease, logs the isolation claim, and starts renewal)."""
+        digest = await asyncio.to_thread(bundle_digest, staging / "bundle")
+        return await runtime.host_provider.acquire(
+            SampleSpec(
+                sample_id=sample_id,
+                task_name=task_name,
+                spec_sha256=plan.range.spec_sha256,
+                bundle_digest=digest,
+                totals=plan.totals,
+            ),
+            LeasePlacement(
+                project=project,
+                bundle_path=str(staging / "bundle"),
+                staging=str(staging),
+            ),
+        )
+
+    @classmethod
+    async def _release_host(
+        cls, runtime: ProviderRuntime, handle: SampleHandle
+    ) -> None:
+        """Release the sample's host lease (and stop its renewal); only ever called after a successful teardown."""
+        if handle.host is not None:
+            await runtime.host_provider.release(handle.host)
+            handle.host = None
+
+    @classmethod
     def _mark_provider_owned(
         cls, runtime: ProviderRuntime, handle: SampleHandle, sample_id: str
     ) -> None:
@@ -332,7 +387,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     async def _unwind_attempt(
         cls, runtime: ProviderRuntime, handle: SampleHandle
     ) -> None:
-        """Unwind one failed acquisition attempt: project (best effort), lease, staging, registry."""
+        """Unwind one failed acquisition attempt: project (best effort), CID lease, host lease, staging, registry."""
         try:
             # up tears its own project down on failure; this is belt-and-braces
             # for crashes between resource creation and up's own cleanup
@@ -343,8 +398,12 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 handle.project,
                 error,
             )
-            return  # keep lease and registry so the sweep can still find it
+            # keep the CID lease, host lease (renewal keeps running), and
+            # registry entry so the sweep can still find it; a failed down
+            # frees NOTHING
+            return
         await asyncio.to_thread(runtime.allocator.release, handle.project)
+        await cls._release_host(runtime, handle)
         shutil.rmtree(handle.staging, ignore_errors=True)
         runtime.registry.pop(handle.project, None)
 
@@ -352,10 +411,11 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     async def _destroy(cls, runtime: ProviderRuntime, handle: SampleHandle) -> None:
         """Tear one sample down: single attempt, no retry.
 
-        Leases, the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, lease plus the provider-marked owner record for `cli_cleanup`).
+        Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
         """
         await asyncio.to_thread(runtime.down_fn, handle.project, runtime.state_dir)
         await asyncio.to_thread(runtime.allocator.release, handle.project)
+        await cls._release_host(runtime, handle)
         shutil.rmtree(handle.staging, ignore_errors=True)
         runtime.registry.pop(handle.project, None)
         if handle.admission_charged:
@@ -399,9 +459,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         remaining = list(runtime.registry.values())
         if not cleanup:
             for handle in remaining:
+                if handle.host is not None:
+                    # the deliberate keep-it-running path: stop renewing but
+                    # LEAVE the lease, so the independent reaper reclaims the
+                    # range after the lease expires
+                    await runtime.host_provider.abandon(handle.host)
                 logger.warning(
-                    "range %s left up (--no-sandbox-cleanup); remove it with: "
-                    "inspect-ranges down %s  (or: inspect sandbox cleanup libvirt_range %s)",
+                    "range %s left up (--no-sandbox-cleanup); its host lease is "
+                    "no longer renewed, so 'inspect-ranges reaper' reclaims it "
+                    "after expiry; remove it sooner with: inspect-ranges down %s  "
+                    "(or: inspect sandbox cleanup libvirt_range %s)",
                     handle.project,
                     handle.project,
                     handle.project,
@@ -437,6 +504,8 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         targets = sorted(leased | marked)
         if id is not None:
             targets = [project for project in targets if project == id]
+        lease_store = LeaseStore(runtime.state_dir)
+        host_leases = await asyncio.to_thread(lease_store.leases)
         failures: list[str] = []
         for project in targets:
             try:
@@ -445,6 +514,9 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 failures.append(f"{project}: {error}")
                 continue
             await asyncio.to_thread(runtime.allocator.release, project)
+            for lease in host_leases:
+                if lease.project == project:
+                    await asyncio.to_thread(lease_store.release, lease.lease_id)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)
         # no blanket prune: leases outside `targets` may belong to a

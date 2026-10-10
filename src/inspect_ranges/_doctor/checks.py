@@ -74,6 +74,26 @@ def run_checks() -> list[CheckResult]:
     return results
 
 
+def readiness_failures() -> list[str]:
+    """The fast readiness subset host backends gate `acquire` on (`host-provider.md:94`): platform, virtualization devices, docker.
+
+    Failure lines only; `warn` and `skip` results pass (an optional module must never fail acquisition). The full battery stays `run_checks`; this subset is cheap enough to run once per task.
+    """
+    host = check_platform(platform.system(), platform.machine())
+    results = [host]
+    if host.status == "ok":
+        results += check_virtualization(Path("/dev"))
+    results += check_docker(
+        info=_run(["docker", "info", "--format", "{{json .}}"]),
+        compose=_run(["docker", "compose", "version", "--format", "json"]),
+    )
+    return [
+        f"{result.group}: {result.name}: {result.detail}"
+        for result in results
+        if result.status == "fail"
+    ]
+
+
 def _provider_state_dir() -> Path:
     from .._runtime.ownership import default_state_dir
 

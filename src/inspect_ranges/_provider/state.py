@@ -18,6 +18,7 @@ from inspect_ai.util._sandbox.lifecycle import (
 from .._channel.channel import MessageChannel
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
+from .._host.host import HostProvider, RangeHost
 from .._runtime.down import DownResult, down
 from .._runtime.ownership import default_state_dir
 from .._runtime.up import UpOptions, UpResult, up
@@ -77,6 +78,8 @@ class SampleHandle:
     booted: bool = False
     deferred: bool = False
     admission_charged: bool = False
+    host: RangeHost | None = None
+    """The sample's leased host, set between render and boot; `None` again once the lease is released."""
 
 
 class ProviderRuntime:
@@ -92,8 +95,10 @@ class ProviderRuntime:
         self.render_fn: RenderFn = render_bundle
         self.channel_factory: ChannelFactory = _default_channel_factory
         self.registry: dict[str, SampleHandle] = {}
+        self.host_backend = os.environ.get("INSPECT_RANGES_HOST", "local")
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None
+        self._host_provider: HostProvider | None = None
         self._resolved: dict[str | RangeSpec, tuple[RangeSpec, ResolvedPlan]] = {}
 
     @property
@@ -108,6 +113,34 @@ class ProviderRuntime:
         if self._allocator is None:
             self._allocator = CidAllocator(self.state_dir)
         return self._allocator
+
+    @property
+    def host_provider(self) -> HostProvider:
+        """The lease-granting backend `INSPECT_RANGES_HOST` selects (default `local`); mutable like the other seams.
+
+        Raises:
+            NotImplementedError: `uds:<socket>` is selected before slice 3 lands.
+            ValueError: The variable names a backend that does not exist.
+        """
+        if self._host_provider is None:
+            if self.host_backend == "local":
+                from .._host.local import LocalHostProvider
+
+                self._host_provider = LocalHostProvider(self.state_dir)
+            elif self.host_backend.startswith("uds:"):
+                raise NotImplementedError(
+                    "INSPECT_RANGES_HOST=uds:<socket> arrives in range-host-v1 slice 3"
+                )
+            else:
+                raise ValueError(
+                    f"unknown INSPECT_RANGES_HOST backend {self.host_backend!r} "
+                    "(expected 'local' or 'uds:<socket>')"
+                )
+        return self._host_provider
+
+    @host_provider.setter
+    def host_provider(self, provider: HostProvider) -> None:
+        self._host_provider = provider
 
     def staging_root(self) -> Path:
         """The sweep-visible staging root (`down --all` clears leftovers after a SIGKILL)."""

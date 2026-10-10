@@ -78,6 +78,10 @@ def resolve_guest_path(path: str) -> str:
 
 
 def _channel(handle: SampleHandle) -> MessageChannel:
+    if handle.host is not None:
+        # a lost lease (reaped host) fails the sample loudly at its next
+        # operation rather than letting it run on a reclaimed range
+        handle.host.check_lease()
     if handle.channel is None:
         raise RuntimeError("sample channel not initialized (sample_init incomplete)")
     return handle.channel

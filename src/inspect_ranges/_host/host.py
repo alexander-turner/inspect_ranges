@@ -51,20 +51,43 @@ class HostFacts(BaseModel):
     host_class: str
 
 
-class RangeHost(Protocol):
-    """One acquired range host: the channel to it, and what the deployment claims about it."""
+class LeasePlacement(BaseModel):
+    """Driver-side placement facts the lease record needs so the reaper can act from disk alone.
 
-    channel: RangeChannel
+    `SampleSpec` deliberately carries none of these (they are placement, not sample identity), yet the recorded lease shape requires them; `acquire` takes them as a second argument. Recorded in the `range-host-v1.md` ledger as a seam-signature extension over the `host-provider.md:83-91` sketch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    bundle_path: str
+    staging: str
+
+
+class RangeHost(Protocol):
+    """One acquired range host: the channel to it, and what the deployment claims about it.
+
+    `channel` is `None` between acquire and boot in the co-resident backend (the local path builds its channel from booted guest CIDs, after `up`); the separated backend attaches it at acquire. Consumers that need the channel assert its presence at their boundary.
+    """
+
+    channel: RangeChannel | None
     isolation: IsolationLevel
     capabilities: HostCapabilities
     facts: HostFacts
+
+    def check_lease(self) -> None:
+        """Raise `LeaseLostError` when this host's lease has been lost (reaped, or expired and reclaimed); ops call this first, so lease loss fails the sample loudly at its next operation instead of silently running on a reclaimed host."""
+        ...
 
 
 class HostProvider(Protocol):
     """Acquires and releases range hosts.
 
-    `acquire` returns a lease (identity plus expiry; a sample that outlives its lease is reclaimed by the independent reaper) and gates on doctor readiness. `release` is destruction: a used host is never returned to a pool.
+    `acquire` returns a lease (identity plus expiry; a sample that outlives its lease is reclaimed by the independent reaper), gates on doctor readiness, logs the isolation claim, and starts renewal. `release` is destruction and must only follow a successful teardown: a used host is never returned to a pool, and a failed teardown frees nothing. `abandon` is the deliberate keep-it-running path (`cleanup=False`): renewal stops but the lease stays, so the reaper reclaims after expiry.
     """
 
-    async def acquire(self, sample: SampleSpec) -> RangeHost: ...
+    async def acquire(
+        self, sample: SampleSpec, placement: LeasePlacement
+    ) -> RangeHost: ...
     async def release(self, host: RangeHost) -> None: ...
+    async def abandon(self, host: RangeHost) -> None: ...

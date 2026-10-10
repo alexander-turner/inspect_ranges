@@ -4,12 +4,15 @@ The up/down/render seams are fakes; the channel is the REAL `MessageChannel` ove
 """
 
 import asyncio
+import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
 from inspect_ranges._channel.channel import (
+    ChannelError,
     LoopbackTransport,
     MessageChannel,
     TamperError,
@@ -20,6 +23,12 @@ from inspect_ranges._compiler.plan import (
     ResolvedPlan,
     Totals,
     resolve_plan,
+)
+from inspect_ranges._host import (
+    HostNotReadyError,
+    LeaseLostError,
+    LeaseStore,
+    LocalHostProvider,
 )
 from inspect_ranges._provider.admission import AdmissionRefused, HostCapacity
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as Env
@@ -73,6 +82,19 @@ class FakeSeams:
         self.render_calls.append(out)
         out.mkdir(parents=True, exist_ok=True)
         plan = resolve_plan(spec, options)
+        # mimic the real render contract: a deterministic manifest.json (its
+        # sha256 is the canonical bundle digest the host lease records)
+        (out / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "range": plan.range.name,
+                    "spec_sha256": plan.range.spec_sha256,
+                    "files": {},
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         self.plans[str(out)] = plan
         return plan
 
@@ -119,7 +141,22 @@ def rigged_runtime(tmp_path: Path) -> tuple[ProviderRuntime, FakeSeams]:
     runtime.channel_factory = lambda cids, label: MessageChannel(
         LoopbackTransport(guests=tuple(cids)), label=label
     )
+    # a REAL local host provider over a real lease store; only the doctor
+    # readiness gate is stubbed out (tests must not probe this machine)
+    runtime.host_provider = LocalHostProvider(runtime.state_dir, gate=lambda: [])
     return runtime, seams
+
+
+def lease_store(runtime: ProviderRuntime) -> LeaseStore:
+    return LeaseStore(runtime.state_dir)
+
+
+def renewal_tasks() -> list["asyncio.Task[None]"]:
+    return [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("lease-renewal-")
+    ]
 
 
 def test_sample_init_boots_and_orders_the_default_first(tmp_path: Path) -> None:
@@ -270,6 +307,11 @@ def test_cleanup_false_leaves_ranges_up_with_recovery_commands(
             messages = " ".join(record.getMessage() for record in caplog.records)
             assert "inspect-ranges down" in messages
             assert "inspect sandbox cleanup libvirt_range" in messages
+            # the lease stays (the reaper reclaims after expiry) but renewal
+            # stops, and the recovery note names the reaper
+            assert "inspect-ranges reaper" in messages
+            assert len(lease_store(runtime).leases()) == 1
+            assert renewal_tasks() == []
 
     asyncio.run(scenario())
 
@@ -365,6 +407,230 @@ def test_config_forms_and_registration() -> None:
     assert isinstance(round_tripped, RangeSpec)
     assert round_tripped == spec
     assert (Env.default_concurrency() or 0) >= 1
+
+
+# -- range-host-v1 slice 2: the host lease through the provider lifecycle ------
+
+
+def test_sample_holds_one_lease_and_logs_the_isolation_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default-local is today's behavior plus exactly one lease and one isolation log line per sample, released (with its renewal task) on destroy."""
+
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, _seams = rigged_runtime(tmp_path)
+            with caplog.at_level(logging.INFO, logger="inspect_ranges.host"):
+                envs = await Env.sample_init(
+                    "task", small_spec(), {"__sample_id__": "s1"}
+                )
+            leases = lease_store(runtime).leases()
+            assert len(leases) == 1
+            lease = leases[0]
+            assert lease.state == "active"
+            assert lease.origin == "local"
+            assert lease.isolation == "shared"
+            assert lease.task_name == "task" and lease.sample_id == "s1"
+            project = next(iter(runtime.registry))
+            assert lease.project == project
+            assert Path(lease.bundle_path).is_dir(), "the lease names the bundle"
+            isolation_lines = [
+                record.getMessage()
+                for record in caplog.records
+                if "isolation=shared" in record.getMessage()
+            ]
+            assert len(isolation_lines) == 1
+            assert len(renewal_tasks()) == 1
+            await Env.sample_cleanup("task", None, envs, interrupted=False)
+            assert lease_store(runtime).leases() == []
+            assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
+def _rig_permanent_up_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
+    seams.up_errors.append(UpError("verify-bundle", "digest mismatch"))
+
+
+def _rig_exhausted_transient_failures(
+    runtime: ProviderRuntime, seams: FakeSeams
+) -> None:
+    seams.up_errors.extend(UpError("guest-boot", "flake") for _ in range(10))
+
+
+def _rig_channel_factory_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
+    def broken(cids: dict[str, int], label: str) -> MessageChannel:
+        raise RuntimeError("no channel")
+
+    runtime.channel_factory = broken
+
+
+def _rig_ping_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
+    # a channel whose transport knows no guests: the boot-confirmation ping fails
+    runtime.channel_factory = lambda cids, label: MessageChannel(
+        LoopbackTransport(guests=()), label=label
+    )
+
+
+@pytest.mark.parametrize(
+    "rig",
+    [
+        _rig_permanent_up_failure,
+        _rig_exhausted_transient_failures,
+        _rig_channel_factory_failure,
+        _rig_ping_failure,
+    ],
+    ids=["permanent-up", "exhausted-respins", "channel-factory", "boot-ping"],
+)
+def test_every_sample_init_early_exit_releases_the_lease(
+    tmp_path: Path, rig: "Callable[[ProviderRuntime, FakeSeams], None]"
+) -> None:
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, seams = rigged_runtime(tmp_path)
+            rig(runtime, seams)
+            with pytest.raises((UpError, RuntimeError, ChannelError)):
+                await Env.sample_init("task", small_spec(), {"__sample_id__": "x"})
+            assert lease_store(runtime).leases() == []
+            assert renewal_tasks() == []
+            assert runtime.allocator.leased_projects() == []
+            assert runtime.registry == {}
+
+    asyncio.run(scenario())
+
+
+def test_respin_releases_the_failed_attempts_lease(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, seams = rigged_runtime(tmp_path)
+            seams.up_errors = [UpError("guest-boot", "flake")]
+            envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "r"})
+            leases = lease_store(runtime).leases()
+            assert len(leases) == 1, "the failed attempt's lease must be gone"
+            assert leases[0].project == seams.up_calls[1].project
+            assert len(renewal_tasks()) == 1
+            await Env.sample_cleanup("task", None, envs, interrupted=False)
+            assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
+def test_interrupted_sample_keeps_lease_and_renewal_until_task_cleanup(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, _seams = rigged_runtime(tmp_path)
+            envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "i"})
+            await Env.sample_cleanup("task", None, envs, interrupted=True)
+            # the range stays booted until run end, so the lease stays renewed
+            assert len(lease_store(runtime).leases()) == 1
+            assert len(renewal_tasks()) == 1
+            await Env.task_cleanup("task", None, cleanup=True)
+            assert lease_store(runtime).leases() == []
+            assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
+def test_failed_down_frees_neither_lease_nor_renewal(tmp_path: Path) -> None:
+    """A failed teardown frees NOTHING: CID lease, host lease, registry entry, and the renewal task all stay until a teardown succeeds."""
+
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, seams = rigged_runtime(tmp_path)
+            envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "f"})
+            seams.down_errors = [RuntimeError("docker wedged")]
+            with pytest.raises(RuntimeError, match="docker wedged"):
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+            assert len(lease_store(runtime).leases()) == 1
+            assert len(runtime.allocator.leased_projects()) == 1
+            assert len(runtime.registry) == 1
+            assert len(renewal_tasks()) == 1
+            await Env.task_cleanup("task", None, cleanup=True)
+            assert lease_store(runtime).leases() == []
+            assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
+def test_unready_host_fails_the_sample_fast_with_the_report(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, _seams = rigged_runtime(tmp_path)
+            runtime.host_provider = LocalHostProvider(
+                runtime.state_dir, gate=lambda: ["Docker: Docker daemon: not running"]
+            )
+            with pytest.raises(HostNotReadyError, match="Docker daemon"):
+                await Env.sample_init("task", small_spec(), {"__sample_id__": "g"})
+            assert lease_store(runtime).leases() == []
+            assert runtime.allocator.leased_projects() == []
+            assert runtime.registry == {}
+
+    asyncio.run(scenario())
+
+
+def test_readiness_gate_runs_once_per_task(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, _seams = rigged_runtime(tmp_path)
+            calls = 0
+
+            def counting_gate() -> list[str]:
+                nonlocal calls
+                calls += 1
+                return []
+
+            runtime.host_provider = LocalHostProvider(
+                runtime.state_dir, gate=counting_gate
+            )
+            for sample in ("s1", "s2"):
+                envs = await Env.sample_init(
+                    "task", small_spec(), {"__sample_id__": sample}
+                )
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+            assert calls == 1, "the gate is cached per task, not re-run per sample"
+
+    asyncio.run(scenario())
+
+
+def test_lost_lease_fails_the_next_op_loudly(tmp_path: Path) -> None:
+    """The deliberate expiry-mid-sample policy: a reclaimed lease surfaces as `LeaseLostError` at the sample's next operation, never a silent limp."""
+
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, _seams = rigged_runtime(tmp_path)
+            envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "l"})
+            handle = next(iter(runtime.registry.values()))
+            assert handle.host is not None
+            # the reaper's side of the race: the lease vanishes behind the driver
+            store = lease_store(runtime)
+            for lease in store.leases():
+                store.release(lease.lease_id)
+            from inspect_ranges._host import LocalRangeHost
+
+            assert isinstance(handle.host, LocalRangeHost)
+            with pytest.raises(LeaseLostError):
+                await handle.host.renew_now()
+            with pytest.raises(LeaseLostError):
+                await envs["attacker"].exec(["true"])
+            # teardown still works (release is idempotent) and cancels renewal
+            await Env.sample_cleanup("task", None, envs, interrupted=False)
+            assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
+def test_unknown_host_backend_refuses(tmp_path: Path) -> None:
+    with sandbox_lifecycle_scope():
+        runtime, _seams = rigged_runtime(tmp_path)
+        runtime.host_backend = "fleet"
+        runtime._host_provider = None  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(ValueError, match="INSPECT_RANGES_HOST"):
+            _ = runtime.host_provider
+        runtime.host_backend = "uds:/tmp/applier.sock"
+        with pytest.raises(NotImplementedError, match="slice 3"):
+            _ = runtime.host_provider
 
 
 def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
