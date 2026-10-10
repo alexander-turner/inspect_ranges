@@ -85,8 +85,12 @@ class FakeSeams:
         self.render_calls.append(out)
         out.mkdir(parents=True, exist_ok=True)
         plan = resolve_plan(spec, options)
-        # mimic the real render contract: a deterministic manifest.json (its
+        # mimic the real render contract: plan.json (the remote seams read
+        # guests and totals from it) and a deterministic manifest.json (its
         # sha256 is the canonical bundle digest the host lease records)
+        from inspect_ranges._compiler.plan import plan_json
+
+        (out / "plan.json").write_text(plan_json(plan))
         (out / "manifest.json").write_text(
             json.dumps(
                 {
@@ -720,7 +724,10 @@ def test_persistent_store_failure_records_lease_loss_after_a_full_ttl(
     asyncio.run(scenario())
 
 
-def test_unknown_host_backend_refuses(tmp_path: Path) -> None:
+def test_host_backend_selection(tmp_path: Path) -> None:
+    """`INSPECT_RANGES_HOST` selects the backend: unknown names refuse, and `uds:` swaps in the remote provider AND the derived channel seams."""
+    from inspect_ranges._host import RemoteHostProvider
+
     with sandbox_lifecycle_scope():
         runtime, _seams = rigged_runtime(tmp_path)
         runtime.host_backend = "fleet"
@@ -728,8 +735,12 @@ def test_unknown_host_backend_refuses(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="INSPECT_RANGES_HOST"):
             _ = runtime.host_provider
         runtime.host_backend = "uds:/tmp/applier.sock"
-        with pytest.raises(NotImplementedError, match="slice 3"):
-            _ = runtime.host_provider
+        original_up = runtime.up_fn
+        provider = runtime.host_provider
+        assert isinstance(provider, RemoteHostProvider)
+        assert runtime.up_fn is not original_up, (
+            "the uds backend derives up/down/channel seams from the channel"
+        )
 
 
 def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
