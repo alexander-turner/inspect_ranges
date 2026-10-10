@@ -13,6 +13,7 @@ from .host import (
 )
 from .leases import HostLease, LeaseLostError, LeaseStore, lease_ttl_s
 from .local import HostNotReadyError, LocalHostProvider, LocalRangeHost
+from .remote import RemoteHostProvider, RemoteRangeHost
 from .stages import SEAM_STAGES, SeamStage, StageTranslator, TranslatedStage
 
 __all__ = [
@@ -27,6 +28,8 @@ __all__ = [
     "LocalHostProvider",
     "LocalRangeHost",
     "RangeHost",
+    "RemoteHostProvider",
+    "RemoteRangeHost",
     "SEAM_STAGES",
     "SampleSpec",
     "SeamStage",

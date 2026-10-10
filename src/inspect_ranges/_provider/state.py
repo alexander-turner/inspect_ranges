@@ -128,9 +128,16 @@ class ProviderRuntime:
 
                 self._host_provider = LocalHostProvider(self.state_dir)
             elif self.host_backend.startswith("uds:"):
-                raise NotImplementedError(
-                    "INSPECT_RANGES_HOST=uds:<socket> arrives in range-host-v1 slice 3"
+                from .._host.remote import RemoteHostProvider, remote_seams
+
+                socket_path = Path(self.host_backend.removeprefix("uds:"))
+                # the separated backend derives the provider seams from the
+                # channel: realize instead of in-process up, teardown instead
+                # of in-process down, UdsTransport channels
+                self.up_fn, self.down_fn, self.channel_factory = remote_seams(
+                    socket_path, self.state_dir
                 )
+                self._host_provider = RemoteHostProvider(socket_path, self.state_dir)
             else:
                 raise ValueError(
                     f"unknown INSPECT_RANGES_HOST backend {self.host_backend!r} "
