@@ -50,9 +50,12 @@ async def read_preamble(
         lease_raw = await reader.readexactly(32)
         try:
             lease_id = lease_raw.decode("ascii")
-            int(lease_id, 16)
-        except (UnicodeDecodeError, ValueError) as error:
+        except UnicodeDecodeError as error:
             raise ValueError(f"malformed lease id {lease_raw!r}") from error
+        if any(char not in "0123456789abcdef" for char in lease_id):
+            # strict: exactly the documented 32-lowercase-hex wire shape
+            # (int(x, 16) would wave through signs, 0x prefixes, whitespace)
+            raise ValueError(f"malformed lease id {lease_raw!r}")
         (name_length,) = await reader.readexactly(1)
         if name_length == 0:
             raise ValueError("empty endpoint name")

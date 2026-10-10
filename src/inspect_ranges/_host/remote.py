@@ -8,7 +8,6 @@ The reaper's applier connector lives here too: `applier_teardown` tears a `uds:`
 """
 
 import asyncio
-import hashlib
 import logging
 import time
 from collections.abc import Callable
@@ -19,7 +18,7 @@ from .._channel.uds import UdsTransport
 from .._compiler.plan import ResolvedPlan
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
-from .._runtime.up import GuestState, UpError, UpOptions, UpResult
+from .._runtime.up import GuestState, UpError, UpOptions, UpResult, bundle_digest
 from .host import LeasePlacement, RangeHost, SampleSpec
 from .leases import HostLease, LeaseStore, lease_ttl_s
 from .local import LocalRangeHost, local_host_facts
@@ -109,13 +108,18 @@ def _lease_for_project(store: LeaseStore, project: str) -> HostLease | None:
     return None
 
 
+def _lease_channel(socket_path: Path, lease: HostLease, label: str) -> MessageChannel:
+    """THE way a driver-side helper reaches one lease's plane (one construction site for transport, label, and budgets)."""
+    return MessageChannel(UdsTransport(socket_path, lease.lease_id), label=label)
+
+
 async def _drive_realize(
     socket_path: Path, lease: HostLease, bundle: Path, project: str
 ) -> UpResult:
     """`channel.realize` folded back into the `up` contract (`UpResult` or `UpError`)."""
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
-    digest = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
-    channel = MessageChannel(UdsTransport(socket_path, lease.lease_id), label=project)
+    digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
+    channel = _lease_channel(socket_path, lease, project)
     started = time.monotonic()
     try:
         async for report in channel.realize(digest, []):
@@ -170,33 +174,30 @@ def remote_seams(socket_path: Path, state_dir: Path) -> RemoteSeams:
             # fresh-process cleanup of a project whose lease is already gone:
             # same host, so direct down is both available and correct
             return run_down(project, state_dir=state_dir_arg)
-
-        async def teardown() -> None:
-            channel = MessageChannel(
-                UdsTransport(socket_path, lease.lease_id), label=project
-            )
-            await channel.teardown()
-
-        asyncio.run(teardown())
+        _teardown_lease(socket_path, lease)
+        # the applier's OkReply carries no removal counts, so zeros here mean
+        # "not counted remotely", not "no-op" (a counted teardown reply is a
+        # wire-growth candidate, not something to fabricate)
         return DownResult(project=project, containers=0, volumes=0, networks=0)
 
     def channel_factory(cids: dict[str, int], label: str) -> MessageChannel:
         lease = _lease_for_project(store, label)
         if lease is None:
             raise RuntimeError(f"no host lease found for project {label!r}")
-        return MessageChannel(UdsTransport(socket_path, lease.lease_id), label=label)
+        return _lease_channel(socket_path, lease, label)
 
     return up_fn, down_fn, channel_factory
 
 
-def applier_teardown(lease: HostLease) -> None:
-    """The reaper's applier connector: teardown through the lease's own socket (releases the applier's admission charge and relay map). Raises on connect failure; the reaper falls back to direct `down` with the recorded warning."""
-    socket_path = lease.origin.removeprefix("uds:")
+def _teardown_lease(socket_path: Path, lease: HostLease) -> None:
+    """One lease's teardown through its applier, from sync (worker-thread or fresh-process) callers."""
 
     async def teardown() -> None:
-        channel = MessageChannel(
-            UdsTransport(socket_path, lease.lease_id), label=lease.project
-        )
-        await channel.teardown()
+        await _lease_channel(socket_path, lease, lease.project).teardown()
 
     asyncio.run(teardown())
+
+
+def applier_teardown(lease: HostLease) -> None:
+    """The reaper's applier connector: teardown through the lease's own socket (releases the applier's admission charge and relay map). Raises on connect failure; the reaper falls back to direct `down` with the recorded warning."""
+    _teardown_lease(Path(lease.origin.removeprefix("uds:")), lease)

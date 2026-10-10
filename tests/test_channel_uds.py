@@ -1,6 +1,7 @@
 """The UDS transport across two real OS processes: the portable conformance suite over a subprocess applier, and the provider lifecycle over the derived uds seams (range-host-v1 slice 3)."""
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -122,6 +123,52 @@ class TestUdsTwoProcessConformance(PortableChannelSuite):
         return self._fixture.digest
 
 
+# -- the live-applier battery gate (design/spikes/range-host-v1) --------------------
+
+LIVE_SOCKET = os.environ.get("IR_UDS_BATTERY_SOCKET", "")
+LIVE_LEASE = os.environ.get("IR_UDS_BATTERY_LEASE", "")
+LIVE_DIGEST = os.environ.get("IR_UDS_BATTERY_DIGEST", "ab" * 32)
+LIVE_GUEST = os.environ.get("IR_UDS_BATTERY_GUEST", "attacker")
+
+
+@pytest.mark.skipif(
+    not LIVE_SOCKET,
+    reason="no live applier (set IR_UDS_BATTERY_SOCKET; see design/spikes/range-host-v1)",
+)
+class TestUdsLiveApplier(PortableChannelSuite):
+    """The portable suite over the LIVE applier and realizer-booted guests, `realize_digest()` at a genuinely rendered bundle.
+
+    The battery drives this class in three sequential pytest phases (realize first, which BOOTS the lease's range through the real applier; then the guest-plane tests over the registered relay; teardown last), because `up` is deliberately not re-runnable on a booted project (`virsh define` is not idempotent) while the suite's file order puts guest tests before the host plane.
+    """
+
+    guest = LIVE_GUEST
+    has_host_plane = True
+    probe_user = "agent"  # the recipe-v4 golden's exec identity
+
+    @pytest.fixture
+    def channel(self) -> MessageChannel:
+        return MessageChannel(
+            UdsTransport(Path(LIVE_SOCKET), LIVE_LEASE), label="uds-live"
+        )
+
+    def realize_digest(self) -> str:
+        return LIVE_DIGEST
+
+    # the fixture-contract vocabulary, mapped to a real Linux guest
+    def argv_stderr(self, text: str) -> tuple[list[str], int]:
+        return ["sh", "-c", f"printf '%s\\n' '{text}' >&2; exit 2"], 2
+
+    def argv_sleep_ms(self, ms: int) -> list[str]:
+        return ["sh", "-c", f"sleep {ms / 1000}"]
+
+    def argv_env_probe(self) -> list[str]:
+        return [
+            "sh",
+            "-c",
+            'printf "cwd=%s\\nuser=%s\\nANSWER=%s\\n" "$(pwd)" "$(id -un)" "$ANSWER"',
+        ]
+
+
 # -- the provider lifecycle over the derived uds seams (in-process applier) ---------
 
 
@@ -146,6 +193,17 @@ def _uds_rig(
         gate=lambda: [],
     )
     return runtime, seams, applier
+
+
+def test_remote_seams_install_at_runtime_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh `ProviderRuntime` under `INSPECT_RANGES_HOST=uds:` carries the derived seams from birth: paths that never touch `host_provider` (cli_cleanup foremost) still tear down THROUGH the applier instead of leaking its charge behind a direct down."""
+    monkeypatch.setenv("INSPECT_RANGES_HOST", f"uds:{tmp_path / 'applier.sock'}")
+    runtime = ProviderRuntime()
+    assert runtime.down_fn.__module__ == "inspect_ranges._host.remote"
+    assert runtime.up_fn.__module__ == "inspect_ranges._host.remote"
+    assert runtime.channel_factory.__module__ == "inspect_ranges._host.remote"
 
 
 def test_provider_lifecycle_over_the_uds_backend(tmp_path: Path) -> None:

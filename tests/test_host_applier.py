@@ -287,6 +287,13 @@ def test_preamble_garbage_overlength_and_timeout_never_crash_the_server(
             assert await reader.read(1) == b""
             writer.close()
 
+            # a lease id that is 32 ASCII chars but not strict lowercase hex
+            reader, writer = await asyncio.open_unix_connection(str(rig.socket_path))
+            writer.write(PREAMBLE_MAGIC + b"+" + b"a" * 31 + bytes([3]) + b"web")
+            await writer.drain()
+            assert await reader.read(1) == b"", "non-hex lease ids are garbage"
+            writer.close()
+
             # silent client: preamble never arrives
             reader, writer = await asyncio.open_unix_connection(str(rig.socket_path))
             assert await reader.read(1) == b""
@@ -351,14 +358,8 @@ def test_realize_translates_registers_relay_and_replays_identically(
     async def scenario() -> None:
         async with Rig(tmp_path) as rig:
             lease, digest = rig.lease(tmp_path, "ir-realize")
-            channel = rig.channel(lease)
-            stages = [report.stage async for report in channel.realize(digest, [])]
-            assert stages == ["fetch", "construct", "boot", "verify", "ready"]
-            assert len(rig.up_calls) == 1
-            relays = rig.applier._relays  # pyright: ignore[reportPrivateUsage]
-            assert set(relays[lease.lease_id]) == {"attacker", "web"}
-
-            # raw same-id replay: two full streams, byte-identical, one execution
+            # raw same-id streams: the first executes, the second replays
+            # byte-identically from the TRANSLATED log without re-running up
             request = RealizeRequest(id=request_id(), bundle_digest=digest, grants=[])
             runs: list[list[StageReport]] = []
             for _ in range(2):
@@ -375,8 +376,17 @@ def test_realize_translates_registers_relay_and_replays_identically(
                     reports.append(message)
                 await stream.aclose()
                 runs.append(reports)
+            assert [report.stage for report in runs[0]] == [
+                "fetch",
+                "construct",
+                "boot",
+                "verify",
+                "ready",
+            ]
             assert runs[0] == runs[1], "a resumed stream must replay identically"
-            assert len(rig.up_calls) == 2, "the same id executed once (1 + this run)"
+            assert len(rig.up_calls) == 1, "the same id executed exactly once"
+            relays = rig.applier._relays  # pyright: ignore[reportPrivateUsage]
+            assert set(relays[lease.lease_id]) == {"attacker", "web"}
 
     asyncio.run(scenario())
 
@@ -414,6 +424,39 @@ def test_realize_refusals_are_typed_and_never_memoized(tmp_path: Path) -> None:
             )
             stages = [r.stage async for r in rig.channel(lease).realize(digest, [])]
             assert stages[-1] == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_second_realize_on_a_charged_lease_refuses_ebusy(tmp_path: Path) -> None:
+    """One realize per lease: a FRESH-id realize on a realized lease must not double-charge admission or re-run up against the live project."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(tmp_path, "ir-once")
+            stages = [r.stage async for r in rig.channel(lease).realize(digest, [])]
+            assert stages[-1] == "ready"
+            with pytest.raises(HostRefused) as refusal:
+                async for _ in rig.channel(lease).realize(digest, []):
+                    pass
+            assert refusal.value.errno == "EBUSY"
+            assert len(rig.up_calls) == 1, "up must not re-run on the live project"
+
+    asyncio.run(scenario())
+
+
+def test_expired_lease_refuses_realize(tmp_path: Path) -> None:
+    """The realize gate mirrors the guest plane: an expired-but-unreaped lease must not start a boot the reaper's teardown would race."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(tmp_path, "ir-stale", expired=True)
+            with pytest.raises(HostRefused) as refusal:
+                async for _ in rig.channel(lease).realize(digest, []):
+                    pass
+            assert refusal.value.errno == "EINVAL"
+            assert "expired" in str(refusal.value)
+            assert rig.up_calls == []
 
     asyncio.run(scenario())
 
