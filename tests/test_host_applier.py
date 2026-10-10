@@ -428,6 +428,35 @@ def test_realize_refusals_are_typed_and_never_memoized(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_gathered_realizes_on_one_lease_charge_exactly_once(tmp_path: Path) -> None:
+    """The one-realize-per-lease invariant under concurrency: two gathered fresh-id realizes yield one execution and one charge; the loser refuses EBUSY; after teardown the accounting is exact (a same-size realize fits again)."""
+
+    async def scenario() -> None:
+        async with Rig(tmp_path, capacity=HostCapacity(cpus=2, memory_mb=8192)) as rig:
+            lease, digest = rig.lease(tmp_path, "ir-race")
+
+            async def attempt() -> str:
+                try:
+                    stages = [
+                        report.stage
+                        async for report in rig.channel(lease).realize(digest, [])
+                    ]
+                    return stages[-1]
+                except HostRefused as refusal:
+                    return refusal.errno
+
+            outcomes = sorted(await asyncio.gather(attempt(), attempt()))
+            assert outcomes == ["EBUSY", "ready"], outcomes
+            assert len(rig.up_calls) == 1, "exactly one execution"
+            await rig.channel(lease).teardown()
+            # one charge, released exactly once: a full-capacity realize fits
+            second, digest2 = rig.lease(tmp_path, "ir-race2")
+            stages = [r.stage async for r in rig.channel(second).realize(digest2, [])]
+            assert stages[-1] == "ready"
+
+    asyncio.run(scenario())
+
+
 def test_second_realize_on_a_charged_lease_refuses_ebusy(tmp_path: Path) -> None:
     """One realize per lease: a FRESH-id realize on a realized lease must not double-charge admission or re-run up against the live project."""
 
@@ -541,6 +570,73 @@ def test_restart_with_live_leases_logs_the_loss_loudly(
                 pass
         messages = " ".join(record.getMessage() for record in caplog.records)
         assert "LOST" in messages and "reaper" in messages
+
+    asyncio.run(scenario())
+
+
+def test_cli_sigterm_exits_zero_and_unlinks_the_socket(tmp_path: Path) -> None:
+    """The slice-4 battery lesson, pinned in CI: SIGTERM reaches the finally, so a terminated applier exits 0 and leaves no stale socket file to fake readiness for its successor."""
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    binary = Path(sys.executable).parent / "inspect-ranges"
+    sock = tmp_path / "a.sock"
+    proc = subprocess.Popen(
+        [
+            str(binary),
+            "applier",
+            "--socket",
+            str(sock),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--image-cache",
+            str(tmp_path / "cache"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    deadline = time.monotonic() + 30
+    while not sock.exists():
+        if proc.poll() is not None:
+            output = proc.stdout.read() if proc.stdout else ""
+            pytest.skip(
+                f"this host fails the applier's readiness gate: {output[-200:]}"
+            )
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise TimeoutError("applier never bound its socket")
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=15) == 0, "graceful SIGTERM shutdown exits 0"
+    assert not sock.exists(), "the socket must be unlinked on shutdown"
+
+
+def test_aclose_never_unlinks_a_replacements_socket(tmp_path: Path) -> None:
+    """Start-new-then-stop-old supervision: the old applier's shutdown must not delete the replacement's freshly bound socket (the unlink is inode-guarded)."""
+
+    async def scenario() -> None:
+        rig = Rig(tmp_path)
+        await rig.applier.start()
+        lease, _ = rig.lease(tmp_path, "ir-replaced", with_bundle=False)
+        replacement = Applier(
+            rig.socket_path,
+            rig.state,
+            image_cache=tmp_path / "cache",
+            down_fn=rig._down,  # pyright: ignore[reportPrivateUsage]
+            gate=lambda: [],
+        )
+        await replacement.start()  # unlinks and rebinds the same path
+        await rig.applier.aclose()  # the OLD applier exits
+        assert rig.socket_path.is_socket(), "the replacement's socket survives"
+        beat = await MessageChannel(
+            UdsTransport(rig.socket_path, lease.lease_id, ack_timeout_s=2.0)
+        ).heartbeat()
+        assert beat.uptime_ms >= 0, "the replacement still serves"
+        await replacement.aclose()
+        assert not rig.socket_path.exists(), "the owner's shutdown unlinks"
 
     asyncio.run(scenario())
 

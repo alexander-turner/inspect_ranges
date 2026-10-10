@@ -61,7 +61,10 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
 _COMPLETED_RUN_CAP = 64
-"""Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound)."""
+"""Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound).
+
+Eviction edge, stated: a same-id resend arriving after 64 intervening completions no longer finds its run, so it re-executes a failed run or refuses `EBUSY` on a still-charged one instead of replaying. Practically unreachable in v1: a driver resumes within seconds, and one lease sees one realize.
+"""
 
 
 def _default_up(bundle: Path, options: UpOptions, on_stage: OnStage) -> UpResult:
@@ -132,6 +135,7 @@ class Applier:
         self._bound_stat: os.stat_result | None = None
         self._started = time.monotonic()
         self._runs: dict[str, _RealizeRun] = {}
+        self._lease_locks: dict[str, asyncio.Lock] = {}
         self._relays: dict[str, dict[str, int]] = {}
         self._guest_states: dict[str, dict[str, GuestState]] = {}
         self._charges: dict[str, Totals] = {}
@@ -391,6 +395,7 @@ class Applier:
             await self.admission.release(charge)
         self._relays.pop(lease.lease_id, None)
         self._guest_states.pop(lease.lease_id, None)
+        self._lease_locks.pop(lease.lease_id, None)
         logger.info(
             "teardown: lease=%s project=%s (charge and relay map released)",
             lease.lease_id,
@@ -405,22 +410,35 @@ class Applier:
     ) -> None:
         run = self._runs.get(request.id)
         if run is None:
-            refusal = await self._refusal(lease, request)
-            if refusal is not None:
-                errno, detail = refusal
-                logger.warning(
-                    "realize refused: lease=%s %s: %s", lease.lease_id, errno, detail
-                )
-                # refusals are never memoized: a later realize re-checks
-                await self._send(
-                    writer, ErrorReply(id=request.id, errno=errno, message=detail)
-                )
-                return
-            run = _RealizeRun()
-            self._runs[request.id] = run
-            task = asyncio.create_task(self._execute(lease, request, run))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            # the refusal gate awaits (manifest and plan reads), so without
+            # serialization two gathered fresh-id realizes on one lease both
+            # pass the charge check: the one-realize-per-lease invariant must
+            # hold under concurrency, with exactly one charge and the loser
+            # refused EBUSY
+            lock = self._lease_locks.setdefault(lease.lease_id, asyncio.Lock())
+            async with lock:
+                run = self._runs.get(request.id)  # a same-id raced us here
+                if run is None:
+                    refusal = await self._refusal(lease, request)
+                    if refusal is not None:
+                        errno, detail = refusal
+                        logger.warning(
+                            "realize refused: lease=%s %s: %s",
+                            lease.lease_id,
+                            errno,
+                            detail,
+                        )
+                        # refusals are never memoized: a later realize re-checks
+                        await self._send(
+                            writer,
+                            ErrorReply(id=request.id, errno=errno, message=detail),
+                        )
+                        return
+                    run = _RealizeRun()
+                    self._runs[request.id] = run
+                    task = asyncio.create_task(self._execute(lease, request, run))
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
         # stream the run's reports (live or replayed identically from the log)
         index = 0
         while True:

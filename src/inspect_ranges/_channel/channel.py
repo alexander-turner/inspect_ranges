@@ -139,7 +139,7 @@ class FileLimitExceeded(ChannelError):
 class HostRefused(ChannelError):
     """The applier refused a realize before emitting any stage report.
 
-    A refusal is an `ErrorReply` carrying the realize request's own id as the very first reply of the stream: typed, errno-tagged (`EAGAIN` capacity-full, `ENOSPC` range-exceeds-host, `EINVAL` digest mismatch, `ENOTSUP` unsupported grants), and never a re-runnable stream (refusals are not memoized applier-side). An error reply with a wrong id, or one arriving after any stage report, is tamper, not a refusal.
+    A refusal is an `ErrorReply` carrying the realize request's own id as the very first reply of the stream: typed, errno-tagged (`EAGAIN` capacity-full, `ENOSPC` range-exceeds-host, `EINVAL` digest mismatch or dead lease, `ENOTSUP` unsupported grants, `EBUSY` the lease already holds a realize), and never a re-runnable stream (refusals are not memoized applier-side). An error reply with a wrong id, or one arriving after any stage report, is tamper, not a refusal.
     """
 
     def __init__(self, errno: str, message: str) -> None:
@@ -347,6 +347,7 @@ class MessageChannel:
                         f"{request.kind} id={request.id}: operation total bound ({outer_s:.0f}s) expired",
                     )
                 )
+            connected = [False]
             try:
                 reply, reply_bulk = await self._once(
                     endpoint,
@@ -354,10 +355,15 @@ class MessageChannel:
                     frames,
                     min(attempt_s, remaining),
                     bulk_cap=bulk_cap,
+                    connected=connected,
                 )
                 deliveries += 1
             except TimeoutError:
-                deliveries += 1  # the frames went out; only the reply is missing
+                if connected[0]:
+                    # the frames went out; only the reply is missing. A window
+                    # that expired still inside connect provably sent nothing
+                    # and is not a delivery.
+                    deliveries += 1
                 layer: BudgetLayer = (
                     "untimed" if deadline - time.monotonic() <= 0 else "channel"
                 )
@@ -447,10 +453,11 @@ class MessageChannel:
         window_s: float,
         *,
         bulk_cap: int,
+        connected: list[bool] | None = None,
     ) -> tuple[Message, bytes | None]:
         """One bounded connect-send-reply round trip.
 
-        Raises `TimeoutError` when the window expires (the caller attributes the layer), loss exceptions for the caller's retry policy, and turns every malformed or residual-bearing reply into a tamper verdict directly. Counts one exchange on success.
+        Raises `TimeoutError` when the window expires (the caller attributes the layer), loss exceptions for the caller's retry policy, and turns every malformed or residual-bearing reply into a tamper verdict directly. Counts one exchange on success. `connected` (when given) is set once connect returns, so the caller's delivery accounting can distinguish an expiry-inside-connect (nothing sent) from a lost reply.
         """
         async with asyncio.timeout(window_s):
             try:
@@ -459,6 +466,8 @@ class MessageChannel:
                 # the request provably never left: callers may resend freely
                 raise _ConnectFailure(str(failure)) from failure
             self.stats.connects += 1
+            if connected is not None:
+                connected[0] = True
             try:
                 for frame in frames:
                     await stream.send(frame)
