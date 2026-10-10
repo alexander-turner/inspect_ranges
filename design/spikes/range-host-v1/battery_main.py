@@ -17,10 +17,9 @@ from pathlib import Path
 SPIKE = Path(__file__).parent
 SPEC = SPIKE / "range.yaml"
 ROOT = SPIKE.parent.parent.parent
-# AF_UNIX paths cap at ~107 bytes; a spike-tree socket blows it from a
-# worktree, so the battery socket lives under a short /tmp dir (0700,
-# created by the applier) keyed by uid
-SOCKET = Path(f"/tmp/ir-rh-{os.getuid()}") / "applier.sock"
+sys.path.insert(0, str(SPIKE))
+from applier_proc import SOCKET, start_applier  # noqa: E402 - spike-local helper
+
 TASK = "range-host-battery"
 
 failures: list[str] = []
@@ -31,40 +30,6 @@ def check(name: str, good: bool, detail: str = "") -> None:
     print(f"{'PASS ' if good else 'FAIL '} {name}" + (f"  [{detail}]" if detail and not good else ""))
     if not good:
         failures.append(name)
-
-
-def start_applier(state_dir: Path, log_name: str) -> "subprocess.Popen[bytes]":
-    import socket as socket_module
-
-    SOCKET.unlink(missing_ok=True)  # a stale file would fake readiness below
-    log = open(SPIKE / "tmp" / "logs" / log_name, "wb")  # noqa: SIM115 - lives as long as the process
-    proc = subprocess.Popen(
-        [
-            # the venv binary DIRECTLY: a `uv run` wrapper absorbs kill()
-            # (SIGKILL cannot be forwarded), leaving the real applier alive
-            str(ROOT / ".venv" / "bin" / "inspect-ranges"), "applier",
-            "--socket", str(SOCKET),
-            "--state-dir", str(state_dir),
-            "--image-cache", os.environ["INSPECT_RANGES_IMAGE_CACHE"],
-        ],
-        cwd=ROOT,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    deadline = time.monotonic() + 60
-    while True:  # readiness means CONNECTABLE, not merely present
-        if proc.poll() is not None or time.monotonic() > deadline:
-            raise RuntimeError("applier never came up (see logs/applier*.txt)")
-        if SOCKET.exists():
-            probe = socket_module.socket(socket_module.AF_UNIX)
-            try:
-                probe.connect(str(SOCKET))
-                return proc
-            except OSError:
-                pass
-            finally:
-                probe.close()
-        time.sleep(0.1)
 
 
 async def observed_realize(state_dir: Path, image_cache: Path) -> None:
@@ -275,7 +240,7 @@ async def main() -> int:
     state_dir = default_state_dir()
     image_cache = Path(os.environ["INSPECT_RANGES_IMAGE_CACHE"])
     (SPIKE / "tmp" / "logs").mkdir(parents=True, exist_ok=True)
-    applier = start_applier(state_dir, "applier-main.txt")
+    applier = start_applier(ROOT, state_dir, SPIKE / "tmp" / "logs" / "applier-main.txt")
     check("applier process is serving", applier.poll() is None)
     try:
         await observed_realize(state_dir, image_cache)

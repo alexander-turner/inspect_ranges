@@ -18,8 +18,9 @@ from pathlib import Path
 SPIKE = Path(__file__).parent
 SPEC = SPIKE / "range.yaml"
 ROOT = SPIKE.parent.parent.parent
-# short /tmp socket: AF_UNIX paths cap at ~107 bytes (see battery_main)
-SOCKET = Path(f"/tmp/ir-rh-{os.getuid()}") / "applier.sock"
+sys.path.insert(0, str(SPIKE))
+from applier_proc import SOCKET, start_applier  # noqa: E402 - spike-local helper
+
 TASK = "range-host-matrix"
 TTL_S = 12.0
 
@@ -34,41 +35,6 @@ def check(name: str, good: bool, detail: str = "") -> None:
     print(f"{'PASS ' if good else 'FAIL '} {name}" + (f"  [{detail}]" if detail and not good else ""))
     if not good:
         failures.append(name)
-
-
-def start_applier(state_dir: Path, log_name: str) -> "subprocess.Popen[bytes]":
-    import socket as socket_module
-
-    SOCKET.unlink(missing_ok=True)  # a stale file would fake readiness below
-    log = open(SPIKE / "tmp" / "logs" / log_name, "ab")  # noqa: SIM115
-    proc = subprocess.Popen(
-        [
-            # the venv binary DIRECTLY: a `uv run` wrapper absorbs kill()
-            # (SIGKILL cannot be forwarded), so the wedge scenario would
-            # "kill" the wrapper while the real applier kept serving
-            str(ROOT / ".venv" / "bin" / "inspect-ranges"), "applier",
-            "--socket", str(SOCKET),
-            "--state-dir", str(state_dir),
-            "--image-cache", os.environ["INSPECT_RANGES_IMAGE_CACHE"],
-        ],
-        cwd=ROOT,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    deadline = time.monotonic() + 60
-    while True:  # readiness means CONNECTABLE, not merely present
-        if proc.poll() is not None or time.monotonic() > deadline:
-            raise RuntimeError("applier never came up")
-        if SOCKET.exists():
-            probe = socket_module.socket(socket_module.AF_UNIX)
-            try:
-                probe.connect(str(SOCKET))
-                return proc
-            except OSError:
-                pass
-            finally:
-                probe.close()
-        time.sleep(0.1)
 
 
 def running_project_containers(project: str) -> int:
@@ -144,10 +110,13 @@ async def concurrent_samples(env_type: object, state_dir: Path) -> None:
     check("both samples' leases released", LeaseStore(state_dir).leases() == [])
 
 
-async def wedged_teardown_and_restart(env_type: object, state_dir: Path, applier: "subprocess.Popen[bytes]") -> "subprocess.Popen[bytes]":
+async def wedged_teardown_and_restart(
+    env_type: object, state_dir: Path, procs: "dict[str, subprocess.Popen[bytes]]"
+) -> None:
     from inspect_ranges._host import LeaseStore
     from inspect_ranges._provider.state import provider_runtime
 
+    applier = procs["applier"]
     envs = await env_type.sample_init(TASK, str(SPEC), {"__sample_id__": "wedge"})
     project = envs["attacker"]._handle.project
     applier.kill()
@@ -168,7 +137,8 @@ async def wedged_teardown_and_restart(env_type: object, state_dir: Path, applier
     )
     check("the range is still running (nothing was freed under it)", running_project_containers(project) > 0)
 
-    fresh = start_applier(state_dir, "applier-restarted.txt")
+    fresh = start_applier(ROOT, state_dir, SPIKE / "tmp" / "logs" / "applier-restarted.txt")
+    procs["applier"] = fresh  # immediately: a later failure must terminate THIS one
     # the restarted applier serves a NEW sample cleanly (recorded limitation:
     # the old charge is lost applier-side; disk-driven teardown recovers)
     new_envs = await env_type.sample_init(TASK, str(SPEC), {"__sample_id__": "after-restart"})
@@ -183,7 +153,6 @@ async def wedged_teardown_and_restart(env_type: object, state_dir: Path, applier
         and runtime.allocator.leased_projects() == []
         and running_project_containers(project) == 0,
     )
-    return fresh
 
 
 def kill9_and_reaper(state_dir: Path) -> None:
@@ -286,19 +255,21 @@ async def main() -> int:
     env_type = registry_find_sandboxenv("libvirt_range")
     state_dir = default_state_dir()
     (SPIKE / "tmp" / "logs").mkdir(parents=True, exist_ok=True)
-    applier = start_applier(state_dir, "applier-matrix.txt")
+    procs: "dict[str, subprocess.Popen[bytes]]" = {
+        "applier": start_applier(ROOT, state_dir, SPIKE / "tmp" / "logs" / "applier-matrix.txt")
+    }
     try:
         with sandbox_lifecycle_scope():
             await env_type.task_init(TASK, str(SPEC))
             await concurrent_samples(env_type, state_dir)
-            applier = await wedged_teardown_and_restart(env_type, state_dir, applier)
+            await wedged_teardown_and_restart(env_type, state_dir, procs)
         await asyncio.to_thread(kill9_and_reaper, state_dir)
         with sandbox_lifecycle_scope():
             await env_type.task_init(TASK, str(SPEC))
             await forced_expiry_and_race(env_type, state_dir)
     finally:
-        applier.terminate()
-        applier.wait(timeout=10)
+        procs["applier"].terminate()
+        procs["applier"].wait(timeout=10)
     (SPIKE / "tmp" / "matrix.json").write_text(json.dumps(evidence, indent=2))
     if failures:
         print(f"{len(failures)} matrix checks failed: {failures}")

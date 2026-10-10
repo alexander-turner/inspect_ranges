@@ -2,7 +2,7 @@
 
 *The booted-range integration gate for the range-host phase: a real `inspect-ranges applier` process and real driver processes on the m6i.metal devbox against recipe-v4 goldens, exercising everything the CI suites reached only through injected seams. Run 2026-10-10 (45 battery checks across the two scripts plus the orchestrator's residue sweep, all green); logs under `tmp/` (gitignored).*
 
-Usage: `./run.sh` (exclusive via the shared battery lock; derives its own golden into `tmp/cache`, state under `tmp/state`; `./run.sh down` sweeps). The applier socket lives under `/tmp/ir-rh-<uid>/` because `AF_UNIX` paths cap at ~107 bytes and a worktree-nested spike path exceeds it. Battery CID band 20000+ for the battery's own direct allocations; provider-driven samples ride the allocator's 10000+ partition as in production.
+Usage: `./run.sh` (exclusive via the shared battery lock; derives its own golden into `tmp/cache`, state under `tmp/state`; `./run.sh down` sweeps). The applier socket lives under `$XDG_RUNTIME_DIR/ir-rh-battery/` (uid-keyed `/tmp` fallback) because `AF_UNIX` paths cap at ~107 bytes and a worktree-nested spike path exceeds it; `applier_proc.py` is the one shared copy of applier spawning and readiness probing for both battery scripts. Battery CID band 20000+ for the battery's own direct allocations; provider-driven samples ride the allocator's 10000+ partition as in production.
 
 ## What runs
 
@@ -22,11 +22,11 @@ Usage: `./run.sh` (exclusive via the shared battery lock; derives its own golden
 
 | What | Seconds |
 |---|---|
-| Observed realize to ready (2 guests, through the applier) | 50.6 |
-| Suite realize phase (same flow plus pytest startup) | 48.4 |
-| UDS sample boot + teardown through the entry point | 47.4 |
-| Local sample boot + teardown through the entry point | 48.1 |
-| UDS boot + ops/self_check battery + teardown | 64.9 |
+| Observed realize to ready (2 guests, through the applier) | 51.0 |
+| Suite realize phase (same flow plus pytest startup) | 48.6 |
+| UDS sample boot + teardown through the entry point | 47.2 |
+| Local sample boot + teardown through the entry point | 46.7 |
+| UDS boot + ops/self_check battery + teardown | 65.4 |
 | Fresh-shell reaper reclaim of a 2-guest range | 1.6 |
 
 The separated topology costs nothing measurable on one host: UDS boot+teardown landed inside run-to-run noise of the local path (the relay adds no per-frame round trips, and realize is dominated by guest boot either way).
@@ -43,5 +43,6 @@ The separated topology costs nothing measurable on one host: UDS boot+teardown l
 - `range.yaml`: the two-guest battery spec (image `noble-range-guest`)
 - `run.sh`: the orchestrator (setup, battery main, lifecycle matrix, residue sweep)
 - `battery_main.py`, `lifecycle_matrix.py`, `boot_and_die.py`: the scenarios
+- `applier_proc.py`: shared applier spawning and readiness probing
 
 Timing summaries from battery runs belong in this committed README, per the house spike convention; `tmp/` evidence is ephemeral, so a number only the logs carry is a number the record loses.
