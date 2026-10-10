@@ -119,6 +119,13 @@ def test_fail_detail_falls_back_to_the_cause_field() -> None:
     )
 
 
+def test_fail_without_diagnostics_is_the_bare_stage_name() -> None:
+    translator = StageTranslator()
+    assert translator.translate("guest-boot", "fail") == TranslatedStage(
+        "failed", "guest-boot"
+    )
+
+
 def test_ready_is_terminal() -> None:
     translator = StageTranslator()
     for stage in ("verify-images", "range-image", "guest-boot", "readiness", "ready"):

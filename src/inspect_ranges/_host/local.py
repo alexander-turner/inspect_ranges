@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import socket
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -54,6 +55,7 @@ class LocalRangeHost:
         self._ttl_s = ttl_s
         self._lost: LeaseLostError | None = None
         self._renewal: asyncio.Task[None] | None = None
+        self._renewed_at = time.monotonic()
 
     def check_lease(self) -> None:
         """Raise the `LeaseLostError` a renewal step recorded, so lease loss fails the sample loudly at its next operation.
@@ -85,6 +87,7 @@ class LocalRangeHost:
             raise
 
     def start_renewal(self) -> None:
+        self._renewed_at = time.monotonic()
         self._renewal = asyncio.create_task(
             self._renew_forever(), name=f"lease-renewal-{self.lease.lease_id}"
         )
@@ -110,17 +113,38 @@ class LocalRangeHost:
             await asyncio.sleep(self._ttl_s / 3)
             try:
                 await self.renew_now()
+                self._renewed_at = time.monotonic()
             except LeaseLostError:
                 return  # recorded; check_lease surfaces it at the next op
             except Exception:
                 # a transient store failure (flock, disk) must not silently
                 # kill renewal under a healthy sample: keep trying at TTL/3.
-                # Only failure persisting a full TTL lets the lease expire,
-                # at which point this driver is indistinguishable from a dead
-                # one and the reaper's reclaim is the designed outcome.
+                # Once failures span a full TTL the lease has provably
+                # expired from under us, so record the loss as the typed
+                # LeaseLostError (check_lease raises it proactively, instead
+                # of the sample dying later on untyped transport errors) and
+                # STILL keep retrying: if the store heals before the reaper
+                # acts, renewing the expired-but-unreaped lease keeps a
+                # mid-teardown reclaim race away while the sample fails. The
+                # recorded loss is never cleared.
                 logger.exception(
                     "lease renewal for %s failed; retrying", self.lease.lease_id
                 )
+                if (
+                    self._lost is None
+                    and time.monotonic() - self._renewed_at >= self._ttl_s
+                ):
+                    self._lost = LeaseLostError(
+                        f"host lease {self.lease.lease_id} could not be renewed "
+                        f"for a full TTL ({self._ttl_s}s); it has expired and may "
+                        "be reclaimed"
+                    )
+                    logger.error(
+                        "lease lost: lease=%s project=%s: renewal failed for a "
+                        "full TTL",
+                        self.lease.lease_id,
+                        self.lease.project,
+                    )
 
 
 class LocalHostProvider:

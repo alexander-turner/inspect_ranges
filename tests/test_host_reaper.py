@@ -11,7 +11,12 @@ from inspect_ranges._host import HostFacts, HostLease, LeaseStore
 from inspect_ranges._host.reaper import ReapOutcome, sweep
 from inspect_ranges._provider.naming import CidAllocator
 from inspect_ranges._runtime.down import DownResult
-from inspect_ranges._runtime.ownership import owner_record, read_owner, write_owner
+from inspect_ranges._runtime.ownership import (
+    owner_record,
+    read_owner,
+    remove_project,
+    write_owner,
+)
 
 
 class Clock:
@@ -56,10 +61,12 @@ class Rig:
         self.down_errors: list[Exception] = []
 
     def down(self, project: str, state_dir: Path) -> DownResult:
-        # destroy-before-release, observed DURING teardown: everything is
-        # still findable while down runs
+        # destroy-before-release, observed DURING teardown: the host lease
+        # (the retry anchor) is findable on every pass, and nothing at all
+        # is freed before the first teardown succeeds
         assert self.store.get(self.lease.lease_id) is not None
-        assert self.allocator.leased_projects() == [self.project]
+        if not self.down_calls:
+            assert self.allocator.leased_projects() == [self.project]
         self.down_calls.append(project)
         if self.down_errors:
             raise self.down_errors.pop(0)
@@ -186,7 +193,52 @@ def test_release_failure_is_contained_and_the_next_sweep_retries(
     assert rig.allocator.leased_projects() == []
 
 
+def test_host_lease_release_failure_leaves_the_retry_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host lease is released LAST: a bookkeeping failure after teardown (here `remove_project`) leaves the reaping lease on disk, so the next sweep genuinely retries and finishes, owner record included."""
+    import inspect_ranges._host.reaper as reaper_module
+
+    rig = Rig(tmp_path)
+    failures = ["state dir hiccup"]
+
+    def flaky(state_dir: Path, project: str) -> None:
+        if failures:
+            raise OSError(failures.pop())
+        remove_project(state_dir, project)
+
+    monkeypatch.setattr(reaper_module, "remove_project", flaky)
+    first = rig.sweep()
+    assert [(o.action, o.error) for o in first] == [
+        ("release-failed", "state dir hiccup")
+    ]
+    survivor = rig.store.get(rig.lease.lease_id)
+    assert survivor is not None and survivor.state == "reaping", (
+        "the lease is the retry anchor and must survive the failure"
+    )
+    second = rig.sweep()
+    assert [o.action for o in second] == ["reaped"]
+    assert rig.store.leases() == []
+    assert read_owner(rig.state, rig.project) is None
+
+
 def test_reaper_cli_one_shot_on_a_clean_state_dir(tmp_path: Path) -> None:
     result = CliRunner().invoke(ranges, ["reaper", "--state-dir", str(tmp_path)])
     assert result.exit_code == 0
     assert result.output == ""
+
+
+def test_reaper_cli_one_shot_exits_1_on_a_failed_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import inspect_ranges._cli.reapercmd as reapercmd
+
+    outcome = ReapOutcome("deadbeef", "ir-x", "down-failed", "docker wedged")
+
+    def rigged_sweep(state_dir: Path) -> list[ReapOutcome]:
+        return [outcome]
+
+    monkeypatch.setattr(reapercmd, "sweep", rigged_sweep)
+    result = CliRunner().invoke(ranges, ["reaper", "--state-dir", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "down-failed: ir-x (lease deadbeef): docker wedged" in result.output

@@ -678,6 +678,48 @@ def test_lost_lease_fails_the_next_op_loudly(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_persistent_store_failure_records_lease_loss_after_a_full_ttl(
+    tmp_path: Path,
+) -> None:
+    """Renewal failures spanning a full TTL mean the lease has provably expired: the loss surfaces as the typed `LeaseLostError` (not later transport noise), while the task keeps retrying in case the store heals."""
+
+    class DeadStore(LeaseStore):
+        def renew(self, lease_id: str, ttl_s: float | None = None) -> HostLease:
+            raise OSError("store down")
+
+    async def scenario() -> None:
+        store = DeadStore(tmp_path / "state")
+        provider = LocalHostProvider(
+            tmp_path / "state", gate=lambda: [], store=store, ttl_s=0.09
+        )
+        host = await provider.acquire(
+            SampleSpec(
+                sample_id="s1",
+                task_name="task",
+                spec_sha256="a" * 64,
+                bundle_digest="b" * 64,
+                totals=Totals(guests=1, cpus=1, memory_mb=512),
+            ),
+            LeasePlacement(project="ir-dead", bundle_path="/b", staging="/s"),
+        )
+        lost = False
+        for _ in range(100):
+            await asyncio.sleep(0.03)
+            try:
+                host.check_lease()
+            except LeaseLostError:
+                lost = True
+                break
+        assert lost, "a full TTL of failures must record the loss"
+        with pytest.raises(LeaseLostError, match="full TTL"):
+            host.check_lease()
+        assert len(renewal_tasks()) == 1, "retrying continues in case the store heals"
+        await provider.release(host)
+        assert renewal_tasks() == []
+
+    asyncio.run(scenario())
+
+
 def test_unknown_host_backend_refuses(tmp_path: Path) -> None:
     with sandbox_lifecycle_scope():
         runtime, _seams = rigged_runtime(tmp_path)

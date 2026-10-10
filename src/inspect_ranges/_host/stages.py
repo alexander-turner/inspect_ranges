@@ -65,7 +65,8 @@ class StageTranslator:
             raw = fields or {}
             cause = raw.get("error") or raw.get("cause")
             parts = [str(part) for part in (raw.get("guest"), cause) if part]
-            return TranslatedStage("failed", f"{stage}: {': '.join(parts)}".rstrip())
+            detail = f"{stage}: {': '.join(parts)}" if parts else stage
+            return TranslatedStage("failed", detail)
         group = _GROUP.get(stage)
         if group is None or group in self._emitted:
             return None

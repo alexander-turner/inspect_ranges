@@ -49,6 +49,10 @@ class JsonRegistry[EntryT: BaseModel]:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def _read(self) -> RegistryView[EntryT]:
+        # an unreadable, non-JSON, or non-object file reads as empty
+        # (inherited from the CID allocator for byte-compatibility), which
+        # means a corrupted registry is silently discarded by the next
+        # write; doctor's strict registry health checks are the mitigation
         try:
             raw = json.loads(self._path.read_text())
         except (OSError, ValueError):

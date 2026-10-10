@@ -1,6 +1,6 @@
 """The independent reaper: reclaims expired host leases from on-disk state alone.
 
-Cleanup must never depend on the original driver process reaching `finally` (`host-provider.md`); the reaper runs in a fresh process, reads `leases.json`, and reclaims on expiry alone, never probing liveness (a healthy sample never expires because its driver renews independently of sample activity). Sweep shape, per `range-host-v1.md`: select and mark under the flock (`LeaseStore.mark_reaping`, which re-checks expiry so a just-landed renewal is spared), tear down OUTSIDE the lock, and only after a successful teardown release the project's CID lease, remove the host lease, and clear the staging and owner record. A failed teardown frees nothing: the lease stays `reaping`, so the next sweep resumes it (crash-resume works the same way).
+Cleanup must never depend on the original driver process reaching `finally` (`host-provider.md`); the reaper runs in a fresh process, reads `leases.json`, and reclaims on expiry alone, never probing liveness (a healthy sample never expires because its driver renews independently of sample activity). Sweep shape, per `range-host-v1.md`: select and mark under the flock (`LeaseStore.mark_reaping`, which re-checks expiry so a just-landed renewal is spared), tear down OUTSIDE the lock, and only after a successful teardown release the project's CID lease, clear the staging and owner record, and remove the host lease LAST: the lease is the retry anchor, so any failure earlier in the release phase leaves it `reaping` and the next sweep genuinely retries. A failed teardown frees nothing (crash-resume works the same way).
 
 For `uds:` leases the reaper prefers teardown through the applier socket, which also releases the applier's admission charge and relay map; with no applier teardown available (or on its failure) it falls back to direct `down` with a logged warning that a live applier's charge leaks until restart (recorded v1 risk). The applier connector arrives in slice 3; until then every `uds:` lease takes the fallback.
 """
@@ -115,9 +115,11 @@ def _reap_one(
             return ReapOutcome(lease.lease_id, lease.project, "down-failed", str(error))
     try:
         allocator.release(lease.project)
-        store.release(lease.lease_id)
         shutil.rmtree(Path(lease.staging), ignore_errors=True)
         remove_project(state_dir, lease.project)
+        # the host lease goes LAST: it is the retry anchor, so a failure in
+        # any step above leaves it reaping and findable
+        store.release(lease.lease_id)
     except Exception as error:
         # the lease stays reaping; the next sweep re-runs the (idempotent)
         # teardown and release steps, and a long-lived --interval reaper
