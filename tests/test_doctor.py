@@ -497,6 +497,19 @@ def test_check_host_fails_a_corrupt_registry(tmp_path: Path) -> None:
     assert results["host leases"].status == "fail"
 
 
+def test_check_host_fails_an_unknown_backend(tmp_path: Path) -> None:
+    """A typo'd INSPECT_RANGES_HOST must fail doctor, because the provider refuses it at eval time."""
+    from inspect_ranges._doctor.checks import check_host
+
+    results = {
+        r.name: r
+        for r in check_host(state_dir=tmp_path / "state", backend="unix:/tmp/x.sock")
+    }
+    backend = results["backend"]
+    assert backend.status == "fail"
+    assert "uds:<socket>" in backend.detail
+
+
 def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
     """Missing socket fails; a routing-answering listener (clean close, no ack) is ok; a bogus ack warns."""
     import asyncio
@@ -514,7 +527,12 @@ def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
         async def server(
             reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         ) -> None:
-            await reader.read(64)
+            received = b""
+            while len(received) < 42:  # the whole preamble, however chunked
+                chunk = await reader.read(64)
+                if not chunk:
+                    break
+                received += chunk
             if answer is not None:
                 writer.write(answer)
                 await writer.drain()

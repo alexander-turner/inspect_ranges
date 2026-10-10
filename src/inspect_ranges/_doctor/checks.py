@@ -257,128 +257,124 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
         except ValueError:
             return entry_block(entry) is not None
 
-    lease_path = state_dir / "cids.json"
-    if not lease_path.exists():
-        results.append(
-            CheckResult(PROVIDER, "cid leases", "ok", "no lease file yet (clean state)")
+    results.append(
+        _strict_registry_check(
+            PROVIDER,
+            "cid leases",
+            state_dir / "cids.json",
+            reservable,
+            bad_label="entries whose CID block cannot be determined",
+            hazard=(
+                "undeterminable entries block all leasing, and a corrupt file "
+                "reads as EMPTY to the allocator, so fresh leases could "
+                "silently overlap CIDs of still-running VMs"
+            ),
         )
-    else:
-        try:
-            raw = json.loads(lease_path.read_text())
-            if not isinstance(raw, dict):
-                raise ValueError("registry root is not an object")
-            entries = cast("dict[str, object]", raw)
-            blocked = sorted(
-                project for project, entry in entries.items() if not reservable(entry)
-            )
-            if blocked:
-                raise ValueError(
-                    "entries whose CID block cannot be determined: "
-                    + ", ".join(blocked)
-                )
-            results.append(
-                CheckResult(
-                    PROVIDER,
-                    "cid leases",
-                    "ok",
-                    f"{len(entries)} entr{'y' if len(entries) == 1 else 'ies'} at {lease_path}",
-                )
-            )
-        except (OSError, ValueError) as error:
-            results.append(
-                CheckResult(
-                    PROVIDER,
-                    "cid leases",
-                    "fail",
-                    f"{lease_path} unreadable or corrupt ({error}): undeterminable entries block all leasing, and a corrupt file reads as EMPTY to the allocator, so fresh leases could silently overlap CIDs of still-running VMs",
-                    fix=(
-                        "tear everything down, then remove the registry: "
-                        f"inspect sandbox cleanup libvirt_range && rm {lease_path}"
-                    ),
-                )
-            )
+    )
     return results
 
 
+def _strict_registry_check(
+    group: str,
+    name: str,
+    path: Path,
+    entry_ok: Callable[[object], bool],
+    *,
+    bad_label: str,
+    hazard: str,
+) -> CheckResult:
+    """One flat `{key: entry}` registry read STRICTLY (deliberately stricter than the runtime readers, which preserve-but-skip what they cannot parse): a corrupt file or an unacceptable entry is one loud fail row carrying `hazard`, never a doctor crash."""
+    if not path.exists():
+        return CheckResult(group, name, "ok", "no lease file yet (clean state)")
+    try:
+        raw = json.loads(path.read_text())
+        if not isinstance(raw, dict):
+            raise ValueError("registry root is not an object")
+        entries = cast("dict[str, object]", raw)
+        bad = sorted(key for key, entry in entries.items() if not entry_ok(entry))
+        if bad:
+            raise ValueError(f"{bad_label}: " + ", ".join(bad))
+        return CheckResult(
+            group,
+            name,
+            "ok",
+            f"{len(entries)} entr{'y' if len(entries) == 1 else 'ies'} at {path}",
+        )
+    except (OSError, ValueError) as error:
+        return CheckResult(
+            group,
+            name,
+            "fail",
+            f"{path} unreadable or corrupt ({error}): {hazard}",
+            fix=(
+                "tear everything down, then remove the registry: "
+                f"inspect sandbox cleanup libvirt_range && rm {path}"
+            ),
+        )
+
+
 def check_host(state_dir: Path, backend: str) -> list[CheckResult]:
-    """The range-host surface: strict `leases.json` health, an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one.
+    """The range-host surface: strict `leases.json` health, an expired-leases hint naming the reaper, the applier socket probe when `INSPECT_RANGES_HOST` points at one, and a loud fail for a backend name the provider would refuse at eval time.
 
     Like the CID registry check, the lease read is deliberately STRICTER than the store's own forgiving reader: an entry the store would preserve-but-skip is a lease the reaper cannot see, so doctor reports it loudly instead.
     """
-    from datetime import UTC, datetime
+    from .._host.leases import HostLease, LeaseStore
 
-    from .._host.leases import HostLease
-
-    results: list[CheckResult] = []
-    lease_path = state_dir / "leases.json"
-    if not lease_path.exists():
-        results.append(
-            CheckResult(HOST, "host leases", "ok", "no lease file yet (clean state)")
-        )
-    else:
+    def parseable(entry: object) -> bool:
         try:
-            raw = json.loads(lease_path.read_text())
-            if not isinstance(raw, dict):
-                raise ValueError("registry root is not an object")
-            entries = cast("dict[str, object]", raw)
-            leases: list[HostLease] = []
-            unparseable: list[str] = []
-            for key, entry in entries.items():
-                try:
-                    leases.append(HostLease.model_validate(entry))
-                except ValueError:
-                    unparseable.append(key)
-            if unparseable:
-                raise ValueError(
-                    "unparseable lease entries: " + ", ".join(sorted(unparseable))
-                )
+            HostLease.model_validate(entry)
+            return True
+        except ValueError:
+            return False
+
+    results = [
+        _strict_registry_check(
+            HOST,
+            "host leases",
+            state_dir / "leases.json",
+            parseable,
+            bad_label="unparseable lease entries",
+            hazard=(
+                "a lease the store cannot parse is a range the reaper cannot "
+                "see or reclaim"
+            ),
+        )
+    ]
+    if results[0].status == "ok" and (state_dir / "leases.json").exists():
+        # the sweep-selection predicate itself, not a reimplementation: the
+        # hint must stay in lockstep with what the reaper will actually select
+        stale = sorted(lease.project for lease in LeaseStore(state_dir).expired())
+        if stale:
             results.append(
                 CheckResult(
                     HOST,
-                    "host leases",
-                    "ok",
-                    f"{len(leases)} lease{'' if len(leases) == 1 else 's'} at {lease_path}",
+                    "expired leases",
+                    "warn",
+                    f"{len(stale)} lease(s) expired or mid-reap "
+                    f"({', '.join(stale)}): their ranges hold CIDs and "
+                    "resources until reclaimed",
+                    fix="inspect-ranges reaper  (one-shot; or --interval <s> as a daemon)",
                 )
             )
-            now = datetime.now(UTC)
-            stale = sorted(
-                lease.project
-                for lease in leases
-                if lease.state == "reaping" or lease.expires() <= now
-            )
-            if stale:
-                results.append(
-                    CheckResult(
-                        HOST,
-                        "expired leases",
-                        "warn",
-                        f"{len(stale)} lease(s) expired or mid-reap "
-                        f"({', '.join(stale)}): their ranges hold CIDs and "
-                        "resources until reclaimed",
-                        fix="inspect-ranges reaper  (one-shot; or --interval <s> as a daemon)",
-                    )
-                )
-            elif leases:
-                results.append(
-                    CheckResult(HOST, "expired leases", "ok", "every lease is current")
-                )
-        except (OSError, ValueError) as error:
+        elif LeaseStore(state_dir).leases():
             results.append(
-                CheckResult(
-                    HOST,
-                    "host leases",
-                    "fail",
-                    f"{lease_path} unreadable or corrupt ({error}): a lease the "
-                    "store cannot parse is a range the reaper cannot see or "
-                    "reclaim",
-                    fix=(
-                        "tear everything down, then remove the registry: "
-                        f"inspect sandbox cleanup libvirt_range && rm {lease_path}"
-                    ),
-                )
+                CheckResult(HOST, "expired leases", "ok", "every lease is current")
             )
     if backend.startswith("uds:"):
         results.append(_probe_applier_socket(Path(backend.removeprefix("uds:"))))
+    elif backend != "local":
+        # the provider raises ValueError for this at eval time; a typo'd
+        # backend passing doctor clean is exactly the miss doctor exists for
+        results.append(
+            CheckResult(
+                HOST,
+                "backend",
+                "fail",
+                f"INSPECT_RANGES_HOST={backend!r} is not a backend "
+                "(expected 'local' or 'uds:<socket>')",
+                fix="unset INSPECT_RANGES_HOST, or point it at a running applier: uds:<socket>",
+            )
+        )
     return results
 
 
@@ -386,32 +382,39 @@ def _probe_applier_socket(socket_path: Path) -> CheckResult:
     """Connect and send a routing preamble for an unknown lease: a serving applier answers routing (a clean no-ack close); a dead socket refuses."""
     import socket as socket_module
 
+    from .._channel.channel import HOST_APPLIER
     from .._channel.uds import encode_preamble
 
-    if not socket_path.is_socket():
-        return CheckResult(
-            HOST,
-            "applier socket",
-            "fail",
-            f"INSPECT_RANGES_HOST points at {socket_path}, which is not a socket",
-            fix=f"start it: inspect-ranges applier --socket {socket_path}",
-        )
-    probe = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
-    probe.settimeout(2.0)
     try:
-        probe.connect(str(socket_path))
-        probe.sendall(encode_preamble("0" * 32, "@host"))
-        answer = probe.recv(1)
-    except (OSError, TimeoutError) as error:
+        # inside the try: on Python 3.12 Path.is_socket() propagates
+        # PermissionError for an unstatable ancestor, and doctor must report,
+        # never crash
+        if not socket_path.is_socket():
+            return CheckResult(
+                HOST,
+                "applier socket",
+                "fail",
+                f"INSPECT_RANGES_HOST points at {socket_path}, which is not a socket",
+                fix=f"start it: inspect-ranges applier --socket {socket_path}",
+            )
+        probe = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+        probe.settimeout(2.0)
+        try:
+            probe.connect(str(socket_path))
+            # "0"*32 is valid wire shape but can never collide with a
+            # uuid4-minted lease id, so a real applier always refuses it
+            probe.sendall(encode_preamble("0" * 32, HOST_APPLIER))
+            answer = probe.recv(1)
+        finally:
+            probe.close()
+    except OSError as error:  # TimeoutError is an OSError since 3.10
         return CheckResult(
             HOST,
             "applier socket",
             "fail",
-            f"{socket_path} exists but did not answer routing ({error})",
+            f"{socket_path} did not answer routing ({error})",
             fix=f"start it: inspect-ranges applier --socket {socket_path}",
         )
-    finally:
-        probe.close()
     if answer == b"":
         return CheckResult(
             HOST, "applier socket", "ok", f"{socket_path} answers routing"
