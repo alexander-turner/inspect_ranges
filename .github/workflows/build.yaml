@@ -59,12 +59,22 @@ jobs:
           tar -C "$HOME/.local/go-toolchains" -xzf /tmp/go.tgz
           mv "$HOME/.local/go-toolchains/go" "$HOME/.local/go-toolchains/go1.23.6"
           "$HOME/.local/go-toolchains/go1.23.6/bin/go" version
+      - name: Install the pinned .NET SDK (the C# codec drift guard)
+        run: |
+          curl -fsSL -o /tmp/dotnet.tgz https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.404/dotnet-sdk-8.0.404-linux-x64.tar.gz
+          echo "5bf340ba6acb314c703c2492a3a6e1530d7cdbfd3b5bf86788ee8b4afefd3573  /tmp/dotnet.tgz" | sha256sum -c
+          mkdir -p "$HOME/.local/dotnet"
+          tar -C "$HOME/.local/dotnet" -xzf /tmp/dotnet.tgz
+          "$HOME/.local/dotnet/dotnet" --version
       - name: Run tests
         run: uv run pytest
         env:
           # the Go drift guard and bundle determinism battery must RUN in CI,
           # never silently skip (tests fail loudly if the toolchain is absent)
           INSPECT_RANGES_REQUIRE_GO: "1"
+          # same contract for the C# codec drift guard: the third codec's
+          # parity is enforced here, never silently skipped
+          INSPECT_RANGES_REQUIRE_DOTNET: "1"
 
   py-build:
     runs-on: ubuntu-latest

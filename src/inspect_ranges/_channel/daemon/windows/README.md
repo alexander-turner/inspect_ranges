@@ -18,7 +18,7 @@ SDK pin: **8.0.404**; `vsockd-win.csproj` pins `LangVersion=5` so everything sta
 
 ## CI story
 
-`tests/test_cs_codec.py` drives the vector check from the Python suite. Linux CI does not build C#: the test skips there EXPLICITLY (visible skip reason) and fails loudly under `INSPECT_RANGES_REQUIRE_DOTNET=1`, which is the Windows-runner/battery story (the channel-v1 Windows battery sets it). This mirrors how the Go gate worked before its CI enforcement; enforcing it in CI means adding a runner with the pinned SDK, recorded as the follow-up in channel-v1.md.
+`tests/test_cs_codec.py` drives the vector check from the Python suite. Linux CI installs the pinned SDK (8.0.404 by sha256 into `$HOME/.local/dotnet`) and sets `INSPECT_RANGES_REQUIRE_DOTNET=1`, so the guard is enforced there exactly like the Go gate: it fails loudly if the toolchain is absent and skips with a visible reason only on dev machines without the pin. A Windows-behavioral runner (in-box csc.exe build path, real Windows path APIs) remains the recorded follow-up in channel-v1.md for when the build phase resumes Windows work; until then those surfaces are covered by the host-side unit pins plus the in-guest battery.
 
 ## Kill semantics (differs from Linux, deliberately)
 

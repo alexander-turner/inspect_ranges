@@ -1,6 +1,6 @@
 """Drive the C# codec's vector round-trip (the third-codec drift guard).
 
-Linux CI has no C# toolchain: this skips there with a visible reason and fails loudly under `INSPECT_RANGES_REQUIRE_DOTNET=1`, which the Windows battery sets (see `daemon/windows/README.md` for the pin and the CI story).
+CI installs the pinned SDK and sets `INSPECT_RANGES_REQUIRE_DOTNET=1`, so this guard is enforced there and fails loudly if the toolchain is absent; it skips with a visible reason only on dev machines without the pin (see `daemon/windows/README.md` for the pin and the CI story).
 """
 
 import os
