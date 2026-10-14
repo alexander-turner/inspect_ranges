@@ -1,6 +1,6 @@
 ## Unreleased
 
-- CI tests on Python 3.12 and 3.15. The matrix jobs now set `UV_PYTHON`, so each entry runs its own version; before, every entry ran on the 3.12 from `.python-version`.
+- CI tests on Python 3.12 and 3.14. The matrix jobs now set `UV_PYTHON`, so each entry runs its own version; before, every entry ran on the 3.12 from `.python-version`.
 
 - CI enforces the C# codec drift guard: the py-test job installs the pinned .NET SDK (8.0.404 by sha256) and sets `INSPECT_RANGES_REQUIRE_DOTNET=1`, so three-codec parity fails loudly in CI instead of silently skipping.
 
