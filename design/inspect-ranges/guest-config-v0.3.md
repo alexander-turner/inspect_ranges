@@ -16,7 +16,7 @@ A guest-content declaration is a statement about the **converged state** of a gu
 
 Two corollaries:
 
-- **Scenario credentials belong in the spec in plaintext.** They are scenario content, visible by design. Per-sample proof material (flags, canaries, principal-bound secrets) never appears in the spec; it is generated from independent entropy at instantiation ([scoring-integrity](scoring-integrity.md)).
+- **Scenario credentials belong in the spec in plaintext.** They are scenario content, visible by design. Per-sample proof material (flags, canaries, principal-bound secrets) never appears in the spec; it is generated from independent entropy at instantiation ([scoring-integrity](challenges-scoring-integrity.md)).
 - **Realization is gated, not pretended.** Until the build phase lands, `resolve_plan` refuses specs carrying guest content with `guest-config-not-realized` (one positioned issue per occurrence), the same pattern as `windows-render-not-supported`. Nothing boots with silently missing content.
 
 ## The vocabulary
