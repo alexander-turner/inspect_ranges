@@ -48,7 +48,7 @@ An earlier draft proposed memory restore as the standard profile for AD/heavy-Wi
 
 ### Adopted regardless of restore path
 
-1. **Range-readiness health checks** (reviewer's suggestion): the battery already run ad hoc in every restore spike (`Test-ComputerSecureChannel`, `Get-ADDomain`, SRV resolution through the real DNS chain, KDC reachability, time status) becomes the formal AD range-readiness gate, executed in the provider's *verify* stage (which the sample state machine already defines) for cold boots and memory restores alike; failure marks the sample invalid/infrastructure per [scoring-integrity](scoring-integrity.md)'s validity states, never silently scored.
+1. **Range-readiness health checks** (reviewer's suggestion): the battery already run ad hoc in every restore spike (`Test-ComputerSecureChannel`, `Get-ADDomain`, SRV resolution through the real DNS chain, KDC reachability, time status) becomes the formal AD range-readiness gate, executed in the provider's *verify* stage (which the sample state machine already defines) for cold boots and memory restores alike; failure marks the sample invalid/infrastructure per [scoring-integrity](challenges-scoring-integrity.md)'s validity states, never silently scored.
 2. **Checkpoint freshness policy**: the build manifest records capture time and a max age; the provider refuses stale checkpoints. Caps the time-jump exposure structurally; a 60-day-old disk checkpoint has the expired-certificate and password-age problems whether or not memory is restored.
 3. **Image hygiene**: range goldens disable the missed-task storm sources (update scans, maintenance tasks) at build — wanted for determinism regardless.
 

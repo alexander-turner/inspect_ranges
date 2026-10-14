@@ -21,7 +21,7 @@
 
 The bundle's disks are never touched: each sample creates qcow2 overlays *at the paths the saved memory image expects*, backed by the bundle's disks (`live/dc01.qcow2 ← ckpt/dc01.qcow2 ← win-golden.qcow2`). `virsh restore` then resumes the pair against disks that are bit-identical to the save instant, which is what makes memory/disk correspondence safe — the hazard the libvirt documentation warns about (restoring memory against changed disks) is structurally excluded because the restored domain only ever sees a fresh overlay of the saved state. Discard = destroy the transient domains and delete the overlays.
 
-Per-sample setup after restore, as [scoring-integrity](../../inspect-ranges/scoring-integrity.md) requires: clock pushed via `guest-set-time` (Kerberos survived in both samples), fresh proof secret planted from independent entropy.
+Per-sample setup after restore, as [scoring-integrity](../../inspect-ranges/challenges-scoring-integrity.md) requires: clock pushed via `guest-set-time` (Kerberos survived in both samples), fresh proof secret planted from independent entropy.
 
 ## Consequences for the design
 
