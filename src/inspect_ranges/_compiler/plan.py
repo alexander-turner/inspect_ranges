@@ -7,6 +7,7 @@ Render v1 scope: guests whose configuration injector is cloud-init (Linux). Wind
 
 import hashlib
 import json
+import re
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +41,9 @@ class PlanOptions(BaseModel):
 
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
+
+    evidence_capture: bool = False
+    """Render the evidence-capture sidecar (per-segment pcap per `evidence-v1.md`). A plan-time input because the sidecar is part of the realization: the bundle's compose project and digest change with it."""
 
 
 class ImageRef(BaseModel):
@@ -105,6 +109,9 @@ class Requirements(BaseModel):
     egress_uplink: bool
     """Whether the deployment must supply an uplink network (any nat/routed network or attacker egress)."""
 
+    evidence_capture: bool = False
+    """Whether the bundle carries the evidence-capture sidecar (per-segment pcap on a `CAP_NET_RAW`-only compose service; the range container's own capability floor is unchanged by this)."""
+
 
 class Totals(BaseModel):
     """Admission-control sums."""
@@ -145,6 +152,38 @@ def plan_json(plan: ResolvedPlan) -> str:
     return json.dumps(plan.model_dump(mode="json"), sort_keys=True, indent=2) + "\n"
 
 
+_EVIDENCE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+"""Names that fit the evidence stream grammar (`pcap/<network>`, `console/<guest>`); checked at planning when capture is enabled so a nonconforming name refuses up front instead of silently shipping no evidence."""
+
+
+def _evidence_name_issues(spec: RangeSpec) -> list[Issue]:
+    issues: list[Issue] = []
+    named: list[tuple[str, tuple[Any, ...]]] = [
+        (network.name, ("networks", index, "name"))
+        for index, network in enumerate(spec.networks)
+    ]
+    named += [
+        (host.name, ("hosts", index, "name")) for index, host in enumerate(spec.hosts)
+    ]
+    named += [
+        (router.name, ("routers", index, "name"))
+        for index, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        named.append((spec.attacker.name, ("attacker", "name")))
+    for name, path in named:
+        if _EVIDENCE_NAME.match(name) is None:
+            issues.append(
+                Issue(
+                    code="evidence-capture-name",
+                    path=path,
+                    message=f"name {name!r} does not fit the evidence stream grammar (lowercase letters, digits, '._-', starting alphanumeric), so its pcap/console streams cannot be recorded",
+                    hint="rename the network/guest, or render without --evidence-capture",
+                )
+            )
+    return issues
+
+
 def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> ResolvedPlan:
     """Resolve a validated spec into the immutable plan.
 
@@ -160,6 +199,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     """
     options = options or PlanOptions()
     issues: list[Issue] = []
+    if options.evidence_capture:
+        issues.extend(_evidence_name_issues(spec))
     for index, host in enumerate(spec.hosts):
         if host.os.type == "windows":
             issues.append(
@@ -319,6 +360,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             cpu_model=options.cpu_model,
             devices=["/dev/kvm", "/dev/vhost-vsock", "/dev/vhost-net", "/dev/net/tun"],
             egress_uplink=egress_uplink,
+            evidence_capture=options.evidence_capture,
         ),
         totals=Totals(
             guests=len(guests),
