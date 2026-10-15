@@ -308,6 +308,42 @@ def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_stop_never_raises_against_a_sealed_writer(tmp_path: Path) -> None:
+    """stop() is the teardown call: an already-sealed writer plus an unreachable sidecar must not raise (chunk-1 verification probe)."""
+
+    class UnreachableTap:
+        def read_status(self) -> bytes:
+            raise RuntimeError("unreachable")
+
+        def list_segment_files(self, segment: str) -> list[str]:
+            raise OSError("unreachable")
+
+        def read_file(self, relpath: str) -> bytes:
+            raise OSError("unreachable")
+
+        def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+            raise OSError("unreachable")
+
+        def remove_file(self, relpath: str) -> None:
+            raise OSError("unreachable")
+
+        def request_stop(self) -> None:
+            raise RuntimeError("unreachable")
+
+        def read_console(self, guest: str, offset: int) -> tuple[int, bytes]:
+            raise OSError("unreachable")
+
+    async def scenario() -> None:
+        writer = EvidenceWriter(LocalDirSink(tmp_path / "evidence"), writer="host")
+        streamer = CaptureStreamer(
+            writer, UnreachableTap(), segments=["dmz"], console_guests=[]
+        )
+        await writer.seal()  # out-of-order teardown: sealed before stop
+        await streamer.stop(stop_timeout_s=0.2)  # must return, never raise
+
+    asyncio.run(scenario())
+
+
 def test_streamer_start_stop_lifecycle(tmp_path: Path) -> None:
     async def scenario() -> None:
         location, capture, writer, tap = harness(tmp_path)
