@@ -121,9 +121,7 @@ def make_oracle(
     plan = cast(
         ResolvedPlan,
         SimpleNamespace(
-            requirements=SimpleNamespace(
-                evidence_capture=capture, probe_segments=()
-            )
+            requirements=SimpleNamespace(evidence_capture=capture, probe_segments=())
         ),
     )
     handle = SampleHandle(

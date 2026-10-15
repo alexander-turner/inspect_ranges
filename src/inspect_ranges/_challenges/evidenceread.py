@@ -4,7 +4,7 @@ Detection, availability, and degrade decide verdicts from the sealed evidence re
 """
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .._evidence.manifest import ChunkRecord
 from .._evidence.reader import manifest_records, stream_chunks
@@ -64,9 +64,10 @@ async def stream_json_records(
             if not line:
                 continue
             try:
-                parsed = json.loads(line)
+                parsed: object = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if isinstance(parsed, dict):
-                records.append(SpannedRecord(parsed, wall_start, wall_end))
+                typed = cast(dict[str, object], parsed)
+                records.append(SpannedRecord(typed, wall_start, wall_end))
     return records, gapped

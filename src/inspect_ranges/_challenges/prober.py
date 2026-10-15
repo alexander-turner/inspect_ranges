@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from secrets import token_hex
 from typing import TYPE_CHECKING
@@ -31,6 +32,23 @@ PROBE_BATCH_S = 15.0
 
 PROBE_EXEC_TIMEOUT_S = 15.0
 """Hard cap on one probe client invocation (the client's own HTTP timeout is 5 s)."""
+
+
+async def _run_probe_client(argv: list[str]) -> bytes:
+    """Run the probe client in the sidecar and return its stdout (the default client runner)."""
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        async with asyncio.timeout(PROBE_EXEC_TIMEOUT_S):
+            stdout, _ = await process.communicate()
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        raise
+    return stdout
 
 
 def parse_tamper_location(location: str) -> tuple[int, str]:
@@ -64,7 +82,7 @@ class ProbeTarget:
 
 @dataclass
 class _TargetState:
-    records: list[dict[str, object]] = field(default_factory=list)
+    records: list[dict[str, object]] = field(default_factory=lambda: [])
     last_flush: float = field(default_factory=time.monotonic)
 
 
@@ -79,7 +97,9 @@ class Prober:
         *,
         cadence_s: float = PROBE_CADENCE_S,
         batch_s: float = PROBE_BATCH_S,
+        client_runner: "Callable[[list[str]], Awaitable[bytes]] | None" = None,
     ) -> None:
+        self._client_runner = client_runner or _run_probe_client
         self._session = session
         self._project = project
         self._targets = targets
@@ -156,21 +176,11 @@ class Prober:
             "rtt_ms": None,
         }
         try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            async with asyncio.timeout(PROBE_EXEC_TIMEOUT_S):
-                stdout, _ = await process.communicate()
+            stdout = await self._client_runner(argv)
             parsed = json.loads(stdout.decode(errors="replace").strip() or "{}")
             for key in ("status", "http", "rtt_ms", "echo", "found"):
                 if key in parsed:
                     record[key] = parsed[key]
-        except TimeoutError:
-            record["error"] = "probe client timeout"
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
         except Exception as error:
             record["error"] = f"{type(error).__name__}"
         return record
