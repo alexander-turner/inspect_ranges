@@ -313,3 +313,8 @@ def test_doctor_s3_probe_stubbed() -> None:
     )
     assert denied.status == "warn"
     assert "stated condition" in denied.detail
+
+    # a malformed URL is a config FAIL (fix the URL), never a credentials warn
+    malformed = probe_s3_sink("Evidence", "s3://", client=client_with([]))
+    assert malformed.status == "fail"
+    assert "malformed" in malformed.detail

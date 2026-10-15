@@ -475,29 +475,44 @@ def check_evidence(
         evidence_max_bytes,
     )
 
+    # the runtime treats an empty override as unset (`if override:` in
+    # location.py); doctor must evaluate the same sink the runtime will
+    sink_override = sink_override or None
+    log_dir = log_dir or None
+
     results: list[CheckResult] = []
-    try:
-        buffer_mb = evidence_buffer_bytes() // (1024 * 1024)
-        max_mb = evidence_max_bytes() // (1024 * 1024)
-        results.append(
-            CheckResult(
-                EVIDENCE,
-                "knobs",
-                "ok",
-                f"buffer {buffer_mb} MB, per-writer cap {max_mb} MB",
-            )
-        )
-    except ValueError as error:
+    # each knob in its own try, naming its variable: int() errors carry no
+    # variable name, and one broken knob must not mask the other
+    knob_failures: list[str] = []
+    values: dict[str, int] = {}
+    for var, read in (
+        (EVIDENCE_BUFFER_MB_VAR, evidence_buffer_bytes),
+        (EVIDENCE_MAX_MB_VAR, evidence_max_bytes),
+    ):
+        try:
+            values[var] = read() // (1024 * 1024)
+        except ValueError as error:
+            knob_failures.append(f"{var} ({error})")
+    if knob_failures:
         results.append(
             CheckResult(
                 EVIDENCE,
                 "knobs",
                 "fail",
-                f"invalid evidence knob ({error}); the provider disables evidence for every sample rather than failing them",
+                f"invalid evidence knob: {'; '.join(knob_failures)}; the provider disables evidence for every sample rather than failing them",
                 fix=(
                     f"unset or set {EVIDENCE_BUFFER_MB_VAR} and "
                     f"{EVIDENCE_MAX_MB_VAR} to positive integers (MB)"
                 ),
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "knobs",
+                "ok",
+                f"buffer {values[EVIDENCE_BUFFER_MB_VAR]} MB, per-writer cap {values[EVIDENCE_MAX_MB_VAR]} MB",
             )
         )
 
@@ -514,6 +529,19 @@ def check_evidence(
         from .s3probe import probe_s3_sink
 
         results.append(probe_s3_sink(EVIDENCE, sink_override, client=s3_client))
+    elif "://" in sink_override:
+        # mirror sink_for_location's scheme validation: at run time an
+        # unsupported scheme disables evidence for every sample, so a green
+        # local-path probe here would bless the exact misconfiguration
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "sink",
+                "fail",
+                f"unsupported evidence location scheme in {sink_override!r}; the runtime would disable evidence for every sample",
+                fix="use s3://bucket/prefix or a filesystem path for INSPECT_RANGES_EVIDENCE_SINK",
+            )
+        )
     else:
         results.append(_probe_local_sink(sink_override))
 
@@ -558,7 +586,7 @@ def _probe_local_sink(base: str) -> CheckResult:
         probe.write_bytes(b"doctor")
         probe.unlink()
         return CheckResult(EVIDENCE, "sink", "ok", f"writable at {base}")
-    except OSError as error:
+    except (OSError, ValueError) as error:  # ValueError: e.g. an embedded NUL
         return CheckResult(
             EVIDENCE,
             "sink",
