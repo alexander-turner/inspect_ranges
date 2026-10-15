@@ -59,6 +59,13 @@ class RecordingEndpoint(LocalEndpoint):
         if request.user == "root" and request.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]:
             _, _, _, _, path, mode, owner = request.cmd
             target = self.translate(path)
+            if target.exists():
+                # the script's pre-existence refusal: nothing touched, exit 2
+                reply = _result_reply(
+                    request, rc=2, stdout=b"", stderr=b"plant target exists\n"
+                )
+                self._store(request.id, reply)
+                return reply
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(stdin)
             target.chmod(int(mode, 8))
@@ -166,6 +173,38 @@ class TestOracleWriteFile:
             assert plant.env == {}
             assert_no_residue(endpoint, value)
             assert (tmp_path / "tmp" / "plant").read_bytes() == value
+
+        asyncio.run(scenario())
+
+    def test_preexisting_target_refused_untouched(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            existing = tmp_path / "tmp" / "occupied"
+            existing.parent.mkdir(parents=True, exist_ok=True)
+            existing.write_bytes(b"real guest content")
+            with pytest.raises(OracleSetupError):
+                await oracle.write_file("box", "/tmp/occupied", b"plant", owner="svc")
+            assert existing.read_bytes() == b"real guest content"
+
+        asyncio.run(scenario())
+
+    def test_privileged_read_honors_caller_cap(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.write_file("box", "/tmp/big", b"x" * 8192, owner=None)
+            with pytest.raises(OracleSetupError, match="cap"):
+                await oracle.read_file("box", "/tmp/big", cap=4096, user="root")
+            small = await oracle.read_file("box", "/tmp/big", user="root")
+            assert small == b"x" * 8192
+
+        asyncio.run(scenario())
+
+    def test_exec_timeout_conversion_never_zero(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path)
+            await oracle.exec("box", ["true"], timeout_s=0.0005)
+            [request] = recorded_execs(endpoint)
+            assert request.budget.command_ms == 1
 
         asyncio.run(scenario())
 

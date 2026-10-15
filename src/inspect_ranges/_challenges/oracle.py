@@ -26,12 +26,13 @@ class OracleSetupError(RuntimeError):
 
 
 PLANT_SCRIPT = (
-    'umask 077 && cat > "$1" && chmod -- "$2" "$1" && chown -- "$3" "$1"'
-    ' || { rm -f -- "$1"; exit 1; }'
+    'if [ -e "$1" ]; then echo "plant target exists" >&2; exit 2; fi; '
+    'umask 077 && { set -C; cat > "$1"; } && chown -- "$3" "$1"'
+    ' && chmod -- "$2" "$1" || { rm -f -- "$1"; exit 1; }'
 )
 """The owner-flow write, run as root with the value on stdin.
 
-A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, the content arrives on stdin, and `umask 077` means the file is never wider than 0600 between creation and the explicit `chmod`. The trailing branch removes the file on ANY failure, so a refused plant leaves nothing behind.
+A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, and the content arrives on stdin. The ordering and guards each carry an invariant: a pre-existing target refuses untouched (exit 2) and `set -C` makes creation exclusive, so a plant never truncates real guest content and the failure branch never removes a file this script did not create; `umask 077` means the file is never wider than 0600 before the explicit `chmod`; and `chown` runs BEFORE `chmod` because chown(2) clears setuid/setgid bits, which would silently strip them from any mode that carries them.
 """
 
 
@@ -94,7 +95,7 @@ class RangeOracle:
         `cmd` must never carry plant material: values travel as `write_file` bulk or `read_file` replies only.
         """
         budget = (
-            Budget(command_ms=int(timeout_s * 1000))
+            Budget(command_ms=max(1, round(timeout_s * 1000)))
             if timeout_s is not None
             else Budget()
         )
@@ -124,9 +125,11 @@ class RangeOracle:
                 f"privileged read as {user!r} failed on {guest}:{path} "
                 f"(rc {outcome.rc})"
             )
-        if outcome.stdout_truncated:
+        if outcome.stdout_truncated or len(outcome.stdout) > cap:
             raise OracleSetupError(
-                f"privileged read of {guest}:{path} truncated at the reply cap"
+                f"privileged read of {guest}:{path} exceeded the caller's cap "
+                f"({cap} bytes); both read paths refuse oversize rather than "
+                "silently returning more"
             )
         return outcome.stdout
 

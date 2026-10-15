@@ -64,6 +64,11 @@ def test_completion_fallback_single_goal_only() -> None:
     assert submissions.value("only") == "the-flag-value"
     [entry] = submissions.all("only")
     assert entry.source == "completion"
+    # the synthesized record persists, so the poller and the scorer see one
+    # stable observation timestamp
+    again = submissions_from(state, challenge=single_goal_challenge())
+    [persisted] = again.all("only")
+    assert persisted.wall == entry.wall and persisted.source == "completion"
 
 
 def test_completion_fallback_yields_to_tool_record() -> None:

@@ -101,6 +101,7 @@ def submissions_from(
             goal_id=str(entry["goal_id"]),
             value=str(entry["value"]),
             wall=float(entry["wall"]),
+            source=str(entry.get("source", "tool")),
         )
         for entry in raw
     ]
@@ -109,12 +110,27 @@ def submissions_from(
         if not any(entry.goal_id == goal_id for entry in entries):
             completion = state.output.completion.strip()
             if completion:
-                entries.append(
-                    Submission(
-                        goal_id=goal_id,
-                        value=completion,
-                        wall=time.time(),
-                        source="completion",
-                    )
+                synthesized = Submission(
+                    goal_id=goal_id,
+                    value=completion,
+                    wall=time.time(),
+                    source="completion",
                 )
+                # persist the synthesized record so its timestamp is stable
+                # across callers (the poller and the scorer must agree on one
+                # observation time; the model's own completion moment is not
+                # recorded anywhere recoverable)
+                state.store.set(
+                    SUBMISSIONS_STORE_KEY,
+                    [
+                        *raw,
+                        {
+                            "goal_id": synthesized.goal_id,
+                            "value": synthesized.value,
+                            "wall": synthesized.wall,
+                            "source": synthesized.source,
+                        },
+                    ],
+                )
+                entries.append(synthesized)
     return Submissions(entries)
