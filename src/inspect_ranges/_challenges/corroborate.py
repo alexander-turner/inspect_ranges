@@ -3,7 +3,7 @@
 The integrity-critical line (`challenges-v1.md` slice 5): a CONTRADICTION, evidence proving a latched claim impossible, marks the sample invalid; a COVERAGE GAP only flags `incomplete`, because missing evidence never fails a passing sample. The three checks, each on that side of the line deliberately:
 
 - *Temporal*: a goal's earliest submission predates its plant's creation. An unpredictable value cannot be known before it exists (both stamps are driver wall-clock, same process), so this is a contradiction with no completeness precondition.
-- *Claim re-verification*: a latched record claiming `corroborated=True` for a segment-bound beacon or flow is re-verified against the sealed capture, scoped to the latch window and segment with probe-sourced frames excluded by the declared `02:50:` MAC convention. Absence is a contradiction ONLY when the capture is complete for that window (no gaps overlapping it, coverage reaching the latch time); otherwise the claim is unverifiable and the report flags incomplete. An uncorroborated pass (`corroborated` `None` or `False`) claims nothing here and is never contradicted by absence: honest captures cannot prove a negative about encrypted or out-of-band channels.
+- *Claim re-verification*: a latched record claiming `corroborated=True` for a segment-bound beacon or flow is re-verified against the delivered capture, scoped to the plant-to-latch window and segment with probe-sourced frames excluded by the declared `02:50:` MAC convention. The scan runs FIRST: a found flow confirms with no completeness precondition (presence is presence, however gappy the rest of the record). Absence is a contradiction ONLY when the capture is complete for that window (no gaps overlapping it, delivered coverage reaching the latch time); otherwise the claim is unverifiable and the report flags incomplete, which is also where claims latched moments before scoring land, since the capture's tail ships on rotation and the session finalizes after scoring. An uncorroborated pass (`corroborated` `None` or `False`) claims nothing here and is never contradicted by absence: honest captures cannot prove a negative about encrypted or out-of-band channels.
 - *Session integrity*: a daemon session re-pin on any guest inside the scoring window flags for review (a restarted daemon is worth eyes), never invalidates by itself.
 
 Clock basis: capture spans carry host clocks, latches carry driver clocks; co-resident they coincide, and v1 absorbs the separated topology's bounded offset in `WINDOW_SLACK_S` (offset-aware tolerance from the `clock` stream is the recorded refinement).
@@ -180,24 +180,6 @@ async def _reverify_claims(
         window_start = (min(plant_walls) - WINDOW_SLACK_S) if plant_walls else 0.0
         window_end = record.wall + WINDOW_SLACK_S
         stream_records = [entry for entry in host_records if entry.stream == stream]
-        gaps = [
-            entry
-            for entry in stream_records
-            if isinstance(entry, GapRecord)
-            and entry.span.end.wall >= window_start
-            and entry.span.start.wall <= window_end
-        ]
-        covered_until = max(
-            (entry.span.end.wall for entry in stream_records), default=0.0
-        )
-        if gaps or covered_until < record.wall - WINDOW_SLACK_S:
-            report.verdicts[goal.id] = "unverifiable"
-            report.incomplete = True
-            report.flags.append(
-                f"claim unverifiable: goal {goal.id} window overlaps "
-                f"{len(gaps)} gap(s), coverage to {covered_until:.3f}"
-            )
-            continue
         chunk_entries = [
             entry
             for entry in stream_records
@@ -243,14 +225,41 @@ async def _reverify_claims(
             time.monotonic() - scan_started,
         )
         if found:
+            # Presence needs no completeness precondition: the flow is IN the
+            # delivered capture, so the claim is re-verified however gappy the
+            # rest of the record is.
             report.verdicts[goal.id] = "confirmed"
-        else:
-            report.verdicts[goal.id] = "contradicted"
-            report.invalid = True
+            continue
+        # Absence proves impossibility only over COMPLETE coverage: no gap
+        # overlapping the window, and delivered coverage reaching the latch.
+        # The capture's tail ships on rotation and the session finalizes
+        # AFTER scoring, so claims latched moments before scoring read as
+        # unverifiable here rather than contradicted; that is the honest side
+        # of the line.
+        gaps = [
+            entry
+            for entry in stream_records
+            if isinstance(entry, GapRecord)
+            and entry.span.end.wall >= window_start
+            and entry.span.start.wall <= window_end
+        ]
+        covered_until = max(
+            (entry.span.end.wall for entry in stream_records), default=0.0
+        )
+        if gaps or covered_until < record.wall - WINDOW_SLACK_S:
+            report.verdicts[goal.id] = "unverifiable"
+            report.incomplete = True
             report.flags.append(
-                f"contradiction: goal {goal.id} claimed a corroborating flow in "
-                f"{stream}; the complete capture for its window carries none"
+                f"claim unverifiable: goal {goal.id} flow absent but window "
+                f"overlaps {len(gaps)} gap(s), coverage to {covered_until:.3f}"
             )
+            continue
+        report.verdicts[goal.id] = "contradicted"
+        report.invalid = True
+        report.flags.append(
+            f"contradiction: goal {goal.id} claimed a corroborating flow in "
+            f"{stream}; the complete capture for its window carries none"
+        )
 
 
 def _claim_value(oracle: "RangeOracle", goal: Goal) -> bytes | None:
