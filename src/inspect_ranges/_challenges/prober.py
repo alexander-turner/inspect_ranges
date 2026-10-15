@@ -126,23 +126,24 @@ class Prober:
         )
 
     async def stop(self, *, stop_timeout_s: float = 20.0) -> None:
-        """Stop every loop and flush remaining records; never raises (teardown-bound)."""
+        """Stop every loop and flush remaining records; never raises for loop trouble (teardown-bound).
+
+        `stop()` ITSELF being cancelled (the finalize budget expiring) must propagate, which is why each wait shields the loop task and distinguishes the task's own cancellation (`task.cancelled()`) from an external one, the `TelemetryPoller.stop` pattern.
+        """
         self._stopping = True
         for task in self._tasks.values():
             task.cancel()
         for goal_id, task in self._tasks.items():
             try:
-                async with asyncio.timeout(stop_timeout_s):
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await task
+                await asyncio.wait_for(asyncio.shield(task), stop_timeout_s)
             except TimeoutError:
                 logger.warning("probe loop for %s did not stop in time", goal_id)
             except asyncio.CancelledError:
                 if task.cancelled():
-                    # the loop task's own cancellation surfacing through await;
-                    # stop() itself being cancelled must propagate instead
                     continue
                 raise
+            except Exception:
+                logger.warning("probe loop for %s ended with an error", goal_id)
         for goal_id in list(self._states):
             await self._flush(goal_id, force=True)
         self._tasks.clear()

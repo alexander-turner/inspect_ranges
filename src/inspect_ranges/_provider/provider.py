@@ -25,6 +25,9 @@ from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
+from .._metadata import (
+    PROBE_SEGMENTS_METADATA_KEY as _PROBE_SEGMENTS_METADATA_KEY,
+)
 from .._runtime.ownership import (
     list_projects,
     read_owner,
@@ -42,8 +45,8 @@ from .state import ProviderRuntime, SampleHandle, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
 
-PROBE_SEGMENTS_METADATA_KEY = "inspect_ranges:probe_segments"
-"""Sample metadata key carrying comma-joined probe segments (written by `challenge_dataset` from the challenge's `active-prober` goals; read here at render time, so a challenge's observer needs become plan options without the compiler ever seeing challenges)."""
+PROBE_SEGMENTS_METADATA_KEY = _PROBE_SEGMENTS_METADATA_KEY
+"""Re-export of `_metadata.PROBE_SEGMENTS_METADATA_KEY` (the shared, provider-free home)."""
 
 TRANSIENT_UP_STAGES = frozenset(
     {"range-container", "guest-boot", "readiness", "admission"}

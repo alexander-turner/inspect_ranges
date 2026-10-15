@@ -6,13 +6,13 @@ Detection, availability, and degrade decide verdicts from the sealed evidence re
 import json
 from typing import TYPE_CHECKING, cast
 
-from .._evidence.manifest import ChunkRecord
+from .._evidence.manifest import ChunkRecord, GapRecord
 from .._evidence.reader import manifest_records, stream_chunks
 
 if TYPE_CHECKING:
     from .._evidence.reader import EvidenceStore
 
-__all__ = ["SpannedRecord", "stream_json_records"]
+__all__ = ["SpannedRecord", "stream_chunks_with_spans", "stream_json_records"]
 
 
 class SpannedRecord:
@@ -33,8 +33,50 @@ class SpannedRecord:
         return wall if isinstance(wall, (int, float)) else self.wall_start
 
 
+async def stream_chunks_with_spans(
+    store: "EvidenceStore",
+    writer: str,
+    stream: str,
+    *,
+    manifest: "list[ChunkRecord | GapRecord] | None" = None,
+) -> tuple[list[tuple[bytes, float, float]], bool]:
+    """A stream's chunks with their wall-clock spans, plus whether the stream carries gaps.
+
+    `manifest` lets callers reuse one `manifest_records` fetch across streams.
+    """
+    spans: dict[int, tuple[float, float]] = {}
+    gapped = False
+    for entry in (
+        manifest if manifest is not None else await manifest_records(store, writer)
+    ):
+        if entry.stream != stream:
+            continue
+        if isinstance(entry, ChunkRecord):
+            spans[entry.seq] = (entry.span.start.wall, entry.span.end.wall)
+        else:
+            gapped = True
+    chunks = await stream_chunks(store, writer, stream)
+    ordered_seqs = sorted(spans)
+    spanned = [
+        (
+            chunk,
+            *(
+                spans[ordered_seqs[position]]
+                if position < len(ordered_seqs)
+                else (0.0, 0.0)
+            ),
+        )
+        for position, chunk in enumerate(chunks)
+    ]
+    return spanned, gapped
+
+
 async def stream_json_records(
-    store: "EvidenceStore", writer: str, stream: str
+    store: "EvidenceStore",
+    writer: str,
+    stream: str,
+    *,
+    manifest: "list[ChunkRecord | GapRecord] | None" = None,
 ) -> tuple[list[SpannedRecord], bool]:
     """Every JSON-line record of a stream, with spans, plus whether the stream carries gaps.
 
@@ -43,7 +85,9 @@ async def stream_json_records(
     """
     spans: dict[int, tuple[float, float]] = {}
     gapped = False
-    for entry in await manifest_records(store, writer):
+    for entry in (
+        manifest if manifest is not None else await manifest_records(store, writer)
+    ):
         if entry.stream != stream:
             continue
         if isinstance(entry, ChunkRecord):
