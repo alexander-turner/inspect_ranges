@@ -4,7 +4,9 @@ The amplification pins are the fifteen-minute performance gate's first real enfo
 """
 
 import asyncio
+import sys
 import time
+import types
 from ipaddress import IPv4Address
 from pathlib import Path
 from types import SimpleNamespace
@@ -264,3 +266,58 @@ class TestHijackFloor:
         achieved, corroborated = asyncio.run(scenario())
         assert achieved and corroborated is True
         assert "any code execution" in (HijackType.__doc__ or "").lower()
+
+
+class DiscloseFailOracle:
+    """Duck-typed oracle whose foothold write fails after the plant is recorded."""
+
+    def __init__(self) -> None:
+        self.store = PlantStore(None)
+
+    def nonce(self) -> str:
+        return "5e5e5e5e" * 8
+
+    def range_spec(self) -> Any:
+        return SimpleNamespace(attacker=SimpleNamespace(host=None, name="attacker"))
+
+    async def write_file(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("foothold write failed")
+
+
+class TestDisclosedValueFrameScrub:
+    """A failing disclose leaves no disclosed-value bytes in the challenge-layer frames (uniformity with the record's scrub claim; the values are agent-disclosed by design)."""
+
+    def test_tamper_and_hijack_setup_frames_scrubbed(self) -> None:
+        from inspect_ranges._challenges.observedtypes import TamperType
+        from inspect_ranges._challenges.schema import TamperGoal
+
+        for goal_type_cls, goal in (
+            (TamperType, TamperGoal(id="t", host="web", location="8080/status")),
+            (HijackType, HijackGoal(id="h", host="db", service="crashsvc")),
+        ):
+
+            async def scenario() -> list["types.FrameType"]:
+                oracle = DiscloseFailOracle()
+                try:
+                    await goal_type_cls().setup(goal, cast(RangeOracle, oracle))
+                except RuntimeError:
+                    frames: list[types.FrameType] = []
+                    tb = sys.exc_info()[2]
+                    while tb is not None:
+                        frames.append(tb.tb_frame)
+                        tb = tb.tb_next
+                    return frames
+                raise AssertionError("disclose unexpectedly succeeded")
+
+            frames = asyncio.run(scenario())
+            disclosed = (
+                oracle_value
+                for frame in frames
+                if "_challenges" in frame.f_code.co_filename
+                for name, oracle_value in frame.f_locals.items()
+                if name in ("value",)
+            )
+            leaked = list(disclosed)
+            assert leaked == [], (
+                f"{goal_type_cls.__name__}: disclosed value survived in frames: {leaked}"
+            )
