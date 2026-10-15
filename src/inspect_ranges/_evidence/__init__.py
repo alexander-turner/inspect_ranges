@@ -1,0 +1,88 @@
+"""Evidence: tamper-evident capture of what happened in a sample's range.
+
+The format and trust story live in `design/inspect-ranges/evidence-v1.md`: write-once chunks and hash-chained manifests at a per-sample location beside the eval log, written through a put-only sink, replayed offline by the verifier. This package is the T1/T2 machinery scoring corroboration consumes; it never participates in scoring decisions itself.
+"""
+
+from .location import (
+    EVIDENCE_SINK_OVERRIDE_VAR,
+    EvidenceIdentity,
+    active_evidence_identity,
+    derive_evidence_location,
+    evidence_location_for,
+    fallback_evidence_location,
+)
+from .manifest import (
+    ChunkRecord,
+    ClockSpan,
+    ClockStamp,
+    GapRecord,
+    ManifestPart,
+    Seal,
+    SealStatus,
+    StreamSummary,
+    canonical_bytes,
+    chain_genesis,
+    chain_next,
+    chunk_key,
+    clock_now,
+    part_key,
+    seal_digest,
+    seal_key,
+)
+from .reader import (
+    Break,
+    EvidenceStore,
+    GapInfo,
+    LocalDirStore,
+    StreamCoverage,
+    VerifyReport,
+    WriterReport,
+    verify_location,
+)
+from .sink import (
+    DEFAULT_BUFFER_CAP_BYTES,
+    EvidenceSink,
+    EvidenceWriter,
+    FlushResult,
+    LocalDirSink,
+    SealDeliveryError,
+)
+
+__all__ = [
+    "EVIDENCE_SINK_OVERRIDE_VAR",
+    "DEFAULT_BUFFER_CAP_BYTES",
+    "Break",
+    "ChunkRecord",
+    "ClockSpan",
+    "ClockStamp",
+    "EvidenceIdentity",
+    "EvidenceSink",
+    "EvidenceStore",
+    "EvidenceWriter",
+    "FlushResult",
+    "GapInfo",
+    "GapRecord",
+    "LocalDirSink",
+    "LocalDirStore",
+    "ManifestPart",
+    "Seal",
+    "SealDeliveryError",
+    "SealStatus",
+    "StreamCoverage",
+    "StreamSummary",
+    "VerifyReport",
+    "WriterReport",
+    "active_evidence_identity",
+    "canonical_bytes",
+    "chain_genesis",
+    "chain_next",
+    "chunk_key",
+    "clock_now",
+    "derive_evidence_location",
+    "evidence_location_for",
+    "fallback_evidence_location",
+    "part_key",
+    "seal_digest",
+    "seal_key",
+    "verify_location",
+]
