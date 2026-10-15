@@ -151,7 +151,8 @@ def test_streamer_tails_consoles_and_reports_truncation(tmp_path: Path) -> None:
         console.write_bytes(b"boot line one\nboot line two\n")
         await one_cycle(streamer)
         console.write_bytes(b"fresh\n")  # shrank: truncation
-        await one_cycle(streamer)
+        await one_cycle(streamer)  # gap recorded, offset reset
+        await one_cycle(streamer)  # post-truncation content ships from zero
         await writer.seal()
         report = await verify_location(LocalDirStore(location), location=str(location))
         assert report.ok
@@ -268,13 +269,16 @@ def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
         def read_file(self, relpath: str) -> bytes:
             raise OSError("no bytes")
 
+        def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+            raise OSError("no tail")
+
         def remove_file(self, relpath: str) -> None:
             raise OSError("no removal")
 
         def request_stop(self) -> None:
             raise RuntimeError("unreachable")
 
-        def read_console(self, guest: str) -> bytes:
+        def read_console(self, guest: str, offset: int) -> tuple[int, bytes]:
             raise OSError("no console")
 
     async def scenario() -> None:
@@ -285,12 +289,21 @@ def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
         )
         await one_cycle(streamer)
         await streamer.stop(stop_timeout_s=0.5)
-        assert streamer._tap_errors > 0
         await writer.seal()
         report = await verify_location(LocalDirStore(location), location=str(location))
         assert report.ok and report.writers["host"].sealed
         causes = {gap.cause for gap in report.writers["host"].gaps}
         assert "capture-unreachable" in causes
+        # tap trouble is observable in the shipped heartbeat, not internals
+        store = LocalDirStore(location)
+        first_heartbeat = json.loads(
+            (await store.get("chunks/host/heartbeat/000000.bin"))
+            .decode()
+            .splitlines()[0]
+        )
+        assert first_heartbeat["source"] == "streamer"
+        assert first_heartbeat["tap_errors"] > 0
+        assert first_heartbeat["status_available"] is False
 
     asyncio.run(scenario())
 
@@ -319,6 +332,74 @@ def test_streamer_start_stop_lifecycle(tmp_path: Path) -> None:
         assert heartbeat.chunks >= 1
 
     asyncio.run(scenario())
+
+
+def test_streamer_ships_nothing_without_a_status_claim(tmp_path: Path) -> None:
+    """No status (or no segment entry) means active is unknown: shipping would risk a half-written chunk."""
+
+    async def scenario() -> None:
+        location, capture, writer, tap = harness(tmp_path)
+        (capture / "dmz").mkdir()
+        (capture / "dmz" / "g0.pcap").write_bytes(b"maybe-active")
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)  # no status.json at all
+        write_status(capture, {})  # status without a dmz entry
+        await one_cycle(streamer)
+        assert (capture / "dmz" / "g0.pcap").exists()
+        store = LocalDirStore(location)
+        assert await store.list("chunks/host/pcap") == []
+
+    asyncio.run(scenario())
+
+
+def test_streamer_never_ships_at_or_past_the_declared_active(tmp_path: Path) -> None:
+    """A stale status must fail safe: files at or past the declared active may still be open."""
+
+    async def scenario() -> None:
+        location, capture, writer, tap = harness(tmp_path)
+        (capture / "dmz").mkdir()
+        for name, content in (
+            ("g0.pcap", b"old-completed"),
+            ("g0.pcap1", b"declared-active"),
+            ("g0.pcap2", b"newer-than-declared"),  # rotation outran the status
+        ):
+            (capture / "dmz" / name).write_bytes(content)
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap1"}})
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)
+        assert not (capture / "dmz" / "g0.pcap").exists()
+        assert (capture / "dmz" / "g0.pcap1").exists()
+        assert (capture / "dmz" / "g0.pcap2").exists()
+        # a writer-less state ships everything on disk
+        write_status(capture, {"dmz": {"active": None, "state": "restarting"}})
+        await one_cycle(streamer)
+        assert list((capture / "dmz").glob("g*.pcap*")) == []
+        await writer.seal()
+        report = await verify_location(LocalDirStore(location), location=str(location))
+        assert report.ok
+        assert report.writers["host"].streams["pcap/dmz"].chunks == 3
+
+    asyncio.run(scenario())
+
+
+def test_evidence_names_refuse_at_planning(tmp_path: Path) -> None:
+    from inspect_ranges._compiler import PlanOptions, resolve_plan
+    from inspect_ranges.types import IssueError
+
+    from tests.test_compiler import two_segment_spec
+
+    spec = two_segment_spec()
+    spec = spec.model_copy(
+        update={
+            "hosts": [spec.hosts[0].model_copy(update={"name": "Web"})] + spec.hosts[1:]
+        }
+    )
+    resolve_plan(spec, PlanOptions())  # fine without capture
+    try:
+        resolve_plan(spec, PlanOptions(evidence_capture=True))
+        raise AssertionError("expected evidence-capture-name refusal")
+    except IssueError as error:
+        assert [issue.code for issue in error.issues] == ["evidence-capture-name"]
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +534,34 @@ def test_supervisor_bounds_restarts(tmp_path: Path) -> None:
         # a restarted capture never reuses a generation basename
         names = sorted(p.name for p in (supervisor.capture / "dmz").glob("g*.pcap*"))
         assert names == ["g0.pcap", "g1.pcap", "g2.pcap"]
+    finally:
+        supervisor.finish()
+
+
+def test_supervisor_keeps_restart_budget_while_bridge_absent(tmp_path: Path) -> None:
+    """A dead capture plus a missing bridge must wait in `restarting`, not burn the budget."""
+    supervisor = Supervisor(
+        tmp_path,
+        mode="exit",
+        env={"CAPTURE_MAX_RESTARTS": "50", "CAPTURE_POLL_S": "0.1"},
+    )
+    try:
+        supervisor.start()
+        (supervisor.netdev / "br-dmz").touch()
+        supervisor.wait_for(lambda s: s["segments"]["dmz"]["restarts"] >= 1)
+        (supervisor.netdev / "br-dmz").unlink()  # the bridge disappears
+        time.sleep(0.5)  # let any in-flight start settle
+        first = supervisor.wait_for(
+            lambda s: s["segments"]["dmz"]["state"] == "restarting"
+        )
+        time.sleep(1.0)  # ten polls with the bridge absent
+        second = supervisor.status()
+        assert second is not None
+        assert second["segments"]["dmz"]["state"] == "restarting"
+        assert (
+            second["segments"]["dmz"]["restarts"]
+            == first["segments"]["dmz"]["restarts"]
+        )
     finally:
         supervisor.finish()
 
