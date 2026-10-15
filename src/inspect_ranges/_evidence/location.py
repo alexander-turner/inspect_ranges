@@ -5,10 +5,14 @@ The per-sample location is `<evallogstem>.evidence/<sample_id>_<epoch>_<attempt>
 The identity (log location, sample id, epoch, attempt) comes from `inspect_ai`'s active-sample context. That is a private API (`inspect_ai.log._samples.sample_active`), adopted on user direction and isolated in `active_evidence_identity` with a documented fallback: when the context is unavailable the caller derives the location from the log directory and run id instead (`fallback_evidence_location`). A pin test asserts the private surface's shape so an `inspect_ai` upgrade fails loudly in CI rather than silently degrading every sample to the fallback.
 """
 
+import hashlib
+import logging
 import os
 import re
 
 from pydantic import BaseModel, ConfigDict
+
+logger = logging.getLogger(__name__)
 
 EVIDENCE_SINK_OVERRIDE_VAR = "INSPECT_RANGES_EVIDENCE_SINK"
 """Override base for evidence locations; unset means derive from the log location."""
@@ -49,7 +53,11 @@ def active_evidence_identity() -> EvidenceIdentity | None:
             epoch=int(active.epoch),
             attempt=len(retries) + 1,
         )
-    except AttributeError:
+    except (AttributeError, TypeError, ValueError) as error:
+        # any shape drift in the private surface degrades to the fallback
+        # (pydantic's ValidationError is a ValueError); the pin test is what
+        # makes such drift loud in CI
+        logger.debug("active-sample identity unavailable, using fallback: %s", error)
         return None
 
 
@@ -96,6 +104,12 @@ def fallback_evidence_location(
 
 
 def _sanitize(value: str) -> str:
-    """Key-safe form of a sample id (filesystem and S3 alike)."""
+    """Key-safe form of a sample id (filesystem and S3 alike).
+
+    When sanitization alters the id, a short digest of the raw value is appended so distinct ids (`a/b` vs `a?b`) cannot collapse onto one evidence prefix: a collision would turn the second sample's whole record into write-once conflicts.
+    """
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "-", value)
-    return cleaned or "sample"
+    if cleaned == value and cleaned:
+        return cleaned
+    tag = hashlib.sha256(value.encode()).hexdigest()[:8]
+    return f"{cleaned or 'sample'}-{tag}"

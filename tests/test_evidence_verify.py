@@ -93,15 +93,15 @@ def test_clean_record_verifies(tmp_path: Path) -> None:
 
 def test_mutated_chunk_bytes(tmp_path: Path) -> None:
     _build_sealed(tmp_path)
-    target = tmp_path / "chunks/pcap/dmz/000001.bin"
+    target = tmp_path / "chunks/host/pcap/dmz/000001.bin"
     target.write_bytes(b"frame-XXX")  # same size: digest is what catches it
     assert _break_kind(tmp_path) == "chunk-digest"
 
 
 def test_swapped_chunk_contents(tmp_path: Path) -> None:
     _build_sealed(tmp_path)
-    first = tmp_path / "chunks/pcap/dmz/000000.bin"
-    second = tmp_path / "chunks/pcap/dmz/000001.bin"
+    first = tmp_path / "chunks/host/pcap/dmz/000000.bin"
+    second = tmp_path / "chunks/host/pcap/dmz/000001.bin"
     a, b = first.read_bytes(), second.read_bytes()
     first.write_bytes(b)
     second.write_bytes(a)
@@ -114,7 +114,7 @@ def test_swapped_chunk_contents(tmp_path: Path) -> None:
 
 def test_deleted_chunk(tmp_path: Path) -> None:
     _build_sealed(tmp_path)
-    (tmp_path / "chunks/console/web/000000.bin").unlink()
+    (tmp_path / "chunks/host/console/web/000000.bin").unlink()
     assert _break_kind(tmp_path) == "chunk-missing"
 
 
@@ -251,9 +251,20 @@ def test_cli_verify(tmp_path: Path) -> None:
     parsed: dict[str, Any] = json.loads(as_json.output)
     assert parsed["writers"]["host"]["sealed"] is True
 
-    (tmp_path / "chunks/pcap/dmz/000000.bin").unlink()
+    (tmp_path / "chunks/host/pcap/dmz/000000.bin").unlink()
     broken = runner.invoke(evidence, ["verify", str(tmp_path)])
     assert broken.exit_code == 1 and "BREAK [chunk-missing]" in broken.output
 
     remote = runner.invoke(evidence, ["verify", "s3://bucket/prefix"])
     assert remote.exit_code != 0 and "slice 3" in remote.output
+
+
+def test_sealed_stays_truthful_on_mid_parts_break(tmp_path: Path) -> None:
+    """A break during replay must not report a sealed record as unsealed."""
+    _build_sealed(tmp_path)
+    (tmp_path / "chunks/host/pcap/dmz/000001.bin").write_bytes(b"frame-XXX")
+    report = _verify(tmp_path)
+    host = report.writers["host"]
+    assert not host.ok and host.first_break is not None
+    assert host.first_break.kind == "chunk-digest"
+    assert host.sealed and host.seal_status == "complete"

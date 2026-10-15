@@ -51,11 +51,23 @@ def test_attempts_and_epochs_disjoint() -> None:
     assert len(locations) == 4
 
 
-def test_sample_id_sanitized() -> None:
+def test_sample_id_sanitized_without_collisions() -> None:
+    import hashlib
+
+    raw = "web / shell?.py"
+    tag = hashlib.sha256(raw.encode()).hexdigest()[:8]
     location = derive_evidence_location(
-        "logs/x.eval", sample_id="web / shell?.py", epoch=1, attempt=1
+        "logs/x.eval", sample_id=raw, epoch=1, attempt=1
     )
-    assert location == "logs/x.evidence/web---shell-.py_1_1"
+    assert location == f"logs/x.evidence/web---shell-.py-{tag}_1_1"
+    # ids that only differ in disallowed characters stay distinct
+    other = derive_evidence_location(
+        "logs/x.eval", sample_id="web?/ shell/.py", epoch=1, attempt=1
+    )
+    assert other != location
+    # clean ids stay clean (no tag appended)
+    clean = derive_evidence_location("logs/x.eval", sample_id="s1", epoch=1, attempt=1)
+    assert clean == "logs/x.evidence/s1_1_1"
 
 
 def test_override_reroots_layout(monkeypatch: pytest.MonkeyPatch) -> None:
