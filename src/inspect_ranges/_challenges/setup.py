@@ -7,14 +7,20 @@ Setup dispatches through the goal-type registry (`engine.py`): each type's `setu
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from .dataset import CHALLENGE_METADATA_KEY
 from .engine import goal_type
 from .oracle import RangeOracle, range_oracle
+from .poller import start_goal_poller
 from .schema import Challenge, required_observers
 from .submission import submit_goal
+from .timings import add_timing
+
+if TYPE_CHECKING:
+    from inspect_ai.util import Store
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
@@ -82,8 +88,15 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
         await oracle.store.discard(key, reason="setup unwound")
 
 
-async def run_setup(oracle: RangeOracle, challenge: Challenge) -> None:
+async def run_setup(
+    oracle: RangeOracle, challenge: Challenge, store: "Store | None" = None
+) -> None:
     """Run the challenge's setups against `oracle`: observer gate first, then plants in goal order.
+
+    Args:
+        oracle: The sample's oracle.
+        challenge: The challenge whose goals plant.
+        store: The sample store; when given, per-goal setup timings accumulate under `inspect_ranges:timings` (the measure-first surface).
 
     Raises:
         RuntimeError: A required observer is unavailable, or a plant failed (plants already written are unwound first). Callers treat this as infrastructure refusal, never agent failure.
@@ -114,12 +127,15 @@ async def run_setup(oracle: RangeOracle, challenge: Challenge) -> None:
                 f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
             ) from error
         planted.extend(keys)
+        elapsed = time.monotonic() - start
+        if store is not None:
+            add_timing(store, f"goal:{goal.id}", "setup", elapsed)
         logger.info(
             "planted goal=%s type=%s plants=%d elapsed=%.3fs",
             goal.id,
             goal.type,
             len(keys),
-            time.monotonic() - start,
+            elapsed,
         )
 
 
@@ -142,7 +158,12 @@ def plant_goals() -> Solver:
         challenge = Challenge.model_validate(raw)
         if len(challenge.goals) > 1 and not _has_submit_goal(state):
             state.tools.append(submit_goal())
-        await run_setup(range_oracle(), challenge)
+        oracle = range_oracle()
+        await run_setup(oracle, challenge, state.store)
+        # The cheap-tier poller (slice 5): latches mid-run passes with their
+        # timestamps; the scorer stops it. Failure to start is logged by the
+        # poller itself and never blocks the sample.
+        start_goal_poller(oracle, challenge, state.store)
         return state
 
     return solve

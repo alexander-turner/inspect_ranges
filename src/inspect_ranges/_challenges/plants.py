@@ -6,6 +6,7 @@ Nothing in this module logs, serializes, or reprs a plant value.
 """
 
 import hashlib
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,8 @@ class Plant:
     digest: str
     size: int
     value: bytes = field(repr=False)
+    recorded_wall: float = field(default_factory=time.time)
+    """Driver wall-clock when the value was recorded (before it existed anywhere). `corroborate()`'s temporal check compares submission times against it: a submission earlier than the value's creation is a contradiction, since an unpredictable value cannot be known before it exists."""
 
 
 class PlantStore:
