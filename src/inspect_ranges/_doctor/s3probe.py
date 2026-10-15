@@ -21,7 +21,19 @@ def probe_s3_sink(group: str, base: str, *, client: Any | None = None) -> CheckR
     from .._evidence.s3 import new_s3_client, parse_s3_location
 
     try:
+        # parsed OUTSIDE the probe's try: a malformed URL is a config error
+        # that will disable evidence at run time (fail, fix the URL), not an
+        # unreachable sink (warn, stated condition)
         bucket, prefix = parse_s3_location(base)
+    except ValueError as error:
+        return CheckResult(
+            group,
+            "sink",
+            "fail",
+            f"malformed evidence sink location ({error}); the runtime would disable evidence for every sample",
+            fix="fix INSPECT_RANGES_EVIDENCE_SINK: s3://bucket[/prefix]",
+        )
+    try:
         key = f"{prefix}/.doctor-probe/{uuid.uuid4().hex}".lstrip("/")
         s3 = client if client is not None else new_s3_client()
         s3.put_object(Bucket=bucket, Key=key, Body=b"doctor", IfNoneMatch="*")
@@ -33,7 +45,7 @@ def probe_s3_sink(group: str, base: str, *, client: Any | None = None) -> CheckR
         return CheckResult(
             group, "sink", "ok", f"conditional put OK at {base}{residue}"
         )
-    except (BotoCoreError, ClientError, OSError, ValueError) as error:
+    except (BotoCoreError, ClientError, OSError) as error:
         return CheckResult(
             group,
             "sink",
