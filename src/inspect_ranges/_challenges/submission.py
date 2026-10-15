@@ -1,8 +1,8 @@
-"""Submission binding: the `submit(goal_id, value)` tool and its scorer-side reader.
+"""Submission binding: the `submit_goal(goal_id, value)` tool and its scorer-side reader.
 
 Submissions bind to goals through the sample store, read by the mid-run poller and the end-of-run scorer; a single-goal challenge may fall back to the completion text (`challenges-v1.md`). Every submission is kept with its timestamp (latching is first-PASS-wins and lives with the scorer, not here).
 
-Note: inspect_ai's `react()` agent carries its own task-completion `submit` tool; when both are in play, name collisions are the eval author's wiring concern and the completion fallback covers the single-goal case. The engine slice revisits this.
+Naming (slice-3 decision, recorded in `challenges-v1.md`): the tool is `submit_goal`, not `submit`, because inspect_ai's `react()` agent carries its own task-completion `submit` tool with different semantics (ending the run vs recording one goal's proof). The two compose cleanly: multi-goal challenges add `submit_goal` to the agent's tools and goal ids appear in the task instructions (`challenge_dataset` appends them); single-goal challenges work with plain `react()` through the completion fallback.
 """
 
 import time
@@ -22,7 +22,7 @@ __all__ = [
     "Submission",
     "Submissions",
     "submissions_from",
-    "submit",
+    "submit_goal",
 ]
 
 
@@ -38,7 +38,7 @@ class Submission:
 
 
 @tool
-def submit() -> Tool:
+def submit_goal() -> Tool:
     """A tool recording proof submissions for challenge goals."""
 
     async def execute(goal_id: str, value: str) -> str:

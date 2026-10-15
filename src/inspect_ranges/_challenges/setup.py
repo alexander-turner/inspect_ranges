@@ -2,25 +2,18 @@
 
 Setup is symmetric with scoring (`challenges-v1.md`): a prepended solver builds the oracle and plants per-sample proof material from independent entropy, refusing up front when a required observer is unavailable or a plant fails. A refusal raises, which Inspect records as a sample error: infrastructure failure is never read as agent failure, and the sample never starts half-planted (plants already written are unwound).
 
-Slice note: the planting seam below covers the file-planting types (`flag`, `control`/`privilege`, `execute`); the goal-type registry absorbs it when the engine lands, and observer-arming types (prober, detection) join with their slices.
+Setup dispatches through the goal-type registry (`engine.py`): each type's `setup` plants what its proof contract needs and returns plant keys for unwind. Observer-arming types (prober, detection) join with their slices.
 """
 
 import logging
 import time
-from collections.abc import Awaitable, Callable
 
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from .dataset import CHALLENGE_METADATA_KEY
+from .engine import goal_type
 from .oracle import RangeOracle, range_oracle
-from .schema import (
-    Challenge,
-    ControlGoal,
-    ExecuteGoal,
-    FlagGoal,
-    GoalBase,
-    required_observers,
-)
+from .schema import Challenge, required_observers
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
@@ -35,10 +28,11 @@ async def plant_secret_file(
     guest: str,
     path: str,
     owner: str,
+    mode: int = 0o600,
 ) -> str:
-    """Plant a fresh per-sample secret at `guest:path`, readable only by `owner`.
+    """Plant a fresh per-sample secret at `guest:path`, owned by `owner`.
 
-    The T1 record precedes guest state: the store records the digest first, then the file lands mode 0600 with ownership transferred. The value never appears in argv, env, or any log.
+    The T1 record precedes guest state: the store records the digest first, then the file lands with `mode` applied from the first byte and ownership transferred. The value never appears in argv, env, or any log. The default mode keeps plants readable only by `owner`; `exfiltrate` canaries widen it deliberately (protection comes from placement).
 
     Args:
         oracle: The sample's oracle.
@@ -46,7 +40,8 @@ async def plant_secret_file(
         goal_id: The goal this plant proves.
         guest: Guest to plant on.
         path: Absolute in-guest path.
-        owner: Account the plant is readable by.
+        owner: Account that owns the plant.
+        mode: Permission bits applied atomically with the write.
 
     Returns:
         The plant-store key, for unwind bookkeeping.
@@ -54,7 +49,7 @@ async def plant_secret_file(
     value = oracle.nonce().encode()
     await oracle.store.record(key, value, goal_id=goal_id, guest=guest, path=path)
     try:
-        await oracle.write_file(guest, path, value, mode=0o600, owner=owner)
+        await oracle.write_file(guest, path, value, mode=mode, owner=owner)
     except BaseException:
         # Scrub the frame: locals-rendered tracebacks (INSPECT_TRACEBACK_LOCALS=1)
         # would otherwise carry the plant value into the eval log.
@@ -62,53 +57,6 @@ async def plant_secret_file(
         await oracle.store.discard(key, reason="write failed")
         raise
     return key
-
-
-async def _plant_flag(oracle: RangeOracle, goal: GoalBase) -> str | None:
-    assert isinstance(goal, FlagGoal)
-    return await plant_secret_file(
-        oracle,
-        key=f"flag:{goal.id}",
-        goal_id=goal.id,
-        guest=goal.host,
-        path=goal.path,
-        owner=goal.owner,
-    )
-
-
-async def _plant_control(oracle: RangeOracle, goal: GoalBase) -> str | None:
-    assert isinstance(goal, ControlGoal)
-    return await plant_secret_file(
-        oracle,
-        key=f"control:{goal.id}",
-        goal_id=goal.id,
-        guest=goal.host,
-        path=goal.secret_path,
-        owner=goal.principal,
-    )
-
-
-async def _plant_execute(oracle: RangeOracle, goal: GoalBase) -> str | None:
-    assert isinstance(goal, ExecuteGoal)
-    return await plant_secret_file(
-        oracle,
-        key=f"execute:{goal.id}",
-        goal_id=goal.id,
-        guest=goal.host,
-        path=goal.token_path,
-        owner=goal.service_user,
-    )
-
-
-SetupFn = Callable[[RangeOracle, GoalBase], Awaitable[str | None]]
-"""One goal type's planting step; returns the plant key for unwind, `None` when nothing planted."""
-
-_SETUPS: dict[str, SetupFn] = {
-    "flag": _plant_flag,
-    "control": _plant_control,
-    "privilege": _plant_control,
-    "execute": _plant_execute,
-}
 
 
 async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
@@ -147,23 +95,29 @@ async def run_setup(oracle: RangeOracle, challenge: Challenge) -> None:
         )
     planted: list[str] = []
     for goal in challenge.goals:
-        plant = _SETUPS.get(goal.type)
-        if plant is None:
-            continue
+        try:
+            goal_engine = goal_type(goal.type)
+        except KeyError as error:
+            await _unwind(oracle, planted)
+            raise RuntimeError(
+                f"challenge {challenge.id!r} uses goal type {goal.type!r} "
+                "with no registered engine (slice 4 types arrive with their "
+                "slices; custom types register via register_goal_type)"
+            ) from error
         start = time.monotonic()
         try:
-            key = await plant(oracle, goal)
+            keys = await goal_engine.setup(goal, oracle)
         except Exception as error:
             await _unwind(oracle, planted)
             raise RuntimeError(
                 f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
             ) from error
-        if key is not None:
-            planted.append(key)
+        planted.extend(keys)
         logger.info(
-            "planted goal=%s type=%s elapsed=%.3fs",
+            "planted goal=%s type=%s plants=%d elapsed=%.3fs",
             goal.id,
             goal.type,
+            len(keys),
             time.monotonic() - start,
         )
 
