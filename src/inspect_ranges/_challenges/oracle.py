@@ -6,18 +6,24 @@ Residue rule, enforced here by construction: plant VALUES never ride argv, env, 
 """
 
 import secrets
+from typing import TYPE_CHECKING
 
 from inspect_ai.util import sandbox
 
 from .._channel.channel import ExecOutcome, MessageChannel, request_id
 from .._channel.protocol import DEFAULT_BULK_CAP, Budget, ExecRequest
 from .._compiler.plan import ResolvedPlan
-from .._evidence.reader import EvidenceStore, stream_chunks
+from .._evidence.manifest import ChunkRecord
+from .._evidence.reader import EvidenceStore, manifest_records, stream_chunks
 from .._evidence.s3 import store_for_location
 from .._provider.provider import sample_handle_for
 from .._provider.state import SampleHandle
 from ..types import RangeSpec
+from .evidenceread import SpannedRecord, stream_json_records
 from .plants import PlantStore
+
+if TYPE_CHECKING:
+    from .._provider.evidence import EvidenceSession
 
 __all__ = ["OracleSetupError", "RangeOracle", "range_oracle"]
 
@@ -58,6 +64,20 @@ class RangeOracle:
         """The sample's plant record: values in memory, digests at T1."""
         return self._plants
 
+    @property
+    def project(self) -> str:
+        """The sample's compose project name (how the prober addresses the probe sidecar)."""
+        return self._handle.project
+
+    @property
+    def channel(self) -> MessageChannel:
+        """The sample's raw channel (the telemetry poller polls through it; same residue rules as every oracle verb)."""
+        return self._channel
+
+    def evidence_session(self) -> "EvidenceSession | None":
+        """The sample's evidence session (producer registration, driver stream appends); `None` when evidence is unavailable."""
+        return self._handle.evidence
+
     def nonce(self) -> str:
         """A fresh per-call secret from independent entropy, never derived from any recorded seed."""
         return secrets.token_hex(16)
@@ -74,6 +94,8 @@ class RangeOracle:
             plan = self._handle.plan
             if plan is not None and plan.requirements.evidence_capture:
                 available.update(("segment-pcap", "console"))
+            if plan is not None and plan.requirements.probe_segments:
+                available.add("active-prober")
         return frozenset(available)
 
     def resolved(self) -> ResolvedPlan:
@@ -204,6 +226,31 @@ class RangeOracle:
         return await stream_chunks(
             self._evidence_store(), "driver", f"telemetry/{collector}"
         )
+
+    async def console(self, guest: str) -> list[bytes]:
+        """The guest's continuous serial-console chunks from the sample's evidence record (host writer)."""
+        return await stream_chunks(self._evidence_store(), "host", f"console/{guest}")
+
+    async def probe_records(self, goal_id: str) -> "list[SpannedRecord]":
+        """The goal's recorded probe verdicts (driver writer), with chunk spans; the scorer never probes live."""
+        records, _ = await stream_json_records(
+            self._evidence_store(), "driver", f"probe/{goal_id}"
+        )
+        return records
+
+    async def telemetry_meta(
+        self, collector: str
+    ) -> "tuple[list[SpannedRecord], bool]":
+        """The collector's per-poll watermark records plus whether its streams carry gaps (the detection completeness inputs)."""
+        meta, meta_gapped = await stream_json_records(
+            self._evidence_store(), "driver", f"telemetry-meta/{collector}"
+        )
+        data_gapped = any(
+            not isinstance(entry, ChunkRecord)
+            for entry in await manifest_records(self._evidence_store(), "driver")
+            if entry.stream == f"telemetry/{collector}"
+        )
+        return meta, meta_gapped or data_gapped
 
     def _evidence_store(self) -> EvidenceStore:
         session = self._handle.evidence

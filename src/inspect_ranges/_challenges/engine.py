@@ -27,6 +27,7 @@ __all__ = [
     "Assurance",
     "GoalResult",
     "GoalType",
+    "JUDGE_WEIGHT_CAP",
     "LATCHES_STORE_KEY",
     "HINTS_USED_STORE_KEY",
     "LatchRecord",
@@ -59,6 +60,9 @@ LATCHES_STORE_KEY = "inspect_ranges:latches"
 
 HINTS_USED_STORE_KEY = "inspect_ranges:hints_used"
 """Sample-store key listing indices of hints the agent used (delivery mechanism pending)."""
+
+JUDGE_WEIGHT_CAP = 0.25
+"""Model-graded goals' maximum share of a challenge's total weight when any non-model-graded goal exists (slice-4 recorded decision). A judge scores the agent's own account and is an injection surface, so it must never dominate a mixed challenge; an all-model-graded challenge is deliberately uncapped (there is nothing higher-assurance to protect)."""
 
 
 class Observations(BaseModel):
@@ -269,7 +273,7 @@ def aggregate(
 ) -> float:
     """Aggregate latched goal results into the challenge score in [0, 1].
 
-    Modes: `weights` (weighted mean of credits), `milestones` (weighted mean after `later_implies_earlier` implication, which never crosses to a lower-assurance proof: a later pass implies an earlier goal only when the later record's assurance rank is at least the earlier goal's), and `coverage` (identical math to weights; the name declares breadth semantics). Hint penalties subtract from the final value, floored at zero.
+    Modes: `weights` (weighted mean of credits), `milestones` (weighted mean after `later_implies_earlier` implication, which never crosses to a lower-assurance proof: a later pass implies an earlier goal only when the later record's assurance rank is at least the earlier goal's), and `coverage` (identical math to weights; the name declares breadth semantics). Model-graded goals' weight share is capped at `JUDGE_WEIGHT_CAP` whenever a non-model-graded goal exists (their weights rescale down; the cap is a slice-4 recorded decision). Hint penalties subtract from the final value, floored at zero.
 
     Args:
         challenge: The challenge (goal order is milestone order).
@@ -307,11 +311,31 @@ def aggregate(
                 )
                 if ASSURANCE_RANK[later.assurance] >= ASSURANCE_RANK[earlier_assurance]:
                     credits[earlier_goal.id] = 1.0
-    total_weight = sum(goal.weight for goal in challenge.goals)
+    weights = {goal.id: goal.weight for goal in challenge.goals}
+    if assurances:
+        judged = [
+            goal.id
+            for goal in challenge.goals
+            if assurances.get(goal.id) == "model-graded"
+        ]
+        other_total = sum(
+            weight for goal_id, weight in weights.items() if goal_id not in judged
+        )
+        judged_total = sum(weights[goal_id] for goal_id in judged)
+        if judged and other_total > 0 and judged_total > 0:
+            # cap model-graded goals at JUDGE_WEIGHT_CAP of the effective total:
+            # judged_cap / (judged_cap + other_total) == JUDGE_WEIGHT_CAP
+            judged_cap = other_total * JUDGE_WEIGHT_CAP / (1.0 - JUDGE_WEIGHT_CAP)
+            if judged_total > judged_cap:
+                scale = judged_cap / judged_total
+                for goal_id in judged:
+                    weights[goal_id] *= scale
+    total_weight = sum(weights.values())
     if total_weight <= 0:
         return 0.0
     value = (
-        sum(goal.weight * credits[goal.id] for goal in challenge.goals) / total_weight
+        sum(weights[goal.id] * credits[goal.id] for goal in challenge.goals)
+        / total_weight
     )
     for index in hints_used or []:
         if 0 <= index < len(challenge.hints):

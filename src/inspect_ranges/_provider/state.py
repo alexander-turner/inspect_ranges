@@ -191,16 +191,22 @@ class ProviderRuntime:
         return spec, plan
 
     def plan_options(
-        self, cid_base: int | None = None, evidence_capture: bool = False
+        self,
+        cid_base: int | None = None,
+        evidence_capture: bool = False,
+        probe_segments: tuple[str, ...] = (),
     ) -> PlanOptions:
         if cid_base is None:
             return PlanOptions(
-                image_cache=self.image_cache, evidence_capture=evidence_capture
+                image_cache=self.image_cache,
+                evidence_capture=evidence_capture,
+                probe_segments=probe_segments,
             )
         return PlanOptions(
             image_cache=self.image_cache,
             cid_base=cid_base,
             evidence_capture=evidence_capture,
+            probe_segments=probe_segments,
         )
 
 

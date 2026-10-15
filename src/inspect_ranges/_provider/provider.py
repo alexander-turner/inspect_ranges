@@ -42,6 +42,9 @@ from .state import ProviderRuntime, SampleHandle, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
 
+PROBE_SEGMENTS_METADATA_KEY = "inspect_ranges:probe_segments"
+"""Sample metadata key carrying comma-joined probe segments (written by `challenge_dataset` from the challenge's `active-prober` goals; read here at render time, so a challenge's observer needs become plan options without the compiler ever seeing challenges)."""
+
 TRANSIENT_UP_STAGES = frozenset(
     {"range-container", "guest-boot", "readiness", "admission"}
 )
@@ -133,6 +136,15 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         runtime = provider_runtime()
         # inspect-ai injects int ids for default datasets: always stringify
         sample_id = str(metadata.get("__sample_id__", "sample"))
+        probe_segments = tuple(
+            sorted(
+                segment
+                for segment in str(metadata.get(PROBE_SEGMENTS_METADATA_KEY, "")).split(
+                    ","
+                )
+                if segment
+            )
+        )
         cache_key = config if isinstance(config, (str, RangeSpec)) else None
         if cache_key is not None:
             spec, plan = runtime.resolve_config(
@@ -161,7 +173,14 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         handle: SampleHandle | None = None
         try:
             handle = await cls._acquire_range(
-                runtime, spec, plan, task_name, sample_id, session, charged_totals
+                runtime,
+                spec,
+                plan,
+                task_name,
+                sample_id,
+                session,
+                charged_totals,
+                probe_segments,
             )
         except BaseException:
             await runtime.admission.release(charged_totals)
@@ -212,6 +231,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         sample_id: str,
         session: EvidenceSession | None,
         charged_totals: Totals,
+        probe_segments: tuple[str, ...] = (),
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
@@ -270,6 +290,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         runtime.plan_options(
                             cid_base=lease.base,
                             evidence_capture=session is not None,
+                            probe_segments=probe_segments,
                         ),
                     )
                 )
