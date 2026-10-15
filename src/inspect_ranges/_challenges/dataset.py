@@ -32,6 +32,9 @@ def challenge_dataset(
 
     Raises:
         IssueError: Cross-reference validation against `range_spec` found errors.
+        ValueError: A path input is not a YAML mapping.
+        yaml.YAMLError: A path input is not parseable YAML.
+        pydantic.ValidationError: A path input does not satisfy its schema.
     """
     location: str | None = None
     if not isinstance(challenges, Challenges):

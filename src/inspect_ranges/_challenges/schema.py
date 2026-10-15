@@ -27,6 +27,7 @@ from .._diagnostics import (
     locate,
     parse_marked,
 )
+from ..schema import validate_range
 from ..types import RangeSpec
 
 __all__ = [
@@ -113,11 +114,11 @@ class FlagGoal(GoalBase):
     """Submit a per-sample secret planted at a path; no guest is consulted at scoring."""
 
     type: Literal["flag"] = "flag"
-    host: str
+    host: str = Field(min_length=1)
     """Guest the flag is planted on."""
-    path: str
+    path: str = Field(min_length=1)
     """Absolute in-guest path of the planted flag."""
-    owner: str = "root"
+    owner: str = Field(default="root", min_length=1)
     """Account the planted file is readable by (mode 0600, owned by `owner`)."""
 
     default_primitive: ClassVar[Primitive | None] = "leak"
@@ -130,13 +131,13 @@ class AnswerGoal(GoalBase):
     """
 
     type: Literal["answer"] = "answer"
-    variable: str | None = None
+    variable: str | None = Field(default=None, min_length=1)
     """Name of a declared range variable whose per-instance value is the expected answer."""
-    value: str | None = None
+    value: str | None = Field(default=None, min_length=1)
     """Literal expected fact (scenario content; never per-sample proof material)."""
-    host: str | None = None
+    host: str | None = Field(default=None, min_length=1)
     """Guest to read the expected fact from, with `path`."""
-    path: str | None = None
+    path: str | None = Field(default=None, min_length=1)
     """In-guest path the oracle reads the expected fact from, with `host`."""
 
     default_primitive: ClassVar[Primitive | None] = "leak"
@@ -178,11 +179,11 @@ class ExfiltrateGoal(GoalBase):
     """
 
     type: Literal["exfiltrate"] = "exfiltrate"
-    host: str
+    host: str = Field(min_length=1)
     """Guest holding the target content."""
-    path: str
+    path: str = Field(min_length=1)
     """In-guest path of the content the canary is planted in."""
-    segment: str | None = None
+    segment: str | None = Field(default=None, min_length=1)
     """Network whose pcap corroborates the exfiltration flow, when declared."""
 
     default_primitive: ClassVar[Primitive | None] = "leak"
@@ -196,13 +197,13 @@ class ExecuteGoal(GoalBase):
     """Run code on a host: produce a per-sample token readable only by the targeted execution context."""
 
     type: Literal["execute"] = "execute"
-    host: str
+    host: str = Field(min_length=1)
     """Guest the execution happens on."""
-    service_user: str
+    service_user: str = Field(min_length=1)
     """Account the exploited context runs as; the token is readable only by it."""
-    token_path: str
+    token_path: str = Field(min_length=1)
     """In-guest path the token is planted at (mode 0600, owned by `service_user`)."""
-    beacon_segment: str | None = None
+    beacon_segment: str | None = Field(default=None, min_length=1)
     """Network whose pcap carries the source-bound beacon corroboration, when declared."""
 
     default_primitive: ClassVar[Primitive | None] = "execute"
@@ -219,9 +220,9 @@ class HijackGoal(GoalBase):
     """
 
     type: Literal["hijack"] = "hijack"
-    host: str
+    host: str = Field(min_length=1)
     """Guest the crashable target runs on."""
-    service: str
+    service: str = Field(min_length=1)
     """Name of the target process whose crash record is checked."""
 
     default_primitive: ClassVar[Primitive | None] = "hijack"
@@ -237,11 +238,11 @@ class ControlGoal(GoalBase):
     """
 
     type: Literal["control", "privilege"] = "control"
-    host: str
+    host: str = Field(min_length=1)
     """Guest the secret is planted on."""
-    principal: str
+    principal: str = Field(min_length=1)
     """Account the secret is readable by; producing it requires the claimed access."""
-    secret_path: str
+    secret_path: str = Field(min_length=1)
     """In-guest path of the planted secret (mode 0600, owned by `principal`)."""
 
     default_primitive: ClassVar[Primitive | None] = "control"
@@ -260,7 +261,7 @@ class DegradeGoal(GoalBase):
     """
 
     type: Literal["degrade"] = "degrade"
-    host: str
+    host: str = Field(min_length=1)
     """Guest running the probed service."""
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
@@ -298,9 +299,9 @@ class TamperGoal(GoalBase):
     """
 
     type: Literal["tamper"] = "tamper"
-    host: str
+    host: str = Field(min_length=1)
     """Guest holding the designated protected location."""
-    location: str
+    location: str = Field(min_length=1)
     """The protected location the value must appear in (a database record, a served response), interpreted by the goal engine."""
     observer: Literal["active-prober", "guest-snapshot"] = "active-prober"
     """How the written value is observed from outside."""
@@ -308,17 +309,14 @@ class TamperGoal(GoalBase):
     default_primitive: ClassVar[Primitive | None] = "write"
 
     def observers(self) -> frozenset[ObserverKind]:
-        kind: ObserverKind = (
-            "guest-snapshot" if self.observer == "guest-snapshot" else "active-prober"
-        )
-        return super().observers() | _observers(kind)
+        return super().observers() | _observers(self.observer)
 
 
 class AvailabilityGoal(GoalBase):
     """Keep a service up (defender direction): the external probe answers its per-probe nonce within the window."""
 
     type: Literal["availability"] = "availability"
-    host: str
+    host: str = Field(min_length=1)
     """Guest running the probed service."""
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
@@ -338,9 +336,9 @@ class DetectionGoal(GoalBase):
     """
 
     type: Literal["detection"] = "detection"
-    collector: str
+    collector: str = Field(min_length=1)
     """Declared telemetry collector or sink the signal is expected in."""
-    signal: str
+    signal: str = Field(min_length=1)
     """The expected signal (a search or event description the engine evaluates)."""
     window_s: float | None = Field(default=None, gt=0)
     """Observation window in seconds; omitted means the whole run."""
@@ -367,7 +365,7 @@ class PatchGoal(GoalBase):
     """Fix a vulnerability (defender direction): the reference exploit re-run fails while the functional check passes."""
 
     type: Literal["patch"] = "patch"
-    host: str
+    host: str = Field(min_length=1)
     """Guest the vulnerability lives on."""
     exploit: str = Field(min_length=1)
     """Identifier of the reference exploit chain re-run at scoring time."""
@@ -682,13 +680,11 @@ def validate_challenges(
 
     Args:
         path: Path to the challenges YAML file.
-        range_spec: The range to cross-reference against: a validated spec, or a `range.yaml` path to load. Omitted means structural validation only.
+        range_spec: The range to cross-reference against: a validated spec, or a `range.yaml` path to load. Omitted means structural validation only. An invalid range file becomes a `range-invalid` issue (cross-reference checks skipped), never a raise. An invalid range file becomes a `range-invalid` issue (cross-reference checks skipped), never a raise.
 
     Returns:
         The report; `ValidationReport.spec` carries the validated `Challenges` when the file is valid.
     """
-    from ..schema import load_range
-
     try:
         data, node = parse_marked(path.read_text())
     except yaml.YAMLError as error:
@@ -711,8 +707,24 @@ def validate_challenges(
             file=str(path), issues=issues, semantic_checked=semantic_checked
         )
     positioned: list[Issue] = []
-    if range_spec is not None:
-        spec = load_range(range_spec) if isinstance(range_spec, Path) else range_spec
+    spec = range_spec if isinstance(range_spec, RangeSpec) else None
+    if isinstance(range_spec, Path):
+        range_report = validate_range(range_spec)
+        if not range_report.valid or range_report.spec is None:
+            return ValidationReport(
+                file=str(path),
+                issues=[
+                    Issue(
+                        code="range-invalid",
+                        message=f"range file {range_spec} failed validation; cross-reference checks did not run",
+                        hint=f"run `inspect-ranges validate {range_spec}` for the range's own report",
+                    )
+                ],
+                semantic_checked=False,
+                spec=challenges,
+            )
+        spec = cast(RangeSpec, range_report.spec)
+    if spec is not None:
         for issue in challenge_issues(challenges, spec):
             position = locate(node, issue.path)
             positioned.append(
