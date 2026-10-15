@@ -146,9 +146,11 @@ class EvidenceWriter:
         if put_attempts < 1:
             raise ValueError("put_attempts must be >= 1")
         if part_max_records < 1:
-            raise ValueError("part_max_records must be >= 1")
-        if part_interval_s < 0 or max_total_bytes is not None and max_total_bytes < 1:
-            raise ValueError("part_interval_s must be >= 0 and max_total_bytes >= 1")
+            raise ValueError(f"part_max_records must be >= 1, got {part_max_records}")
+        if part_interval_s < 0:
+            raise ValueError(f"part_interval_s must be >= 0, got {part_interval_s}")
+        if max_total_bytes is not None and max_total_bytes < 1:
+            raise ValueError(f"max_total_bytes must be >= 1, got {max_total_bytes}")
         check_name(writer, WRITER_NAME_PATTERN, "writer")
         self._sink = sink
         self._writer = writer
@@ -261,6 +263,25 @@ class EvidenceWriter:
         for error in result.errors:
             logger.warning("evidence delivery failure (buffered for retry): %s", error)
         return result
+
+    async def checkpoint(self) -> FlushResult:
+        """A flush that also FORCES the manifest-part cut (part batching bypassed).
+
+        For moments the record must be independently verifiable without closing it: an applier shutdown that leaves the record unsealed for the reaper, or any caller about to lose this process. Chunks already deliver on every flush; this commits their manifest records too.
+        """
+        async with self._lock:
+            self._check_open()
+            result = FlushResult()
+            await self._deliver_chunks(result)
+            self._cut_part(force=True)
+            await self._deliver_parts(result)
+            result.pending_chunks = len(self._pending_chunks)
+            result.pending_parts = len(self._pending_parts)
+            for error in result.errors:
+                logger.warning(
+                    "evidence delivery failure (buffered for retry): %s", error
+                )
+            return result
 
     async def seal(
         self,

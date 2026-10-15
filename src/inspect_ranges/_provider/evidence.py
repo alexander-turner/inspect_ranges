@@ -12,6 +12,7 @@ Writers open only after a successful boot: acquisition respins reuse the sample'
 import asyncio
 import logging
 import os
+import uuid
 from pathlib import Path
 
 from .._compiler.plan import ResolvedPlan
@@ -22,7 +23,7 @@ from .._evidence.location import (
     evidence_location_for,
     fallback_evidence_location,
 )
-from .._evidence.manifest import Seal, clock_now, seal_digest
+from .._evidence.manifest import Seal, clock_now, seal_digest, seal_key
 from .._evidence.reader import EvidenceStore
 from .._evidence.s3 import sink_for_location, store_for_location
 from .._evidence.sink import DEFAULT_BUFFER_CAP_BYTES, EvidenceWriter
@@ -237,7 +238,7 @@ class EvidenceSession:
         try:
             async with asyncio.timeout(HOST_SEAL_READ_BUDGET_S):
                 store: EvidenceStore = store_for_location(self.location)
-                raw = await store.get("manifests/host/seal.json")
+                raw = await store.get(seal_key("host"))
             seal = Seal.model_validate_json(raw)
             self._seals["host"] = seal_digest(seal)
             self._chain_heads["host"] = {
@@ -346,9 +347,12 @@ def resolve_evidence_session(
         # metadata sample id is the same value, stringified)
         location = evidence_location_for(identity)
     elif os.environ.get(EVIDENCE_SINK_OVERRIDE_VAR):
+        # the run id must be unique per run: a static task name would collide
+        # across repeated runs and turn the second run's whole record into
+        # write-once conflicts (review finding, 2026-10-15)
         location = fallback_evidence_location(
             os.environ[EVIDENCE_SINK_OVERRIDE_VAR],
-            run_hint,
+            f"{run_hint}-{uuid.uuid4().hex[:8]}",
             sample_id=sample_id,
             epoch=1,
             attempt=1,
@@ -359,5 +363,14 @@ def resolve_evidence_session(
             run_hint,
             EVIDENCE_SINK_OVERRIDE_VAR,
         )
+        return None
+    try:
+        # validate the knobs HERE: a malformed value must disable evidence
+        # with a loud named error, never fail the sample (the applier handles
+        # the same misconfiguration the same way)
+        evidence_buffer_bytes()
+        evidence_max_bytes()
+    except ValueError:
+        logger.exception("evidence disabled for %s: invalid evidence knob", run_hint)
         return None
     return EvidenceSession(location, sample_id=sample_id, capture_local=capture_local)

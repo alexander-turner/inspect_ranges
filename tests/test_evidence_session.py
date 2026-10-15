@@ -42,8 +42,15 @@ def test_resolve_uses_override_fallback_layout(
         sample_id="s1", run_hint="mytask", capture_local=False
     )
     assert session is not None
-    assert session.location == f"{tmp_path}/mytask.evidence/s1_1_1"
+    assert session.location.startswith(f"{tmp_path}/mytask-")
+    assert session.location.endswith(".evidence/s1_1_1")
     assert session.capture_local is False
+    # the fallback run id is unique per resolve: a static name would turn a
+    # repeated run's whole record into write-once conflicts
+    second = resolve_evidence_session(
+        sample_id="s1", run_hint="mytask", capture_local=False
+    )
+    assert second is not None and second.location != session.location
 
 
 def test_admission_charge_counts_resident_writers(
@@ -201,6 +208,17 @@ def test_finalize_with_failing_sink_never_raises(tmp_path: Path) -> None:
         assert session.binding()["seals"] == {}
 
     asyncio.run(scenario())
+
+
+def test_bad_knob_disables_evidence_not_the_sample(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(EVIDENCE_SINK_OVERRIDE_VAR, str(tmp_path))
+    monkeypatch.setenv(EVIDENCE_BUFFER_MB_VAR, "64MB")
+    assert (
+        resolve_evidence_session(sample_id="s", run_hint="t", capture_local=True)
+        is None
+    ), "a malformed knob disables evidence with a named error, never the sample"
 
 
 def test_knob_validation() -> None:
