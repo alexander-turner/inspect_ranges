@@ -200,14 +200,15 @@ class StageRecorder:
             events.append(self._events.popleft())
         if not events:
             return b"", b""
-        stages = _json_lines(events)
-        verify = _json_lines(
+        stages = json_lines(events)
+        verify = json_lines(
             [event for event in events if event["stage"] in self.VERIFY_STAGES]
         )
         return stages, verify
 
 
-def _json_lines(records: list[dict[str, Any]]) -> bytes:
+def json_lines(records: list[dict[str, Any]]) -> bytes:
+    """Serialize records as JSONL for the in-stream record streams (`stages`, `heartbeat`, `clock`, `telemetry-meta/*`)."""
     if not records:
         return b""
     return (
@@ -541,7 +542,7 @@ class CaptureStreamer:
                 {"kind": "clock", "wall": now.wall, "monotonic": now.monotonic}
             )
         if records:
-            await self._writer.append("clock", _json_lines(records))
+            await self._writer.append("clock", json_lines(records))
 
     def _heartbeat_due(self, now: ClockStamp) -> bool:
         # scheduled on the monotonic clock: a backwards wall jump (the very
@@ -585,4 +586,4 @@ class CaptureStreamer:
             records.append(
                 {"source": f"console/{guest}", "wall": now.wall, "bytes": offset}
             )
-        await self._writer.append("heartbeat", _json_lines(records))
+        await self._writer.append("heartbeat", json_lines(records))

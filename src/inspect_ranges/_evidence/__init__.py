@@ -44,6 +44,8 @@ from .reader import (
     StreamCoverage,
     VerifyReport,
     WriterReport,
+    manifest_records,
+    stream_chunks,
     verify_location,
 )
 from .s3 import (
@@ -61,14 +63,26 @@ from .sink import (
     LocalDirSink,
     SealDeliveryError,
 )
+from .telemetry import (
+    CURSOR_PLACEHOLDER,
+    DEFAULT_MAX_POLL_BYTES,
+    CollectorSpec,
+    CommandSource,
+    FileSource,
+    TelemetryPoller,
+)
 
 __all__ = [
+    "CURSOR_PLACEHOLDER",
     "EVIDENCE_SINK_OVERRIDE_VAR",
     "DEFAULT_BUFFER_CAP_BYTES",
+    "DEFAULT_MAX_POLL_BYTES",
     "Break",
     "CaptureStreamer",
     "CaptureTap",
     "ChunkRecord",
+    "CollectorSpec",
+    "CommandSource",
     "ComposeTap",
     "ClockSpan",
     "ClockStamp",
@@ -76,6 +90,7 @@ __all__ = [
     "EvidenceSink",
     "EvidenceStore",
     "EvidenceWriter",
+    "FileSource",
     "FlushResult",
     "GapInfo",
     "GapRecord",
@@ -91,6 +106,7 @@ __all__ = [
     "StageRecorder",
     "StreamCoverage",
     "StreamSummary",
+    "TelemetryPoller",
     "VerifyReport",
     "WriterReport",
     "active_evidence_identity",
@@ -102,11 +118,13 @@ __all__ = [
     "derive_evidence_location",
     "evidence_location_for",
     "fallback_evidence_location",
+    "manifest_records",
     "parse_s3_location",
     "part_key",
     "seal_digest",
     "seal_key",
     "sink_for_location",
     "store_for_location",
+    "stream_chunks",
     "verify_location",
 ]

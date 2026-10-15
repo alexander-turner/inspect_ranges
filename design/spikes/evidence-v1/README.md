@@ -17,3 +17,21 @@ What the run demonstrated, in order:
 - **The record closes honestly**: seal `complete`, `inspect-ranges evidence verify`-equivalent offline replay unbroken, `stages` carrying `ready`, `verify` carrying readiness events, heartbeats present throughout.
 
 Files: `run.sh` (setup + battery + residue check), `battery.py` (the checks), `spec.yaml` (the two-segment range). Artifacts land under `tmp/` (gitignored).
+
+## Slice 4: in-guest telemetry export (2026-10-15)
+
+Run on the metal devbox: **18/18 checks green plus zero residue**, `./run_telemetry.sh`, CID base 30300, shared battery flock, range up 50.7 s. The range is the minimal telemetry shape (`spec-telemetry.yaml`: one segment, one target, the attacker); the driver-side `TelemetryPoller` polls two collectors on the target over vsock at 0.5 s cadence: a journald `command` source (`journalctl --after-cursor={cursor} --show-cursor`) and a file source (`/var/log/tele.log`, offset watermark), both into one `driver` evidence record.
+
+What the run demonstrated, in order:
+
+- **Events flow with watermarks advancing**: a real in-guest appender (0.3 s period) and `logger`-emitted journald events both appear in the record; the file watermark advanced across at least 3 separate polls and the journal cursor was extracted and re-substituted per poll.
+- **A producer kill is a visible stall, not silence**: after `pkill` of the appender, at least 4 further polls ran (proven from the record's own poll counters), every one `quiet` with the watermark frozen; coverage demonstrably continued. The paired post-hoc invariant: every data chunk corresponds to an `ok` poll, so nothing shipped during the stall.
+- **An unreachable guest is a poll-failed gap, and recovery is clean**: `virsh suspend` of the target produced `error` meta records and exactly one in-chain `poll-failed` gap for the streak; after `virsh resume`, polling recovered with no chain break.
+- **Log truncation is a watermark regression**: `: > tele.log` produced the `watermark-regression` gap and shipping resumed from the new content.
+- **The record closes honestly**: seal `complete`, offline verify unbroken **with the seal binding supplied** (`expected_seals`), journald and file events both present, every non-error poll carrying its watermark.
+
+Re-run green (18/18, zero residue) after the fresh-context review's fixes, whose main changes are content-anchored regression detection for file sources (a truncate that regrows past the old offset is caught by a shipped-prefix digest, and rotation surfacing as ENOENT after shipped content is a regression, not an absence), cursor-banner stripping with banner-only polls reading as quiet (stall-vs-quiet stays decidable for command sources and the data stream carries events only), a bounded cursor-search window over adversarial guest output, an explicit replay flag on post-reset bootstrap polls, a restart-after-stop refusal, and a bounded `stop()` that cancels a hung poll.
+
+Two operational findings worth keeping: the production daemon reaps the exec's process group on return, so an in-guest background producer must `setsid` to survive its starting exec (the prototype-era "background processes survive" no longer holds unqualified); and live battery predicates must be delivery-lag immune (assert from the record's own poll counters, never from counts of delivered-so-far chunks, which lag appends by a flush).
+
+Files: `run_telemetry.sh`, `telemetry_battery.py`, `spec-telemetry.yaml`. Artifacts land under `tmp-telemetry/` (gitignored).
