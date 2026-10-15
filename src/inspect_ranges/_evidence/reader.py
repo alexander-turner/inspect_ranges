@@ -2,7 +2,7 @@
 
 The reader is the only component that reads evidence; the writer never does (put-only credentials). `verify_location` replays every writer's manifest from genesis, recomputing the chain record by record and checking every referenced chunk, and reports the FIRST break with its neighborhood: the output is designed for incident use, so a sample's evidence trouble is diagnosable from the manifest alone, without host access.
 
-What a break means: any rewrite, reorder, truncation of a sealed record, deletion, or forged record is a chain, sequence, digest, or seal mismatch here. What is honestly out of reach: an UNSEALED record's tail can be truncated without detection (there is no seal binding the part count yet) — verify reports such locations as unsealed rather than pretending; the lifecycle makes unsealed-at-rest an anomaly (finalize and the reaper both seal).
+Scope of the guarantee (chunk-1 verification, 2026-10-15): the chain anchors everything at or below the seal, so any in-chain rewrite, reorder, deletion, or hole is a chain, sequence, digest, or seal mismatch here, detectable from the location alone. The seal tier itself (its fields, its presence, the record's location, the writer set) is unanchored until someone holds the seal digest externally: that holder is the sample-store binding written at finalize, and `verify_location(expected_seals=...)` (CLI `--expect-seal writer=digest`) is how a binding-holder supplies it, which upgrades verification from internal consistency to the full detection claim. Without a binding, a re-put seal with forged fields, a deleted seal plus tail truncation, or a whole-record transplant to another location all verify as internally consistent. An UNSEALED record is extendable as well as truncatable (no seal binds the part count or chain heads yet); verify reports such locations as unsealed rather than pretending, and the lifecycle makes unsealed-at-rest an anomaly (finalize and the reaper both seal).
 """
 
 import hashlib
@@ -77,6 +77,9 @@ class Break(EvidenceModel):
         "seal-parts",
         "seal-chain-head",
         "seal-counts",
+        "seal-writer-mismatch",
+        "seal-digest-mismatch",
+        "seal-missing",
     ]
     key: str
     """The object key where the break was observed."""
@@ -117,6 +120,12 @@ class WriterReport(EvidenceModel):
     sealed: bool = False
     seal_status: str | None = None
     seal_digest: str | None = None
+    lease_id: str | None = None
+    """From the seal: which lease produced this record (incident orientation; makes a transplanted record visually obvious)."""
+    sample_id: str | None = None
+    """From the seal: which sample this record claims to belong to."""
+    binding_checked: bool = False
+    """True when an external seal digest was supplied for this writer, so `ok` carries the full detection claim; False means `ok` attests internal consistency only."""
     first_break: Break | None = None
     streams: dict[str, StreamCoverage] = {}
     gaps: list[GapInfo] = []
@@ -142,21 +151,40 @@ class VerifyReport(EvidenceModel):
 
 
 async def verify_location(
-    store: EvidenceStore, *, location: str = "", deep: bool = True
+    store: EvidenceStore,
+    *,
+    location: str = "",
+    deep: bool = True,
+    expected_seals: dict[str, str] | None = None,
 ) -> VerifyReport:
     """Replay every writer's chain at a location and report the first break per writer.
 
-    With `deep` (the default) every referenced chunk is fetched and its digest and size checked; without it only manifests, chains, and seals are replayed.
+    With `deep` (the default) every referenced chunk is fetched and its digest and size checked; without it only manifests, chains, and seals are replayed. `expected_seals` maps writer names to externally-held seal digests (the sample-store binding): a supplied digest must match the computed one, a supplied writer must be present and sealed, and the writer's `ok` then carries the full detection claim instead of internal consistency only.
     """
     report = VerifyReport(location=location)
     referenced: set[str] = set()
+    expected = expected_seals or {}
     manifest_keys = await store.list("manifests")
     writers = sorted(
         {key.split("/")[1] for key in manifest_keys if len(key.split("/")) >= 3}
     )
     for writer in writers:
         report.writers[writer] = await _verify_writer(
-            store, writer, deep=deep, referenced=referenced
+            store,
+            writer,
+            deep=deep,
+            referenced=referenced,
+            expected_digest=expected.get(writer),
+        )
+    for writer in sorted(set(expected) - set(writers)):
+        report.writers[writer] = WriterReport(
+            writer=writer,
+            binding_checked=True,
+            first_break=Break(
+                kind="seal-missing",
+                key=seal_key(writer),
+                detail="a seal digest was supplied for this writer but no record exists at the location",
+            ),
         )
     chunk_keys = await store.list("chunks")
     report.unreferenced = [key for key in chunk_keys if key not in referenced]
@@ -164,7 +192,12 @@ async def verify_location(
 
 
 async def _verify_writer(
-    store: EvidenceStore, writer: str, *, deep: bool, referenced: set[str]
+    store: EvidenceStore,
+    writer: str,
+    *,
+    deep: bool,
+    referenced: set[str],
+    expected_digest: str | None = None,
 ) -> WriterReport:
     result = WriterReport(writer=writer)
     keys = await store.list(f"manifests/{writer}")
@@ -177,11 +210,19 @@ async def _verify_writer(
     # the seal is read FIRST so `sealed` reports the record's true lifecycle
     # state even when replay breaks mid-parts (an incident responder must not
     # be told a sealed record is unsealed)
+    result.binding_checked = expected_digest is not None
     seal: Seal | None = None
     try:
         seal_bytes = await store.get(seal_key(writer))
     except FileNotFoundError:
         seal_bytes = None
+    if seal_bytes is None and expected_digest is not None:
+        result.first_break = Break(
+            kind="seal-missing",
+            key=seal_key(writer),
+            detail="a seal digest was supplied for this writer but the record is unsealed (a deleted seal makes a sealed record's truncation invisible; the binding makes the deletion itself the break)",
+        )
+        return result
     if seal_bytes is not None:
         try:
             seal = Seal.model_validate_json(seal_bytes)
@@ -192,9 +233,29 @@ async def _verify_writer(
                 detail=str(error),
             )
             return result
+        if seal.writer != writer:
+            result.first_break = Break(
+                kind="seal-writer-mismatch",
+                key=seal_key(writer),
+                detail=f"seal claims writer {seal.writer!r} but is stored under {writer!r}",
+            )
+            return result
         result.sealed = True
         result.seal_status = seal.status
         result.seal_digest = seal_digest(seal)
+        result.lease_id = seal.lease_id
+        result.sample_id = seal.sample_id
+        if expected_digest is not None and result.seal_digest != expected_digest:
+            result.first_break = Break(
+                kind="seal-digest-mismatch",
+                key=seal_key(writer),
+                detail=(
+                    f"computed seal digest {result.seal_digest} does not match the "
+                    f"externally-held binding {expected_digest} (a re-put seal, or a "
+                    f"record transplanted from another location)"
+                ),
+            )
+            return result
 
     for index, key in enumerate(part_keys):
         expected = part_key(writer, index)
