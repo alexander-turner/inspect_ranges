@@ -4,6 +4,7 @@ Comparison is pinned host-side and pure; the execute/exfiltrate corroboration te
 """
 
 import asyncio
+import time
 import struct
 from ipaddress import IPv4Address
 from pathlib import Path
@@ -44,9 +45,12 @@ VALUE = b"ENGINE-5f5f5f"
 def submissions(**values: str) -> Submissions:
     from inspect_ranges._challenges.submission import Submission
 
+    # Real wall clocks: a submission timestamped before its plant's creation is
+    # a corroboration CONTRADICTION by design (the slice-5 temporal check), so
+    # the fixture must not fabricate epoch-era times.
     return Submissions(
         [
-            Submission(goal_id=goal_id, value=value, wall=1.0)
+            Submission(goal_id=goal_id, value=value, wall=time.time())
             for goal_id, value in values.items()
         ]
     )

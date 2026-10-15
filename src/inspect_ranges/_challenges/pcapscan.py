@@ -16,13 +16,20 @@ _LINKTYPE_ETHERNET = 1
 _ETHERTYPE_IPV4 = 0x0800
 
 
-def source_bound_find(chunks: list[bytes], *, value: bytes, src: IPv4Address) -> bool:
+def source_bound_find(
+    chunks: list[bytes],
+    *,
+    value: bytes,
+    src: IPv4Address,
+    exclude_src_mac_prefixes: tuple[bytes, ...] = (),
+) -> bool:
     """Whether any captured packet from `src` carries `value`.
 
     Args:
         chunks: Raw classic-pcap chunks (one capture file each, possibly truncated).
         value: The bytes to find in a packet from `src`.
         src: The required IPv4 source address (the claimed guest's interface).
+        exclude_src_mac_prefixes: Ethernet source-MAC prefixes whose frames never count, regardless of IP source. `corroborate()` passes the declared probe convention (`02:50:`) so probe-sourced flows are excluded from agent-traffic reasoning by spec, not heuristics (`challenges-v1.md`).
 
     Returns:
         True when a packet with IPv4 source `src` contains `value`; a match in a packet from any other source never counts.
@@ -53,6 +60,10 @@ def source_bound_find(chunks: list[bytes], *, value: bytes, src: IPv4Address) ->
             packet = chunk[start:end]
             offset = end
             if len(packet) < 34:  # ethernet (14) + minimal IPv4 header (20)
+                continue
+            if any(
+                packet[6:12].startswith(prefix) for prefix in exclude_src_mac_prefixes
+            ):
                 continue
             ethertype = int.from_bytes(packet[12:14], "big")
             if ethertype != _ETHERTYPE_IPV4:

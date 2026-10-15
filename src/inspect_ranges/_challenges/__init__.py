@@ -1,5 +1,6 @@
 """Challenges and goals: typed `challenges.yaml`, the dataset, the oracle and plants, and the goal-type engine."""
 
+from .corroborate import PROBE_MAC_PREFIX, CorroborationReport, corroborate
 from .dataset import challenge_dataset
 from .engine import (
     ASSURANCE_RANK,
@@ -24,6 +25,7 @@ from .goaltypes import (
 )
 from .oracle import OracleSetupError, RangeOracle, range_oracle
 from .plants import Plant, PlantStore
+from .poller import GoalPoller, start_goal_poller, stop_goal_poller
 from .schema import (
     GOAL_TYPES,
     Challenge,
@@ -42,6 +44,12 @@ from .schema import (
 from .scorer import challenge_scorer, score_challenge
 from .setup import plant_goals, plant_secret_file
 from .submission import Submission, Submissions, submissions_from, submit_goal
+from .timings import (
+    TIMINGS_STORE_KEY,
+    add_timing,
+    render_timing_table,
+    timings_snapshot,
+)
 
 __all__ = [
     "ASSURANCE_RANK",
@@ -88,4 +96,14 @@ __all__ = [
     "submissions_from",
     "submit_goal",
     "validate_challenges",
+    "CorroborationReport",
+    "GoalPoller",
+    "PROBE_MAC_PREFIX",
+    "TIMINGS_STORE_KEY",
+    "add_timing",
+    "corroborate",
+    "render_timing_table",
+    "start_goal_poller",
+    "stop_goal_poller",
+    "timings_snapshot",
 ]
