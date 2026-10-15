@@ -256,8 +256,8 @@ def test_cli_verify(tmp_path: Path) -> None:
     broken = runner.invoke(evidence, ["verify", str(tmp_path)])
     assert broken.exit_code == 1 and "BREAK [chunk-missing]" in broken.output
 
-    remote = runner.invoke(evidence, ["verify", "s3://bucket/prefix"])
-    assert remote.exit_code != 0 and "slice 3" in remote.output
+    # s3:// locations are accepted since slice 3 (dispatch and scheme
+    # rejection are pinned in test_evidence_s3.py)
 
 
 def test_sealed_stays_truthful_on_mid_parts_break(tmp_path: Path) -> None:
