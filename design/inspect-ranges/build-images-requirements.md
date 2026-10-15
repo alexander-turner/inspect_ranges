@@ -39,6 +39,7 @@ Every example validates today and refuses at planning via the guest-config gate;
 - The provider phase consumes goldens per sample and left two build-relevant residuals: Windows-through-provider waits on Windows render support, and the recipe-v4 golden requirement is now load-bearing for permission semantics (the agent user is created at derive time, src/inspect_ranges/_runtime/images.py).
 - The realizer's three-command cold start (`images derive`, `render`, `up`) is MEASURED at 55 s on a warm-caches host (realizer-v1.md phase exit) and is the baseline the consumption story must beat or justify.
 - channel-v1 carries the Windows CI runner follow-up (the C# drift guard needs a Windows runner) and notes Windows goldens take ~3 minutes to produce unattended in the spike harness (design/spikes/channel-v1/README.md).
+- evidence-v1 (in flight) extends the pinned hypervisor-stack container image with capture tooling (tcpdump; no shipped image carried it, per the evidence-capture spike) and gives that one image two runtime consumers with different capability profiles: the range container at the measured eight-capability floor, and the capture sidecar at `NET_RAW` only on the range's netns. Guest images are untouched by design (capture lives outside every VM). The architecture document's inventory must treat the hypervisor image as a versioned artifact with multiple capability profiles, not a deployment detail.
 
 ## 3. Existing commitments, and where the records disagree
 
@@ -165,6 +166,7 @@ Each question lists constraints and evidence, and what resolves it (analysis, me
 | Recipe bundle | digest per recipe-references | specified | no (unimplemented) |
 | Realization bundle | manifest with spec/plan hashes and per-file digests | at `up`, traversal-safe | no |
 | Checkpoint bundle | none yet (spike form only) | n/a | no |
+| Hypervisor-stack container image | pinned image reference; gains capture tooling and a second runtime profile (range container at the eight-cap floor; capture sidecar at `NET_RAW` only) with evidence-v1 | by Docker digest at pull | no |
 
 ### 7.3 Gates whose deletion defines the arc
 
