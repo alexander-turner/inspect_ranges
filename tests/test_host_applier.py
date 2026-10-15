@@ -726,3 +726,28 @@ def test_applier_without_evidence_location_writes_nothing(tmp_path: Path) -> Non
             await channel.teardown()
 
     asyncio.run(scenario())
+
+
+def test_applier_shutdown_leaves_evidence_unsealed_with_gaps(tmp_path: Path) -> None:
+    """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for the reaper's honest reap-seal."""
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        rig = Rig(tmp_path)
+        await rig.applier.start()
+        lease, digest = rig.lease(
+            tmp_path, "ir-shutdown", evidence_location=str(evidence_root)
+        )
+        channel = rig.channel(lease)
+        async for _ in channel.realize(digest, []):
+            pass
+        await rig.applier.aclose()  # shutdown with the sample still live
+        report = await verify_location(LocalDirStore(evidence_root))
+        host = report.writers["host"]
+        assert not host.sealed, "a cutoff record must stay unsealed"
+        assert host.first_break is None, "unsealed is reported, never broken"
+        causes = {gap.cause for gap in host.gaps}
+        assert "applier-shutdown" in causes, f"gaps: {causes}"
+
+    asyncio.run(scenario())

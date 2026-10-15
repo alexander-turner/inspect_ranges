@@ -44,7 +44,7 @@ POLL_UNTIMED_BOUND_MS = 30_000
 """Outer per-poll budget across attempts (`Budget.untimed_bound_ms`)."""
 
 DEFAULT_META_FLUSH_S = 15.0
-"""Default meta-record batching cadence (chunk-2 verification finding 3): routine ok/quiet poll records batch into one `telemetry-meta` chunk per interval instead of one object per poll; anomalies, errors, replays, and recoveries flush immediately, and `stop()` flushes the remainder. 0 means ship every poll (unit tests pin per-poll meta with it)."""
+"""Default meta-record batching cadence (chunk-2 verification finding 3): routine poll records batch into one `telemetry-meta` chunk per interval instead of one object per poll; failures, truncation, re-bootstraps, anomalies, and recoveries flush immediately, and `stop()` flushes the remainder. 0 means ship every poll (unit tests pin per-poll meta with it). The crash-window trade, stated: buffered ROUTINE meta records are coverage metadata, and a driver killed mid-interval loses up to one interval of them with no gap record; event payloads are unaffected (data chunks ship on their own poll's flush), and the record never claims the missing window, it simply proves coverage only up to its last shipped batch."""
 
 META_BATCH_MAX_RECORDS = 64
 """Buffered meta records that force a flush regardless of age."""
@@ -316,8 +316,12 @@ class TelemetryPoller:
         # anomalies flush immediately (their visibility latency is the point);
         # routine quiet/ok polls batch on the cadence (chunk-2 verification
         # finding 3: one meta object per poll was 2 S3 objects per poll)
+        # urgent: failures, truncation, re-bootstraps, anomalies, recoveries.
+        # "absent" (producer not started) and "capped" (gap already recorded
+        # once per stall) are ROUTINE: per-poll flushing for them would
+        # re-create the per-poll object cost batching exists to remove.
         urgent = (
-            meta.get("outcome") not in ("ok", "quiet")
+            meta.get("outcome") in ("error", "truncated", "cursor-missing")
             or "anomaly" in meta
             or meta.get("replay") is True
             or recovered
