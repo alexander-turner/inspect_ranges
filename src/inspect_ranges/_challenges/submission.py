@@ -34,7 +34,7 @@ class Submission:
     value: str
     wall: float
     source: str = "tool"
-    """`tool` for `submit()` records; `completion` for the single-goal fallback."""
+    """`tool` for `submit_goal()` records; `completion` for the single-goal fallback."""
 
 
 @tool
@@ -86,7 +86,7 @@ def submissions_from(
 ) -> Submissions:
     """The sample's submissions, with the single-goal completion fallback.
 
-    When `challenge` has exactly one goal and no `submit()` record exists for it, the model's completion text (stripped) counts as that goal's submission.
+    When `challenge` has exactly one goal and no `submit_goal()` record exists for it, the model's completion text (stripped) counts as that goal's submission.
 
     Args:
         state: The sample's task state.

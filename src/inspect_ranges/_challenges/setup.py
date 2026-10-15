@@ -14,6 +14,7 @@ from .dataset import CHALLENGE_METADATA_KEY
 from .engine import goal_type
 from .oracle import RangeOracle, range_oracle
 from .schema import Challenge, required_observers
+from .submission import submit_goal
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
@@ -127,6 +128,8 @@ def plant_goals() -> Solver:
     """Plant every goal's per-sample material before the agent acts.
 
     Prepend to the task's solver chain. Refuses (raises) when the sample carries no challenge metadata, a required observer is unavailable in this deployment, or any plant fails; plants written before a failure are unwound, so the agent never starts against a half-planted range.
+
+    Multi-goal challenges get the `submit_goal` tool added to `state.tools` (the dataset's appended prompt paragraph names it, so the harness guarantees it for generate-driven solvers). Agents that carry their own toolset, like `react(tools=...)`, must include `submit_goal()` themselves; single-goal challenges work without it through the completion fallback.
     """
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -136,7 +139,22 @@ def plant_goals() -> Solver:
                 "sample carries no challenge metadata; build the dataset with "
                 "challenge_dataset()"
             )
-        await run_setup(range_oracle(), Challenge.model_validate(raw))
+        challenge = Challenge.model_validate(raw)
+        if len(challenge.goals) > 1 and not _has_submit_goal(state):
+            state.tools.append(submit_goal())
+        await run_setup(range_oracle(), challenge)
         return state
 
     return solve
+
+
+def _has_submit_goal(state: TaskState) -> bool:
+    from inspect_ai.tool import ToolDef
+
+    for existing in state.tools:
+        try:
+            if ToolDef(existing).name == "submit_goal":
+                return True
+        except Exception:  # a tool ToolDef cannot introspect is not ours
+            continue
+    return False
