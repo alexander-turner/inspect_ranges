@@ -194,3 +194,37 @@ class TestBestPartialAcrossCandidates:
         goals = asyncio.run(scenario())
         record = cast("dict[str, object]", goals["j"])
         assert record["partial"] == 0.4
+
+
+class HostileStore(Store):
+    """A store whose writes fail; scoring must survive it (never-throw-into-scoring)."""
+
+    def set(self, key: str, value: Any) -> None:
+        raise RuntimeError("store write refused")
+
+
+class TestStoreFailureIsolation:
+    """A hostile store cannot error the sample out of score_challenge; the score comes from in-memory records."""
+
+    def test_score_survives_store_write_failures(self, tmp_path: Path) -> None:
+        async def scenario() -> tuple[float, dict[str, object]]:
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.store.record(
+                "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
+            )
+            challenge = Challenge.model_validate(
+                {
+                    "id": "c",
+                    "prompt": "p",
+                    "goals": [{"id": "f", "type": "flag", "host": "box", "path": "/f"}],
+                }
+            )
+            subs = Submissions(
+                [Submission(goal_id="f", value="VAL-7b7b", wall=time.time())]
+            )
+            return await score_challenge(oracle, HostileStore(), challenge, subs)
+
+        value, metadata = asyncio.run(scenario())
+        assert value == 1.0
+        goals = cast("dict[str, object]", metadata["goals"])
+        assert cast("dict[str, object]", goals["f"])["achieved"] is True

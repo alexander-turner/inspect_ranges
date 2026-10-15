@@ -19,6 +19,7 @@ from .engine import (
     HINTS_USED_STORE_KEY,
     Assurance,
     GoalResult,
+    LatchRecord,
     aggregate,
     goal_type,
     latch,
@@ -64,6 +65,7 @@ async def score_challenge(
     """
     assurances: dict[str, Assurance] = {}
     candidates_dropped: dict[str, int] = {}
+    fallback_records: dict[str, LatchRecord] = {}
     for goal in challenge.goals:
         engine = goal_type(goal.type)
         assurances[goal.id] = engine.assurance_for(goal)
@@ -115,15 +117,42 @@ async def score_challenge(
                 type(error).__name__,
             )
         elapsed = time.monotonic() - started
-        add_timing(store, f"goal:{goal.id}", "check-compare", elapsed)
-        record = latch(
-            store,
-            goal.id,
-            result,
-            assurance=assurances[goal.id],
-            primitive=goal.primitive_label,
-            elapsed_s=elapsed,
-        )
+        # Store writes are guarded like the poller's and corroborate's: a
+        # hostile or failing store must not throw into scoring (a lost timing
+        # or latch write never kills the score).
+        try:
+            add_timing(store, f"goal:{goal.id}", "check-compare", elapsed)
+        except Exception as error:
+            logger.warning(
+                "timing write failed goal=%s: %s", goal.id, type(error).__name__
+            )
+        try:
+            record = latch(
+                store,
+                goal.id,
+                result,
+                assurance=assurances[goal.id],
+                primitive=goal.primitive_label,
+                elapsed_s=elapsed,
+            )
+        except Exception as error:
+            logger.warning(
+                "latch write failed goal=%s: %s (scoring from the in-memory result)",
+                goal.id,
+                type(error).__name__,
+            )
+            record = LatchRecord(
+                achieved=result.achieved,
+                partial=result.partial,
+                corroborated=result.corroborated,
+                indeterminate=result.indeterminate,
+                reason=result.reason,
+                wall=time.time(),
+                assurance=assurances[goal.id],
+                primitive=goal.primitive_label,
+                elapsed_s=elapsed,
+            )
+        fallback_records[goal.id] = record
         logger.info(
             "scored goal=%s type=%s achieved=%s partial=%s corroborated=%s "
             "indeterminate=%s assurance=%s primitive=%s latch_wall=%.3f elapsed=%.3fs",
@@ -138,7 +167,12 @@ async def score_challenge(
             record.wall,
             elapsed,
         )
-    all_records = latched_records(store)
+    try:
+        all_records = latched_records(store)
+    except Exception as error:
+        logger.warning("latch read failed: %s", type(error).__name__)
+        all_records = {}
+    all_records = {**fallback_records, **all_records}
     records = {
         goal.id: all_records[goal.id]
         for goal in challenge.goals
