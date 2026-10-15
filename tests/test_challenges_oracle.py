@@ -1,11 +1,13 @@
 """Slice-2 battery (CI half): the oracle's raw-channel discipline, the plant store's value/digest split, and setup/unwind semantics.
 
-The residue rule is pinned mechanically: a recording endpoint captures every request the oracle sends, and tests assert plant values appear ONLY as `write_file` bulk — never in argv, env, stdin, logs, or the emitted plant records.
+The residue rule is pinned mechanically: a recording endpoint captures every request the oracle sends, and tests assert plant values appear ONLY as `write_file` bulk, never in argv, env, stdin, logs, or the emitted plant records.
 """
 
 import asyncio
 import json
 import logging
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -430,3 +432,44 @@ class TestRunSetup:
             assert [r["event"] for r in session.records] == ["planted", "unwound"]
 
         asyncio.run(scenario())
+
+
+class TestTracebackLocalsScrub:
+    """A failing plant's challenge-layer frames carry no plant bytes, so a locals-rendered traceback (`INSPECT_TRACEBACK_LOCALS=1`) cannot leak them from here (lower channel frames are documented out of scope; the flag stays forbidden on scoring runs)."""
+
+    def test_plant_frames_scrubbed(self, tmp_path: Path) -> None:
+        async def scenario() -> list[types.FrameType]:
+            endpoint = FailingPlantEndpoint("box", tmp_path)
+            oracle, _, _ = make_oracle(tmp_path, endpoint=endpoint)
+            oracle.nonce = lambda: VALUE_MARKER.decode()  # type: ignore[method-assign]
+            try:
+                await plant_secret_file(
+                    oracle,
+                    key="k",
+                    goal_id="g",
+                    guest="box",
+                    path="/tmp/x",
+                    owner="ghost",
+                )
+            except OracleSetupError:
+                frames: list[types.FrameType] = []
+                tb = sys.exc_info()[2]
+                while tb is not None:
+                    frames.append(tb.tb_frame)
+                    tb = tb.tb_next
+                return frames
+            raise AssertionError("plant unexpectedly succeeded")
+
+        frames = asyncio.run(scenario())
+        ours = [
+            frame
+            for frame in frames
+            if frame.f_code.co_name in ("plant_secret_file", "write_file")
+            and "_challenges" in frame.f_code.co_filename
+        ]
+        assert len(ours) >= 2, "expected both challenge-layer frames in the chain"
+        for frame in ours:
+            for name, local in frame.f_locals.items():
+                assert VALUE_MARKER.decode() not in repr(local), (
+                    f"plant bytes in frame {frame.f_code.co_name} local {name!r}"
+                )

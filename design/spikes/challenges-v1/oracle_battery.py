@@ -172,9 +172,12 @@ async def main() -> int:
         started = time.monotonic()
         await run_setup(oracle, challenge)
         total = time.monotonic() - started
-        check(True, f"plants landed via run_setup ({total:.2f}s for 2 plants)")
         flag_value = oracle.store.get("flag:crown")
         secret_value = oracle.store.get("control:owned")
+        check(
+            bool(flag_value) and bool(secret_value),
+            f"plants landed via run_setup ({total:.2f}s for 2 plants)",
+        )
 
         print("=== placement: mode and owner ===", flush=True)
         rc, out = await sh(oracle, "web", "stat -c '%a %U' /root/crown-flag")

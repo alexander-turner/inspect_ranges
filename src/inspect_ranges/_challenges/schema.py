@@ -99,6 +99,7 @@ class GoalBase(_StrictModel):
     """Capability label override; `None` means the type's default applies."""
 
     default_primitive: ClassVar[Primitive | None] = None
+    """Per-type default label. The mapping across types is a v1 proposal pending external-review feedback (`challenges-v1.md`): the design names the vocabulary but not the table."""
 
     @property
     def primitive_label(self) -> Primitive | None:
@@ -680,7 +681,7 @@ def validate_challenges(
 
     Args:
         path: Path to the challenges YAML file.
-        range_spec: The range to cross-reference against: a validated spec, or a `range.yaml` path to load. Omitted means structural validation only. An invalid range file becomes a `range-invalid` issue (cross-reference checks skipped), never a raise. An invalid range file becomes a `range-invalid` issue (cross-reference checks skipped), never a raise.
+        range_spec: The range to cross-reference against: a validated spec, or a `range.yaml` path to load. Omitted means structural validation only. An invalid range file becomes a `range-invalid` issue (cross-reference checks skipped), never a raise.
 
     Returns:
         The report; `ValidationReport.spec` carries the validated `Challenges` when the file is valid.

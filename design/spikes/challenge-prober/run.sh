@@ -114,7 +114,6 @@ echo "=== baseline agent view (no probe endpoints exist) ==="
 aview | tee "$SPIKE/tmp/logs/view-baseline.txt"
 grep -q "PING $PROBE_A_IP silent" "$SPIKE/tmp/logs/view-baseline.txt" \
   && ok "baseline: probe IPs dark" || bad "baseline not dark"
-BASE_OPEN=$(gx web "python3 /tmp/agentview.py 10.95.10.3" 2>/dev/null | grep -c open || true)
 ship agentview.py web /tmp/agentview.py
 BASE_OPEN=$(gx web "python3 /tmp/agentview.py 10.95.10.3" 2>/dev/null | grep -c ' open' || true)
 echo "baseline agent open-port count (from web): $BASE_OPEN"
