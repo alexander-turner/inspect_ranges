@@ -5,6 +5,7 @@ from .._devbox import devbox_group
 from .appliercmd import applier
 from .daemonbundle import daemon_bundle
 from .doctor import doctor
+from .evidencecmd import evidence
 from .imagescmd import images
 from .plancmd import plan, render
 from .reapercmd import reaper
@@ -23,6 +24,7 @@ ranges.add_command(applier)
 ranges.add_command(daemon_bundle)
 ranges.add_command(devbox_group)
 ranges.add_command(doctor)
+ranges.add_command(evidence)
 ranges.add_command(images)
 ranges.add_command(plan)
 ranges.add_command(reaper)
