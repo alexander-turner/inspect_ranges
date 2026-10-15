@@ -28,6 +28,7 @@ from .naming import CidAllocator
 from .retry import RetryConfig, RetryStats
 
 if TYPE_CHECKING:
+    from .._challenges.plants import PlantStore
     from .._channel.channel import Transport
     from .evidence import EvidenceSession
 
@@ -84,6 +85,10 @@ class SampleHandle:
     """The sample's leased host, set between render and boot; `None` again once the lease is released."""
     evidence: "EvidenceSession | None" = None
     """The sample's evidence session (`evidence-v1.md`), `None` when evidence is off; finalized by `_destroy` before `down`."""
+    plan: ResolvedPlan | None = None
+    """The sample's resolved plan, set at `sample_init`; the oracle's `resolved()` reads it (`challenges-v1.md`)."""
+    plants: "PlantStore | None" = None
+    """The sample's plant store, created lazily by the oracle factory; plant VALUES live only here, in memory (`challenges-v1.md`)."""
 
 
 class ProviderRuntime:
