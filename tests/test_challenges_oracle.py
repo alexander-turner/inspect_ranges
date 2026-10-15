@@ -11,7 +11,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from inspect_ranges._challenges.oracle import OracleSetupError, RangeOracle
+from inspect_ranges._challenges.oracle import (
+    PLANT_SCRIPT,
+    OracleSetupError,
+    RangeOracle,
+)
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import Challenge
 from inspect_ranges._challenges.setup import plant_secret_file, run_setup
@@ -48,8 +52,21 @@ class RecordingEndpoint(LocalEndpoint):
 
     async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
         # ownership emulation, extending LocalEndpoint's root-chown shape: the
-        # CI host cannot be root, so root `rm` (the oracle's rollback/unwind
-        # verb) runs as the current user against the translated path
+        # CI host cannot be root, so the oracle's root verbs are emulated at
+        # the contract level. The plant script writes stdin at the translated
+        # path with the requested mode and records the owner; root `rm` (the
+        # unwind verb) runs as the current user.
+        if request.user == "root" and request.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]:
+            _, _, _, _, path, mode, owner = request.cmd
+            target = self.translate(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(stdin)
+            target.chmod(int(mode, 8))
+            self.file_modes[path] = int(mode, 8)
+            self.file_owners[path] = owner
+            reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
+            self._store(request.id, reply)
+            return reply
         if request.user == "root" and request.cmd and request.cmd[0] == "rm":
             return await super()._run_command(
                 request.model_copy(update={"user": None}), stdin
@@ -57,11 +74,11 @@ class RecordingEndpoint(LocalEndpoint):
         return await super()._run_command(request, stdin)
 
 
-class FailingChownEndpoint(RecordingEndpoint):
-    """Chown as root fails here, driving the owner-flow rollback path."""
+class FailingPlantEndpoint(RecordingEndpoint):
+    """The plant script fails here (as it would for an unknown owner), writing nothing."""
 
     async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
-        if request.cmd and request.cmd[0] == "chown":
+        if request.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]:
             reply = _result_reply(
                 request, rc=1, stdout=b"", stderr=b"chown: invalid user\n"
             )
@@ -115,27 +132,38 @@ def recorded_execs(endpoint: RecordingEndpoint) -> list[ExecRequest]:
 
 
 def assert_no_residue(endpoint: RecordingEndpoint, value: bytes) -> None:
-    """The value appears only as `write_file` bulk: never argv, env, stdin, or any other request field."""
+    """The value rides only the sanctioned content channels (`write_file` bulk, the plant script's stdin bulk): never argv, env, paths, or any other request field."""
     for message, bulk in endpoint.requests:
         serialized = message.model_dump_json().encode()
         assert value not in serialized, f"plant value in request fields: {message.kind}"
-        if bulk is not None and not isinstance(message, WriteFileRequest):
+        sanctioned = isinstance(message, WriteFileRequest) or (
+            isinstance(message, ExecRequest)
+            and message.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]
+        )
+        if bulk is not None and not sanctioned:
             assert value not in bulk, f"plant value in {message.kind} bulk"
 
 
 class TestOracleWriteFile:
-    def test_owner_flow_mode_then_chown_path_only(self, tmp_path: Path) -> None:
+    def test_owner_flow_root_script_value_on_stdin_only(self, tmp_path: Path) -> None:
         async def scenario() -> None:
             oracle, endpoint, _ = make_oracle(tmp_path)
             value = VALUE_MARKER + b"-owner"
             await oracle.write_file("box", "/tmp/plant", value, owner="svc")
             assert endpoint.file_modes["/tmp/plant"] == 0o600
             assert endpoint.file_owners["/tmp/plant"] == "svc"
-            execs = recorded_execs(endpoint)
-            assert [req.cmd for req in execs] == [["chown", "svc", "/tmp/plant"]]
-            assert execs[0].user == "root"
-            assert execs[0].env == {}
-            assert not any(req.cmd[0] == "chmod" for req in execs)
+            [plant] = recorded_execs(endpoint)
+            assert plant.cmd == [
+                "sh",
+                "-c",
+                PLANT_SCRIPT,
+                "plant",
+                "/tmp/plant",
+                "600",
+                "svc",
+            ]
+            assert plant.user == "root"
+            assert plant.env == {}
             assert_no_residue(endpoint, value)
             assert (tmp_path / "tmp" / "plant").read_bytes() == value
 
@@ -150,11 +178,11 @@ class TestOracleWriteFile:
 
         asyncio.run(scenario())
 
-    def test_chown_failure_removes_file_and_names_principal(
+    def test_plant_failure_leaves_nothing_and_names_principal(
         self, tmp_path: Path
     ) -> None:
         async def scenario() -> None:
-            endpoint = FailingChownEndpoint("box", tmp_path)
+            endpoint = FailingPlantEndpoint("box", tmp_path)
             oracle, _, _ = make_oracle(tmp_path, endpoint=endpoint)
             value = VALUE_MARKER + b"-rollback"
             with pytest.raises(OracleSetupError) as excinfo:

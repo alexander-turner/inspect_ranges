@@ -25,6 +25,16 @@ class OracleSetupError(RuntimeError):
     """A privileged setup operation failed; the message names the operation, never a value."""
 
 
+PLANT_SCRIPT = (
+    'umask 077 && cat > "$1" && chmod -- "$2" "$1" && chown -- "$3" "$1"'
+    ' || { rm -f -- "$1"; exit 1; }'
+)
+"""The owner-flow write, run as root with the value on stdin.
+
+A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, the content arrives on stdin, and `umask 077` means the file is never wider than 0600 between creation and the explicit `chmod`. The trailing branch removes the file on ANY failure, so a refused plant leaves nothing behind.
+"""
+
+
 class RangeOracle:
     """Privileged access to one sample's range for setup and scoring. Not a `SandboxEnvironment`.
 
@@ -106,23 +116,36 @@ class RangeOracle:
         mode: int = 0o600,
         owner: str | None = None,
     ) -> None:
-        """Write a guest file with `mode` applied atomically; `owner` transfers ownership afterwards.
+        """Write a guest file with `mode` applied from the first byte; `owner` sets the principal.
 
-        The daemon pins the permission bits before any content lands (no world-readable window), writing as its own identity; `owner` then runs `chown` as root with ONLY the path in argv. A failed chown removes the file and raises: a plant is never left behind under the wrong principal.
+        Without `owner`, this is the daemon's file plane (mode pinned atomically with the write, daemon identity, so the path must be daemon-writable). With `owner`, the write rides the exec plane as root: the daemon's file identity cannot create files in privileged locations (`/root`, another principal's 0700 home), so the value travels as exec stdin (request bulk, the same transport privacy as a file write and never argv or env) into `umask 077 && cat`, then `chmod`/`chown` by positional argument. Any failure removes the file in the same script: a plant is never left behind under the wrong mode or principal.
 
         Raises:
-            OracleSetupError: The ownership transfer failed (the write is rolled back).
+            OracleSetupError: The owner-flow script failed (nothing is left at `path`).
         """
-        await self._channel.write_file(guest, path, data, mode=mode)
         if owner is None:
+            await self._channel.write_file(guest, path, data, mode=mode)
             return
-        outcome = await self.exec(guest, ["chown", owner, path], user="root")
+        request = ExecRequest(
+            id=request_id(),
+            cmd=[
+                "sh",
+                "-c",
+                PLANT_SCRIPT,
+                "plant",
+                path,
+                format(mode, "o"),
+                owner,
+            ],
+            user="root",
+            data_size=len(data),
+            budget=Budget(),
+        )
+        outcome = await self._channel.exec(guest, request, stdin=data)
         if outcome.rc != 0:
-            removal = await self.exec(guest, ["rm", "-f", path], user="root")
-            removed = "removed" if removal.rc == 0 else "REMOVAL FAILED, file left"
             raise OracleSetupError(
-                f"chown to {owner!r} failed on {guest}:{path} "
-                f"(rc {outcome.rc}; planted file {removed})"
+                f"owned write for {owner!r} failed on {guest}:{path} "
+                f"(rc {outcome.rc}; the script removed any partial file)"
             )
 
     # -- evidence accessors (read-only) -----------------------------------------
