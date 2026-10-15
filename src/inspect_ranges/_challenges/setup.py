@@ -186,7 +186,9 @@ def plant_goals(
                 f"with no telemetry spec supplied to plant_goals(): "
                 f"{sorted(unmatched)}"
             )
-        extra = frozenset({"telemetry-collector"}) if needed else frozenset()
+        extra: frozenset[str] = (
+            frozenset({"telemetry-collector"}) if needed else frozenset()
+        )
         await run_setup(oracle, challenge, extra_observers=extra)
         await _start_producers(
             oracle,

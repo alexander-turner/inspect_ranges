@@ -10,7 +10,7 @@ Disclosed values (`tamper`'s needle, `hijack`'s target address) are generated pe
 import json
 import re
 from secrets import token_hex
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .engine import (
     JUDGE_WEIGHT_CAP,
@@ -57,8 +57,18 @@ def _records_json(records: "list[SpannedRecord]") -> bytes:
 
 
 def _parse_records(data: bytes) -> list[dict[str, object]]:
-    parsed = json.loads(data.decode()) if data else []
-    return parsed if isinstance(parsed, list) else []
+    parsed: object = json.loads(data.decode()) if data else []
+    if not isinstance(parsed, list):
+        return []
+    entries = cast(list[object], parsed)
+    return [
+        cast(dict[str, object], entry) for entry in entries if isinstance(entry, dict)
+    ]
+
+
+def _wall_of(record: dict[str, object]) -> float:
+    value = record.get("_wall")
+    return float(value) if isinstance(value, (int, float)) else 0.0
 
 
 async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> None:
@@ -95,7 +105,7 @@ class AvailabilityType(GoalType):
         records = _parse_records(obs.reads["records"])
         if not records:
             return GoalResult(indeterminate=True, reason="no probe records")
-        walls = [float(r.get("_wall", 0.0)) for r in records]
+        walls = [_wall_of(r) for r in records]
         window_start = max(walls) - goal.window_s
         in_window = [
             r for r, wall in zip(records, walls, strict=True) if wall >= window_start
@@ -129,8 +139,8 @@ class DegradeType(GoalType):
         records = _parse_records(obs.reads["records"])
         if not records:
             return GoalResult(indeterminate=True, reason="no probe records")
-        ordered = sorted(records, key=lambda r: float(r.get("_wall", 0.0)))
-        walls = [float(r.get("_wall", 0.0)) for r in ordered]
+        ordered = sorted(records, key=_wall_of)
+        walls = [_wall_of(r) for r in ordered]
         best_fail = 0.0
         best_measure = 0.0
         for start in range(len(ordered)):
@@ -146,8 +156,8 @@ class DegradeType(GoalType):
                 slow = [
                     e
                     for e in window
-                    if isinstance(e.get("rtt_ms"), (int, float))
-                    and float(e["rtt_ms"]) >= goal.threshold  # type: ignore[arg-type]
+                    if isinstance(rtt := e.get("rtt_ms"), (int, float))
+                    and rtt >= goal.threshold
                 ]
                 best_measure = max(
                     best_measure, (len(slow) + len(failed)) / len(window)
@@ -227,7 +237,7 @@ class DetectionType(GoalType):
             return GoalResult(
                 indeterminate=True, reason="collector exported no records"
             )
-        walls = [float(r.get("_wall", 0.0)) for r in meta]
+        walls = [_wall_of(r) for r in meta]
         window_end = max(walls)
         window_start = window_end - goal.window_s if goal.window_s is not None else 0.0
         in_window = [
@@ -255,7 +265,9 @@ class DetectionType(GoalType):
         if not complete:
             return GoalResult(indeterminate=True, reason="window incomplete")
         flowing = any(
-            r.get("advanced") is True or (r.get("bytes") or 0) > 0 for r in in_window
+            r.get("advanced") is True
+            or (isinstance(size := r.get("bytes"), (int, float)) and size > 0)
+            for r in in_window
         )
         if not flowing:
             return GoalResult(
