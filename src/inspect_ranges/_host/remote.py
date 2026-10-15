@@ -18,7 +18,14 @@ from .._channel.uds import UdsTransport
 from .._compiler.plan import ResolvedPlan
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
-from .._runtime.up import GuestState, UpError, UpOptions, UpResult, bundle_digest
+from .._runtime.up import (
+    GuestState,
+    OnStage,
+    UpError,
+    UpOptions,
+    UpResult,
+    bundle_digest,
+)
 from .host import LeasePlacement, RangeHost, SampleSpec
 from .leases import HostLease, LeaseStore, lease_ttl_s
 from .local import LocalRangeHost, local_host_facts
@@ -70,6 +77,7 @@ class RemoteHostProvider:
                 staging=placement.staging,
                 host_facts=local_host_facts(),
                 ttl_s=self._ttl_s,
+                evidence_location=placement.evidence_location,
             )
         )
         channel = MessageChannel(
@@ -114,15 +122,28 @@ def _lease_channel(socket_path: Path, lease: HostLease, label: str) -> MessageCh
 
 
 async def _drive_realize(
-    socket_path: Path, lease: HostLease, bundle: Path, project: str
+    socket_path: Path,
+    lease: HostLease,
+    bundle: Path,
+    project: str,
+    on_stage: OnStage | None,
 ) -> UpResult:
-    """`channel.realize` folded back into the `up` contract (`UpResult` or `UpError`)."""
+    """`channel.realize` folded back into the `up` contract (`UpResult` or `UpError`).
+
+    `on_stage` observes each folded report with the DRIVER's clocks at receive time (the seam-stage vocabulary, status `report`): the receive-side half of the clock-offset pairs whose emit side the applier's recorder writes host-side (`evidence-v1.md`).
+    """
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
     channel = _lease_channel(socket_path, lease, project)
     started = time.monotonic()
     try:
         async for report in channel.realize(digest, []):
+            if on_stage is not None:
+                # never let an observer failure alter the realize outcome
+                try:
+                    on_stage(report.stage, "report", {"detail": report.detail})
+                except Exception:
+                    logger.exception("realize on_stage observer failed (ignored)")
             if report.stage == "failed":
                 # the failed detail begins with the up stage name: the lossless
                 # reverse mapping the provider's respin classification needs
@@ -146,7 +167,7 @@ async def _drive_realize(
 
 
 RemoteSeams = tuple[
-    Callable[[Path, UpOptions], UpResult],
+    Callable[[Path, UpOptions, OnStage | None], UpResult],
     Callable[[str, Path], DownResult],
     Callable[[dict[str, int], str], MessageChannel],
 ]
@@ -159,14 +180,16 @@ def remote_seams(socket_path: Path, state_dir: Path) -> RemoteSeams:
     """
     store = LeaseStore(state_dir)
 
-    def up_fn(bundle: Path, options: UpOptions) -> UpResult:
+    def up_fn(bundle: Path, options: UpOptions, on_stage: OnStage | None) -> UpResult:
         project = options.project or ""
         lease = _lease_for_project(store, project)
         if lease is None:
             raise UpError(
                 "verify-bundle", f"no host lease found for project {project!r}"
             )
-        return asyncio.run(_drive_realize(socket_path, lease, bundle, project))
+        return asyncio.run(
+            _drive_realize(socket_path, lease, bundle, project, on_stage)
+        )
 
     def down_fn(project: str, state_dir_arg: Path) -> DownResult:
         lease = _lease_for_project(store, project)

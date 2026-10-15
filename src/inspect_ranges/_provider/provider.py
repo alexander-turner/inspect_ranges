@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from typing_extensions import override
 
 from .._channel.channel import TamperError
-from .._compiler.plan import ResolvedPlan, resolve_plan
+from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
 from .._runtime.ownership import (
@@ -35,6 +35,7 @@ from .._runtime.up import UpError, UpOptions, UpResult, bundle_digest
 from ..schema import load_range, revalidate_range
 from ..types import RangeSpec
 from .admission import default_max_sandboxes
+from .evidence import EvidenceSession, resolve_evidence_session
 from .naming import sample_project
 from .ops import provider_exec, provider_read_file, provider_write_file
 from .state import ProviderRuntime, SampleHandle, provider_runtime
@@ -141,12 +142,29 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             spec = _resolve_spec(config)
             plan = resolve_plan(spec, runtime.plan_options())
 
-        await runtime.admission.acquire(plan.totals)
+        # evidence resolves before admission: its buffer caps join the memory
+        # charge, and failure to resolve must disable evidence, never the
+        # sample (resolve returns None with one INFO line)
+        session = resolve_evidence_session(
+            sample_id=sample_id,
+            run_hint=task_name,
+            capture_local=not runtime.host_backend.startswith("uds:"),
+        )
+        charged_totals = plan.totals
+        if session is not None:
+            charged_totals = plan.totals.model_copy(
+                update={
+                    "memory_mb": plan.totals.memory_mb + session.admission_memory_mb()
+                }
+            )
+        await runtime.admission.acquire(charged_totals)
         handle: SampleHandle | None = None
         try:
-            handle = await cls._acquire_range(runtime, spec, plan, task_name, sample_id)
+            handle = await cls._acquire_range(
+                runtime, spec, plan, task_name, sample_id, session, charged_totals
+            )
         except BaseException:
-            await runtime.admission.release(plan.totals)
+            await runtime.admission.release(charged_totals)
             raise
         handle.admission_charged = True
 
@@ -169,6 +187,8 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         ) from tamper
                     raise
                 handle.sessions[guest] = pong.session
+            if handle.evidence is not None:
+                await handle.evidence.record_session_pins(handle.sessions)
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes
@@ -190,14 +210,22 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         plan: ResolvedPlan,
         task_name: str,
         sample_id: str,
+        session: EvidenceSession | None,
+        charged_totals: Totals,
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
         On every failure path the attempt's lease, staging, registry entry, and any
         partially created project are unwound before the error (or the respin) proceeds.
+        `charged_totals` is what admission charged (plan totals plus the evidence buffer
+        memory), stored on the handle so the release is symmetric. The evidence session's
+        writers open only after a successful boot (respins reuse the sample's location,
+        so earlier writes would turn a retry into write-once conflicts); its stage
+        recorder observes every attempt through the up seam.
         """
         attempts = max(1, runtime.retry_config.up_attempts)
         last_error: UpError | None = None
+        on_stage = session.recorder.on_stage if session is not None else None
         for attempt in range(1, attempts + 1):
             project = sample_project(spec.meta.name, sample_id)
             # the allocator takes a blocking cross-process flock: off the loop.
@@ -212,7 +240,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 project=project,
                 task_name=task_name,
                 staging=staging,
-                totals=plan.totals,
+                totals=charged_totals,
                 cid_base=lease.base,
                 retry=runtime.retry_config,
             )
@@ -237,7 +265,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         runtime.render_fn,
                         spec,
                         staging / "bundle",
-                        runtime.plan_options(cid_base=lease.base),
+                        runtime.plan_options(
+                            cid_base=lease.base,
+                            evidence_capture=session is not None,
+                        ),
                     )
                 )
                 boot: asyncio.Future[UpResult] | None = None
@@ -250,7 +281,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # the handle for the unwind to release.
                     acquire = asyncio.ensure_future(
                         cls._acquire_host(
-                            runtime, handle, plan, task_name, sample_id, staging
+                            runtime,
+                            handle,
+                            plan,
+                            task_name,
+                            sample_id,
+                            staging,
+                            session.location if session is not None else None,
                         )
                     )
                     await asyncio.shield(acquire)
@@ -263,9 +300,11 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                                 image_cache=runtime.image_cache,
                                 state_dir=runtime.state_dir,
                             ),
+                            on_stage,
                         )
                     )
                     result: UpResult = await asyncio.shield(boot)
+                    rendered_plan: ResolvedPlan = render.result()
                 except asyncio.CancelledError:
                     # none of these can be aborted and all keep creating
                     # resources; drain them (up is internally bounded) so the
@@ -322,6 +361,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # attached post-boot (None only between acquire and boot)
                     handle.host.channel = handle.channel
                 cls._mark_provider_owned(runtime, handle, sample_id)
+                if session is not None:
+                    # open() never raises (a session that cannot open disables
+                    # itself); the handle carries it for ops and _destroy
+                    await session.open(
+                        lease_id=cls._lease_id(handle),
+                        project=project,
+                        bundle=staging / "bundle",
+                        plan=rendered_plan,
+                    )
+                    handle.evidence = session
             except BaseException as failure:
                 # the range is BOOTED: a post-boot failure destroys it rather
                 # than leaving it running until task_cleanup while the sample's
@@ -343,6 +392,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         task_name: str,
         sample_id: str,
         staging: Path,
+        evidence_location: str | None,
     ) -> None:
         """Digest the rendered bundle and lease a host for it (the backend gates on readiness, writes the lease, logs the isolation claim, and starts renewal).
 
@@ -361,6 +411,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 project=handle.project,
                 bundle_path=str(staging / "bundle"),
                 staging=str(staging),
+                evidence_location=evidence_location,
             ),
         )
 
@@ -372,6 +423,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         if handle.host is not None:
             await runtime.host_provider.release(handle.host)
             handle.host = None
+
+    @classmethod
+    def _lease_id(cls, handle: SampleHandle) -> str | None:
+        """The sample's host-lease id when the backend exposes one (both v1 backends do); evidence records carry it for the cross-binding."""
+        lease = getattr(handle.host, "lease", None)
+        lease_id = getattr(lease, "lease_id", None)
+        return lease_id if isinstance(lease_id, str) else None
 
     @classmethod
     def _mark_provider_owned(
@@ -420,9 +478,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     async def _destroy(cls, runtime: ProviderRuntime, handle: SampleHandle) -> None:
         """Tear one sample down: single attempt, no retry.
 
-        Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
+        `finalize evidence` runs first (bounded, idempotent, never raises: evidence failure must never alter teardown), then `down`; the binding is written only after a successful teardown (in the separated topology the host's seal digest is read back then, since the applier seals at teardown). Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
         """
+        if handle.evidence is not None:
+            await handle.evidence.finalize()
         await asyncio.to_thread(runtime.down_fn, handle.project, runtime.state_dir)
+        if handle.evidence is not None:
+            if not handle.evidence.capture_local:
+                await handle.evidence.read_host_seal()
+            handle.evidence.write_binding()
+            handle.evidence = None
         await asyncio.to_thread(runtime.allocator.release, handle.project)
         await cls._release_host(runtime, handle)
         shutil.rmtree(handle.staging, ignore_errors=True)
@@ -468,6 +533,14 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         remaining = list(runtime.registry.values())
         if not cleanup:
             for handle in remaining:
+                if handle.evidence is not None:
+                    # the range stays up, so seal what this process delivered
+                    # (honest to the abandonment point) and surface the
+                    # binding; an applier-side writer keeps capturing and the
+                    # reaper reap-seals it after lease expiry
+                    await handle.evidence.finalize()
+                    handle.evidence.write_binding()
+                    handle.evidence = None
                 if handle.host is not None:
                     # the deliberate keep-it-running path: stop renewing but
                     # LEAVE the lease, so the independent reaper reclaims the

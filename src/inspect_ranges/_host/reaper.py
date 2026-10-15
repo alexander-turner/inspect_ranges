@@ -40,6 +40,34 @@ def _default_down(project: str, state_dir: Path) -> DownResult:
     return run_down(project, state_dir=state_dir)
 
 
+def _reap_seal(location: str, lease: HostLease) -> None:
+    """Best-effort reap-seal of the lease's abandoned evidence record (never raises; failures are logged and reclamation proceeds)."""
+    import asyncio
+
+    from .._evidence.sealer import seal_abandoned
+
+    try:
+        sealed = asyncio.run(
+            seal_abandoned(location, lease_id=lease.lease_id, sample_id=lease.sample_id)
+        )
+    except Exception as error:
+        logger.warning(
+            "reaper: reap-seal at %s for lease=%s failed (record stays "
+            "unsealed, reported as such by verify): %s",
+            location,
+            lease.lease_id,
+            error,
+        )
+        return
+    if sealed:
+        logger.info(
+            "reaper: reap-sealed %s writer(s) at %s for lease=%s",
+            len(sealed),
+            location,
+            lease.lease_id,
+        )
+
+
 def sweep(
     state_dir: Path,
     *,
@@ -107,6 +135,13 @@ def _reap_one(
                 error,
             )
             return ReapOutcome(lease.lease_id, lease.project, "down-failed", str(error))
+    if lease.evidence_location is not None:
+        # after teardown (nothing appends anymore), before release: a dead
+        # driver's record gets its `reaped` seal so it stays verifiable.
+        # Best-effort by design: evidence trouble never blocks reclamation,
+        # and a put-only credential (which cannot replay parts) leaves the
+        # record honestly unsealed with a warning (sealer docstring).
+        _reap_seal(lease.evidence_location, lease)
     try:
         allocator.release(lease.project)
         shutil.rmtree(Path(lease.staging), ignore_errors=True)

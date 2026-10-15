@@ -196,7 +196,7 @@ Range startup consists of:
 
 Each range is a single Docker container running the hypervisor stack (libvirtd and QEMU) and hosting every guest as a VM, including the attack box. Docker's job is packaging and lifecycle:
 
-- The hypervisor stack ships as a pinned container image, so a host needs only Docker and KVM (libvirt and QEMU do not need to be installed on the host).
+- The hypervisor stack ships as a pinned container image, so a host needs only Docker and KVM (libvirt and QEMU do not need to be installed on the host). The image also carries the evidence-capture tooling (tcpdump, python3), used only by a `NET_RAW`-only capture sidecar on the range's network namespace; the binaries are inert in the range service itself, which holds no `NET_RAW`.
 
 - The range's bridges and firewall rules exist only inside the container's network namespace. The host's own networking carries no range state, even while a range is running.
 

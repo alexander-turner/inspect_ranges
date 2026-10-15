@@ -66,16 +66,23 @@ def derive_evidence_location(
 ) -> str:
     """The per-sample evidence prefix beside the eval log.
 
-    Strips the log file's final suffix (`.eval`, `.json`) and appends `.evidence/<sample_id>_<epoch>_<attempt>`. Works on paths and URLs alike (string surgery on the final `/` segment, never `Path`, so `s3://` locations survive). When `INSPECT_RANGES_EVIDENCE_SINK` is set, the same `<stem>.evidence/<triple>` layout is rooted under the override instead.
+    Strips the log file's final suffix (`.eval`, `.json`) and appends `.evidence/<sample_id>_<epoch>_<attempt>`. Works on paths and URLs alike (string surgery on the final `/` segment, never `Path`, so `s3://` locations survive). When `INSPECT_RANGES_EVIDENCE_SINK` is set, the same `<stem>.evidence/<triple>` layout is rooted under the override instead. Filesystem results are absolutized: inspect may report a relative log location (relative to its own working directory), and a relative path in the binding would only resolve from that directory, which a later verifier does not have.
     """
     base, _, name = log_location.rstrip("/").rpartition("/")
     stem = name.rsplit(".", 1)[0] if "." in name else name
     triple = f"{_sanitize(sample_id)}_{epoch}_{attempt}"
     override = os.environ.get(EVIDENCE_SINK_OVERRIDE_VAR)
     if override:
-        return f"{override.rstrip('/')}/{stem}.evidence/{triple}"
+        return _absolutize(f"{override.rstrip('/')}/{stem}.evidence/{triple}")
     prefix = f"{base}/" if base else ""
-    return f"{prefix}{stem}.evidence/{triple}"
+    return _absolutize(f"{prefix}{stem}.evidence/{triple}")
+
+
+def _absolutize(location: str) -> str:
+    """Anchor a filesystem location to the current working directory; URL schemes pass through."""
+    if "://" in location or location.startswith("/"):
+        return location
+    return os.path.abspath(location)
 
 
 def evidence_location_for(identity: EvidenceIdentity) -> str:

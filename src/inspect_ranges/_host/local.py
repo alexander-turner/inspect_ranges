@@ -198,6 +198,7 @@ class LocalHostProvider:
                 staging=placement.staging,
                 host_facts=local_host_facts(),
                 ttl_s=self._ttl_s,
+                evidence_location=placement.evidence_location,
             )
         )
         host = LocalRangeHost(lease, self._store, self._ttl_s)
