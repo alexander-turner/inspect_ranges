@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from inspect_ranges._challenges import (
     Challenge,
     Challenges,
@@ -306,8 +307,6 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
 def test_structural_refusals(
     label: str, data: dict[str, Any], code: str, tmp_path: Path
 ) -> None:
-    import yaml
-
     with pytest.raises(ValidationError):
         Challenge.model_validate(data)
     path = tmp_path / "challenges.yaml"
@@ -318,8 +317,6 @@ def test_structural_refusals(
 
 
 def test_duplicate_challenge_ids(tmp_path: Path) -> None:
-    import yaml
-
     first = challenge_with([{"id": "g", "type": "judge", "rubric": "r"}])
     with pytest.raises(ValidationError):
         Challenges.model_validate({"challenges": [first, dict(first)]})
@@ -388,8 +385,6 @@ def test_cross_validation(
     hint: str | None,
     tmp_path: Path,
 ) -> None:
-    import yaml
-
     path = tmp_path / "challenges.yaml"
     path.write_text(yaml.safe_dump({"challenges": [challenge_with([goal])]}))
     report = validate_challenges(path, range_spec=fixture_spec())
@@ -401,8 +396,6 @@ def test_cross_validation(
 
 
 def test_cross_validation_collects_all(tmp_path: Path) -> None:
-    import yaml
-
     goals = [
         {"id": "a", "type": "flag", "host": "nope", "path": "/f"},
         {"id": "b", "type": "detection", "collector": "elk", "signal": "x"},
@@ -417,8 +410,6 @@ def test_cross_validation_collects_all(tmp_path: Path) -> None:
 
 
 def test_valid_against_fixture(tmp_path: Path) -> None:
-    import yaml
-
     goals = [
         {"id": "a", "type": "flag", "host": "web", "path": "/f"},
         {"id": "b", "type": "detection", "collector": "sysmon", "signal": "x"},
@@ -472,6 +463,57 @@ def test_goal_unknown_key_hint(tmp_path: Path) -> None:
     issue = next(issue for issue in report.issues if issue.code == "unknown-key")
     assert issue.path == ("challenges", 0, "goals", 0, "pth")
     assert issue.hint == "did you mean 'path'?"
+
+
+EMPTY_FIELD_CASES: list[tuple[str, dict[str, Any]]] = [
+    ("flag-empty-path", {"id": "g", "type": "flag", "host": "web", "path": ""}),
+    ("answer-empty-value", {"id": "g", "type": "answer", "value": ""}),
+    (
+        "answer-empty-host",
+        {"id": "g", "type": "answer", "host": "", "path": "/x"},
+    ),
+    (
+        "execute-empty-user",
+        {
+            "id": "g",
+            "type": "execute",
+            "host": "web",
+            "service_user": "",
+            "token_path": "/t",
+        },
+    ),
+    (
+        "detection-empty-signal",
+        {"id": "g", "type": "detection", "collector": "splunk", "signal": ""},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "goal"), EMPTY_FIELD_CASES, ids=[case[0] for case in EMPTY_FIELD_CASES]
+)
+def test_actionable_fields_refuse_empty(label: str, goal: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        Challenge.model_validate(challenge_with([goal]))
+
+
+def test_invalid_range_file_reports_not_raises(tmp_path: Path) -> None:
+    challenges_path = tmp_path / "challenges.yaml"
+    challenges_path.write_text(
+        yaml.safe_dump(
+            {
+                "challenges": [
+                    challenge_with([{"id": "g", "type": "judge", "rubric": "r"}])
+                ]
+            }
+        )
+    )
+    range_path = tmp_path / "range.yaml"
+    range_path.write_text("range: [broken")
+    report = validate_challenges(challenges_path, range_spec=range_path)
+    assert not report.valid
+    assert {issue.code for issue in report.issues} == {"range-invalid"}
+    assert not report.semantic_checked
 
 
 @pytest.mark.parametrize(
