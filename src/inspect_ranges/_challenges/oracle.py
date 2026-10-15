@@ -102,10 +102,33 @@ class RangeOracle:
         return await self._channel.exec(guest, request)
 
     async def read_file(
-        self, guest: str, path: str, *, cap: int = DEFAULT_BULK_CAP
+        self,
+        guest: str,
+        path: str,
+        *,
+        cap: int = DEFAULT_BULK_CAP,
+        user: str | None = None,
     ) -> bytes:
-        """Read a guest file raw (a T3 read like any other; the cost rule applies to oracle reads too)."""
-        return await self._channel.read_file(guest, path, cap=cap)
+        """Read a guest file raw (a T3 read like any other; the cost rule applies to oracle reads too).
+
+        The daemon's file plane reads as the daemon identity (the agent user), so privileged locations (a 0600 root plant, another principal's file) need `user`: the read then rides the exec plane (`cat` with only the path in argv; the content returns as reply bulk, the same privacy class as a file read).
+
+        Raises:
+            OracleSetupError: The privileged read failed or was truncated at the reply cap.
+        """
+        if user is None:
+            return await self._channel.read_file(guest, path, cap=cap)
+        outcome = await self.exec(guest, ["cat", "--", path], user=user)
+        if outcome.rc != 0:
+            raise OracleSetupError(
+                f"privileged read as {user!r} failed on {guest}:{path} "
+                f"(rc {outcome.rc})"
+            )
+        if outcome.stdout_truncated:
+            raise OracleSetupError(
+                f"privileged read of {guest}:{path} truncated at the reply cap"
+            )
+        return outcome.stdout
 
     async def write_file(
         self,
