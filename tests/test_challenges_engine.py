@@ -5,6 +5,7 @@ Comparison is pinned host-side and pure; the execute/exfiltrate corroboration te
 
 import asyncio
 import struct
+import time
 from ipaddress import IPv4Address
 from pathlib import Path
 
@@ -44,9 +45,12 @@ VALUE = b"ENGINE-5f5f5f"
 def submissions(**values: str) -> Submissions:
     from inspect_ranges._challenges.submission import Submission
 
+    # Real wall clocks: a submission timestamped before its plant's creation is
+    # a corroboration CONTRADICTION by design (the slice-5 temporal check), so
+    # the fixture must not fabricate epoch-era times.
     return Submissions(
         [
-            Submission(goal_id=goal_id, value=value, wall=1.0)
+            Submission(goal_id=goal_id, value=value, wall=time.time())
             for goal_id, value in values.items()
         ]
     )
@@ -179,6 +183,66 @@ class TestLatch:
             elapsed_s=0.1,
         )
         assert second.achieved and second.wall == first.wall
+
+    def test_corroboration_upgrades_without_restamping(self) -> None:
+        """A cheap-tier poller latch (corroborated None) must not mask the full check's corroborated=True; the upgrade keeps the original timestamp."""
+        store = Store()
+        first = latch(
+            store,
+            "g",
+            GoalResult(achieved=True, corroborated=None),
+            assurance="guest-corroborated",
+            primitive="execute",
+            elapsed_s=0.1,
+        )
+        upgraded = latch(
+            store,
+            "g",
+            GoalResult(achieved=True, corroborated=True),
+            assurance="guest-corroborated",
+            primitive="execute",
+            elapsed_s=0.1,
+        )
+        assert upgraded.corroborated is True and upgraded.wall == first.wall
+        downgrade = latch(
+            store,
+            "g",
+            GoalResult(achieved=True, corroborated=None),
+            assurance="guest-corroborated",
+            primitive="execute",
+            elapsed_s=0.1,
+        )
+        assert downgrade.corroborated is True  # never downgraded
+
+    def test_partial_survives_indeterminate_then_clean_fail(self) -> None:
+        """Earned partial credit floors every replacement: 0.4 -> indeterminate -> clean fail keeps 0.4."""
+        store = Store()
+        latch(
+            store,
+            "g",
+            GoalResult(achieved=False, partial=0.4),
+            assurance="host-anchored",
+            primitive="leak",
+            elapsed_s=0.1,
+        )
+        held = latch(
+            store,
+            "g",
+            GoalResult(indeterminate=True, reason="check failed"),
+            assurance="host-anchored",
+            primitive="leak",
+            elapsed_s=0.1,
+        )
+        assert held.indeterminate and held.partial == 0.4
+        resolved = latch(
+            store,
+            "g",
+            GoalResult(achieved=False),
+            assurance="host-anchored",
+            primitive="leak",
+            elapsed_s=0.1,
+        )
+        assert not resolved.indeterminate and resolved.partial == 0.4
 
     def test_partial_improves_but_never_regresses(self) -> None:
         store = Store()
@@ -601,3 +665,54 @@ class TestReviewFindings:
         assert _guest_ip(oracle, "gw", "internal") == IPv4Address("10.9.2.1")
         with pytest.raises(KeyError):
             _guest_ip(oracle, "gw", "nowhere")
+
+
+class TestMultiCandidateScoring:
+    def test_later_wrong_submission_never_buries_a_right_one(
+        self, tmp_path: Path
+    ) -> None:
+        """Scoring tries every distinct submitted value oldest-first, so the outcome never depends on poll timing."""
+        from inspect_ranges._challenges.submission import Submission
+
+        async def scenario() -> float:
+            oracle, _, handle = make_oracle(tmp_path, session=FakePlantSession())
+            handle.spec = minimal_spec()
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[FlagGoal(id="only", host="box", path="/tmp/f", owner="root")],
+            )
+            await run_setup(oracle, challenge)
+            value = oracle.store.get("flag:only").decode()
+            base = time.time()
+            view = Submissions(
+                [
+                    Submission(goal_id="only", value=value, wall=base),
+                    Submission(goal_id="only", value="typo", wall=base + 2),
+                ]
+            )
+            scored, _ = await score_challenge(oracle, Store(), challenge, view)
+            return scored
+
+        assert asyncio.run(scenario()) == 1.0
+
+    def test_duplicate_hint_indices_penalize_once(self, tmp_path: Path) -> None:
+        async def scenario() -> float:
+            oracle, _, handle = make_oracle(tmp_path, session=FakePlantSession())
+            handle.spec = minimal_spec()
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[FlagGoal(id="only", host="box", path="/tmp/f", owner="root")],
+                hints=[Hint(text="h", penalty=0.3)],
+            )
+            await run_setup(oracle, challenge)
+            value = oracle.store.get("flag:only").decode()
+            store = Store()
+            store.set("inspect_ranges:hints_used", [0, 0])
+            scored, _ = await score_challenge(
+                oracle, store, challenge, submissions(only=value)
+            )
+            return scored
+
+        assert asyncio.run(scenario()) == pytest.approx(0.7)
