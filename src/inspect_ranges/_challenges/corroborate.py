@@ -160,6 +160,10 @@ async def _reverify_claims(
         # (a boot-time restart hours earlier) must not suppress contradiction
         # detection; a gap overlapping it makes the claim unverifiable.
         plants = plants_by_goal.get(goal.id, [])
+        # Boundary note: coverage/gap comparisons against these edges are
+        # strict, so coverage ending EXACTLY at window_start lands on the
+        # contradicted side. Defensible (the slack already absorbs the clock
+        # offset the strictness could mis-serve) but deliberate, not accidental.
         window_start = (
             (min(plant.recorded_wall for plant in plants) - WINDOW_SLACK_S)
             if plants
