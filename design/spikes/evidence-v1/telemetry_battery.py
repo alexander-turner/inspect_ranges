@@ -30,7 +30,10 @@ from inspect_ranges._evidence import (  # noqa: E402
     TelemetryPoller,
     verify_location,
 )
-from inspect_ranges._evidence.manifest import ManifestPart  # noqa: E402
+from inspect_ranges._evidence.reader import (  # noqa: E402
+    manifest_records,
+    stream_chunks,
+)
 from inspect_ranges._runtime.down import down  # noqa: E402
 from inspect_ranges._runtime.up import UpOptions, up  # noqa: E402
 from inspect_ranges.schema import load_range  # noqa: E402
@@ -98,6 +101,8 @@ def virsh(project: str, *args: str) -> str:
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        print(f"virsh {' '.join(args)} failed: {result.stderr.strip()}", flush=True)
     return result.stdout
 
 
@@ -115,27 +120,21 @@ async def wait_for(predicate: Any, name: str, timeout: float = 60.0) -> bool:
 
 async def meta_records(store: LocalDirStore, collector: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for key in sorted(await store.list(f"chunks/driver/telemetry-meta/{collector}")):
-        for line in (await store.get(key)).decode().splitlines():
-            records.append(json.loads(line))
+    for chunk in await stream_chunks(store, "driver", f"telemetry-meta/{collector}"):
+        records.extend(json.loads(line) for line in chunk.decode().splitlines())
     return records
 
 
 async def data_bytes(store: LocalDirStore, collector: str) -> bytes:
-    keys = sorted(await store.list(f"chunks/driver/telemetry/{collector}"))
-    return b"".join([await store.get(key) for key in keys])
+    return b"".join(await stream_chunks(store, "driver", f"telemetry/{collector}"))
 
 
 async def gap_causes(store: LocalDirStore, stream: str) -> list[str]:
-    causes: list[str] = []
-    for key in sorted(await store.list("manifests/driver")):
-        if "part-" not in key:
-            continue
-        part = ManifestPart.model_validate_json(await store.get(key))
-        causes.extend(
-            r.cause for r in part.records if r.kind == "gap" and r.stream == stream
-        )
-    return causes
+    return [
+        r.cause
+        for r in await manifest_records(store, "driver")
+        if r.kind == "gap" and r.stream == stream
+    ]
 
 
 async def main() -> int:
@@ -233,7 +232,10 @@ async def main() -> int:
 
         print("=== outage: pause the VM, gap, resume, recover ===", flush=True)
         names = virsh(project, "list", "--name")
-        domain = next(n for n in names.split() if "db" in n)
+        domain = next((n for n in names.split() if "db" in n), None)
+        if not check(domain is not None, f"virsh found the db domain in {names!r}"):
+            raise RuntimeError("cannot run the outage scenario without the domain")
+        assert domain is not None
         virsh(project, "suspend", domain)
         await wait_for(
             lambda: _error_seen(store, "applog"),

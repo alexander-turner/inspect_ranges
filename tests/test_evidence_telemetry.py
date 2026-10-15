@@ -16,8 +16,12 @@ from inspect_ranges._channel.channel import (
     GuestError,
 )
 from inspect_ranges._channel.protocol import ExecRequest
-from inspect_ranges._evidence.manifest import ManifestPart
-from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+from inspect_ranges._evidence.reader import (
+    LocalDirStore,
+    manifest_records,
+    stream_chunks,
+    verify_location,
+)
 from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
 from inspect_ranges._evidence.telemetry import (
     CURSOR_PLACEHOLDER,
@@ -123,28 +127,22 @@ def make_poller(
 
 
 async def gap_causes(store: LocalDirStore, stream: str) -> list[str]:
-    causes: list[str] = []
-    for key in sorted(await store.list("manifests/driver")):
-        if "part-" not in key:
-            continue
-        part = ManifestPart.model_validate_json(await store.get(key))
-        for record in part.records:
-            if record.kind == "gap" and record.stream == stream:
-                causes.append(record.cause)
-    return causes
+    return [
+        record.cause
+        for record in await manifest_records(store, "driver")
+        if record.kind == "gap" and record.stream == stream
+    ]
 
 
 async def meta_records(store: LocalDirStore, collector: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for key in sorted(await store.list(f"chunks/driver/telemetry-meta/{collector}")):
-        for line in (await store.get(key)).decode().splitlines():
-            records.append(json.loads(line))
+    for chunk in await stream_chunks(store, "driver", f"telemetry-meta/{collector}"):
+        records.extend(json.loads(line) for line in chunk.decode().splitlines())
     return records
 
 
 async def data_bytes(store: LocalDirStore, collector: str) -> bytes:
-    chunks = sorted(await store.list(f"chunks/driver/telemetry/{collector}"))
-    return b"".join([await store.get(key) for key in chunks])
+    return b"".join(await stream_chunks(store, "driver", f"telemetry/{collector}"))
 
 
 # -- command mode ------------------------------------------------------------
@@ -249,6 +247,51 @@ def test_command_truncation_ships_prefix_gaps_and_rebootstraps(
     asyncio.run(run())
 
 
+def test_command_banner_only_output_is_quiet_and_ships_nothing(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"evt-1\n-- cursor: c1\n"),
+            exec_ok(b"-- cursor: c1\n"),
+            exec_ok(b"-- cursor: c1\n"),
+        ]
+        poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
+        for _ in range(3):
+            await poller.poll_once("journal")
+        await writer.seal()
+
+        # banner lines never ship: the data stream carries events only
+        assert await data_bytes(store, "journal") == b"evt-1\n"
+        meta = await meta_records(store, "journal")
+        assert [m["outcome"] for m in meta] == ["ok", "quiet", "quiet"]
+        assert [m["watermark"] for m in meta] == ["c1", "c1", "c1"]
+
+    asyncio.run(run())
+
+
+def test_command_replay_flag_marks_post_reset_bootstrap(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"evt-1\n-- cursor: c1\n"),
+            exec_ok(b"evt-2 (cursor lost)", truncated=True),
+            exec_ok(b"evt-1\nevt-2\n-- cursor: c2\n"),  # bootstrap re-ships
+        ]
+        poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
+        for _ in range(3):
+            await poller.poll_once("journal")
+        await writer.seal()
+
+        meta = await meta_records(store, "journal")
+        # the duplicate window is decidable from the record alone
+        assert meta[0].get("replay") is None
+        assert meta[2]["replay"] is True and meta[2]["outcome"] == "ok"
+
+    asyncio.run(run())
+
+
 def test_command_cursor_missing_rebootstraps_without_gap(tmp_path: Path) -> None:
     async def run() -> None:
         channel = FakeChannel()
@@ -304,6 +347,50 @@ def test_file_watermark_regression_gaps_and_reships(tmp_path: Path) -> None:
         meta = await meta_records(store, "applog")
         assert meta[1]["anomaly"] == "watermark-regression"
         assert meta[1]["outcome"] == "ok" and meta[1]["watermark"] == 6
+
+    asyncio.run(run())
+
+
+def test_file_truncate_then_regrow_is_detected_by_content(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        # same length as shipped prefix, different bytes: a size-only check
+        # would silently splice the new file's tail into the record
+        channel.read_script = [b"old-content-1\n", b"NEW-content-1\nNEW-2\n"]
+        poller, writer, store = make_poller(tmp_path, channel, [file_spec()])
+        await poller.poll_once("applog")
+        await poller.poll_once("applog")
+        await writer.seal()
+
+        assert await gap_causes(store, "telemetry/applog") == ["watermark-regression"]
+        data = await data_bytes(store, "applog")
+        # the record restarts from the new content, never splicing mid-file
+        assert data == b"old-content-1\nNEW-content-1\nNEW-2\n"
+
+    asyncio.run(run())
+
+
+def test_file_rotation_via_enoent_after_content_is_regression(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.read_script = [
+            b"line-1\n",
+            GuestError("ENOENT", "rotated away"),
+            b"fresh-1\n",
+        ]
+        poller, writer, store = make_poller(tmp_path, channel, [file_spec()])
+        for _ in range(3):
+            await poller.poll_once("applog")
+        await writer.seal()
+
+        assert await gap_causes(store, "telemetry/applog") == ["watermark-regression"]
+        assert (await data_bytes(store, "applog")).endswith(b"fresh-1\n")
+        meta = await meta_records(store, "applog")
+        assert meta[1]["outcome"] == "absent"
+        assert meta[1]["anomaly"] == "rotated-or-deleted"
+        assert meta[1]["watermark"] == 0
 
     asyncio.run(run())
 
@@ -432,6 +519,42 @@ def test_stop_against_sealed_writer_and_dead_channel_never_raises(
         await asyncio.sleep(0.05)
         await writer.seal()  # out-of-order teardown: sealed under the poller
         await poller.stop()  # must not raise
+
+    asyncio.run(run())
+
+
+def test_start_after_stop_raises_rather_than_silently_not_polling(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [exec_ok(b"evt\n-- cursor: c1\n")]
+        poller, _, _ = make_poller(tmp_path, channel, [journal_spec(poll_s=0.01)])
+        await poller.start()
+        await poller.stop()
+        with pytest.raises(RuntimeError, match="cannot restart"):
+            await poller.start()
+
+    asyncio.run(run())
+
+
+def test_stop_cancels_a_hung_poll_within_budget(tmp_path: Path) -> None:
+    async def run() -> None:
+        hang = asyncio.Event()
+
+        class HangingChannel(FakeChannel):
+            async def exec(self, *args: Any, **kwargs: Any) -> ExecOutcome:
+                hang.set()
+                await asyncio.sleep(3600)
+                raise AssertionError("unreachable")
+
+        channel = HangingChannel()
+        poller, _, _ = make_poller(tmp_path, channel, [journal_spec(poll_s=0.01)])
+        await poller.start()
+        await asyncio.wait_for(hang.wait(), timeout=5)
+        start = asyncio.get_running_loop().time()
+        await poller.stop(stop_timeout_s=0.2)  # must cancel, not wait an hour
+        assert asyncio.get_running_loop().time() - start < 5
 
     asyncio.run(run())
 

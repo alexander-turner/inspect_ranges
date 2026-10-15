@@ -10,6 +10,7 @@ Watermark semantics by source kind. A `command` source owns true deltas when the
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import Annotated, Callable, Coroutine, Literal
@@ -48,7 +49,7 @@ CollectorName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*
 class CommandSource(EvidenceModel):
     r"""Poll a collector by running a declared command in the guest.
 
-    `command` runs when a watermark exists and must carry `{cursor}` in exactly one argument; `bootstrap` runs first (and after an explicit re-bootstrap) and must not reference the cursor. `cursor_pattern` is a regex with exactly one capture group, searched over the poll's decoded output; the last match's group becomes the next watermark. Example (journald): bootstrap `journalctl -t app -n 100 --show-cursor -q`, command `journalctl -t app --after-cursor={cursor} --show-cursor -q`, pattern `-- cursor: (\\S+)`.
+    `command` runs when a watermark exists and must carry `{cursor}` in exactly one argument; `bootstrap` runs first (and after an explicit re-bootstrap) and must not reference the cursor. `cursor_pattern` is a regex with exactly one capture group, searched over the final `CURSOR_TAIL_WINDOW` bytes of the poll's decoded output (the banner trails the events, and the window bounds regex cost over adversarial guest output, so the cursor must appear within it); the last match's group becomes the next watermark, and matching tail lines are stripped from the shipped payload so the data stream carries events only. Example (journald): bootstrap `journalctl -t app -n 100 --show-cursor -q`, command `journalctl -t app --after-cursor={cursor} --show-cursor -q`, pattern `-- cursor: (\\S+)`.
     """
 
     kind: Literal["command"] = "command"
@@ -97,10 +98,47 @@ class _CollectorState:
     def __init__(self) -> None:
         self.cursor: str | None = None  # command-mode watermark
         self.offset = 0  # file-mode watermark
+        self.shipped = hashlib.sha256()  # digest of every shipped file byte
+        self.replay_next = False  # the next bootstrap re-ships a seen window
         self.failing = False  # a poll-failed gap has been recorded for this streak
         self.capped = False  # a poll-truncated gap has been recorded for this stall
         self.polls = 0
         self.errors = 0
+
+    def reset_file(self) -> None:
+        self.offset = 0
+        self.shipped = hashlib.sha256()
+        self.capped = False
+
+
+CURSOR_TAIL_WINDOW = 4096
+"""Cursor extraction searches only the output's final bytes: the cursor banner trails the events, and the window bounds regex work over guest-controlled (adversarial post-compromise) text."""
+
+
+def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
+    """Extract the last cursor from `data`'s tail window and strip banner lines.
+
+    Returns the cursor (or `None` when the pattern matches nothing in the window) and the payload with every matching tail-window line removed, so the data stream carries events only. Lines outside the window are never regex-tested (the window is the bound on matching cost) and ship untouched.
+    """
+    compiled = re.compile(pattern)
+    lines = data.split(b"\n")
+    tested = 0
+    cursor: str | None = None
+    drop: set[int] = set()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        tested += len(line) + 1
+        if tested > CURSOR_TAIL_WINDOW:
+            break
+        match = compiled.search(line.decode("utf-8", errors="replace"))
+        if match is not None:
+            if cursor is None:
+                cursor = match.group(1)
+            drop.add(index)
+    if not drop:
+        return None, data
+    payload = b"\n".join(line for index, line in enumerate(lines) if index not in drop)
+    return cursor, payload
 
 
 class TelemetryPoller:
@@ -129,18 +167,39 @@ class TelemetryPoller:
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
-        """Begin polling every collector; idempotent."""
+        """Begin polling every collector; idempotent while running.
+
+        Raises:
+            RuntimeError: The poller was already stopped; a stopped poller cannot restart (a silent no-op here would end the meta stream with nothing in the record to distinguish it from a wedged poller).
+        """
+        if self._stopping.is_set():
+            raise RuntimeError("TelemetryPoller cannot restart after stop()")
         for name in self._collectors:
             if name not in self._tasks:
                 self._tasks[name] = asyncio.create_task(
                     self._run(name), name=f"telemetry-{name}"
                 )
 
-    async def stop(self) -> None:
-        """End the poll loops and flush; never raises."""
+    async def stop(self, *, stop_timeout_s: float = 20.0) -> None:
+        """End the poll loops and flush; never raises.
+
+        An in-flight poll against an unreachable guest can hold the channel's per-poll budget; past `stop_timeout_s` it is cancelled so teardown (this is the teardown-bound call, like `CaptureStreamer.stop`) is never hostage to a wedged guest.
+        """
         self._stopping.set()
+        deadline = asyncio.get_running_loop().time() + stop_timeout_s
         for task in self._tasks.values():
-            await self._guard("await-task", self._await_task(task))
+            remaining = max(deadline - asyncio.get_running_loop().time(), 0.1)
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "telemetry task %s did not stop within budget; cancelling",
+                    task.get_name(),
+                )
+                task.cancel()
+                await self._guard("cancel-task", self._await_task(task))
+            except Exception:
+                logger.exception("telemetry task %s failed at stop", task.get_name())
         self._tasks.clear()
         await self._guard("flush", self._writer.flush())
 
@@ -153,7 +212,10 @@ class TelemetryPoller:
 
     @staticmethod
     async def _await_task(task: "asyncio.Task[None]") -> None:
-        await task
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _run(self, name: str) -> None:
         spec = self._collectors[name]
@@ -244,6 +306,12 @@ class TelemetryPoller:
                 ),
             ),
         )
+        if state.replay_next and state.cursor is None:
+            # this bootstrap follows a reset (truncation or a missing cursor),
+            # so its window may re-ship entries already in the record; the
+            # flag makes the duplicate window decidable from the meta stream
+            meta["replay"] = True
+            state.replay_next = False
         meta["rc"] = outcome.rc
         meta["attempts"] = outcome.attempts
         if outcome.rc != 0:
@@ -253,28 +321,34 @@ class TelemetryPoller:
                 f"poll command rc={outcome.rc}: "
                 + outcome.stderr[:200].decode("utf-8", errors="replace")
             )
-        # the per-poll cap is enforced driver-side (`RangeChannel.exec` has no
-        # per-call output cap), on top of whatever the daemon truncated
+        # the per-poll cap is enforced driver-side: the `RangeChannel` seam
+        # carries no per-call output cap (`MessageChannel.exec` offers
+        # `bulk_cap`, but the poller stays on the protocol seam), so the
+        # daemon may ship up to its own output cap before this slice; declare
+        # a line limit (journalctl `-n`) in the command for high-volume
+        # collectors
         truncated = (
             outcome.stdout_truncated or len(outcome.stdout) > spec.max_poll_bytes
         )
         data = outcome.stdout[: spec.max_poll_bytes]
-        meta["bytes"] = len(data)
         meta["truncated"] = truncated
         if not data:
+            meta["bytes"] = 0
             meta["outcome"] = "quiet"
             meta["watermark"] = state.cursor
             meta["advanced"] = False
             return
-        await self._writer.append(f"telemetry/{spec.name}", data, span=self._span())
         if truncated:
-            # the tail (which carries the cursor) is gone: the loss is
-            # explicit and the watermark re-bootstraps rather than livelocking
-            # on the same window
+            # the tail (which carries the cursor) is gone: ship the prefix,
+            # record the loss explicitly, and re-bootstrap rather than
+            # livelocking on the same window
+            await self._writer.append(f"telemetry/{spec.name}", data, span=self._span())
+            meta["bytes"] = len(data)
             meta["outcome"] = "truncated"
             meta["watermark"] = None
             meta["advanced"] = False
             state.cursor = None
+            state.replay_next = True
             await self._writer.gap(
                 f"telemetry/{spec.name}", cause="poll-truncated", dropped=0
             )
@@ -284,22 +358,37 @@ class TelemetryPoller:
                 spec.name,
             )
             return
-        text = data.decode("utf-8", errors="replace")
-        matches = list(re.finditer(source.cursor_pattern, text))
-        if not matches:
+        cursor, payload = _extract_cursor(data, source.cursor_pattern)
+        meta["bytes"] = len(payload)
+        if cursor is None:
             # output without a cursor: the declared pattern does not match the
-            # tool's output; re-bootstrap so the poller never silently spins
-            # on a stale cursor (duplicates stay visible as advanced=false)
+            # tool's output; ship what arrived and re-bootstrap so the poller
+            # never silently spins on a stale cursor (the replay flag keeps
+            # the duplicate window visible)
+            if payload.strip():
+                await self._writer.append(
+                    f"telemetry/{spec.name}", payload, span=self._span()
+                )
             meta["outcome"] = "cursor-missing"
             meta["watermark"] = None
             meta["advanced"] = False
             state.cursor = None
+            state.replay_next = True
             logger.warning(
                 "telemetry cursor pattern matched nothing (re-bootstrap): collector=%s",
                 spec.name,
             )
             return
-        cursor = matches[-1].group(1)
+        if not payload.strip():
+            # cursor banner only (journalctl prints it even with no entries):
+            # a quiet poll, never shipped, so stall-vs-quiet stays decidable
+            # and the data stream carries events only
+            meta["outcome"] = "quiet"
+            meta["watermark"] = cursor
+            meta["advanced"] = False
+            state.cursor = cursor
+            return
+        await self._writer.append(f"telemetry/{spec.name}", payload, span=self._span())
         meta["outcome"] = "ok"
         meta["watermark"] = cursor
         meta["advanced"] = cursor != state.cursor
@@ -322,8 +411,28 @@ class TelemetryPoller:
             truncated = True
         except GuestError as error:
             if error.errno == "ENOENT":
-                # the log appears once the producer starts; absence is quiet,
-                # not an observation failure
+                if state.offset > 0:
+                    # the log vanished after content shipped: rotation or
+                    # deletion. History is gone, so this is a watermark
+                    # regression, not a quiet absence; shipping restarts from
+                    # whatever file reappears.
+                    await self._writer.gap(
+                        f"telemetry/{spec.name}",
+                        cause="watermark-regression",
+                        dropped=0,
+                    )
+                    logger.warning(
+                        "telemetry log vanished after %d shipped bytes (gap recorded): collector=%s path=%s",
+                        state.offset,
+                        spec.name,
+                        source.path,
+                    )
+                    state.reset_file()
+                    meta["anomaly"] = "rotated-or-deleted"
+                else:
+                    # the log appears once the producer starts; absence before
+                    # any content is quiet, not an observation failure
+                    pass
                 meta["outcome"] = "absent"
                 meta["watermark"] = state.offset
                 meta["advanced"] = False
@@ -331,28 +440,38 @@ class TelemetryPoller:
             raise
         meta["truncated"] = truncated
         size = len(data)
-        if size < state.offset:
-            # the file shrank: truncated or rewritten on the guest. The
-            # watermark regression is recorded in-chain and shipping restarts
-            # from the new content.
+        # regression check is content-anchored, not size-anchored: a truncate
+        # that regrows past the old offset between polls would otherwise
+        # splice mid-file bytes of the NEW content into the record silently
+        rewritten = (
+            state.offset > 0
+            and size >= state.offset
+            and hashlib.sha256(data[: state.offset]).hexdigest()
+            != state.shipped.hexdigest()
+        )
+        if size < state.offset or rewritten:
+            # the file shrank or its shipped prefix changed: truncated or
+            # rewritten on the guest. The watermark regression is recorded
+            # in-chain and shipping restarts from the new content.
             await self._writer.gap(
                 f"telemetry/{spec.name}", cause="watermark-regression", dropped=0
             )
             logger.warning(
-                "telemetry watermark regression (gap recorded): collector=%s path=%s %d -> %d",
+                "telemetry watermark regression (gap recorded): collector=%s path=%s %d -> %d rewritten=%s",
                 spec.name,
                 source.path,
                 state.offset,
                 size,
+                rewritten,
             )
-            state.offset = 0
-            state.capped = False
+            state.reset_file()
             meta["anomaly"] = "watermark-regression"
         delta = data[state.offset :]
         if delta:
             await self._writer.append(
                 f"telemetry/{spec.name}", delta, span=self._span()
             )
+            state.shipped.update(delta)
             state.offset += len(delta)
             state.capped = False
             meta["outcome"] = "ok"

@@ -30,6 +30,8 @@ What the run demonstrated, in order:
 - **Log truncation is a watermark regression**: `: > tele.log` produced the `watermark-regression` gap and shipping resumed from the new content.
 - **The record closes honestly**: seal `complete`, offline verify unbroken **with the seal binding supplied** (`expected_seals`), journald and file events both present, every non-error poll carrying its watermark.
 
+Re-run green (18/18, zero residue) after the fresh-context review's fixes, whose main changes are content-anchored regression detection for file sources (a truncate that regrows past the old offset is caught by a shipped-prefix digest, and rotation surfacing as ENOENT after shipped content is a regression, not an absence), cursor-banner stripping with banner-only polls reading as quiet (stall-vs-quiet stays decidable for command sources and the data stream carries events only), a bounded cursor-search window over adversarial guest output, an explicit replay flag on post-reset bootstrap polls, a restart-after-stop refusal, and a bounded `stop()` that cancels a hung poll.
+
 Two operational findings worth keeping: the production daemon reaps the exec's process group on return, so an in-guest background producer must `setsid` to survive its starting exec (the prototype-era "background processes survive" no longer holds unqualified); and live battery predicates must be delivery-lag immune (assert from the record's own poll counters, never from counts of delivered-so-far chunks, which lag appends by a flush).
 
 Files: `run_telemetry.sh`, `telemetry_battery.py`, `spec-telemetry.yaml`. Artifacts land under `tmp-telemetry/` (gitignored).
