@@ -289,7 +289,7 @@ def test_write_once_conflict_becomes_gap(tmp_path: Path) -> None:
         clock = FakeClock()
         sink = LocalDirSink(tmp_path)
         # a foreign object already sits at the chunk key this stream will use
-        await sink.put("chunks/stages/000000.bin", b"squatter")
+        await sink.put("chunks/host/stages/000000.bin", b"squatter")
         writer = EvidenceWriter(sink, writer="host", clock=clock, retry_wait_s=0)
         await writer.append("stages", b"ours", span=_span(clock))
         seal, _ = await writer.seal()
@@ -298,7 +298,7 @@ def test_write_once_conflict_becomes_gap(tmp_path: Path) -> None:
         host = report.writers["host"]
         assert host.ok and host.gaps[0].cause == "write-once-conflict"
         # the squatter is residue: unreferenced, reported, not a break
-        assert report.unreferenced == ["chunks/stages/000000.bin"]
+        assert report.unreferenced == ["chunks/host/stages/000000.bin"]
 
     asyncio.run(scenario())
 
@@ -336,5 +336,99 @@ def test_interleaved_writers_stay_isolated(tmp_path: Path) -> None:
         assert report.ok and set(report.writers) == {"driver", "host"}
         assert set(report.writers["host"].streams) == {"pcap/dmz", "console/web"}
         assert set(report.writers["driver"].streams) == {"plants", "clock"}
+
+    asyncio.run(scenario())
+
+
+def test_invalid_names_raise_at_the_boundary(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        with pytest.raises(ValueError):
+            EvidenceWriter(LocalDirSink(tmp_path), writer="Host!", clock=clock)
+        writer = EvidenceWriter(LocalDirSink(tmp_path), writer="host", clock=clock)
+        with pytest.raises(ValueError):
+            await writer.append("Console", b"x", span=_span(clock))
+        with pytest.raises(ValueError):
+            await writer.gap("a/b/c", cause="nested-too-deep")
+        # the rejected names poisoned nothing: valid work still delivers
+        await writer.append("console/web", b"x", span=_span(clock))
+        seal, _ = await writer.seal()
+        assert seal.status == "complete"
+
+    asyncio.run(scenario())
+
+
+def test_ambiguous_file_exists_after_transient_assumed_delivered(
+    tmp_path: Path,
+) -> None:
+    """A put that landed but reported failure (the S3 shape): the retry's FileExistsError means ours."""
+
+    class LandsButFails:
+        def __init__(self, inner: LocalDirSink) -> None:
+            self.inner = inner
+            self.failed_once = False
+
+        async def put(self, key: str, data: bytes) -> None:
+            if key.startswith("chunks/") and not self.failed_once:
+                self.failed_once = True
+                await self.inner.put(key, data)  # the write lands...
+                raise OSError("response lost")  # ...but the caller never hears
+            await self.inner.put(key, data)
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            LandsButFails(LocalDirSink(tmp_path)),
+            writer="host",
+            clock=clock,
+            retry_wait_s=0,
+        )
+        await writer.append("stages", b"landed", span=_span(clock))
+        seal, _ = await writer.seal()
+        assert seal.streams["stages"].chunks == 1
+        assert seal.streams["stages"].gaps == 0
+        report = await verify_location(LocalDirStore(tmp_path))
+        assert report.ok and not report.unreferenced
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_append_and_flush_stay_consistent(tmp_path: Path) -> None:
+    """A flusher task racing appends and gaps on one stream: keys and seqs stay in step."""
+
+    class SlowSink:
+        def __init__(self, inner: LocalDirSink) -> None:
+            self.inner = inner
+
+        async def put(self, key: str, data: bytes) -> None:
+            await asyncio.sleep(0.001)
+            await self.inner.put(key, data)
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            SlowSink(LocalDirSink(tmp_path)), writer="host", clock=clock, retry_wait_s=0
+        )
+
+        async def producer() -> None:
+            for index in range(20):
+                await writer.append(
+                    "pcap/dmz", f"frame-{index}".encode(), span=_span(clock)
+                )
+                if index % 5 == 0:
+                    await writer.gap("pcap/dmz", cause="write-failed", dropped=1)
+
+        async def flusher() -> None:
+            for _ in range(10):
+                await writer.flush()
+                await asyncio.sleep(0)
+
+        async with asyncio.TaskGroup() as group:
+            group.create_task(producer())
+            group.create_task(flusher())
+        seal, _ = await writer.seal()
+        assert seal.streams["pcap/dmz"].records == 24  # 20 chunks + 4 gaps
+        report = await verify_location(LocalDirStore(tmp_path))
+        assert report.ok and not report.unreferenced
 
     asyncio.run(scenario())

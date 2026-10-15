@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .manifest import (
+    STREAM_NAME_PATTERN,
+    WRITER_NAME_PATTERN,
     ChunkRecord,
     ClockSpan,
     ClockStamp,
@@ -28,6 +30,7 @@ from .manifest import (
     canonical_bytes,
     chain_genesis,
     chain_next,
+    check_name,
     chunk_key,
     clock_now,
     part_key,
@@ -36,6 +39,9 @@ from .manifest import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CHAIN_PLACEHOLDER = "0" * 64
+"""Pattern-valid filler for a record's `chain` while computing the real value (the field is excluded from its own hash, so the content never matters)."""
 
 DEFAULT_BUFFER_CAP_BYTES = 64 * 1024 * 1024
 """Default local backpressure cap; the runtime wires `INSPECT_RANGES_EVIDENCE_BUFFER_MB` to this at construction (slice 5)."""
@@ -110,9 +116,9 @@ class FlushResult:
 class EvidenceWriter:
     """Buffered, chaining writer for one writer identity at one evidence location.
 
-    Streams are single-writer by contract: two writers at one location (host and driver) must use disjoint stream names; their manifests are disjoint by construction (`manifests/<writer>/`).
+    Two writers at one location (host and driver) are isolated by construction: manifests AND chunks are namespaced by writer, so even a shared stream name cannot collide.
 
-    `append` and `gap` never raise backend errors; `flush` reports; `seal` raises `SealDeliveryError` only when the record cannot be closed honestly.
+    `append` and `gap` never raise backend errors (invalid names raise `ValueError` immediately: a programming error, caught at the boundary before it can poison the queue); `flush` reports; `seal` raises `SealDeliveryError` only when the record cannot be closed honestly. The public methods serialize on an internal lock, so `append` may briefly wait for an in-flight flush; the lock is what keeps chunk object keys and committed sequence numbers in step under concurrent use (a capture loop appending while a flusher task delivers).
     """
 
     def __init__(
@@ -129,8 +135,10 @@ class EvidenceWriter:
     ) -> None:
         if put_attempts < 1:
             raise ValueError("put_attempts must be >= 1")
+        check_name(writer, WRITER_NAME_PATTERN, "writer")
         self._sink = sink
         self._writer = writer
+        self._lock = asyncio.Lock()
         self._lease_id = lease_id
         self._sample_id = sample_id
         self._buffer_cap = buffer_cap_bytes
@@ -155,24 +163,28 @@ class EvidenceWriter:
     ) -> None:
         """Buffer one chunk for delivery; never raises backend errors.
 
-        If the buffer cap is exceeded, the oldest undelivered chunks are dropped with in-chain gap records (cause `buffer-cap`); a chunk larger than the cap is gapped immediately.
+        If the buffer cap is exceeded, the oldest undelivered chunks are dropped with in-chain gap records (cause `buffer-cap`); a chunk larger than the cap is gapped immediately. An invalid stream name raises `ValueError` here, at the boundary, before it can poison the delivery queue.
         """
-        self._check_open()
-        resolved = span if span is not None else self._point_span()
-        if len(data) > self._buffer_cap:
-            self._commit_gap(stream, resolved, cause="buffer-cap", dropped=len(data))
-            logger.warning(
-                "evidence gap (buffer-cap, oversized chunk): writer=%s stream=%s dropped=%d",
-                self._writer,
-                stream,
-                len(data),
+        check_name(stream, STREAM_NAME_PATTERN, "stream")
+        async with self._lock:
+            self._check_open()
+            resolved = span if span is not None else self._point_span()
+            if len(data) > self._buffer_cap:
+                self._commit_gap(
+                    stream, resolved, cause="buffer-cap", dropped=len(data)
+                )
+                logger.warning(
+                    "evidence gap (buffer-cap, oversized chunk): writer=%s stream=%s dropped=%d",
+                    self._writer,
+                    stream,
+                    len(data),
+                )
+                return
+            self._pending_chunks.append(
+                _PendingChunk(stream=stream, data=data, span=resolved)
             )
-            return
-        self._pending_chunks.append(
-            _PendingChunk(stream=stream, data=data, span=resolved)
-        )
-        self._pending_bytes += len(data)
-        self._enforce_cap()
+            self._pending_bytes += len(data)
+            self._enforce_cap()
 
     async def gap(
         self,
@@ -183,17 +195,23 @@ class EvidenceWriter:
         dropped: int = 0,
     ) -> None:
         """Record an explicit hole in a stream (data lost before it reached the writer)."""
-        self._check_open()
-        self._commit_gap(
-            stream,
-            span if span is not None else self._point_span(),
-            cause=cause,
-            dropped=dropped,
-        )
+        check_name(stream, STREAM_NAME_PATTERN, "stream")
+        async with self._lock:
+            self._check_open()
+            self._commit_gap(
+                stream,
+                span if span is not None else self._point_span(),
+                cause=cause,
+                dropped=dropped,
+            )
 
     async def flush(self) -> FlushResult:
         """Deliver buffered chunks and manifest parts; backend errors are retried, logged, and reported, never raised."""
-        self._check_open()
+        async with self._lock:
+            self._check_open()
+            return await self._flush_locked()
+
+    async def _flush_locked(self) -> FlushResult:
         result = FlushResult()
         await self._deliver_chunks(result)
         self._cut_part()
@@ -214,8 +232,16 @@ class EvidenceWriter:
 
         Returns the seal and its canonical digest (the sample-store binding value). Raises `SealDeliveryError` if manifest parts or the seal itself cannot be delivered: a seal must never claim parts that are not in the store, so the record stays honestly unsealed.
         """
-        self._check_open()
-        result = await self.flush()
+        async with self._lock:
+            self._check_open()
+            return await self._seal_locked(
+                status, worst_watermark_lag_s=worst_watermark_lag_s
+            )
+
+    async def _seal_locked(
+        self, status: SealStatus, *, worst_watermark_lag_s: float | None
+    ) -> tuple[Seal, str]:
+        result = await self._flush_locked()
         unflushed = 0
         while self._pending_chunks:
             pending = self._pending_chunks.popleft()
@@ -301,7 +327,7 @@ class EvidenceWriter:
             sha256=hashlib.sha256(pending.data).hexdigest(),
             size=len(pending.data),
             span=pending.span,
-            chain=chain_genesis(self._writer, pending.stream),  # placeholder, set below
+            chain=_CHAIN_PLACEHOLDER,
         )
         record.chain = chain_next(state.chain, record)
         state.chain = record.chain
@@ -321,7 +347,7 @@ class EvidenceWriter:
             span=span,
             cause=cause,
             dropped=dropped,
-            chain=chain_genesis(self._writer, stream),  # placeholder, set below
+            chain=_CHAIN_PLACEHOLDER,
         )
         record.chain = chain_next(state.chain, record)
         state.chain = record.chain
@@ -358,8 +384,10 @@ class EvidenceWriter:
         # sequence order between delivery and commitment
         while self._pending_chunks:
             pending = self._pending_chunks[0]
-            record_preview = self._stream_state(pending.stream).next_seq
-            key = chunk_key(pending.stream, record_preview)
+            # the lock guarantees nothing else commits to this stream between
+            # the key computation here and _commit_chunk below
+            next_seq = self._stream_state(pending.stream).next_seq
+            key = chunk_key(self._writer, pending.stream, next_seq)
             try:
                 await self._put_with_retry(key, pending.data)
             except FileExistsError:
@@ -418,8 +446,21 @@ class EvidenceWriter:
                 await self._sink.put(key, data)
                 return
             except FileExistsError:
-                # write-once violation is never transient; surface it
-                raise
+                if last is None:
+                    # first attempt: a foreign object genuinely sits at our
+                    # key; write-once forbids replacing it, surface it
+                    raise
+                # a prior attempt failed transiently but may have landed
+                # (routine for S3: bytes accepted, response lost). Assume the
+                # object is ours: if it is in fact foreign, verify reports a
+                # loud digest break instead of us silently gapping delivered
+                # data. Read-back disambiguation is unavailable by design
+                # (put-only credentials).
+                logger.warning(
+                    "evidence put ambiguous after transient failure, assuming delivered: key=%s",
+                    key,
+                )
+                return
             except Exception as error:
                 last = error
                 if attempt + 1 < self._put_attempts:

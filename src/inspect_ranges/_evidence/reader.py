@@ -9,10 +9,11 @@ import hashlib
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import ValidationError
 
 from .manifest import (
     ChunkRecord,
+    EvidenceModel,
     GapRecord,
     ManifestPart,
     Seal,
@@ -61,10 +62,8 @@ class LocalDirStore:
         return sorted(keys)
 
 
-class Break(BaseModel):
+class Break(EvidenceModel):
     """The first point where replay diverges from the stored record."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal[
         "manifest-unparseable",
@@ -88,10 +87,8 @@ class Break(BaseModel):
     """The last-good record before the break, for incident orientation."""
 
 
-class StreamCoverage(BaseModel):
+class StreamCoverage(EvidenceModel):
     """A stream's replayed totals and clock coverage."""
-
-    model_config = ConfigDict(extra="forbid")
 
     records: int = 0
     chunks: int = 0
@@ -101,10 +98,8 @@ class StreamCoverage(BaseModel):
     wall_end: float | None = None
 
 
-class GapInfo(BaseModel):
+class GapInfo(EvidenceModel):
     """One gap, inventoried for the report."""
-
-    model_config = ConfigDict(extra="forbid")
 
     stream: str
     seq: int
@@ -114,10 +109,8 @@ class GapInfo(BaseModel):
     wall_end: float
 
 
-class WriterReport(BaseModel):
+class WriterReport(EvidenceModel):
     """One writer's replay outcome."""
-
-    model_config = ConfigDict(extra="forbid")
 
     writer: str
     parts: int = 0
@@ -134,10 +127,8 @@ class WriterReport(BaseModel):
         return self.first_break is None
 
 
-class VerifyReport(BaseModel):
+class VerifyReport(EvidenceModel):
     """The whole location's verification outcome."""
-
-    model_config = ConfigDict(extra="forbid")
 
     location: str
     writers: dict[str, WriterReport] = {}
@@ -182,6 +173,28 @@ async def _verify_writer(
     next_seq: dict[str, int] = {}
     coverage: dict[str, StreamCoverage] = result.streams
     last_good: str | None = None
+
+    # the seal is read FIRST so `sealed` reports the record's true lifecycle
+    # state even when replay breaks mid-parts (an incident responder must not
+    # be told a sealed record is unsealed)
+    seal: Seal | None = None
+    try:
+        seal_bytes = await store.get(seal_key(writer))
+    except FileNotFoundError:
+        seal_bytes = None
+    if seal_bytes is not None:
+        try:
+            seal = Seal.model_validate_json(seal_bytes)
+        except (ValidationError, ValueError) as error:
+            result.first_break = Break(
+                kind="seal-unparseable",
+                key=seal_key(writer),
+                detail=str(error),
+            )
+            return result
+        result.sealed = True
+        result.seal_status = seal.status
+        result.seal_digest = seal_digest(seal)
 
     for index, key in enumerate(part_keys):
         expected = part_key(writer, index)
@@ -241,23 +254,8 @@ async def _verify_writer(
             last_good = f"{record.stream}#{record.seq} ({record.kind}) in {key}"
         result.parts = index + 1
 
-    try:
-        seal_bytes = await store.get(seal_key(writer))
-    except FileNotFoundError:
+    if seal is None:
         return result
-    try:
-        seal = Seal.model_validate_json(seal_bytes)
-    except (ValidationError, ValueError) as error:
-        result.first_break = Break(
-            kind="seal-unparseable",
-            key=seal_key(writer),
-            detail=str(error),
-            neighborhood=last_good,
-        )
-        return result
-    result.sealed = True
-    result.seal_status = seal.status
-    result.seal_digest = seal_digest(seal)
     if seal.parts != result.parts:
         result.first_break = Break(
             kind="seal-parts",
@@ -356,7 +354,7 @@ async def _verify_record(
         return None
     cov.chunks += 1
     cov.size += record.size
-    key = chunk_key(stream, record.seq)
+    key = chunk_key(writer, stream, record.seq)
     referenced.add(key)
     if not deep:
         return None

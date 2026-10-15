@@ -32,13 +32,13 @@ SealStatus = Literal["complete", "incomplete", "reaped"]
 """`complete`: everything appended was delivered before sealing. `incomplete`: the seal records an unflushed remainder (as in-chain gaps). `reaped`: sealed by the reaper after the driver died; the record is honest up to its last delivered part."""
 
 
-class _EvidenceModel(BaseModel):
+class EvidenceModel(BaseModel):
     """Strict base: unknown keys are errors everywhere in the format."""
 
     model_config = ConfigDict(extra="forbid")
 
 
-class ClockStamp(_EvidenceModel):
+class ClockStamp(EvidenceModel):
     """One reading of a writer's clocks.
 
     `wall` is unix seconds (UTC); `monotonic` is the same process's monotonic clock, present on capture-side and driver-side records alike so ordering survives wall-clock steps.
@@ -53,14 +53,14 @@ def clock_now() -> ClockStamp:
     return ClockStamp(wall=time.time(), monotonic=time.monotonic())
 
 
-class ClockSpan(_EvidenceModel):
+class ClockSpan(EvidenceModel):
     """The capture interval a record covers (point records use start == end)."""
 
     start: ClockStamp
     end: ClockStamp
 
 
-class ChunkRecord(_EvidenceModel):
+class ChunkRecord(EvidenceModel):
     """One delivered write-once chunk of a stream."""
 
     kind: Literal["chunk"] = "chunk"
@@ -73,7 +73,7 @@ class ChunkRecord(_EvidenceModel):
     chain: Sha256Hex
 
 
-class GapRecord(_EvidenceModel):
+class GapRecord(EvidenceModel):
     """An explicit hole in a stream: data that existed but was not delivered.
 
     Gaps occupy a stream sequence slot and are chained like chunks, so they are inside the chain, not beside it. The forbidden behavior is losing data without one of these.
@@ -93,7 +93,7 @@ class GapRecord(_EvidenceModel):
 ManifestRecord = Annotated[ChunkRecord | GapRecord, Field(discriminator="kind")]
 
 
-class ManifestPart(_EvidenceModel):
+class ManifestPart(EvidenceModel):
     """One write-once batch of manifest records, numbered contiguously per writer."""
 
     writer: WriterName
@@ -101,7 +101,7 @@ class ManifestPart(_EvidenceModel):
     records: list[ManifestRecord]
 
 
-class StreamSummary(_EvidenceModel):
+class StreamSummary(EvidenceModel):
     """A stream's totals and final chain head, as recorded in the seal."""
 
     chain: Sha256Hex
@@ -112,7 +112,7 @@ class StreamSummary(_EvidenceModel):
     """Delivered chunk bytes (dropped bytes are in the gaps, not here)."""
 
 
-class Seal(_EvidenceModel):
+class Seal(EvidenceModel):
     """The terminal record closing a writer's chains.
 
     `seal_digest` of this model is the value the driver records in the Inspect sample store (with the evidence pointer and chain heads), making the eval log and the evidence record mutually verifying.
@@ -134,10 +134,12 @@ class Seal(_EvidenceModel):
 def canonical_bytes(model: BaseModel, *, exclude: set[str] | None = None) -> bytes:
     """Deterministic serialization used for chaining and digests.
 
-    JSON with sorted keys and no whitespace over the model's JSON-mode dump; the digest of a record is stable across processes and pydantic re-parses.
+    JSON with sorted keys, no whitespace, and ASCII escaping over the model's JSON-mode dump; the digest of a record is stable across processes and pydantic re-parses. Deliberately distinct from `_channel/codec.py`'s `canonical_json` (which pins `ensure_ascii=False` for the wire): this encoder's bytes are baked into every chain value and seal digest, so its parameters are pinned here and must never drift toward the channel's.
     """
     data: dict[str, Any] = model.model_dump(mode="json", exclude=exclude)
-    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    return json.dumps(
+        data, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
 
 
 def chain_genesis(writer: str, stream: str) -> str:
@@ -162,24 +164,28 @@ def seal_digest(seal: Seal) -> str:
     return hashlib.sha256(canonical_bytes(seal)).hexdigest()
 
 
-def chunk_key(stream: str, seq: int) -> str:
-    """The write-once object key for a stream chunk."""
-    _check_name(stream, STREAM_NAME_PATTERN, "stream")
-    return f"chunks/{stream}/{seq:06d}.bin"
+def chunk_key(writer: str, stream: str, seq: int) -> str:
+    """The write-once object key for a stream chunk.
+
+    Namespaced by writer (like the manifests) so two writers at one location cannot collide even if they break the disjoint-streams convention: isolation is mechanism, not contract.
+    """
+    check_name(writer, WRITER_NAME_PATTERN, "writer")
+    check_name(stream, STREAM_NAME_PATTERN, "stream")
+    return f"chunks/{writer}/{stream}/{seq:06d}.bin"
 
 
 def part_key(writer: str, part: int) -> str:
     """The write-once object key for a manifest part."""
-    _check_name(writer, WRITER_NAME_PATTERN, "writer")
+    check_name(writer, WRITER_NAME_PATTERN, "writer")
     return f"manifests/{writer}/part-{part:06d}.json"
 
 
 def seal_key(writer: str) -> str:
     """The write-once object key for a writer's seal."""
-    _check_name(writer, WRITER_NAME_PATTERN, "writer")
+    check_name(writer, WRITER_NAME_PATTERN, "writer")
     return f"manifests/{writer}/seal.json"
 
 
-def _check_name(value: str, pattern: str, label: str) -> None:
+def check_name(value: str, pattern: str, label: str) -> None:
     if re.match(pattern, value) is None:
         raise ValueError(f"invalid {label} name {value!r} (must match {pattern})")
