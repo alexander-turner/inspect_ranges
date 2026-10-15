@@ -15,6 +15,7 @@ from inspect_ranges._challenges.engine import (
     Observations,
     aggregate,
 )
+from inspect_ranges._challenges.netident import PROBE_MAC_PREFIX
 from inspect_ranges._challenges.observedtypes import (
     _JUDGE_TEMPLATE,
     AvailabilityType,
@@ -80,6 +81,10 @@ class TestAllocation:
         assert str(dmz.ip) == "10.80.10.254"
         assert dmz.device == "pr-dmz" and dmz.peer == "prb-dmz"
         assert dmz.mac.startswith("02:50:00:")
+        # Cross-module drift pin: netident's exclusion prefix must cover the
+        # MACs the allocator actually mints, or probe frames silently stop
+        # being excluded from agent-traffic reasoning in BOTH scans.
+        assert bytes.fromhex(dmz.mac.replace(":", "")).startswith(PROBE_MAC_PREFIX)
         guest_ips = {
             str(interface.ip)
             for guest in first.guests
