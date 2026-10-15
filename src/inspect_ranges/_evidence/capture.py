@@ -293,8 +293,14 @@ class CaptureStreamer:
             for segment, view in self._segments.items():
                 if not view.unreachable_reported:
                     view.unreachable_reported = True
-                    await self._writer.gap(
-                        f"pcap/{segment}", cause="capture-unreachable"
+                    # guarded like every other writer touch: stop() is the
+                    # teardown call and must never raise, even against a
+                    # writer someone already sealed
+                    await self._guard(
+                        "unreachable-gap",
+                        self._writer.gap(
+                            f"pcap/{segment}", cause="capture-unreachable"
+                        ),
                     )
         await self._cycle(final=True, sidecar_stopped=stopped)
         await self._guard("flush", self._writer.flush())
