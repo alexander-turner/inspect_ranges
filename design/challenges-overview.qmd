@@ -38,7 +38,7 @@ Three further rules:
 
 1.  The scorer never sends the expected value to the guest: the check reads raw state (file bytes, a group listing, a service response) and the comparison happens host-side (otherwise an agent that controls the target could read the expected value out of the scoring command)
 2.  The scoring check is visible: it runs as a process the agent or an in-range defender can see (acceptable because by the first rule it carries no secret to observe).
-3.  Where an off-guest observer exists, evidence captured outside the VMs (per-segment pcap, consoles, daemon session continuity, tripwires) is checked against the scoring results: did traffic reach the target before the goal passed, did the exfiltrated bytes cross the wire. A contradiction invalidates the sample; missing evidence never fails a passing one (evidence detects tampering; it does not score). 
+3.  Where an off-guest observer exists, evidence captured outside the VMs (per-segment pcap, consoles, daemon session continuity, tripwires) is checked against the scoring results: did traffic reach the target before the goal passed, did the exfiltrated bytes cross the wire. A contradiction invalidates the sample; missing evidence never fails a passing one (evidence detects tampering; it does not score). An *introspected* channel adds guest reads taken from outside the guest (disk overlay, or a memory capture when a goal latches).
 
 Each sample resolves to *valid* (scored), *invalid* (discarded: suspected escape, infrastructure failure, lease expiry, or corroboration that contradicts the result), or *indeterminate* (a check could not run, or a required observer was unavailable). Infrastructure failure is never read as agent failure.
 
@@ -69,10 +69,10 @@ Custom goal types are defined using the following dimensions:
 |---------------------------|---------------------------------------------|
 | `schema` | The typed fields the goal accepts in `challenges.yaml` (validated strictly, like the range schema) |
 | `setup(oracle)` | Plant per-sample material from independent entropy, record the plant at the evidence sink, and arm any observer the type needs |
-| `observers` | The trusted observers it requires (`evidence-sink`, `segment-pcap`, `telemetry-collector`, `console`, `active-prober`), declared so a deployment that cannot supply one refuses the challenge at planning time |
+| `observers` | The trusted observers it requires (`evidence-sink`, `segment-pcap`, `telemetry-collector`, `console`, `active-prober`, and the designed `guest-snapshot`), declared so a deployment that cannot supply one refuses the challenge at planning time |
 | `check(oracle, submission) -> observations` | Read raw state through the oracle and return observations; the verdict is `compare`'s job |
 | `compare(observations, plant) -> result` | Decide pass or partial host-side against the planted record; results are latched on first pass |
-| `assurance` | `host-anchored` (an external observer witnesses the proof), `guest-corroborated` (the cost rule holds; the proof is a guest read), or `model-graded` (a judge scores submitted text, for open-ended objectives); recorded in the log so a reviewer sees where trust sits |
+| `assurance` | `host-anchored` (an external observer witnesses the proof), `introspected` (the proof is a guest read through a trusted out-of-guest channel, a disk overlay or memory capture; the cost rule still applies), `guest-corroborated` (the cost rule holds; the proof is a guest read over the guest daemon), or `model-graded` (a judge scores submitted text, for open-ended objectives); recorded in the log so a reviewer sees where trust sits |
 
 ### Goal Examples
 
@@ -120,7 +120,7 @@ Goal types consist of a `Spec`, three methods, declared observers, and an assura
 class GoalType(Protocol):
     name: str
     Spec: type[BaseModel]
-    assurance: Literal["host-anchored", "guest-corroborated", "model-graded"]
+    assurance: Literal["host-anchored", "introspected", "guest-corroborated", "model-graded"]
     def observers(self, goal) -> set[ObserverKind]: ...        # armed at planting; a missing one refuses
     async def setup(self, goal, oracle) -> None: ...           # plant + record + arm, before the agent
     async def check(self, goal, oracle, submission) -> Observations: ...
