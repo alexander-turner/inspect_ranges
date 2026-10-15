@@ -54,6 +54,33 @@ Green plus zero residue, twice (2026-10-15, this devbox): 11/11 initial, 14/14 p
 
 Performance read (the measure-first gate): scoring cost is entirely dominated by range lifecycle, not verification; every goal's check+compare is milliseconds, and nothing here approaches minutes, let alone the fifteen-minute review gate.
 
+## Slice 5: the mid-run poller and corroborate() (`./run_poller.sh`)
+
+Two parts. Part A is a real `inspect eval` (two samples, `INSPECT_RANGES_POLL_S=1`): `mid` proves the poller latches a pass MID-RUN at its cheap tier, asserted from the eval log itself (the `early` latch wall precedes a marker the solver stamps 3.5 s after submitting, which precedes the second submission and run end), that the end-of-run scorer agrees idempotently, and that the timing surface (`inspect_ranges:timings`) lands in the eval log's sample store; `injury` stops the poller mid-run and the sample outcome is unaffected. Part B boots directly at CID 30800 with capture on and drives `score_challenge` against real evidence: a REAL beacon flow (token over UDP from `web`, path-only argv) confirms a corroborated execute pass by rescanning the delivered capture; a FORGED `corroborated=True` latch over complete committed coverage contradicts and the Score goes invalid; killing the capture sidecar opens an honest gap and the same forged claim reads unverifiable with the score unchanged.
+
+### Results
+
+21/21 green plus zero residue, twice (2026-10-15, this devbox; the second run post-review with all ten findings fixed):
+
+| Measure | Value |
+|---|---|
+| eval wall, 2 samples sequential | 113 s (~57 s per sample, warm caches) |
+| mid: poller latch lead over the run's second half | latched 3.5 s before the marker (poll_s=1, ticks n=4) |
+| injury: poller stopped mid-run | 1.0 valid, outcome unaffected |
+| B1 confirmed: corroborate rescan | 2 chunks, 2.0 MB, 0.001 s |
+| B2 contradicted (forged claim, complete coverage) | validity invalid; 4 chunks, 4.0 MB scanned in 0.006 s |
+| B3 unverifiable (capture killed, gapped window) | score unchanged, corroboration incomplete |
+| poller tick cost (store-and-memory only) | ~0.000 s per tick |
+| setup per plant / check+compare per goal | ~0.010 s / 0.001-0.008 s |
+
+Performance read (the measure-first gate): corroboration scans megabytes in milliseconds; the only waits in the battery are deliberately sized to capture rotation (seconds) and the manifest part interval (15 s), which bound how soon after a latch an ABSENCE claim can be adjudicated; nothing approaches minutes.
+
+### Semantics proven here (and pinned in CI)
+
+- The scan runs FIRST: presence in the delivered capture confirms with no completeness precondition (the delivered chunk objects are the same source the type's check read; manifest parts batch at 15 s, so a manifest-only scan moments after a rotation would manufacture false trouble). Absence contradicts ONLY over committed, gap-free coverage reaching the latch; everything else is unverifiable and flags incomplete.
+- Both scans (the type's `compare` and `corroborate`'s rescan) apply the identical probe-frame exclusion (`netident.py`), so they cannot disagree and manufacture a false contradiction.
+- Gaps never fail a passing sample: B3's score is byte-identical to a gapless pass; only the corroboration section differs.
+
 ## Honest notes
 
 - Per-plant setup timings print from the `inspect_ranges.challenges` logger (the measure-first rows); the eval-log timing instrumentation is slice 5.
@@ -61,4 +88,5 @@ Performance read (the measure-first gate): scoring cost is entirely dominated by
 - `root` plants on the CI endpoint are emulated (the test host cannot chown); this battery is where the real daemon's root chown and 0600-atomic write are proven on live guests.
 
 - The slice-3 eval runs the provider end to end, so CIDs come from the provider's own allocator under the battery's private state dir (its 10000+ band); the 30600+ convention applies to the direct-channel oracle section.
-- The per-plant setup lines logged by `inspect_ranges.challenges` do not surface in the eval log's sample events at INFO (inspect's logger capture threshold), so the setup rows above come from the slice-2 battery; eval-log timing instrumentation is slice 5.
+- The per-plant setup lines logged by `inspect_ranges.challenges` do not surface in the eval log's sample events at INFO (inspect's logger capture threshold); slice 5's `inspect_ranges:timings` store entries are the durable surface (asserted from the eval log in the slice-5 battery).
+- The slice-5 run scripts stay self-contained copies of the shared prelude (doctor, golden derive, lock, residue check) per the house spike convention; a shared sourced prelude was considered in review and declined to keep each battery's recorded artifact standalone.
