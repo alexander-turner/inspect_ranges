@@ -322,6 +322,28 @@ class TestClaimReverification:
         assert report.verdicts["g"] == "unverifiable"
         assert report.incomplete and not report.invalid
 
+    def test_compare_applies_the_same_probe_exclusion(self, tmp_path: Path) -> None:
+        """The type's own compare() excludes probe-sourced frames exactly like corroborate(), so the two scans cannot disagree and manufacture a false contradiction."""
+        from inspect_ranges._challenges.engine import Observations, goal_type
+
+        async def scenario() -> bool | None:
+            oracle, _, _ = make_oracle(tmp_path)
+            token = await plant_token(oracle)
+            goal = execute_challenge().goals[0]
+            engine = goal_type("execute")
+            observations = Observations(
+                source="submission",
+                reads={"v": token, "src": GUEST_IP.encode()},
+                chunk_reads={
+                    "pcap": [probe_sourced_chunk(b"xx " + token + b" xx", GUEST_IP)]
+                },
+            )
+            result = engine.compare(goal, observations, oracle.store)
+            assert result.achieved  # the submission matches
+            return result.corroborated
+
+        assert run(scenario()) is False
+
 
 class TestTemporal:
     def test_submission_before_plant_contradicts(self, tmp_path: Path) -> None:
