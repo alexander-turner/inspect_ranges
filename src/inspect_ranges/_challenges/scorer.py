@@ -34,6 +34,11 @@ logger = logging.getLogger("inspect_ranges.challenges")
 
 __all__ = ["challenge_scorer", "score_challenge"]
 
+CANDIDATE_CAP = 8
+"""Distinct submitted candidates scored per goal, EARLIEST first; later ones are dropped, logged, and recorded in the score metadata (`candidates_dropped`).
+
+Without the cap, scoring cost scales linearly with `submit_goal` calls the agent controls: one judge model generate per candidate (uncapped model spend) and one full check per candidate. Together with the oracle's evidence memo (one fetch per evidence key per pass) this is the fifteen-minute performance gate's first real catch: the gate exists precisely so an agent cannot buy unbounded scoring time. Eight is deliberate headroom over honest use (a goal has one right answer; retries beyond a handful are noise or flooding), and the drop is visible to reviewers rather than silent."""
+
 Validity = Literal["valid", "invalid", "indeterminate"]
 """Sample validity (`challenges-scoring-integrity.md`): `invalid` when corroboration finds a contradiction (evidence proving a latched result impossible); `indeterminate` when a check could not run (never read as agent failure); `valid` otherwise. Escape and lease-loss triggers remain provider-side plumbing recorded for later."""
 
@@ -58,6 +63,7 @@ async def score_challenge(
         The aggregated value in [0, 1] and the score metadata (validity plus per-goal detail).
     """
     assurances: dict[str, Assurance] = {}
+    candidates_dropped: dict[str, int] = {}
     for goal in challenge.goals:
         engine = goal_type(goal.type)
         assurances[goal.id] = engine.assurance_for(goal)
@@ -68,13 +74,25 @@ async def score_challenge(
             # and the outcome must not depend on whether a poller tick
             # happened to land between them.
             candidates = submissions.candidates(goal.id)
+            if len(candidates) > CANDIDATE_CAP:
+                candidates_dropped[goal.id] = len(candidates) - CANDIDATE_CAP
+                logger.warning(
+                    "goal %s: %d submitted candidates exceed the cap of %d; "
+                    "scoring the earliest %d (drop recorded in score metadata)",
+                    goal.id,
+                    len(candidates),
+                    CANDIDATE_CAP,
+                    CANDIDATE_CAP,
+                )
+                candidates = candidates[:CANDIDATE_CAP]
             views = [Submissions([entry]) for entry in candidates] or [submissions]
             result = GoalResult(achieved=False, reason="no submission")
-            for view in views:
-                observations = await engine.check(goal, oracle, view)
-                result = engine.compare(goal, observations, oracle.store)
-                if result.achieved:
-                    break
+            with oracle.evidence_memo():
+                for view in views:
+                    observations = await engine.check(goal, oracle, view)
+                    result = engine.compare(goal, observations, oracle.store)
+                    if result.achieved:
+                        break
         except Exception as error:
             result = GoalResult(
                 indeterminate=True,
@@ -147,6 +165,7 @@ async def score_challenge(
             goal_id: record.model_dump(mode="json")
             for goal_id, record in records.items()
         },
+        "candidates_dropped": dict(candidates_dropped),
         "corroboration": {
             "verdicts": dict(corroboration.verdicts),
             "flags": list(corroboration.flags),
