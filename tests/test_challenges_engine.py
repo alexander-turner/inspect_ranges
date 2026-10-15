@@ -4,8 +4,8 @@ Comparison is pinned host-side and pure; the execute/exfiltrate corroboration te
 """
 
 import asyncio
-import time
 import struct
+import time
 from ipaddress import IPv4Address
 from pathlib import Path
 
