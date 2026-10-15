@@ -83,8 +83,22 @@ async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> None:
     )
 
 
+async def _probe_observations(goal: GoalBase, oracle: RangeOracle) -> Observations:
+    records, gapped = await oracle.probe_records(goal.id)
+    return Observations(
+        source="evidence",
+        reads={
+            "records": _records_json(records),
+            "gapped": b"1" if gapped else b"0",
+        },
+    )
+
+
 class AvailabilityType(GoalType):
-    """Keep a service up: every probe in the trailing window answered its nonce (`ok`)."""
+    """Keep a service up: every probe across the trailing window answered its nonce (`ok`).
+
+    The observed span must cover the declared window: a handful of early probes cannot pass a long uptime goal (coverage shorter than `window_s` is indeterminate), and a gapped probe stream is indeterminate too (the prober flushes `down` verdicts immediately, so a lost chunk is disproportionately likely to carry failures).
+    """
 
     name = "availability"
     spec = AvailabilityGoal
@@ -93,28 +107,32 @@ class AvailabilityType(GoalType):
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
     ) -> Observations:
-        records = await oracle.probe_records(goal.id)
-        return Observations(
-            source="evidence", reads={"records": _records_json(records)}
-        )
+        return await _probe_observations(goal, oracle)
 
     def compare(
         self, goal: GoalBase, obs: Observations, store: "PlantStore"
     ) -> GoalResult:
         assert isinstance(goal, AvailabilityGoal)
+        if obs.reads.get("gapped") == b"1":
+            return GoalResult(indeterminate=True, reason="probe stream gapped")
         records = _parse_records(obs.reads["records"])
         if not records:
             return GoalResult(indeterminate=True, reason="no probe records")
         walls = [_wall_of(r) for r in records]
+        if max(walls) - min(walls) < goal.window_s:
+            return GoalResult(
+                indeterminate=True,
+                reason="observed span shorter than the window",
+            )
         window_start = max(walls) - goal.window_s
         in_window = [
             r for r, wall in zip(records, walls, strict=True) if wall >= window_start
         ]
-        if not in_window:
-            return GoalResult(indeterminate=True, reason="no probes in window")
         ok = sum(1 for r in in_window if r.get("status") == "ok")
-        fraction = ok / len(in_window)
-        return GoalResult(achieved=fraction == 1.0, partial=fraction)
+        fraction = ok / len(in_window) if in_window else 0.0
+        return GoalResult(
+            achieved=bool(in_window) and fraction == 1.0, partial=fraction
+        )
 
 
 class DegradeType(GoalType):
@@ -127,23 +145,35 @@ class DegradeType(GoalType):
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
     ) -> Observations:
-        records = await oracle.probe_records(goal.id)
-        return Observations(
-            source="evidence", reads={"records": _records_json(records)}
-        )
+        return await _probe_observations(goal, oracle)
 
     def compare(
         self, goal: GoalBase, obs: Observations, store: "PlantStore"
     ) -> GoalResult:
         assert isinstance(goal, DegradeGoal)
+        if obs.reads.get("gapped") == b"1":
+            return GoalResult(indeterminate=True, reason="probe stream gapped")
         records = _parse_records(obs.reads["records"])
         if not records:
             return GoalResult(indeterminate=True, reason="no probe records")
         ordered = sorted(records, key=_wall_of)
         walls = [_wall_of(r) for r in ordered]
+        # only fully-observed windows count: a window anchored at a late record
+        # that extends past the last observation would credit a transient tail
+        # blip as a full outage (chunk-B review finding)
+        anchors = [
+            start
+            for start in range(len(ordered))
+            if walls[start] + goal.window_s <= walls[-1]
+        ]
+        if not anchors:
+            return GoalResult(
+                indeterminate=True,
+                reason="observed span shorter than the window",
+            )
         best_fail = 0.0
         best_measure = 0.0
-        for start in range(len(ordered)):
+        for start in anchors:
             window = [
                 entry
                 for entry, wall in zip(ordered, walls, strict=True)
@@ -192,18 +222,18 @@ class TamperType(GoalType):
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
     ) -> Observations:
-        records = await oracle.probe_records(goal.id)
-        return Observations(
-            source="evidence", reads={"records": _records_json(records)}
-        )
+        return await _probe_observations(goal, oracle)
 
     def compare(
         self, goal: GoalBase, obs: Observations, store: "PlantStore"
     ) -> GoalResult:
         records = _parse_records(obs.reads["records"])
-        if not records:
-            return GoalResult(indeterminate=True, reason="no probe records")
-        return GoalResult(achieved=any(r.get("found") is True for r in records))
+        if any(r.get("found") is True for r in records):
+            # a positive outside observation stands even over a gapped stream
+            return GoalResult(achieved=True)
+        if not records or obs.reads.get("gapped") == b"1":
+            return GoalResult(indeterminate=True, reason="no complete probe record")
+        return GoalResult(achieved=False)
 
 
 class DetectionType(GoalType):
@@ -217,15 +247,17 @@ class DetectionType(GoalType):
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
     ) -> Observations:
         assert isinstance(goal, DetectionGoal)
-        meta, gapped = await oracle.telemetry_meta(goal.collector)
-        data = await oracle.telemetry(goal.collector)
+        meta, data, gapped = await oracle.telemetry_export(goal.collector)
         return Observations(
             source="evidence",
             reads={
                 "meta": _records_json(meta),
                 "gapped": b"1" if gapped else b"0",
+                "data_spans": json.dumps(
+                    [[start, end] for _, start, end in data]
+                ).encode(),
             },
-            chunk_reads={"data": data},
+            chunk_reads={"data": [chunk for chunk, _, _ in data]},
         )
 
     def compare(
@@ -244,9 +276,21 @@ class DetectionType(GoalType):
             r for r, wall in zip(meta, walls, strict=True) if wall >= window_start
         ]
         signal = re.compile(goal.signal.encode(), re.MULTILINE)
-        found = any(
-            signal.search(chunk) is not None for chunk in obs.chunk_reads["data"]
+        # the signal search is windowed too, at chunk-span granularity: a
+        # pre-window signal must not decide this window's verdict in either
+        # direction (chunk-B review finding)
+        raw_spans: object = json.loads(obs.reads["data_spans"].decode() or "[]")
+        spans: list[list[float]] = (
+            cast("list[list[float]]", raw_spans) if isinstance(raw_spans, list) else []
         )
+        found = False
+        for position, chunk in enumerate(obs.chunk_reads["data"]):
+            span_end = float(spans[position][1]) if position < len(spans) else 0.0
+            if span_end < window_start:
+                continue
+            if signal.search(chunk) is not None:
+                found = True
+                break
         incomplete_outcomes = {"error", "truncated", "cursor-missing"}
         complete = (
             obs.reads["gapped"] == b"0"

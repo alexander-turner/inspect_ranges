@@ -243,7 +243,12 @@ def _probe_targets(oracle: RangeOracle, challenge: Challenge) -> list[ProbeTarge
             needle = oracle.store.get(f"tamper:{goal.id}").decode()
         else:
             continue
-        ip = _probe_target_ip(plan, goal.host, probe_segments)
+        wanted = (
+            {goal.segment} & probe_segments
+            if goal.segment is not None
+            else probe_segments
+        )
+        ip = _probe_target_ip(plan, goal.host, wanted)
         if ip is None:
             raise RuntimeError(
                 f"goal {goal.id!r} probes host {goal.host!r}, which has no "

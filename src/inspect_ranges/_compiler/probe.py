@@ -113,9 +113,12 @@ def main() -> None:
             result["echo"] = expected.encode() in body
             if needle is not None:
                 result["found"] = needle.encode() in body
-            if response.status == 200 and (result["echo"] or needle is not None):
+            if response.status == 200 and result["echo"]:
                 result["status"] = "ok"
             else:
+                # 200 without the fresh nonce's digest is MUMBLE: canned and
+                # replayed responses never read ok (tamper's needle verdict
+                # rides `found`, independent of status)
                 result["status"] = "mumble"
     except urllib.error.HTTPError as error:
         result["rtt_ms"] = round((time.monotonic() - started) * 1000.0, 2)

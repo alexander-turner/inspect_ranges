@@ -48,10 +48,16 @@ from inspect_ranges.types import IssueError
 from tests.test_compiler import two_segment_spec
 
 
-def observations(records: list[dict[str, Any]], **extra_reads: bytes) -> Observations:
+def observations(
+    records: list[dict[str, Any]], gapped: bool = False, **extra_reads: bytes
+) -> Observations:
     return Observations(
         source="evidence",
-        reads={"records": json.dumps(records).encode(), **extra_reads},
+        reads={
+            "records": json.dumps(records).encode(),
+            "gapped": b"1" if gapped else b"0",
+            **extra_reads,
+        },
     )
 
 
@@ -115,70 +121,83 @@ class TestClampRendering:
 
 
 class TestProber:
-    def test_records_batch_and_flush_on_down_and_stop(self) -> None:
-        async def scenario() -> list[tuple[str, list[dict[str, Any]]]]:
-            shipped: list[tuple[str, list[dict[str, Any]]]] = []
+    """Exercised through the public surface (start/stop plus the injectable client runner)."""
 
-            class FakeSession:
-                async def append_driver(self, stream: str, data: bytes) -> None:
-                    shipped.append(
-                        (stream, [json.loads(line) for line in data.splitlines()])
-                    )
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.shipped: list[tuple[str, list[dict[str, Any]]]] = []
 
-            outputs = iter(
-                [
-                    b'{"status": "ok", "http": 200, "rtt_ms": 1.5, "echo": true}',
-                    b'{"status": "down"}',
-                ]
+        async def append_driver(self, stream: str, data: bytes) -> None:
+            self.shipped.append(
+                (stream, [json.loads(line) for line in data.splitlines()])
             )
+
+    def test_records_ship_with_down_flush_and_stop_flush(self) -> None:
+        async def scenario() -> list[tuple[str, list[dict[str, Any]]]]:
+            session = self._FakeSession()
+            outputs = [
+                b'{"status": "ok", "http": 200, "rtt_ms": 1.5, "echo": true}',
+                b'{"status": "down"}',
+                b'{"status": "ok", "http": 200, "rtt_ms": 1.5, "echo": true}',
+            ]
+            calls = 0
 
             async def runner(argv: list[str]) -> bytes:
-                assert "--needle" not in argv  # availability target carries none
-                return next(outputs)
+                nonlocal calls
+                assert "--needle" not in argv
+                output = outputs[min(calls, len(outputs) - 1)]
+                calls += 1
+                return output
 
             prober = Prober(
-                cast(Any, FakeSession()),
+                cast(Any, session),
                 "proj",
                 [ProbeTarget(goal_id="g", ip="10.0.0.1", port=80)],
+                cadence_s=0.01,
+                batch_s=60.0,  # only the down flush and the stop flush ship
                 client_runner=runner,
             )
-            target = prober._targets[0]  # pyright: ignore[reportPrivateUsage]
-            prober._states["g"] = (  # pyright: ignore[reportPrivateUsage]
-                __import__(
-                    "inspect_ranges._challenges.prober", fromlist=["_TargetState"]
-                )._TargetState()
-            )
-            ok = await prober.probe_once(target)
-            assert ok["status"] == "ok" and ok["echo"] is True
-            down = await prober.probe_once(target)
-            assert down["status"] == "down"
-            state = prober._states["g"]  # pyright: ignore[reportPrivateUsage]
-            state.records.extend([ok, down])
-            await prober._flush("g", force=True)  # pyright: ignore[reportPrivateUsage]
-            return shipped
+            prober.start()
+            while calls < 3:
+                await asyncio.sleep(0.01)
+            await prober.stop()
+            return session.shipped
 
         shipped = asyncio.run(scenario())
-        assert len(shipped) == 1
-        stream, records = shipped[0]
-        assert stream == "probe/g"
-        assert [r["status"] for r in records] == ["ok", "down"]
+        assert shipped, "nothing shipped"
+        assert all(stream == "probe/g" for stream, _ in shipped)
+        records = [record for _, batch in shipped for record in batch]
+        statuses = [record["status"] for record in records]
+        assert "down" in statuses and "ok" in statuses
         assert all("nonce" in r and "wall" in r for r in records)
+        # the down verdict force-flushed a batch of its own before stop
+        assert len(shipped) >= 2
 
-    def test_client_failure_reads_down_with_error(self) -> None:
-        async def scenario() -> dict[str, Any]:
+    def test_client_failure_ships_down_with_error(self) -> None:
+        async def scenario() -> list[tuple[str, list[dict[str, Any]]]]:
+            session = self._FakeSession()
+
             async def runner(argv: list[str]) -> bytes:
                 raise OSError("docker gone")
 
             prober = Prober(
-                cast(Any, None),
+                cast(Any, session),
                 "proj",
                 [ProbeTarget(goal_id="g", ip="10.0.0.1", port=80)],
+                cadence_s=0.01,
+                batch_s=60.0,
                 client_runner=runner,
             )
-            return await prober.probe_once(prober._targets[0])  # pyright: ignore[reportPrivateUsage]
+            prober.start()
+            await asyncio.sleep(0.05)
+            await prober.stop()
+            return session.shipped
 
-        record = asyncio.run(scenario())
-        assert record["status"] == "down" and record["error"] == "OSError"
+        shipped = asyncio.run(scenario())
+        records = [record for _, batch in shipped for record in batch]
+        assert records and all(
+            r["status"] == "down" and r["error"] == "OSError" for r in records
+        )
 
 
 class TestParseTamperLocation:
@@ -196,7 +215,7 @@ class TestParseTamperLocation:
 
 
 class TestAvailability:
-    GOAL = AvailabilityGoal(id="up", host="web", port=80, window_s=60.0)
+    GOAL = AvailabilityGoal(id="up", host="web", port=80, window_s=4.0)
 
     def test_all_ok_in_window_achieves(self) -> None:
         records = [probe_record(1000.0 + i, "ok") for i in range(5)]
@@ -206,15 +225,17 @@ class TestAvailability:
         assert result.achieved and result.partial == 1.0
 
     def test_mumble_penalizes(self) -> None:
-        records = [probe_record(1000.0, "ok"), probe_record(1001.0, "mumble")]
+        records = [
+            probe_record(1000.0 + i, "ok" if i < 4 else "mumble") for i in range(5)
+        ]
         result = AvailabilityType().compare(
             self.GOAL, observations(records), EMPTY_STORE
         )
-        assert not result.achieved and result.partial == 0.5
+        assert not result.achieved and result.partial == pytest.approx(0.8)
 
     def test_old_failures_outside_window_ignored(self) -> None:
         records = [probe_record(100.0, "down")] + [
-            probe_record(1000.0 + i, "ok") for i in range(3)
+            probe_record(1000.0 + i, "ok") for i in range(5)
         ]
         result = AvailabilityType().compare(
             self.GOAL, observations(records), EMPTY_STORE
@@ -225,13 +246,27 @@ class TestAvailability:
         result = AvailabilityType().compare(self.GOAL, observations([]), EMPTY_STORE)
         assert result.indeterminate
 
+    def test_short_coverage_indeterminate(self) -> None:
+        records = [probe_record(1000.0, "ok"), probe_record(1001.0, "ok")]
+        result = AvailabilityType().compare(
+            self.GOAL, observations(records), EMPTY_STORE
+        )
+        assert result.indeterminate
+
+    def test_gapped_stream_indeterminate(self) -> None:
+        records = [probe_record(1000.0 + i, "ok") for i in range(5)]
+        result = AvailabilityType().compare(
+            self.GOAL, observations(records, gapped=True), EMPTY_STORE
+        )
+        assert result.indeterminate
+
 
 class TestDegrade:
     def goal(self, **extra: Any) -> DegradeGoal:
-        return DegradeGoal(id="dos", host="web", port=80, window_s=10.0, **extra)
+        return DegradeGoal(id="dos", host="web", port=80, window_s=2.0, **extra)
 
     def test_fully_down_window_achieves(self) -> None:
-        records = [probe_record(1000.0 + i, "down", None) for i in range(3)]
+        records = [probe_record(1000.0 + i, "down", None) for i in range(4)]
         result = DegradeType().compare(self.goal(), observations(records), EMPTY_STORE)
         assert result.achieved and result.partial == 1.0
 
@@ -240,9 +275,11 @@ class TestDegrade:
         records = [
             probe_record(1000.0, "ok", 250.0),
             probe_record(1001.0, "ok", 10.0),
+            probe_record(1002.0, "ok", 10.0),
+            probe_record(1003.0, "ok", 10.0),
         ]
         result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
-        assert not result.achieved and result.partial == 0.5
+        assert not result.achieved and result.partial == pytest.approx(1 / 3)
 
     def test_error_fraction_below_threshold_scores_zero(self) -> None:
         goal = self.goal(measure="error-fraction", threshold=0.8)
@@ -251,12 +288,26 @@ class TestDegrade:
             probe_record(1001.0, "ok"),
             probe_record(1002.0, "ok"),
             probe_record(1003.0, "ok"),
+            probe_record(1004.0, "ok"),
         ]
         result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
         assert not result.achieved and result.partial == 0.0
 
     def test_no_records_indeterminate(self) -> None:
         result = DegradeType().compare(self.goal(), observations([]), EMPTY_STORE)
+        assert result.indeterminate
+
+    def test_trailing_blip_never_achieves(self) -> None:
+        # a lone down record at the tail anchors no fully-observed window
+        # (the chunk-B review's over-credit scenario)
+        records = [probe_record(1000.0 + i, "ok") for i in range(5)]
+        records.append(probe_record(1005.0, "down", None))
+        result = DegradeType().compare(self.goal(), observations(records), EMPTY_STORE)
+        assert not result.achieved
+
+    def test_short_span_indeterminate(self) -> None:
+        records = [probe_record(1000.0, "down", None)]
+        result = DegradeType().compare(self.goal(), observations(records), EMPTY_STORE)
         assert result.indeterminate
 
 
@@ -282,15 +333,34 @@ class TestTamper:
             TamperType().compare(self.GOAL, observations([]), EMPTY_STORE).indeterminate
         )
 
+    def test_gapped_without_find_indeterminate(self) -> None:
+        records = [probe_record(1.0, "ok", found=False)]
+        result = TamperType().compare(
+            self.GOAL, observations(records, gapped=True), EMPTY_STORE
+        )
+        assert result.indeterminate
+
+    def test_found_stands_even_gapped(self) -> None:
+        records = [probe_record(1.0, "ok", found=True)]
+        result = TamperType().compare(
+            self.GOAL, observations(records, gapped=True), EMPTY_STORE
+        )
+        assert result.achieved
+
 
 def detection_obs(
-    meta: list[dict[str, Any]], data: list[bytes], gapped: bool = False
+    meta: list[dict[str, Any]],
+    data: list[bytes],
+    gapped: bool = False,
+    data_spans: list[list[float]] | None = None,
 ) -> Observations:
+    spans = data_spans if data_spans is not None else [[0.0, 10.0]] * len(data)
     return Observations(
         source="evidence",
         reads={
             "meta": json.dumps(meta).encode(),
             "gapped": b"1" if gapped else b"0",
+            "data_spans": json.dumps(spans).encode(),
         },
         chunk_reads={"data": data},
     )
@@ -555,3 +625,55 @@ class TestDatasetProbeSegments:
         noprobe_meta = by_id["noprobe"].metadata
         assert noprobe_meta is not None
         assert PROBE_SEGMENTS_METADATA_KEY not in noprobe_meta
+
+
+class TestSegmentField:
+    def test_unreachable_segment_refuses(self) -> None:
+        from inspect_ranges._challenges.schema import Challenges, challenge_issues
+
+        challenges = Challenges(
+            challenges=[
+                Challenge(
+                    id="dos",
+                    prompt="p",
+                    goals=[
+                        DegradeGoal(
+                            id="deny",
+                            host="web",
+                            port=80,
+                            window_s=30.0,
+                            segment="internal",
+                        )
+                    ],
+                )
+            ]
+        )
+        issues = challenge_issues(challenges, two_segment_spec())
+        assert any(issue.code == "probe-segment-unreachable" for issue in issues)
+
+    def test_declared_segment_drives_dataset_metadata(self) -> None:
+        from inspect_ranges._challenges.dataset import challenge_dataset
+        from inspect_ranges._challenges.schema import Challenges
+        from inspect_ranges._metadata import PROBE_SEGMENTS_METADATA_KEY
+
+        challenges = Challenges(
+            challenges=[
+                Challenge(
+                    id="dos",
+                    prompt="p",
+                    goals=[
+                        AvailabilityGoal(
+                            id="up",
+                            host="db",
+                            port=5432,
+                            window_s=30.0,
+                            segment="internal",
+                        )
+                    ],
+                )
+            ]
+        )
+        dataset = challenge_dataset(challenges, range_spec=two_segment_spec())
+        sample = next(iter(dataset))
+        assert sample.metadata is not None
+        assert sample.metadata[PROBE_SEGMENTS_METADATA_KEY] == "internal"

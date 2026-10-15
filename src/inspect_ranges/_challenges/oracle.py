@@ -13,13 +13,16 @@ from inspect_ai.util import sandbox
 from .._channel.channel import ExecOutcome, MessageChannel, request_id
 from .._channel.protocol import DEFAULT_BULK_CAP, Budget, ExecRequest
 from .._compiler.plan import ResolvedPlan
-from .._evidence.manifest import ChunkRecord
 from .._evidence.reader import EvidenceStore, manifest_records, stream_chunks
 from .._evidence.s3 import store_for_location
 from .._provider.provider import sample_handle_for
 from .._provider.state import SampleHandle
 from ..types import RangeSpec
-from .evidenceread import SpannedRecord, stream_json_records
+from .evidenceread import (
+    SpannedRecord,
+    stream_chunks_with_spans,
+    stream_json_records,
+)
 from .plants import PlantStore
 
 if TYPE_CHECKING:
@@ -231,26 +234,31 @@ class RangeOracle:
         """The guest's continuous serial-console chunks from the sample's evidence record (host writer)."""
         return await stream_chunks(self._evidence_store(), "host", f"console/{guest}")
 
-    async def probe_records(self, goal_id: str) -> "list[SpannedRecord]":
-        """The goal's recorded probe verdicts (driver writer), with chunk spans; the scorer never probes live."""
-        records, _ = await stream_json_records(
+    async def probe_records(self, goal_id: str) -> "tuple[list[SpannedRecord], bool]":
+        """The goal's recorded probe verdicts (driver writer) plus whether the stream carries gaps.
+
+        A gap is an observation hole: the prober flushes `down` verdicts immediately, so a lost chunk is disproportionately likely to be the one carrying failures, and the prober types treat a gapped stream as indeterminate rather than trusting the survivors.
+        """
+        return await stream_json_records(
             self._evidence_store(), "driver", f"probe/{goal_id}"
         )
-        return records
 
-    async def telemetry_meta(
+    async def telemetry_export(
         self, collector: str
-    ) -> "tuple[list[SpannedRecord], bool]":
-        """The collector's per-poll watermark records plus whether its streams carry gaps (the detection completeness inputs)."""
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]":
+        """The collector's export for scoring: meta records, data chunks with spans, and the gap flag.
+
+        One manifest fetch serves both streams (the detection check runs per goal, possibly on a poller cadence, against a possibly remote store).
+        """
+        store = self._evidence_store()
+        manifest = await manifest_records(store, "driver")
         meta, meta_gapped = await stream_json_records(
-            self._evidence_store(), "driver", f"telemetry-meta/{collector}"
+            store, "driver", f"telemetry-meta/{collector}", manifest=manifest
         )
-        data_gapped = any(
-            not isinstance(entry, ChunkRecord)
-            for entry in await manifest_records(self._evidence_store(), "driver")
-            if entry.stream == f"telemetry/{collector}"
+        data, data_gapped = await stream_chunks_with_spans(
+            store, "driver", f"telemetry/{collector}", manifest=manifest
         )
-        return meta, meta_gapped or data_gapped
+        return meta, data, meta_gapped or data_gapped
 
     def _evidence_store(self) -> EvidenceStore:
         session = self._handle.evidence

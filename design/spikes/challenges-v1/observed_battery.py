@@ -211,7 +211,7 @@ async def main() -> int:
         check(rc == 0 and b"nominal" in out, "obsvc serving on web:8080")
 
         print("=== availability: live window, then nonce-binding negative ===")
-        avail = AvailabilityGoal(id="up", host="web", port=8080, window_s=20.0)
+        avail = AvailabilityGoal(id="up", host="web", port=8080, window_s=6.0)
         tamper = TamperGoal(id="deface", host="web", location="8080/status")
         await goal_type("tamper").setup(tamper, oracle)
         disclosed = oracle.store.get("tamper:deface").decode()
@@ -283,7 +283,9 @@ async def main() -> int:
             "http.server.HTTPServer(('0.0.0.0',8081),H).serve_forever()\" "
             ">/dev/null 2>&1 </dev/null & sleep 0.5",
         )
-        canned_goal = AvailabilityGoal(id="canned", host="web", port=8081, window_s=20.0)
+        canned_goal = AvailabilityGoal(
+            id="canned", host="web", port=8081, window_s=3.0
+        )
         prober3 = Prober(
             session,
             project,

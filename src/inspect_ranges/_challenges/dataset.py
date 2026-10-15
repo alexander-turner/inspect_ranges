@@ -9,7 +9,7 @@ from pathlib import Path
 
 from inspect_ai.dataset import Dataset, MemoryDataset, Sample
 
-from .._provider.provider import PROBE_SEGMENTS_METADATA_KEY
+from .._metadata import PROBE_SEGMENTS_METADATA_KEY
 from ..schema import load_range
 from ..types import IssueError, RangeSpec
 from .schema import Challenge, Challenges, challenge_issues, load_challenges
@@ -23,12 +23,16 @@ CHALLENGE_METADATA_KEY = "challenge"
 def _probe_segments(challenge: Challenge, spec: RangeSpec) -> list[str]:
     """The networks whose probe endpoints this challenge's `active-prober` goals need.
 
-    One segment per probed host: its first declared network (the probe endpoint reaches the host's service through the segment they share). The provider reads the result from sample metadata at render time, which is how a challenge's observer needs become plan options without the compiler ever seeing challenges.
+    One segment per probed goal: the goal's declared `segment`, else the host's first declared network (the v1 convention for single-homed hosts; multi-homed hosts should declare `segment`). The provider reads the result from sample metadata at render time, which is how a challenge's observer needs become plan options without the compiler ever seeing challenges.
     """
     segments: set[str] = set()
     by_name = {host.name: host for host in spec.hosts}
     for goal in challenge.goals:
         if "active-prober" not in goal.observers():
+            continue
+        declared = getattr(goal, "segment", None)
+        if isinstance(declared, str):
+            segments.add(declared)
             continue
         host_name = getattr(goal, "host", None)
         host = by_name.get(host_name) if isinstance(host_name, str) else None
