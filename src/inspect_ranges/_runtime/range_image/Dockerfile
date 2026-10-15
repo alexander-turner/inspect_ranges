@@ -8,6 +8,9 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+# python3 + tcpdump serve the evidence-capture SIDECAR (same pinned image, its
+# own compose service): inert in the range service itself, which holds no
+# NET_RAW; the capture grant lives only on the sidecar (evidence-v1.md)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libvirt-daemon-system libvirt-clients virtinst \
     qemu-system-x86 qemu-utils \
