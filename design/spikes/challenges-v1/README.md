@@ -41,7 +41,7 @@ One real `inspect eval` (mockllm; the solvers are scripted), three samples, each
 
 ### Results
 
-11/11 green plus zero residue (2026-10-15, this devbox; initial and post-review runs):
+Green plus zero residue, twice (2026-10-15, this devbox): 11/11 initial, 14/14 post-review (the review added per-sample scored guards so an errored sample degrades to FAIL rows, and the chunk-safe pcap path ran live with the beacon still corroborating):
 
 | Measure | Value |
 |---|---|
