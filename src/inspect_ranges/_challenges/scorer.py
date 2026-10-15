@@ -87,12 +87,22 @@ async def score_challenge(
                 candidates = candidates[:CANDIDATE_CAP]
             views = [Submissions([entry]) for entry in candidates] or [submissions]
             result = GoalResult(achieved=False, reason="no submission")
+            first_candidate = True
             with oracle.evidence_memo():
                 for view in views:
                     observations = await engine.check(goal, oracle, view)
-                    result = engine.compare(goal, observations, oracle.store)
-                    if result.achieved:
+                    candidate = engine.compare(goal, observations, oracle.store)
+                    if candidate.achieved:
+                        result = candidate
                         break
+                    # Best-partial across candidates (upgrade-not-regress, the
+                    # latch rule applied here too): a later wrong submission
+                    # must not bury an earlier better partial.
+                    if first_candidate or (candidate.partial or 0.0) > (
+                        result.partial or 0.0
+                    ):
+                        result = candidate
+                    first_candidate = False
         except Exception as error:
             result = GoalResult(
                 indeterminate=True,

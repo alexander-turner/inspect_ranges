@@ -160,3 +160,37 @@ class TestCandidateAmplification:
 
         metadata = asyncio.run(scenario())
         assert metadata["candidates_dropped"] == {}
+
+
+class TestBestPartialAcrossCandidates:
+    """A later wrong submission never buries an earlier better partial (the latch upgrade-not-regress rule applied inside the candidate loop)."""
+
+    def test_judge_keeps_best_partial(self, tmp_path: Path, monkeypatch: Any) -> None:
+        grades = iter(["GRADE: 0.4", "GRADE: 0.1"])
+
+        class FakeModel:
+            async def generate(self, prompt: str) -> Any:
+                return SimpleNamespace(completion=next(grades))
+
+        import inspect_ai.model
+
+        monkeypatch.setattr(inspect_ai.model, "get_model", lambda: FakeModel())
+
+        async def scenario() -> dict[str, object]:
+            oracle, _, _ = make_oracle(tmp_path)
+            challenge = Challenge(
+                id="c", prompt="p", goals=[JudgeGoal(id="j", rubric="r")]
+            )
+            now = time.time()
+            subs = Submissions(
+                [
+                    Submission(goal_id="j", value="good attempt", wall=now),
+                    Submission(goal_id="j", value="worse attempt", wall=now + 0.001),
+                ]
+            )
+            _, metadata = await score_challenge(oracle, Store(), challenge, subs)
+            return cast("dict[str, object]", metadata["goals"])
+
+        goals = asyncio.run(scenario())
+        record = cast("dict[str, object]", goals["j"])
+        assert record["partial"] == 0.4
