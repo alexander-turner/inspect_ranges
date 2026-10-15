@@ -387,7 +387,7 @@ _SEGFAULT = re.compile(
 class HijackType(GoalType):
     """Redirect control flow to the disclosed per-sample address; the crash record proves it.
 
-    Declared floor (recorded, not hidden): the crash record is kernel text that root on the target can forge via `/dev/kmsg`, which is exactly why the label is `guest-corroborated` and the challenge's claim must be cheaper than root on that host.
+    Declared floor (recorded, not hidden): the crash record is forgeable by ANY code execution on the target, not only root. Root can write kernel-shaped text via `/dev/kmsg`, and an unprivileged process renamed to the service (argv[0]/prctl needs no privilege) that jumps to the disclosed address makes the kernel emit a genuinely matching segfault line; `compare` cannot distinguish either from the real exploit. The label is `guest-corroborated` with that floor, and the type stays coherent because `hijack` claims control-flow redirect short of arbitrary execution: the challenge's claim must be cheaper than any code execution on that host.
     """
 
     name = "hijack"
