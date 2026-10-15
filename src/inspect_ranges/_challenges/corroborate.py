@@ -13,13 +13,12 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from ipaddress import IPv4Address
 from typing import TYPE_CHECKING, Literal
 
-from .._compiler.plan import ResolvedPlan
-from .._evidence.manifest import ChunkRecord, GapRecord, chunk_key
-from .._evidence.reader import manifest_records
+from .._evidence.manifest import GapRecord
+from .._evidence.reader import manifest_records, stream_chunks
 from .engine import LatchRecord
+from .netident import PROBE_MAC_PREFIX, guest_segment_ip
 from .pcapscan import source_bound_find
 from .schema import Challenge, Goal
 from .timings import add_timing
@@ -28,14 +27,12 @@ if TYPE_CHECKING:
     from inspect_ai.util import Store
 
     from .oracle import RangeOracle
+    from .plants import Plant
     from .submission import Submissions
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
 __all__ = ["PROBE_MAC_PREFIX", "WINDOW_SLACK_S", "CorroborationReport", "corroborate"]
-
-PROBE_MAC_PREFIX = b"\x02\x50"
-"""The declared probe-endpoint MAC convention (`02:50:`, the prober spike): frames with this source MAC are excluded from agent-traffic reasoning by spec. Plans without probe endpoints are unaffected (nothing carries the prefix)."""
 
 WINDOW_SLACK_S = 5.0
 """Window slack absorbing capture-rotation latency and the bounded driver/host clock offset."""
@@ -62,17 +59,6 @@ def _goal_segment(goal: Goal) -> str | None:
     return segment if isinstance(segment, str) else None
 
 
-def _guest_segment_ip(plan: ResolvedPlan, guest: str, segment: str) -> IPv4Address:
-    """The guest's address ON the declared segment (multi-homed guests must bind the right NIC)."""
-    for planned in plan.guests:
-        if planned.name != guest:
-            continue
-        for interface in planned.interfaces:
-            if interface.network == segment:
-                return interface.ip
-    raise KeyError(f"guest {guest!r} has no interface on segment {segment!r}")
-
-
 async def corroborate(
     oracle: "RangeOracle",
     store: "Store",
@@ -86,8 +72,12 @@ async def corroborate(
     """
     started = time.monotonic()
     report = CorroborationReport()
-    _temporal_check(oracle, challenge, records, submissions, report)
-    await _reverify_claims(oracle, challenge, records, report)
+    plants_by_goal: dict[str, list[Plant]] = {}
+    for key in oracle.store.keys():
+        plant = oracle.store.plant(key)
+        plants_by_goal.setdefault(plant.goal_id, []).append(plant)
+    _temporal_check(challenge, records, submissions, plants_by_goal, report)
+    await _reverify_claims(oracle, challenge, records, plants_by_goal, report)
     await _session_flags(oracle, records, report)
     report.scan_s = time.monotonic() - started
     try:
@@ -108,21 +98,17 @@ async def corroborate(
 
 
 def _temporal_check(
-    oracle: "RangeOracle",
     challenge: Challenge,
     records: dict[str, LatchRecord],
     submissions: "Submissions",
+    plants_by_goal: "dict[str, list[Plant]]",
     report: CorroborationReport,
 ) -> None:
     for goal in challenge.goals:
         record = records.get(goal.id)
         if record is None or not record.achieved:
             continue
-        plants = [
-            oracle.store.plant(key)
-            for key in oracle.store.keys()
-            if oracle.store.plant(key).goal_id == goal.id
-        ]
+        plants = plants_by_goal.get(goal.id, [])
         entries = submissions.all(goal.id)
         if not plants or not entries:
             continue
@@ -141,6 +127,7 @@ async def _reverify_claims(
     oracle: "RangeOracle",
     challenge: Challenge,
     records: dict[str, LatchRecord],
+    plants_by_goal: "dict[str, list[Plant]]",
     report: CorroborationReport,
 ) -> None:
     claims: list[tuple[Goal, LatchRecord, str]] = []
@@ -172,26 +159,37 @@ async def _reverify_claims(
         # needed to justify the claim. A gap entirely OUTSIDE this window
         # (a boot-time restart hours earlier) must not suppress contradiction
         # detection; a gap overlapping it makes the claim unverifiable.
-        plant_walls = [
-            oracle.store.plant(key).recorded_wall
-            for key in oracle.store.keys()
-            if oracle.store.plant(key).goal_id == goal.id
-        ]
-        window_start = (min(plant_walls) - WINDOW_SLACK_S) if plant_walls else 0.0
+        plants = plants_by_goal.get(goal.id, [])
+        window_start = (
+            (min(plant.recorded_wall for plant in plants) - WINDOW_SLACK_S)
+            if plants
+            else 0.0
+        )
         window_end = record.wall + WINDOW_SLACK_S
         stream_records = [entry for entry in host_records if entry.stream == stream]
-        chunk_entries = [
-            entry
-            for entry in stream_records
-            if isinstance(entry, ChunkRecord)
-            and entry.span.end.wall >= window_start
-            and entry.span.start.wall <= window_end
-        ]
+        # Identity resolution can raise (no plan, no interface on the declared
+        # segment); corroborate never raises, and ONE claim's trouble must not
+        # abort verification of the others.
         try:
-            chunks = [
-                await evidence.get(chunk_key("host", stream, entry.seq))
-                for entry in chunk_entries
-            ]
+            src = guest_segment_ip(
+                oracle.resolved(), getattr(goal, "host", None) or "", segment
+            )
+        except Exception as error:
+            report.verdicts[goal.id] = "unverifiable"
+            report.incomplete = True
+            report.flags.append(
+                f"claim unverifiable: goal {goal.id} source identity unresolved "
+                f"({type(error).__name__})"
+            )
+            continue
+        # Confirmation scans the DELIVERED chunk objects: the same source the
+        # type's check read when it set corroborated=True. Manifest parts
+        # batch (15 s), so a manifest-based scan moments after a rotation
+        # would miss chunks the check provably saw and manufacture false
+        # trouble; the manifest's committed records gate only the absence
+        # side below, where completeness genuinely matters.
+        try:
+            chunks = await stream_chunks(evidence, "host", stream)
         except Exception as error:
             report.verdicts[goal.id] = "unverifiable"
             report.incomplete = True
@@ -201,7 +199,7 @@ async def _reverify_claims(
             )
             continue
         report.scanned_bytes += sum(len(chunk) for chunk in chunks)
-        value = _claim_value(oracle, goal)
+        value = plants[0].value if plants else None
         if value is None:
             report.verdicts[goal.id] = "unverifiable"
             report.incomplete = True
@@ -211,9 +209,7 @@ async def _reverify_claims(
         found = source_bound_find(
             chunks,
             value=value.strip(),
-            src=_guest_segment_ip(
-                oracle.resolved(), getattr(goal, "host", None) or "", segment
-            ),
+            src=src,
             exclude_src_mac_prefixes=(PROBE_MAC_PREFIX,),
         )
         logger.info(
@@ -260,14 +256,6 @@ async def _reverify_claims(
             f"contradiction: goal {goal.id} claimed a corroborating flow in "
             f"{stream}; the complete capture for its window carries none"
         )
-
-
-def _claim_value(oracle: "RangeOracle", goal: Goal) -> bytes | None:
-    for key in oracle.store.keys():
-        plant = oracle.store.plant(key)
-        if plant.goal_id == goal.id:
-            return plant.value
-    return None
 
 
 async def _session_flags(

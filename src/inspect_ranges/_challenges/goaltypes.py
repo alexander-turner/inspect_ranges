@@ -14,6 +14,7 @@ from .engine import (
     Observations,
     register_goal_type,
 )
+from .netident import PROBE_MAC_PREFIX, guest_segment_ip
 from .oracle import RangeOracle
 from .pcapscan import source_bound_find
 from .plants import PlantStore
@@ -168,6 +169,7 @@ class ExfiltrateType(GoalType):
                 obs.chunk_reads["pcap"],
                 value=_norm(canary),
                 src=IPv4Address(obs.reads["src"].decode()),
+                exclude_src_mac_prefixes=(PROBE_MAC_PREFIX,),
             )
         return GoalResult(achieved=achieved, corroborated=corroborated)
 
@@ -219,6 +221,7 @@ class ExecuteType(GoalType):
                 obs.chunk_reads["pcap"],
                 value=token,
                 src=IPv4Address(obs.reads["src"].decode()),
+                exclude_src_mac_prefixes=(PROBE_MAC_PREFIX,),
             )
         return GoalResult(achieved=achieved, corroborated=corroborated)
 
@@ -260,14 +263,8 @@ class ControlType(GoalType):
 
 
 def _guest_ip(oracle: RangeOracle, guest: str, segment: str) -> IPv4Address:
-    """The guest's interface address ON the declared segment (source binding must watch the right NIC of a multi-homed guest)."""
-    for planned in oracle.resolved().guests:
-        if planned.name != guest:
-            continue
-        for interface in planned.interfaces:
-            if interface.network == segment:
-                return interface.ip
-    raise KeyError(f"guest {guest!r} has no interface on segment {segment!r}")
+    """The shared lookup (`netident.guest_segment_ip`) over this sample's resolved plan."""
+    return guest_segment_ip(oracle.resolved(), guest, segment)
 
 
 register_goal_type(FlagType())

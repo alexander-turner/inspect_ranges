@@ -63,8 +63,18 @@ async def score_challenge(
         assurances[goal.id] = engine.assurance_for(goal)
         started = time.monotonic()
         try:
-            observations = await engine.check(goal, oracle, submissions)
-            result = engine.compare(goal, observations, oracle.store)
+            # Every distinct submitted value gets a chance, oldest first: a
+            # later wrong submission must not bury an earlier correct one,
+            # and the outcome must not depend on whether a poller tick
+            # happened to land between them.
+            candidates = submissions.candidates(goal.id)
+            views = [Submissions([entry]) for entry in candidates] or [submissions]
+            result = GoalResult(achieved=False, reason="no submission")
+            for view in views:
+                observations = await engine.check(goal, oracle, view)
+                result = engine.compare(goal, observations, oracle.store)
+                if result.achieved:
+                    break
         except Exception as error:
             result = GoalResult(
                 indeterminate=True,
@@ -126,7 +136,7 @@ async def score_challenge(
         else "valid"
     )
     raw_hints = store.get(HINTS_USED_STORE_KEY, [])
-    hints_used = [index for index in raw_hints if type(index) is int]
+    hints_used = list(dict.fromkeys(index for index in raw_hints if type(index) is int))
     value = aggregate(challenge, records, assurances=assurances, hints_used=hints_used)
     metadata: dict[str, object] = {
         "validity": validity,

@@ -169,26 +169,38 @@ class GoalPoller:
             latest = max(float(entry["wall"]) for entry in entries)
             if latest <= self._seen.get(goal.id, float("-inf")):
                 continue
-            value = str(max(entries, key=lambda entry: float(entry["wall"]))["value"])
+            # every distinct value gets a chance, oldest first (same rule as
+            # the scorer: a later wrong submission never buries a right one)
+            values: list[str] = []
+            for entry in sorted(entries, key=lambda e: float(e["wall"])):
+                text = str(entry["value"])
+                if text not in values:
+                    values.append(text)
             compare_started = time.monotonic()
+            record = None
             try:
                 engine = goal_type(goal.type)
-                observations = self._observations(goal, value)
-                result = engine.compare(goal, observations, self._oracle.store)
+                for value in values:
+                    observations = self._observations(goal, value)
+                    result = engine.compare(goal, observations, self._oracle.store)
+                    record = latch(
+                        self._store,
+                        goal.id,
+                        result,
+                        assurance=engine.assurance_for(goal),
+                        primitive=goal.primitive_label,
+                        elapsed_s=time.monotonic() - compare_started,
+                    )
+                    if record.achieved:
+                        break
             except Exception as error:
                 # A plant not yet recorded or a spec edge: skip quietly; the
                 # scorer's full check decides at end of run.
                 logger.debug("poller skip goal=%s: %s", goal.id, type(error).__name__)
                 continue
             elapsed = time.monotonic() - compare_started
-            record = latch(
-                self._store,
-                goal.id,
-                result,
-                assurance=engine.assurance_for(goal),
-                primitive=goal.primitive_label,
-                elapsed_s=elapsed,
-            )
+            if record is None:
+                continue
             self._seen[goal.id] = latest
             add_timing(self._store, f"goal:{goal.id}", "poller-compare", elapsed)
             logger.debug(
