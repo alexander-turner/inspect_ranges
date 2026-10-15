@@ -41,7 +41,11 @@ from .._channel.protocol import (
 from .._channel.uds import ROUTED_ACK, read_preamble
 from .._compiler.plan import ResolvedPlan, Totals
 from .._doctor.checks import readiness_failures
+from .._evidence.capture import CaptureStreamer, ComposeTap, StageRecorder
+from .._evidence.s3 import sink_for_location
+from .._evidence.sink import EvidenceWriter
 from .._provider.admission import AdmissionRefused, HostCapacity, WeightedAdmission
+from .._provider.evidence import evidence_buffer_bytes, evidence_max_bytes
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
 from .._runtime.up import OnStage, UpError, UpOptions, UpResult, up
@@ -140,6 +144,8 @@ class Applier:
         self._guest_states: dict[str, dict[str, GuestState]] = {}
         self._charges: dict[str, Totals] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._evidence: dict[str, tuple[CaptureStreamer, EvidenceWriter]] = {}
+        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; the reaper reap-seals)."""
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -204,6 +210,17 @@ class Applier:
                 self._socket_path.unlink()
         except OSError:
             pass
+        for lease_id in list(self._evidence):
+            # bounded best-effort flush on shutdown; anything beyond it is the
+            # recorded restart limitation (the reaper reap-seals)
+            try:
+                async with asyncio.timeout(5.0):
+                    await self._stop_evidence(lease_id)
+            except TimeoutError:
+                logger.warning(
+                    "evidence capture for lease=%s not flushed at shutdown",
+                    lease_id,
+                )
         for task in list(self._tasks):
             task.cancel()
 
@@ -381,7 +398,10 @@ class Applier:
     async def _teardown(
         self, lease: HostLease, request: TeardownRequest, writer: asyncio.StreamWriter
     ) -> None:
-        """Drive `down`, then release the admission charge and the relay map (idempotent; retriable)."""
+        """Harvest and seal capture, drive `down`, then release the admission charge and the relay map (idempotent; retriable)."""
+        # before down: the capture sidecar and its volume die with the
+        # project, so the final harvest must happen while they live
+        await self._stop_evidence(lease.lease_id)
         try:
             await asyncio.to_thread(self._down_fn, lease.project, self._state_dir)
         except Exception as error:
@@ -521,6 +541,17 @@ class Applier:
         loop = asyncio.get_running_loop()
         translator = StageTranslator()
         states = self._guest_states.setdefault(lease.lease_id, {})
+        bundle = Path(lease.bundle_path)
+        try:
+            plan = await asyncio.to_thread(self._load_plan, bundle)
+        except (OSError, ValueError):
+            plan = None  # the refusal gate already read it; a race here only disables evidence
+        evidence_on = (
+            lease.evidence_location is not None
+            and plan is not None
+            and plan.requirements.evidence_capture
+        )
+        recorder = StageRecorder() if evidence_on else None
 
         async def emit(stage: SeamStage, detail: str) -> None:
             detail = detail[:3000]  # inside StageReport's wire cap, whatever up said
@@ -540,13 +571,15 @@ class Applier:
             )
 
         def on_stage(stage: str, status: str, fields: dict[str, object]) -> None:
+            if recorder is not None:
+                # host emit clocks for the stages/verify streams; never raises
+                recorder.on_stage(stage, status, fields)
             translated = translator.translate(stage, status, fields)
             if translated is not None:
                 asyncio.run_coroutine_threadsafe(
                     emit(translated.stage, translated.detail), loop
                 )
 
-        bundle = Path(lease.bundle_path)
         options = UpOptions(
             project=lease.project,
             image_cache=self._image_cache,
@@ -576,12 +609,66 @@ class Applier:
             self._relays[lease.lease_id] = {
                 guest.name: guest.cid for guest in result.guests
             }
+            if evidence_on and plan is not None and recorder is not None:
+                await self._start_evidence(lease, plan, recorder)
         if failed:
             charge = self._charges.pop(lease.lease_id, None)
             if charge is not None:
                 await self.admission.release(charge)
         await run.finish()
         self._bound_runs()
+
+    async def _start_evidence(
+        self, lease: HostLease, plan: ResolvedPlan, recorder: StageRecorder
+    ) -> None:
+        """Open the host writer and capture streamer for one realized lease; never raises (evidence trouble never fails a realize)."""
+        assert lease.evidence_location is not None
+        try:
+            writer = EvidenceWriter(
+                sink_for_location(lease.evidence_location),
+                writer="host",
+                lease_id=lease.lease_id,
+                sample_id=lease.sample_id,
+                buffer_cap_bytes=evidence_buffer_bytes(),
+                max_total_bytes=evidence_max_bytes(),
+            )
+            streamer = CaptureStreamer(
+                writer,
+                ComposeTap(lease.project, Path(lease.bundle_path)),
+                segments=[network.name for network in plan.networks],
+                console_guests=[guest.name for guest in plan.guests],
+                stage_recorder=recorder,
+            )
+            await streamer.start()
+            self._evidence[lease.lease_id] = (streamer, writer)
+            logger.info(
+                "evidence capture started: lease=%s location=%s",
+                lease.lease_id,
+                lease.evidence_location,
+            )
+        except Exception:
+            logger.exception(
+                "evidence capture failed to start for lease=%s (sample "
+                "proceeds without host-side evidence)",
+                lease.lease_id,
+            )
+
+    async def _stop_evidence(self, lease_id: str) -> None:
+        """Harvest and seal one lease's capture before its containers die; never raises."""
+        entry = self._evidence.pop(lease_id, None)
+        if entry is None:
+            return
+        streamer, writer = entry
+        try:
+            await streamer.stop()
+            _, digest = await writer.seal("complete")
+            logger.info("evidence capture sealed: lease=%s digest=%s", lease_id, digest)
+        except Exception:
+            logger.exception(
+                "evidence capture stop/seal failed for lease=%s (record stays "
+                "unsealed, reported as such by verify)",
+                lease_id,
+            )
 
     def _bound_runs(self) -> None:
         completed = [rid for rid, run in self._runs.items() if run.done]

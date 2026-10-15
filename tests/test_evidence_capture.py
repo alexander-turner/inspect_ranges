@@ -60,7 +60,9 @@ def harness(
     consoles = tmp_path / "consoles"
     capture.mkdir()
     consoles.mkdir()
-    writer = EvidenceWriter(LocalDirSink(location), writer="host", **writer_kwargs)
+    writer = EvidenceWriter(
+        LocalDirSink(location), part_interval_s=0, writer="host", **writer_kwargs
+    )
     return location, capture, writer, LocalTap(capture, consoles)
 
 
@@ -283,7 +285,9 @@ def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         location = tmp_path / "evidence"
-        writer = EvidenceWriter(LocalDirSink(location), writer="host")
+        writer = EvidenceWriter(
+            LocalDirSink(location), part_interval_s=0, writer="host"
+        )
         streamer = CaptureStreamer(
             writer, HostileTap(), segments=["dmz"], console_guests=["web"]
         )
@@ -334,7 +338,9 @@ def test_stop_never_raises_against_a_sealed_writer(tmp_path: Path) -> None:
             raise OSError("unreachable")
 
     async def scenario() -> None:
-        writer = EvidenceWriter(LocalDirSink(tmp_path / "evidence"), writer="host")
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path / "evidence"), part_interval_s=0, writer="host"
+        )
         streamer = CaptureStreamer(
             writer, UnreachableTap(), segments=["dmz"], console_guests=[]
         )

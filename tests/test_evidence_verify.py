@@ -47,6 +47,7 @@ def _build_sealed(root: Path) -> str:
         clock = FakeClock()
         writer = EvidenceWriter(
             LocalDirSink(root),
+            part_interval_s=0,
             writer="host",
             lease_id="lease-9",
             clock=clock,
@@ -282,7 +283,11 @@ def test_sealed_stays_truthful_on_mid_parts_break(tmp_path: Path) -> None:
 def _build_empty_sealed(root: Path, writer_name: str) -> str:
     async def build() -> str:
         writer = EvidenceWriter(
-            LocalDirSink(root), writer=writer_name, clock=FakeClock(), retry_wait_s=0
+            LocalDirSink(root),
+            part_interval_s=0,
+            writer=writer_name,
+            clock=FakeClock(),
+            retry_wait_s=0,
         )
         _, digest = await writer.seal()
         return digest

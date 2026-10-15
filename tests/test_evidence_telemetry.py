@@ -120,9 +120,12 @@ def make_poller(
     tmp_path: Path, channel: FakeChannel, specs: list[CollectorSpec]
 ) -> tuple[TelemetryPoller, EvidenceWriter, LocalDirStore]:
     writer = EvidenceWriter(
-        LocalDirSink(tmp_path), writer="driver", sample_id="telemetry-test"
+        LocalDirSink(tmp_path),
+        part_interval_s=0,
+        writer="driver",
+        sample_id="telemetry-test",
     )
-    poller = TelemetryPoller(channel, writer, specs)  # type: ignore[arg-type]
+    poller = TelemetryPoller(channel, writer, specs, meta_flush_s=0)  # type: ignore[arg-type]
     return poller, writer, LocalDirStore(tmp_path)
 
 
@@ -555,6 +558,62 @@ def test_stop_cancels_a_hung_poll_within_budget(tmp_path: Path) -> None:
         start = asyncio.get_running_loop().time()
         await poller.stop(stop_timeout_s=0.2)  # must cancel, not wait an hour
         assert asyncio.get_running_loop().time() - start < 5
+
+    asyncio.run(run())
+
+
+def test_stop_never_raises_when_poll_task_cancelled_externally(
+    tmp_path: Path,
+) -> None:
+    """Chunk-2 verification finding 1: a framework all-tasks sweep may cancel a poll task before stop(); the resulting CancelledError out of the shield must not escape stop()."""
+
+    async def run() -> None:
+        hang = asyncio.Event()
+
+        class HangingChannel(FakeChannel):
+            async def exec(self, *args: Any, **kwargs: Any) -> ExecOutcome:
+                hang.set()
+                await asyncio.sleep(3600)
+                raise AssertionError("unreachable")
+
+        poller, _, _ = make_poller(
+            tmp_path, HangingChannel(), [journal_spec(poll_s=0.01)]
+        )
+        await poller.start()
+        await asyncio.wait_for(hang.wait(), timeout=5)
+        for task in asyncio.all_tasks():
+            if task.get_name().startswith("telemetry-"):
+                task.cancel()  # the outside actor
+        await asyncio.sleep(0)  # let the cancellation land
+        await poller.stop(stop_timeout_s=1.0)  # must not raise
+
+    asyncio.run(run())
+
+
+def test_stop_cancelled_itself_still_propagates(tmp_path: Path) -> None:
+    """The dual of the external-cancellation fix: cancelling stop() is the CALLER's cancellation and must propagate, not be eaten by the task.cancelled() check."""
+
+    async def run() -> None:
+        hang = asyncio.Event()
+
+        class HangingChannel(FakeChannel):
+            async def exec(self, *args: Any, **kwargs: Any) -> ExecOutcome:
+                hang.set()
+                await asyncio.sleep(3600)
+                raise AssertionError("unreachable")
+
+        poller, _, _ = make_poller(
+            tmp_path, HangingChannel(), [journal_spec(poll_s=0.01)]
+        )
+        await poller.start()
+        await asyncio.wait_for(hang.wait(), timeout=5)
+        stopping = asyncio.create_task(poller.stop(stop_timeout_s=30.0))
+        await asyncio.sleep(0.05)  # stop() is now awaiting the hung task
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        # leave no hung poll task behind
+        await poller.stop(stop_timeout_s=0.2)
 
     asyncio.run(run())
 

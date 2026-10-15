@@ -76,6 +76,8 @@ class HostLease(BaseModel):
     """Absolute ISO-8601 UTC expiry; the reaper compares against it, never against liveness."""
     state: LeaseState
     host_facts: HostFacts
+    evidence_location: str | None = None
+    """The sample's evidence prefix (`evidence-v1.md`), when evidence is on: the applier writes capture streams there, and the reaper reap-seals an abandoned record there. Additive over the recorded `range-host-v1.md` shape (old entries parse with `None`)."""
 
     @field_validator("created", "expires_at")
     @classmethod
@@ -113,6 +115,7 @@ class LeaseStore:
         staging: str,
         host_facts: HostFacts,
         ttl_s: float | None = None,
+        evidence_location: str | None = None,
     ) -> HostLease:
         """Mint a fresh active lease expiring `ttl_s` (default `lease_ttl_s()`) from now."""
         now = self._now()
@@ -131,6 +134,7 @@ class LeaseStore:
             expires_at=(now + timedelta(seconds=ttl)).isoformat(),
             state="active",
             host_facts=host_facts,
+            evidence_location=evidence_location,
         )
         with self._registry.locked(write=True) as view:
             view.entries[lease.lease_id] = lease

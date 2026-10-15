@@ -39,6 +39,8 @@ class HostCapabilities(BaseModel):
     image_delivery: Literal["pre-seeded"] = "pre-seeded"
     forward_upstream: Literal[False] = False
     egress_grant: Literal[False] = False
+    evidence_sink: Literal["location"] = "location"
+    """How the host delivers capture evidence (`host-provider.md:104`): it writes to the per-sample location the driver hands it at acquire (`LeasePlacement.evidence_location`), through a put-only credential. The only v1 mode; a host that cannot write evidence would refuse at planning, never degrade silently."""
 
 
 class HostFacts(BaseModel):
@@ -62,6 +64,8 @@ class LeasePlacement(BaseModel):
     project: str
     bundle_path: str
     staging: str
+    evidence_location: str | None = None
+    """The per-sample evidence prefix the host's capture writer targets (`None` when evidence is off). Driver-derived (`evidence-v1.md`: the driver computes the location and hands the host a put-scoped destination at acquire); lands on the lease so the applier and the reaper act from disk alone."""
 
 
 class RangeHost(Protocol):
