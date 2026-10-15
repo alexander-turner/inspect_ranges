@@ -1,3 +1,10 @@
+# __version__ resolves first: deep imports (the oracle's compiler/runtime
+# chain) read it during package initialization
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "unknown"
+
 from ._challenges import (
     challenge_dataset,
     load_challenges,
@@ -10,12 +17,6 @@ from .schema import (
     validate_range,
 )
 from .types import semantic_issues
-
-try:
-    from ._version import __version__
-except ImportError:
-    __version__ = "unknown"
-
 
 __all__ = [
     "__version__",
