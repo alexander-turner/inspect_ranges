@@ -14,6 +14,7 @@ PLATFORM = "Platform"
 REALIZER = "Realizer"
 PROVIDER = "Provider"
 HOST = "Host"
+EVIDENCE = "Evidence"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
@@ -47,6 +48,10 @@ def run_checks() -> list[CheckResult]:
     results += check_host(
         state_dir=_provider_state_dir(),
         backend=os.environ.get("INSPECT_RANGES_HOST", "local"),
+    )
+    results += check_evidence(
+        sink_override=os.environ.get("INSPECT_RANGES_EVIDENCE_SINK"),
+        log_dir=os.environ.get("INSPECT_LOG_DIR"),
     )
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
@@ -451,6 +456,144 @@ def _range_image_tag() -> str:
     from .._runtime.rangeimage import RANGE_IMAGE_TAG
 
     return RANGE_IMAGE_TAG
+
+
+def check_evidence(
+    sink_override: str | None,
+    log_dir: str | None,
+    *,
+    s3_client: Any | None = None,
+) -> list[CheckResult]:
+    """The evidence surface (`evidence-v1.md`): knob validity, a writability probe of the standing sink override when one is set, and whether evidence resolves off-instance.
+
+    Doctor never requires AWS: a probe that cannot reach the sink (no credentials, no network) is a stated condition (`warn`), not a host failure. The off-instance row is guidance for untrusted-model runs, where instance-local evidence does not survive instance compromise; it warns rather than fails because local evidence is the normal development state.
+    """
+    from .._provider.evidence import (
+        EVIDENCE_BUFFER_MB_VAR,
+        EVIDENCE_MAX_MB_VAR,
+        evidence_buffer_bytes,
+        evidence_max_bytes,
+    )
+
+    # the runtime treats an empty override as unset (`if override:` in
+    # location.py); doctor must evaluate the same sink the runtime will
+    sink_override = sink_override or None
+    log_dir = log_dir or None
+
+    results: list[CheckResult] = []
+    # each knob in its own try, naming its variable: int() errors carry no
+    # variable name, and one broken knob must not mask the other
+    knob_failures: list[str] = []
+    values: dict[str, int] = {}
+    for var, read in (
+        (EVIDENCE_BUFFER_MB_VAR, evidence_buffer_bytes),
+        (EVIDENCE_MAX_MB_VAR, evidence_max_bytes),
+    ):
+        try:
+            values[var] = read() // (1024 * 1024)
+        except ValueError as error:
+            knob_failures.append(f"{var} ({error})")
+    if knob_failures:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "knobs",
+                "fail",
+                f"invalid evidence knob: {'; '.join(knob_failures)}; the provider disables evidence for every sample rather than failing them",
+                fix=(
+                    f"unset or set {EVIDENCE_BUFFER_MB_VAR} and "
+                    f"{EVIDENCE_MAX_MB_VAR} to positive integers (MB)"
+                ),
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "knobs",
+                "ok",
+                f"buffer {values[EVIDENCE_BUFFER_MB_VAR]} MB, per-writer cap {values[EVIDENCE_MAX_MB_VAR]} MB",
+            )
+        )
+
+    if sink_override is None:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "sink",
+                "ok",
+                "derived from the eval log location at run time (no standing sink to probe)",
+            )
+        )
+    elif sink_override.startswith("s3://"):
+        from .s3probe import probe_s3_sink
+
+        results.append(probe_s3_sink(EVIDENCE, sink_override, client=s3_client))
+    elif "://" in sink_override:
+        # mirror sink_for_location's scheme validation: at run time an
+        # unsupported scheme disables evidence for every sample, so a green
+        # local-path probe here would bless the exact misconfiguration
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "sink",
+                "fail",
+                f"unsupported evidence location scheme in {sink_override!r}; the runtime would disable evidence for every sample",
+                fix="use s3://bucket/prefix or a filesystem path for INSPECT_RANGES_EVIDENCE_SINK",
+            )
+        )
+    else:
+        results.append(_probe_local_sink(sink_override))
+
+    resolved = sink_override or log_dir
+    if (
+        resolved is not None
+        and re.match(r"^[a-z0-9+.-]+://", resolved)
+        and not resolved.startswith("file://")
+    ):
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "ok",
+                f"evidence resolves off-instance ({resolved})",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "warn",
+                "evidence resolves to instance-local storage; fine for development, but the pre-compromise record only survives instance compromise when it streams off-instance, so untrusted-model runs need a remote log dir or sink",
+                fix=(
+                    "point INSPECT_LOG_DIR (preferred: evidence then lives beside "
+                    "the logs) or INSPECT_RANGES_EVIDENCE_SINK at s3://..."
+                ),
+            )
+        )
+    return results
+
+
+def _probe_local_sink(base: str) -> CheckResult:
+    """Writability probe of a filesystem sink override: create the base (first use would anyway), write and remove one probe file."""
+    import uuid
+
+    try:
+        root = Path(base)
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / f".doctor-probe-{uuid.uuid4().hex}"
+        probe.write_bytes(b"doctor")
+        probe.unlink()
+        return CheckResult(EVIDENCE, "sink", "ok", f"writable at {base}")
+    except (OSError, ValueError) as error:  # ValueError: e.g. an embedded NUL
+        return CheckResult(
+            EVIDENCE,
+            "sink",
+            "fail",
+            f"{base} is not writable ({error}); every sample would run with evidence disabled",
+            fix="make the sink directory writable by the eval user, or change INSPECT_RANGES_EVIDENCE_SINK",
+        )
 
 
 def _artifact_state(sidecar: Path) -> str:

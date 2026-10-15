@@ -26,6 +26,8 @@ inspect-docs:
       href: provider.qmd
     - text: Host Topology
       href: topology.qmd
+    - text: Evidence
+      href: evidence.qmd
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk

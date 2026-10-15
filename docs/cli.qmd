@@ -53,7 +53,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 ## doctor
 
-`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet), plus the provider and host groups (entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one). `--fix-script` emits the shell commands for whatever failed.
+`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet), plus the provider and host groups (entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one), plus the evidence group (knob validity, a writability probe of a configured sink, and a warning when evidence resolves to instance-local storage; see [Evidence](evidence.qmd)). `--fix-script` emits the shell commands for whatever failed.
 
 ::: {.callout-note}
 ## The v1 boundary, honestly

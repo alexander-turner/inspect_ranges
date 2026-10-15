@@ -35,3 +35,19 @@ Re-run green (18/18, zero residue) after the fresh-context review's fixes, whose
 Two operational findings worth keeping: the production daemon reaps the exec's process group on return, so an in-guest background producer must `setsid` to survive its starting exec (the prototype-era "background processes survive" no longer holds unqualified); and live battery predicates must be delivery-lag immune (assert from the record's own poll counters, never from counts of delivered-so-far chunks, which lag appends by a flush).
 
 Files: `run_telemetry.sh`, `telemetry_battery.py`, `spec-telemetry.yaml`. Artifacts land under `tmp-telemetry/` (gitignored).
+
+## Slice-5 section: the provider/host seam (run_seam.sh)
+
+Devbox, 2026-10-15: 39 checks green (32 in S1-S4 plus 7 eval-smoke checks), zero container residue, zero S3 residue, exit 0. The S3 leg ran against the chunk-3 scratch bucket under a per-run prefix, removed at the end.
+
+| Measurement | Value |
+|---|---|
+| 4-VM sample boot with capture + evidence wiring on (budget stated in advance: 56 s vs the ~51 s chunk-2 baseline) | 51.9 s |
+| kill -9 to reaper reclaim (lease TTL 20 s) | one sweep after expiry |
+| Unreferenced trailing chunks after the kill (the manifest-batching crash window, listed never broken) | 1 |
+
+Headlines, as run: (S1) a normal provider sample streamed to real S3 while live; the binding (both writers' seal digests plus chain heads) verified from a scrubbed subprocess; in the compromise window a conditional re-put of a delivered chunk was refused 412 by the store, and a post-window PLAIN overwrite (this bucket carries no deny-overwrite policy; the chunk-3 IAM limitation) was detected by the binding-holder as a chunk-size break at the forged key: tamper-evident, exactly the claim. (S2) the driver was SIGKILLed after a manifest part committed; the reaper reclaimed the range and reap-sealed the host record (`reaped`); the record verified off-instance with every pre-kill chunk present. (S3) a 1 MB buffer cap under the flood produced explicit in-chain `buffer-cap` gaps, an unbroken chain, and a range whose daemons kept answering. (S4) the separated topology: the APPLIER owned the host capture writer, driver streams stayed driver-side, and the binding carried both digests. (S5) a real `inspect eval` (mockllm) left the store binding in the eval log, the evidence beside the log via the `sample_active()` identity path, and `evidence verify --expect-seal` from the log's binding alone exited 0.
+
+Battery-driven findings fixed in the slice: a relative inspect log location produced a relative (cwd-bound) binding path, so filesystem locations now absolutize at derivation; the kill headline is scoped to COMMITTED evidence (a delivered manifest part), with trailing chunks the recorded batching trade-off; `sweep` must be driven via a thread from async callers (the reap-sealer runs its own event loop); and inspect's loader requires a relative task path.
+
+Post-review re-run (same day, after the 8-finding fresh-context review round): 39 checks green again, up 51.7 s, zero container and S3 residue.

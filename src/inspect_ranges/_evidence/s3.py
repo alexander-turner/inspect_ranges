@@ -46,7 +46,8 @@ def parse_s3_location(location: str) -> tuple[str, str]:
     return bucket, prefix.strip("/")
 
 
-def _new_client() -> Any:
+def new_s3_client() -> Any:
+    """A fresh S3 client under this module's config: bounded timeouts, retry-transparent (one total attempt). The doctor's sink probe shares it so probe behavior matches the writer's."""
     import boto3
     from botocore.config import Config
 
@@ -89,7 +90,7 @@ class _S3Base:
         # are not, so none is kept)
         with self._client_lock:
             if self._client_instance is None:
-                self._client_instance = _new_client()
+                self._client_instance = new_s3_client()
             return self._client_instance
 
     def _object_key(self, key: str) -> str:

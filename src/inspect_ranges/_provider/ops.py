@@ -100,6 +100,10 @@ async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     observed = await _channel(handle).session(guest)
     if observed != pinned:
         handle.sessions[guest] = observed  # re-pin so later samples/ops proceed
+        if handle.evidence is not None:
+            # a daemon restart is evidence (the `session` stream feeds the
+            # continuity corroboration); recording it never alters the op
+            await handle.evidence.record_session_event(guest, observed, "re-pinned")
         raise SessionChangedError(guest, op, pinned, observed)
 
 

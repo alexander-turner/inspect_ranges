@@ -136,6 +136,34 @@ def test_sdk_retries_disabled() -> None:
     assert retries is not None and retries.get("total_max_attempts") == 1
 
 
+def test_sdk_retries_disabled_behaviorally() -> None:
+    """Chunk-2 verification finding 4: pin the BEHAVIOR, not just the config dict.
+
+    A retryable 500 must surface after exactly ONE HTTP attempt. The proof is a bait success queued behind the error: a botocore release reinterpreting `total_max_attempts` would consume the bait in a hidden retry and the first put would falsely succeed; with the SDK transparent, the first put raises and the SECOND put consumes the bait.
+    """
+    client = _client()
+    sink = S3Sink("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "put_object", service_error_code="InternalError", http_status_code=500
+    )
+    stubber.add_response(
+        "put_object",
+        {},
+        expected_params={
+            "Bucket": "bucket",
+            "Key": "p/chunks/host/s/000000.bin",
+            "Body": b"x",
+            "IfNoneMatch": "*",
+        },
+    )
+    with stubber:
+        with pytest.raises(Exception, match="InternalError"):
+            asyncio.run(sink.put("chunks/host/s/000000.bin", b"x"))
+        asyncio.run(sink.put("chunks/host/s/000000.bin", b"x"))
+    stubber.assert_no_pending_responses()
+
+
 def test_access_denied_get_reads_as_missing() -> None:
     # without s3:ListBucket, S3 reports a missing key as 403; a restricted
     # verifier credential must get the chunk-missing break, not a traceback
@@ -168,7 +196,9 @@ def test_writer_ambiguous_put_composes_with_s3() -> None:
             raise FileExistsError(key)
 
     async def scenario() -> None:
-        writer = EvidenceWriter(FlakyThen412(), writer="host", retry_wait_s=0.0)
+        writer = EvidenceWriter(
+            FlakyThen412(), part_interval_s=0, writer="host", retry_wait_s=0.0
+        )
         await writer.append("stages", b"evt")
         result = await writer.flush()
         assert result.delivered_chunks == 1
@@ -239,3 +269,52 @@ def test_cli_verify_rejects_unknown_scheme() -> None:
     result = CliRunner().invoke(evidence, ["verify", "ftp://bucket/p"])
     assert result.exit_code != 0
     assert "unsupported evidence location scheme" in result.output
+
+
+def test_doctor_s3_probe_stubbed() -> None:
+    """The doctor's sink probe is one conditional put plus best-effort delete: denied credentials warn (a stated condition, never a host failure), and a put-only credential is ok with the residue noted."""
+    from botocore.stub import ANY, Stubber
+    from inspect_ranges._doctor.s3probe import probe_s3_sink
+
+    def client_with(responses: list[tuple[str, bool]]) -> Any:
+        client = _client()
+        stubber = Stubber(client)
+        for op, succeed in responses:
+            if succeed:
+                stubber.add_response(
+                    op,
+                    {},
+                    {"Bucket": "b", "Key": ANY, "Body": ANY, "IfNoneMatch": "*"}
+                    if op == "put_object"
+                    else {"Bucket": "b", "Key": ANY},
+                )
+            else:
+                stubber.add_client_error(op, "AccessDenied", "denied", 403)
+        stubber.activate()
+        return client
+
+    ok = probe_s3_sink(
+        "Evidence",
+        "s3://b/pre",
+        client=client_with([("put_object", True), ("delete_object", True)]),
+    )
+    assert ok.status == "ok"
+
+    put_only = probe_s3_sink(
+        "Evidence",
+        "s3://b/pre",
+        client=client_with([("put_object", True), ("delete_object", False)]),
+    )
+    assert put_only.status == "ok"
+    assert "residue" in put_only.detail
+
+    denied = probe_s3_sink(
+        "Evidence", "s3://b/pre", client=client_with([("put_object", False)])
+    )
+    assert denied.status == "warn"
+    assert "stated condition" in denied.detail
+
+    # a malformed URL is a config FAIL (fix the URL), never a credentials warn
+    malformed = probe_s3_sink("Evidence", "s3://", client=client_with([]))
+    assert malformed.status == "fail"
+    assert "malformed" in malformed.detail

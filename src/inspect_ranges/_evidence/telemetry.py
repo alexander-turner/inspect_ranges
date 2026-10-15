@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 from typing import Annotated, Callable, Coroutine, Literal
 
 from pydantic import Field, StringConstraints, model_validator
@@ -41,6 +42,12 @@ POLL_COMMAND_MS = 10_000
 
 POLL_UNTIMED_BOUND_MS = 30_000
 """Outer per-poll budget across attempts (`Budget.untimed_bound_ms`)."""
+
+DEFAULT_META_FLUSH_S = 15.0
+"""Default meta-record batching cadence (chunk-2 verification finding 3): routine poll records batch into one `telemetry-meta` chunk per interval instead of one object per poll; failures, truncation, re-bootstraps, anomalies, and recoveries flush immediately, and `stop()` flushes the remainder. 0 means ship every poll (unit tests pin per-poll meta with it). The crash-window trade, stated: buffered ROUTINE meta records are coverage metadata, and a driver killed mid-interval loses up to one interval of them with no gap record; event payloads are unaffected (data chunks ship on their own poll's flush), and the record never claims the missing window, it simply proves coverage only up to its last shipped batch."""
+
+META_BATCH_MAX_RECORDS = 64
+"""Buffered meta records that force a flush regardless of age."""
 
 CollectorName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$")]
 """Collector names become the second stream segment (`telemetry/<name>`), so they carry the stream grammar."""
@@ -104,6 +111,9 @@ class _CollectorState:
         self.capped = False  # a poll-truncated gap has been recorded for this stall
         self.polls = 0
         self.errors = 0
+        self.meta_buffer: list[dict[str, object]] = []  # batched meta records
+        self.meta_first: ClockStamp | None = None  # first buffered record's stamp
+        self.meta_since: float | None = None  # monotonic age basis for the batch
 
     def reset_file(self) -> None:
         self.offset = 0
@@ -153,15 +163,19 @@ class TelemetryPoller:
         writer: EvidenceWriter,
         collectors: list[CollectorSpec],
         *,
+        meta_flush_s: float = DEFAULT_META_FLUSH_S,
         clock: Callable[[], ClockStamp] = clock_now,
     ) -> None:
         names = [spec.name for spec in collectors]
         if len(set(names)) != len(names):
             raise ValueError("collector names must be unique")
+        if meta_flush_s < 0:
+            raise ValueError("meta_flush_s must be >= 0")
         self._channel = channel
         self._writer = writer
         self._collectors = {spec.name: spec for spec in collectors}
         self._states = {spec.name: _CollectorState() for spec in collectors}
+        self._meta_flush_s = meta_flush_s
         self._clock = clock
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stopping = asyncio.Event()
@@ -191,6 +205,20 @@ class TelemetryPoller:
             remaining = max(deadline - asyncio.get_running_loop().time(), 0.1)
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            except asyncio.CancelledError:
+                # two causes share this exception (chunk-2 verification
+                # finding 1). A poll task cancelled by an OUTSIDE actor (a
+                # framework all-tasks sweep) ends the task, not stop():
+                # swallow it, stop() must never raise. stop() ITSELF being
+                # cancelled must propagate: that is the caller's cancellation,
+                # and eating it would break teardown's cancel semantics.
+                if task.cancelled():
+                    logger.warning(
+                        "telemetry task %s was cancelled externally before stop",
+                        task.get_name(),
+                    )
+                    continue
+                raise
             except asyncio.TimeoutError:
                 logger.warning(
                     "telemetry task %s did not stop within budget; cancelling",
@@ -201,6 +229,8 @@ class TelemetryPoller:
             except Exception:
                 logger.exception("telemetry task %s failed at stop", task.get_name())
         self._tasks.clear()
+        for name in self._collectors:
+            await self._guard(f"meta-flush:{name}", self._flush_meta(name, force=True))
         await self._guard("flush", self._writer.flush())
 
     async def poll_once(self, name: str) -> None:
@@ -252,6 +282,7 @@ class TelemetryPoller:
             "monotonic": start.monotonic,
             "poll": state.polls,
         }
+        recovered = False
         try:
             if isinstance(spec.source, CommandSource):
                 await self._poll_command(spec, spec.source, state, meta)
@@ -275,10 +306,50 @@ class TelemetryPoller:
         else:
             if state.failing:
                 state.failing = False
+                recovered = True
                 logger.info("telemetry poll recovered: collector=%s", name)
         meta["errors"] = state.errors
+        if state.meta_buffer == []:
+            state.meta_first = start
+            state.meta_since = time.monotonic()
+        state.meta_buffer.append(meta)
+        # anomalies flush immediately (their visibility latency is the point);
+        # routine quiet/ok polls batch on the cadence (chunk-2 verification
+        # finding 3: one meta object per poll was 2 S3 objects per poll)
+        # urgent: failures, truncation, re-bootstraps, anomalies, recoveries.
+        # "absent" (producer not started) and "capped" (gap already recorded
+        # once per stall) are ROUTINE: per-poll flushing for them would
+        # re-create the per-poll object cost batching exists to remove.
+        urgent = (
+            meta.get("outcome") in ("error", "truncated", "cursor-missing")
+            or "anomaly" in meta
+            or meta.get("replay") is True
+            or recovered
+        )
+        await self._flush_meta(name, force=urgent)
+
+    async def _flush_meta(self, name: str, *, force: bool) -> None:
+        """Ship the collector's batched meta records when due (`meta_flush_s`; 0 means every poll) or forced (anomaly, recovery, stop)."""
+        state = self._states[name]
+        if not state.meta_buffer:
+            return
+        if not force:
+            age = (
+                0.0 if state.meta_since is None else time.monotonic() - state.meta_since
+            )
+            if (
+                self._meta_flush_s != 0
+                and age < self._meta_flush_s
+                and len(state.meta_buffer) < META_BATCH_MAX_RECORDS
+            ):
+                return
+        batch = state.meta_buffer
+        first = state.meta_first
+        state.meta_buffer = []
+        state.meta_first = None
+        state.meta_since = None
         await self._writer.append(
-            f"telemetry-meta/{name}", json_lines([meta]), span=self._span(start)
+            f"telemetry-meta/{name}", json_lines(batch), span=self._span(first)
         )
 
     async def _poll_command(
