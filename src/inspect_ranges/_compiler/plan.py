@@ -20,6 +20,7 @@ from .allocate import (
     GuestAllocation,
     GuestKind,
     InterfaceAllocation,
+    ProbeEndpoint,
     allocate,
 )
 from .dnsmasq import resolvers_for, search_domain
@@ -44,6 +45,9 @@ class PlanOptions(BaseModel):
 
     evidence_capture: bool = False
     """Render the evidence-capture sidecar (per-segment pcap per `evidence-v1.md`). A plan-time input because the sidecar is part of the realization: the bundle's compose project and digest change with it."""
+
+    probe_segments: tuple[str, ...] = ()
+    """Networks that get a declared probe endpoint (the clamped veth of the challenge-prober spike) plus the zero-capability probe sidecar. A plan-time input for the same reason as `evidence_capture`; set by the provider from the challenge's `active-prober` requirements."""
 
 
 class ImageRef(BaseModel):
@@ -76,6 +80,8 @@ class PlannedNetwork(BaseModel):
     """Resolver addresses handed to this network's guests."""
     search: str | None
     """Derived search domain, for records-serving networks."""
+    probe_endpoint: ProbeEndpoint | None = None
+    """The declared probe endpoint (clamped veth), when a challenge's `active-prober` observer requested this segment."""
 
 
 class PlannedGuest(BaseModel):
@@ -111,6 +117,9 @@ class Requirements(BaseModel):
 
     evidence_capture: bool = False
     """Whether the bundle carries the evidence-capture sidecar (per-segment pcap on a `CAP_NET_RAW`-only compose service; the range container's own capability floor is unchanged by this)."""
+
+    probe_segments: tuple[str, ...] = ()
+    """Networks carrying a declared probe endpoint and the zero-capability probe sidecar (sorted; empty means no prober)."""
 
 
 class Totals(BaseModel):
@@ -201,6 +210,17 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     issues: list[Issue] = []
     if options.evidence_capture:
         issues.extend(_evidence_name_issues(spec))
+    declared_networks = {network.name for network in spec.networks}
+    for segment in options.probe_segments:
+        if segment not in declared_networks:
+            issues.append(
+                Issue(
+                    code="probe-segment-unknown",
+                    path=("networks",),
+                    message=f"probe segment {segment!r} is not a declared network",
+                    hint="probe segments come from the challenge's active-prober goals; the goal's host must sit on a declared network",
+                )
+            )
     for index, host in enumerate(spec.hosts):
         if host.os.type == "windows":
             issues.append(
@@ -292,7 +312,11 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     if issues:
         raise IssueError(issues)
 
-    allocation = allocate(spec, cid_base=options.cid_base)
+    allocation = allocate(
+        spec,
+        cid_base=options.cid_base,
+        probe_networks=frozenset(options.probe_segments),
+    )
     gateways = elect_gateways(spec, allocation)
 
     networks: list[PlannedNetwork] = []
@@ -307,6 +331,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 dhcp=network.dhcp,
                 gateway=gateways.get(network.name),
                 hypervisor_address=allocation.hypervisor_addresses.get(network.name),
+                probe_endpoint=allocation.probe_endpoints.get(network.name),
                 resolvers=resolvers_for(spec, allocation, network.name),
                 search=search_domain(network.name) if serves_records else None,
             )
@@ -361,6 +386,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             devices=["/dev/kvm", "/dev/vhost-vsock", "/dev/vhost-net", "/dev/net/tun"],
             egress_uplink=egress_uplink,
             evidence_capture=options.evidence_capture,
+            probe_segments=tuple(sorted(options.probe_segments)),
         ),
         totals=Totals(
             guests=len(guests),
@@ -406,5 +432,10 @@ def guest_allocation(plan: ResolvedPlan) -> Allocation:
             network.name: network.hypervisor_address
             for network in plan.networks
             if network.hypervisor_address is not None
+        },
+        probe_endpoints={
+            network.name: network.probe_endpoint
+            for network in plan.networks
+            if network.probe_endpoint is not None
         },
     )

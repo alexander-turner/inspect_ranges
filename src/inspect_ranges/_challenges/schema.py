@@ -90,7 +90,7 @@ class GoalBase(_StrictModel):
     """Fields shared by every goal, independent of its proof contract."""
 
     id: str = Field(min_length=1)
-    """Goal name, unique within its challenge; `submit(goal_id, value)` binds to it."""
+    """Goal name, unique within its challenge; `submit_goal(goal_id, value)` binds to it."""
 
     weight: float = Field(default=1.0, ge=0)
     """Relative contribution under the challenge's scoring mode."""
@@ -266,6 +266,8 @@ class DegradeGoal(GoalBase):
     """Guest running the probed service."""
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
+    segment: str | None = None
+    """Network the probe reaches the service through; omitted means the host's first declared network (the v1 convention; declare it for multi-homed hosts whose service binds elsewhere)."""
     window_s: float = Field(gt=0)
     """Observation window the probe verdict is scored over, in seconds."""
     measure: Literal["latency", "error-fraction"] | None = None
@@ -303,7 +305,9 @@ class TamperGoal(GoalBase):
     host: str = Field(min_length=1)
     """Guest holding the designated protected location."""
     location: str = Field(min_length=1)
-    """The protected location the value must appear in (a database record, a served response), interpreted by the goal engine."""
+    """The protected location the value must appear in (a database record, a served response), interpreted by the goal engine (v1: `PORT/PATH` observed over HTTP)."""
+    segment: str | None = None
+    """Network the probe reaches the location through; omitted means the host's first declared network (the v1 convention)."""
     observer: Literal["active-prober", "guest-snapshot"] = "active-prober"
     """How the written value is observed from outside."""
 
@@ -321,6 +325,8 @@ class AvailabilityGoal(GoalBase):
     """Guest running the probed service."""
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
+    segment: str | None = None
+    """Network the probe reaches the service through; omitted means the host's first declared network (the v1 convention; declare it for multi-homed hosts whose service binds elsewhere)."""
     window_s: float = Field(gt=0)
     """Observation window, in seconds; DOWN and MUMBLE inside it are penalized."""
 
@@ -640,6 +646,27 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
                         collectors,
                     )
                 )
+            if (
+                isinstance(goal, (AvailabilityGoal, DegradeGoal, TamperGoal))
+                and goal.segment is not None
+                and host is not None
+            ):
+                attached = {
+                    interface.network
+                    for declared in (*spec.hosts, *spec.routers)
+                    if declared.name == host
+                    for interface in declared.interfaces
+                }
+                if attached and goal.segment not in attached:
+                    issues.append(
+                        unknown(
+                            "probe-segment-unreachable",
+                            (*at, "segment"),
+                            goal.segment,
+                            f"host '{host}' has no interface on probe segment '{goal.segment}'",
+                            attached,
+                        )
+                    )
             if "guest-snapshot" in goal.observers():
                 issues.append(
                     Issue(

@@ -1,8 +1,8 @@
-"""Submission binding: the `submit(goal_id, value)` tool and its scorer-side reader.
+"""Submission binding: the `submit_goal(goal_id, value)` tool and its scorer-side reader.
 
 Submissions bind to goals through the sample store, read by the mid-run poller and the end-of-run scorer; a single-goal challenge may fall back to the completion text (`challenges-v1.md`). Every submission is kept with its timestamp (latching is first-PASS-wins and lives with the scorer, not here).
 
-Note: inspect_ai's `react()` agent carries its own task-completion `submit` tool; when both are in play, name collisions are the eval author's wiring concern and the completion fallback covers the single-goal case. The engine slice revisits this.
+Naming (slice-3 decision, recorded in `challenges-v1.md`): the tool is `submit_goal`, not `submit`, because inspect_ai's `react()` agent carries its own task-completion `submit` tool with different semantics (ending the run vs recording one goal's proof). The two compose cleanly: multi-goal challenges add `submit_goal` to the agent's tools and goal ids appear in the task instructions (`challenge_dataset` appends them); single-goal challenges work with plain `react()` through the completion fallback.
 """
 
 import time
@@ -22,7 +22,7 @@ __all__ = [
     "Submission",
     "Submissions",
     "submissions_from",
-    "submit",
+    "submit_goal",
 ]
 
 
@@ -34,11 +34,11 @@ class Submission:
     value: str
     wall: float
     source: str = "tool"
-    """`tool` for `submit()` records; `completion` for the single-goal fallback."""
+    """`tool` for `submit_goal()` records; `completion` for the single-goal fallback."""
 
 
 @tool
-def submit() -> Tool:
+def submit_goal() -> Tool:
     """A tool recording proof submissions for challenge goals."""
 
     async def execute(goal_id: str, value: str) -> str:
@@ -71,6 +71,19 @@ class Submissions:
         """Every submission for `goal_id`, oldest first."""
         return [entry for entry in self._entries if entry.goal_id == goal_id]
 
+    def candidates(self, goal_id: str) -> list[Submission]:
+        """Distinct submitted values for `goal_id`, ordered by first occurrence.
+
+        Scoring tries every candidate oldest-first and stops at the first pass, so a later wrong submission never buries an earlier correct one (and the outcome never depends on poll timing).
+        """
+        seen: set[str] = set()
+        out: list[Submission] = []
+        for entry in self.all(goal_id):
+            if entry.value not in seen:
+                seen.add(entry.value)
+                out.append(entry)
+        return out
+
     def value(self, goal_id: str) -> str | None:
         """The latest submitted value for `goal_id`, `None` when nothing was submitted."""
         matches = self.all(goal_id)
@@ -86,7 +99,7 @@ def submissions_from(
 ) -> Submissions:
     """The sample's submissions, with the single-goal completion fallback.
 
-    When `challenge` has exactly one goal and no `submit()` record exists for it, the model's completion text (stripped) counts as that goal's submission.
+    When `challenge` has exactly one goal and no `submit_goal()` record exists for it, the model's completion text (stripped) counts as that goal's submission.
 
     Args:
         state: The sample's task state.
