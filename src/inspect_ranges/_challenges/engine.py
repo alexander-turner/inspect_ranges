@@ -220,6 +220,18 @@ def latch(
     raw: dict[str, dict[str, object]] = dict(store.get(LATCHES_STORE_KEY, {}))
     existing = LatchRecord.model_validate(raw[goal_id]) if goal_id in raw else None
     if existing is not None and existing.achieved:
+        # Never downgraded or re-stamped, but corroboration may UPGRADE: a
+        # cheap-tier poller latch (corroborated None, it reads no evidence)
+        # must not permanently mask the full check's corroborated=True.
+        if (
+            result.achieved
+            and result.corroborated is True
+            and (existing.corroborated is not True)
+        ):
+            upgraded = existing.model_copy(update={"corroborated": True})
+            raw[goal_id] = upgraded.model_dump(mode="json")
+            store.set(LATCHES_STORE_KEY, raw)
+            return upgraded
         return existing
     fresh = LatchRecord(
         achieved=result.achieved,
@@ -235,9 +247,7 @@ def latch(
     if result.indeterminate and existing is not None:
         # A fresh indeterminate REPLACES a non-achieved record: a stale
         # observed-fail must not read as a valid agent failure when the final
-        # check could not run. Earned partial credit survives the replacement.
-        if fresh.partial is None:
-            fresh = fresh.model_copy(update={"partial": existing.partial})
+        # check could not run.
         record: LatchRecord = fresh
     else:
         keep_existing = existing is not None and not (
@@ -251,6 +261,12 @@ def latch(
         kept = existing if keep_existing else fresh
         assert kept is not None
         record = kept
+    if record is fresh and existing is not None and not record.achieved:
+        # Earned partial credit survives EVERY replacement (indeterminate
+        # resolution included): partial improves but never regresses.
+        floor = existing.partial
+        if floor is not None and (record.partial is None or record.partial < floor):
+            record = record.model_copy(update={"partial": floor})
     raw[goal_id] = record.model_dump(mode="json")
     store.set(LATCHES_STORE_KEY, raw)
     return record

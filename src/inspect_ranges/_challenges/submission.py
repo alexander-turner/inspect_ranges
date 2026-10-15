@@ -71,6 +71,19 @@ class Submissions:
         """Every submission for `goal_id`, oldest first."""
         return [entry for entry in self._entries if entry.goal_id == goal_id]
 
+    def candidates(self, goal_id: str) -> list[Submission]:
+        """Distinct submitted values for `goal_id`, ordered by first occurrence.
+
+        Scoring tries every candidate oldest-first and stops at the first pass, so a later wrong submission never buries an earlier correct one (and the outcome never depends on poll timing).
+        """
+        seen: set[str] = set()
+        out: list[Submission] = []
+        for entry in self.all(goal_id):
+            if entry.value not in seen:
+                seen.add(entry.value)
+                out.append(entry)
+        return out
+
     def value(self, goal_id: str) -> str | None:
         """The latest submitted value for `goal_id`, `None` when nothing was submitted."""
         matches = self.all(goal_id)

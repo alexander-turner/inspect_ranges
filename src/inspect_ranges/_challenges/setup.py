@@ -15,6 +15,7 @@ from .._evidence.telemetry import CollectorSpec, TelemetryPoller
 from .dataset import CHALLENGE_METADATA_KEY
 from .engine import goal_type
 from .oracle import RangeOracle, range_oracle
+from .poller import start_goal_poller
 from .prober import Prober, ProbeTarget, parse_tamper_location
 from .schema import (
     AvailabilityGoal,
@@ -25,6 +26,10 @@ from .schema import (
     required_observers,
 )
 from .submission import submit_goal
+from .timings import add_timing
+
+if TYPE_CHECKING:
+    from inspect_ai.util import Store
 
 if TYPE_CHECKING:
     from .._compiler.plan import ResolvedPlan
@@ -98,6 +103,7 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
 async def run_setup(
     oracle: RangeOracle,
     challenge: Challenge,
+    store: "Store | None" = None,
     *,
     extra_observers: frozenset[str] = frozenset(),
 ) -> None:
@@ -106,6 +112,7 @@ async def run_setup(
     Args:
         oracle: The sample's oracle.
         challenge: The challenge being planted.
+        store: The sample store; when given, per-goal setup timings accumulate under `inspect_ranges:timings` (the measure-first surface).
         extra_observers: Observers the caller supplies beyond the deployment's own (`telemetry-collector` when `plant_goals` was given a matching collector spec).
 
     Raises:
@@ -139,12 +146,15 @@ async def run_setup(
                 f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
             ) from error
         planted.extend(keys)
+        elapsed = time.monotonic() - start
+        if store is not None:
+            add_timing(store, f"goal:{goal.id}", "setup", elapsed)
         logger.info(
             "planted goal=%s type=%s plants=%d elapsed=%.3fs",
             goal.id,
             goal.type,
             len(keys),
-            time.monotonic() - start,
+            elapsed,
         )
 
 
@@ -189,12 +199,16 @@ def plant_goals(
         extra: frozenset[str] = (
             frozenset({"telemetry-collector"}) if needed else frozenset()
         )
-        await run_setup(oracle, challenge, extra_observers=extra)
+        await run_setup(oracle, challenge, state.store, extra_observers=extra)
         await _start_producers(
             oracle,
             challenge,
             [spec for spec in collectors if spec.name in needed],
         )
+        # The cheap-tier poller (slice 5): latches mid-run passes with their
+        # timestamps; the scorer stops it. Failure to start is logged by the
+        # poller itself and never blocks the sample.
+        start_goal_poller(oracle, challenge, state.store)
         return state
 
     return solve
