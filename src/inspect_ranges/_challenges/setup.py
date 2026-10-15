@@ -114,7 +114,7 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
         plant = oracle.store.plant(key)
         try:
             removal = await oracle.exec(
-                plant.guest, ["rm", "-f", plant.path], user="root"
+                plant.guest, ["rm", "-f", "--", plant.path], user="root"
             )
             if removal.rc != 0:
                 logger.warning(

@@ -74,10 +74,13 @@ async def proc_dump(oracle: RangeOracle, guest: str) -> bytes:
 
 
 async def new_files(oracle: RangeOracle, guest: str, marker: str) -> list[str]:
+    # tmpfs mounts (/run, /dev/shm) are their own filesystems, so a bare
+    # `find / -xdev` would skip exactly the scratch locations where residue
+    # could hide; list each start point explicitly
     rc, out = await sh(
         oracle,
         guest,
-        f"find / -xdev -type f -newer {marker} 2>/dev/null",
+        f"find / /run /dev/shm -xdev -type f -newer {marker} 2>/dev/null | sort -u",
     )
     return [line for line in out.decode().splitlines() if line] if rc == 0 else []
 
@@ -204,8 +207,11 @@ async def main() -> int:
                     continue
                 try:
                     content = await oracle.read_file(guest, path, user="root")
-                except OracleSetupError:
-                    continue  # vanished or special; a plant value cannot hide in ENOENT
+                except OracleSetupError as error:
+                    if "cap" in str(error):
+                        # an unscannable file is a sweep HOLE, never a skip
+                        dirty.append(f"{path} (unscannable: over cap)")
+                    continue  # else vanished; a plant value cannot hide in ENOENT
                 if flag_value in content or secret_value in content:
                     dirty.append(path)
             check(
