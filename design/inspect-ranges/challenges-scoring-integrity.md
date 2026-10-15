@@ -83,6 +83,16 @@ The proof-contract table below is updated in the reviewer document (adding `answ
 - **The asymmetric rule (mandatory if built).** A successful replay upgrades confidence; a failed replay is inconclusive, at most flagging for human review. It is absence of corroboration, not contradiction: without this rule, instance-tuned exploits that fail on the twin would invalidate legitimate passes.
 - **Reporting.** Replay coverage will be partial (anti-emulation and timing-dependent exploits under-reproduce on TCG); report it as a rate, never assume it.
 
+## Amendment (2026-10-15, eighth): the T1 sink exists ([evidence-v1](evidence-v1.md))
+
+*Status change, not a design change: the evidence layer this record trusts is now built and demonstrated.*
+
+- **T1 is real.** Per-sample evidence streams as generated to `<evallogstem>.evidence/<sample>_<epoch>_<attempt>` (local or S3) in a write-once, hash-chained format sealed per writer; the seal digests land in the eval log's sample store, so log and record mutually verify (`evidence verify --expect-seal`). The guarantee's exact scope is recorded in evidence-v1: the chain anchors everything at or below the seal; the store binding anchors the seal tier. Demonstrated: a `kill -9` of the driver leaves a reaper-sealed (`reaped`) record whose pre-kill contents verify off-instance, and post-compromise tampering on the instance is detected by the binding-holder.
+- **T2 capture is real.** Per-segment pcap (a `NET_RAW`-only sidecar; the range container's capability floor is unchanged), continuous consoles, stage/verification streams, and daemon session continuity, all with explicit in-chain gap records under backpressure or injury: coverage holes are visible, never silent.
+- **The detection goal's completeness primitives exist**, applied first to our own collectors: capture heartbeats and watermarks, poll-gap records, and watermark-stall visibility, so "the collector was alive for the whole window" is decidable from the sealed record alone.
+- **In-range telemetry export landed, poll-based**, with the assurance scope this record's tiers imply: export upgrades the timeline, not the source. Pre-compromise telemetry is immutable once streamed and producer silencing is a visible stall; the read remains T3 at origin, so exported content corroborates and gates completeness rather than proving. The clock basis for cross-observer corroboration is dual clocks plus recorded offset pairs; comparisons carry a tolerance.
+- **Still future here:** signed collector attestations (the recorded T2-under-compromise upgrade), the active prober, and `corroborate()` itself (challenges-v1 consumes the sink this phase produced).
+
 ## Trusted observers
 
 Every scoring input is classified by where it is read from, worst case assumed:
