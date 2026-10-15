@@ -26,13 +26,14 @@ class OracleSetupError(RuntimeError):
 
 
 PLANT_SCRIPT = (
-    'if [ -e "$1" ]; then echo "plant target exists" >&2; exit 2; fi; '
-    'umask 077 && { set -C; cat > "$1"; } && chown -- "$3" "$1"'
+    'if [ -e "$1" ] || [ -L "$1" ]; then echo "plant target exists" >&2; exit 2; fi; '
+    'umask 077; ( set -C; : > "$1" ) || exit 3; '
+    'cat > "$1" && chown -- "$3" "$1"'
     ' && chmod -- "$2" "$1" || { rm -f -- "$1"; exit 1; }'
 )
 """The owner-flow write, run as root with the value on stdin.
 
-A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, and the content arrives on stdin. The ordering and guards each carry an invariant: a pre-existing target refuses untouched (exit 2) and `set -C` makes creation exclusive, so a plant never truncates real guest content and the failure branch never removes a file this script did not create; `umask 077` means the file is never wider than 0600 before the explicit `chmod`; and `chown` runs BEFORE `chmod` because chown(2) clears setuid/setgid bits, which would silently strip them from any mode that carries them.
+A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, and the content arrives on stdin. The ordering and guards each carry an invariant: a pre-existing target, including a symlink dangling or not, refuses untouched (exit 2); the empty file is created exclusively first (`set -C`, exit 3 touching nothing on a lost race), so the failure branch's `rm` can only ever remove a file this script itself created and a plant never truncates real guest content; `umask 077` means the file is never wider than 0600 before the explicit `chmod`; and `chown` runs BEFORE `chmod` because chown(2) clears setuid/setgid bits, which would silently strip them from any mode that carries them.
 """
 
 
@@ -146,11 +147,17 @@ class RangeOracle:
 
         Without `owner`, this is the daemon's file plane (mode pinned atomically with the write, daemon identity, so the path must be daemon-writable). With `owner`, the write rides the exec plane as root: the daemon's file identity cannot create files in privileged locations (`/root`, another principal's 0700 home), so the value travels as exec stdin (request bulk, the same transport privacy as a file write and never argv or env) into `umask 077 && cat`, then `chmod`/`chown` by positional argument. Any failure removes the file in the same script: a plant is never left behind under the wrong mode or principal.
 
+        On every failure path this frame scrubs `data` before raising, so a locals-rendered traceback (`INSPECT_TRACEBACK_LOCALS=1`) cannot carry plant bytes from here; lower channel frames are outside this guarantee, which is why that flag is forbidden on scoring runs.
+
         Raises:
             OracleSetupError: The owner-flow script failed (nothing is left at `path`).
         """
         if owner is None:
-            await self._channel.write_file(guest, path, data, mode=mode)
+            try:
+                await self._channel.write_file(guest, path, data, mode=mode)
+            except BaseException:
+                del data
+                raise
             return
         request = ExecRequest(
             id=request_id(),
@@ -167,8 +174,13 @@ class RangeOracle:
             data_size=len(data),
             budget=Budget(),
         )
-        outcome = await self._channel.exec(guest, request, stdin=data)
+        try:
+            outcome = await self._channel.exec(guest, request, stdin=data)
+        except BaseException:
+            del data
+            raise
         if outcome.rc != 0:
+            del data
             raise OracleSetupError(
                 f"owned write for {owner!r} failed on {guest}:{path} "
                 f"(rc {outcome.rc}; the script removed any partial file)"

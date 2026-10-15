@@ -56,6 +56,9 @@ async def plant_secret_file(
     try:
         await oracle.write_file(guest, path, value, mode=0o600, owner=owner)
     except BaseException:
+        # Scrub the frame: locals-rendered tracebacks (INSPECT_TRACEBACK_LOCALS=1)
+        # would otherwise carry the plant value into the eval log.
+        del value
         await oracle.store.discard(key, reason="write failed")
         raise
     return key
