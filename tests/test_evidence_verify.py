@@ -15,6 +15,7 @@ from inspect_ranges._evidence.manifest import (
     ClockStamp,
     GapRecord,
     ManifestPart,
+    Seal,
     canonical_bytes,
     chain_genesis,
     chain_next,
@@ -268,3 +269,165 @@ def test_sealed_stays_truthful_on_mid_parts_break(tmp_path: Path) -> None:
     assert not host.ok and host.first_break is not None
     assert host.first_break.kind == "chunk-digest"
     assert host.sealed and host.seal_status == "complete"
+
+
+# ---------------------------------------------------------------------------
+# the seal tier: unanchored without an external binding (chunk-1 verification
+# findings, adopted from the verifier's probes). Each test asserts the HONEST
+# current behavior: caught structurally, caught only with --expect-seal, or
+# documented-undetectable-without-binding.
+# ---------------------------------------------------------------------------
+
+
+def _build_empty_sealed(root: Path, writer_name: str) -> str:
+    async def build() -> str:
+        writer = EvidenceWriter(
+            LocalDirSink(root), writer=writer_name, clock=FakeClock(), retry_wait_s=0
+        )
+        _, digest = await writer.seal()
+        return digest
+
+    return asyncio.run(build())
+
+
+def _verify_bound(root: Path, expected: dict[str, str]) -> VerifyReport:
+    return asyncio.run(
+        verify_location(
+            LocalDirStore(root), location=str(root), expected_seals=expected
+        )
+    )
+
+
+def test_seal_writer_swap_is_a_structural_break(tmp_path: Path) -> None:
+    """A seal stored under one writer but claiming another breaks without any binding."""
+    _build_empty_sealed(tmp_path, "host")
+    _build_empty_sealed(tmp_path, "driver")
+    (tmp_path / "manifests/driver/seal.json").write_bytes(
+        (tmp_path / "manifests/host/seal.json").read_bytes()
+    )
+    report = _verify(tmp_path)
+    driver = report.writers["driver"]
+    assert driver.first_break is not None
+    assert driver.first_break.kind == "seal-writer-mismatch"
+
+
+def test_forged_seal_fields_need_the_binding(tmp_path: Path) -> None:
+    """A re-put seal with forged fields is internally consistent; the external digest catches it."""
+    digest = _build_sealed(tmp_path)
+    key = tmp_path / "manifests/host/seal.json"
+    seal = Seal.model_validate_json(key.read_bytes())
+    seal.status = "reaped"
+    seal.lease_id = "lease-FORGED"
+    seal.sealed_at.wall += 86400.0
+    key.write_bytes(canonical_bytes(seal))
+    # without the binding: documented undetectable; the forged fields read as truth
+    unbound = _verify(tmp_path)
+    assert unbound.ok and unbound.writers["host"].seal_status == "reaped"
+    assert unbound.writers["host"].lease_id == "lease-FORGED"
+    assert unbound.writers["host"].binding_checked is False
+    # with the binding: the digest mismatch is the break
+    bound = _verify_bound(tmp_path, {"host": digest})
+    host = bound.writers["host"]
+    assert host.binding_checked and host.first_break is not None
+    assert host.first_break.kind == "seal-digest-mismatch"
+
+
+def test_deleted_seal_and_truncation_need_the_binding(tmp_path: Path) -> None:
+    """Unsealing a sealed record and truncating its tail is clean without the binding."""
+    digest = _build_sealed(tmp_path)
+    (tmp_path / "manifests/host/seal.json").unlink()
+    (tmp_path / "manifests/host/part-000002.json").unlink()
+    (tmp_path / "chunks/host/pcap/dmz/000002.bin").unlink()
+    unbound = _verify(tmp_path)
+    assert unbound.ok and unbound.writers["host"].sealed is False
+    bound = _verify_bound(tmp_path, {"host": digest})
+    host = bound.writers["host"]
+    assert host.first_break is not None and host.first_break.kind == "seal-missing"
+
+
+def test_unsealed_forged_extension_needs_the_binding(tmp_path: Path) -> None:
+    """Nothing secret guards the chain: an unsealed record accepts validly-chained forgeries."""
+    digest = _build_sealed(tmp_path)
+    (tmp_path / "manifests/host/seal.json").unlink()
+    parts = [
+        ManifestPart.model_validate_json(p.read_bytes())
+        for p in sorted((tmp_path / "manifests/host").glob("part-*.json"))
+    ]
+    chain = chain_genesis("host", "pcap/dmz")
+    seq = 0
+    for part in parts:
+        for rec in part.records:
+            if rec.stream == "pcap/dmz":
+                chain = rec.chain
+                seq = rec.seq + 1
+    stamp = ClockStamp(wall=9999.0, monotonic=None)
+    forged = GapRecord(
+        stream="pcap/dmz",
+        seq=seq,
+        span=ClockSpan(start=stamp, end=stamp),
+        cause="forged-by-attacker",
+        dropped=0,
+        chain=chain_genesis("host", "pcap/dmz"),
+    )
+    forged.chain = chain_next(chain, forged)
+    extra = ManifestPart(writer="host", part=len(parts), records=[forged])
+    (tmp_path / f"manifests/host/part-{extra.part:06d}.json").write_bytes(
+        canonical_bytes(extra)
+    )
+    # without the binding: the forged gap reads as a real one (documented)
+    unbound = _verify(tmp_path)
+    assert unbound.ok
+    assert any(g.cause == "forged-by-attacker" for g in unbound.writers["host"].gaps)
+    # with the binding: the missing seal is the break
+    bound = _verify_bound(tmp_path, {"host": digest})
+    host = bound.writers["host"]
+    assert host.first_break is not None and host.first_break.kind == "seal-missing"
+
+
+def test_cross_location_transplant_needs_the_binding(tmp_path: Path) -> None:
+    """A whole self-consistent record replayed at another attempt's location."""
+    import hashlib
+    import shutil
+
+    attempt1 = tmp_path / "s1_1_1"
+    attempt2 = tmp_path / "s1_1_2"
+    _build_sealed(attempt1)
+    shutil.copytree(attempt1, attempt2)
+    # without the binding: clean, but the seal's lease id is surfaced so a
+    # transplant is visually obvious to an incident responder
+    unbound = _verify(attempt2)
+    assert unbound.ok and unbound.writers["host"].lease_id == "lease-9"
+    # attempt 2's binding-holder has attempt 2's digest, which cannot match
+    attempt2_binding = hashlib.sha256(b"attempt-2-seal").hexdigest()
+    bound = _verify_bound(attempt2, {"host": attempt2_binding})
+    host = bound.writers["host"]
+    assert host.first_break is not None
+    assert host.first_break.kind == "seal-digest-mismatch"
+
+
+def test_expected_seal_for_an_absent_writer_breaks(tmp_path: Path) -> None:
+    digest = _build_sealed(tmp_path)
+    report = _verify_bound(tmp_path, {"host": digest, "driver": "f" * 64})
+    assert report.writers["host"].ok and report.writers["host"].binding_checked
+    driver = report.writers["driver"]
+    assert driver.first_break is not None and driver.first_break.kind == "seal-missing"
+
+
+def test_cli_expect_seal(tmp_path: Path) -> None:
+    digest = _build_sealed(tmp_path)
+    runner = CliRunner()
+    ok = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", f"host={digest}"]
+    )
+    assert ok.exit_code == 0 and "binding CHECKED" in ok.output
+    assert "lease=lease-9" in ok.output
+    wrong = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", "host=" + "0" * 64]
+    )
+    assert wrong.exit_code == 1 and "seal-digest-mismatch" in wrong.output
+    unbound = runner.invoke(evidence, ["verify", str(tmp_path)])
+    assert unbound.exit_code == 0 and "internal consistency only" in unbound.output
+    malformed = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", "nodigest"]
+    )
+    assert malformed.exit_code != 0 and "WRITER=DIGEST" in malformed.output
