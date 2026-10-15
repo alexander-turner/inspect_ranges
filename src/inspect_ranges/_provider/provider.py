@@ -25,6 +25,9 @@ from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
+from .._metadata import (
+    PROBE_SEGMENTS_METADATA_KEY as _PROBE_SEGMENTS_METADATA_KEY,
+)
 from .._runtime.ownership import (
     list_projects,
     read_owner,
@@ -41,6 +44,9 @@ from .ops import provider_exec, provider_read_file, provider_write_file
 from .state import ProviderRuntime, SampleHandle, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
+
+PROBE_SEGMENTS_METADATA_KEY = _PROBE_SEGMENTS_METADATA_KEY
+"""Re-export of `_metadata.PROBE_SEGMENTS_METADATA_KEY` (the shared, provider-free home)."""
 
 TRANSIENT_UP_STAGES = frozenset(
     {"range-container", "guest-boot", "readiness", "admission"}
@@ -133,6 +139,15 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         runtime = provider_runtime()
         # inspect-ai injects int ids for default datasets: always stringify
         sample_id = str(metadata.get("__sample_id__", "sample"))
+        probe_segments = tuple(
+            sorted(
+                segment
+                for segment in str(metadata.get(PROBE_SEGMENTS_METADATA_KEY, "")).split(
+                    ","
+                )
+                if segment
+            )
+        )
         cache_key = config if isinstance(config, (str, RangeSpec)) else None
         if cache_key is not None:
             spec, plan = runtime.resolve_config(
@@ -161,7 +176,14 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         handle: SampleHandle | None = None
         try:
             handle = await cls._acquire_range(
-                runtime, spec, plan, task_name, sample_id, session, charged_totals
+                runtime,
+                spec,
+                plan,
+                task_name,
+                sample_id,
+                session,
+                charged_totals,
+                probe_segments,
             )
         except BaseException:
             await runtime.admission.release(charged_totals)
@@ -212,6 +234,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         sample_id: str,
         session: EvidenceSession | None,
         charged_totals: Totals,
+        probe_segments: tuple[str, ...] = (),
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
@@ -244,6 +267,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 cid_base=lease.base,
                 retry=runtime.retry_config,
                 plan=plan,
+                spec=spec,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
@@ -269,6 +293,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         runtime.plan_options(
                             cid_base=lease.base,
                             evidence_capture=session is not None,
+                            probe_segments=probe_segments,
                         ),
                     )
                 )
@@ -306,6 +331,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     )
                     result: UpResult = await asyncio.shield(boot)
                     rendered_plan: ResolvedPlan = render.result()
+                    # the rendered plan is the truthful one (it carries
+                    # evidence_capture and realized allocations); the oracle's
+                    # available_observers reads it off the handle
+                    handle.plan = rendered_plan
                 except asyncio.CancelledError:
                     # none of these can be aborted and all keep creating
                     # resources; drain them (up is internally bounded) so the
@@ -674,6 +703,16 @@ def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
     Raises:
         TypeError: `environment` is not a `libvirt_range` environment.
     """
+    # In a live eval, inspect_ai hands out sandboxes wrapped in its event
+    # proxy; unwrap it to reach the provider environment. Private API,
+    # isolated here with a CI pin (like `sample_active()` in location.py).
+    try:
+        from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
+        if isinstance(environment, SandboxEnvironmentProxy):
+            environment = environment._sandbox  # pyright: ignore[reportPrivateUsage]
+    except ImportError:  # pragma: no cover - inspect_ai moved the proxy
+        pass
     if not isinstance(environment, LibvirtRangeSandboxEnvironment):
         raise TypeError(
             "expected a libvirt_range sandbox environment, got "

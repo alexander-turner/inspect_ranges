@@ -1,4 +1,4 @@
-"""Slice-2 battery (CI half): the `submit` tool's store records and the scorer-side reader with its completion fallback."""
+"""Slice-2 battery (CI half): the `submit_goal` tool's store records and the scorer-side reader with its completion fallback."""
 
 import asyncio
 
@@ -9,7 +9,7 @@ from inspect_ranges._challenges.schema import Challenge
 from inspect_ranges._challenges.submission import (
     SUBMISSIONS_STORE_KEY,
     submissions_from,
-    submit,
+    submit_goal,
 )
 
 
@@ -37,11 +37,11 @@ def single_goal_challenge() -> Challenge:
     )
 
 
-def test_submit_tool_appends_records() -> None:
+def test_submit_goal_tool_appends_records() -> None:
     async def scenario() -> None:
         store = Store()
         init_subtask_store(store)
-        execute = submit()
+        execute = submit_goal()
         await execute(goal_id="user", value="abc")
         await execute(goal_id="user", value="def")
         await execute(goal_id="root", value="xyz")
@@ -75,7 +75,7 @@ def test_completion_fallback_yields_to_tool_record() -> None:
     async def scenario() -> None:
         store = Store()
         init_subtask_store(store)
-        execute = submit()
+        execute = submit_goal()
         await execute(goal_id="only", value="submitted")
         state = make_state(store, completion="completion-text")
         submissions = submissions_from(state, challenge=single_goal_challenge())

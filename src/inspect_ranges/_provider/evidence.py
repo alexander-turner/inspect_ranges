@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .._compiler.plan import ResolvedPlan
@@ -97,6 +98,7 @@ class EvidenceSession:
         self._chain_heads: dict[str, dict[str, str]] = {}
         self._finalized = False
         self._disabled = False
+        self._producers: list[Callable[[], Awaitable[None]]] = []
 
     # -- admission -------------------------------------------------------------
 
@@ -230,6 +232,14 @@ class EvidenceSession:
         self._finalized = True
         try:
             async with asyncio.timeout(FINALIZE_BUDGET_S):
+                for stop in self._producers:
+                    try:
+                        await stop()
+                    except Exception:
+                        logger.exception(
+                            "evidence producer stop failed (continuing): location=%s",
+                            self.location,
+                        )
                 if self._streamer is not None:
                     await self._streamer.stop()
                 await self._drain_recorder()
@@ -319,6 +329,22 @@ class EvidenceSession:
             await self._driver_append("stages", stages)
         if verify:
             await self._driver_append("verify", verify)
+
+    @property
+    def driver_writer(self) -> EvidenceWriter | None:
+        """The driver-side writer (the telemetry poller appends through it directly); `None` before open or when disabled."""
+        return None if self._disabled else self._driver
+
+    def register_producer(self, stop: Callable[[], Awaitable[None]]) -> None:
+        """Register a driver-side evidence producer (prober, telemetry poller) stopped at finalize.
+
+        Producers are stopped before the drain and seals, inside the finalize budget; a producer's `stop` must itself never raise (the house teardown contract), and a raise here is caught and logged anyway.
+        """
+        self._producers.append(stop)
+
+    async def append_driver(self, stream: str, data: bytes) -> None:
+        """Append to a driver-side evidence stream (guarded: disabled sessions and backend trouble no-op, never raise)."""
+        await self._driver_append(stream, data)
 
     async def _driver_append(self, stream: str, data: bytes) -> None:
         if self._driver is None or self._disabled or not data:

@@ -87,6 +87,8 @@ class SampleHandle:
     """The sample's evidence session (`evidence-v1.md`), `None` when evidence is off; finalized by `_destroy` before `down`."""
     plan: ResolvedPlan | None = None
     """The sample's resolved plan, set at `sample_init`; the oracle's `resolved()` reads it (`challenges-v1.md`)."""
+    spec: "RangeSpec | None" = None
+    """The sample's validated range spec, set beside `plan`; the oracle's `range_spec()` reads it for declared variables and scenario content (`challenges-v1.md`). Carries the resolved per-instance values once the generation layer lands."""
     plants: "PlantStore | None" = None
     """The sample's plant store, created lazily by the oracle factory; plant VALUES live only here, in memory (`challenges-v1.md`)."""
 
@@ -189,16 +191,22 @@ class ProviderRuntime:
         return spec, plan
 
     def plan_options(
-        self, cid_base: int | None = None, evidence_capture: bool = False
+        self,
+        cid_base: int | None = None,
+        evidence_capture: bool = False,
+        probe_segments: tuple[str, ...] = (),
     ) -> PlanOptions:
         if cid_base is None:
             return PlanOptions(
-                image_cache=self.image_cache, evidence_capture=evidence_capture
+                image_cache=self.image_cache,
+                evidence_capture=evidence_capture,
+                probe_segments=probe_segments,
             )
         return PlanOptions(
             image_cache=self.image_cache,
             cid_base=cid_base,
             evidence_capture=evidence_capture,
+            probe_segments=probe_segments,
         )
 
 

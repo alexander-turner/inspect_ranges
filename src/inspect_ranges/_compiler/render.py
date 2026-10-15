@@ -32,6 +32,13 @@ from .plan import (
     plan_json,
     resolve_plan,
 )
+from .probe import (
+    PROBECLIENT_FILENAME,
+    PROBECLIENT_SOURCE,
+    PROBES_FILENAME,
+    render_probe_clamp_nftables,
+    render_probes_txt,
+)
 
 _DOMAIN_XML = """<domain type='kvm'>
   <name>{name}</name>
@@ -145,6 +152,30 @@ def _compose_with_capture(compose: str) -> str:
     return compose.replace(marker, "\n" + _COMPOSE_CAPTURE_SERVICE + marker, 1)
 
 
+_COMPOSE_PROBE_SERVICE = """\
+  # active-prober sidecar (challenges-v1.md, challenge-prober spike): shares
+  # the range netns with ZERO capabilities (the clamped probe veth already
+  # exists; the kernel stack does the protocol work), so probes originate from
+  # the declared probe identity without growing any capability floor
+  probe:
+    image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
+    init: true
+    network_mode: service:range
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - .:/render:ro
+"""
+
+
+def _compose_with_probe(compose: str) -> str:
+    """Insert the zero-capability probe sidecar into a rendered compose text."""
+    marker = "\nnetworks:\n" if "\nnetworks:\n" in compose else "\nvolumes:\n"
+    return compose.replace(marker, "\n" + _COMPOSE_PROBE_SERVICE + marker, 1)
+
+
 _COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
     "    network_mode: none\n",
     """    # this range requests egress: the deployment supplies the uplink network
@@ -232,6 +263,9 @@ def render_bundle(
             render_bridges_tsv({n.name: n.bridge for n in plan.networks}),
         )
         write(f"capture/{SUPERVISOR_FILENAME}", SUPERVISOR_SOURCE)
+    if plan.requirements.probe_segments:
+        compose = _compose_with_probe(compose)
+        write(f"probe/{PROBECLIENT_FILENAME}", PROBECLIENT_SOURCE)
     write("compose.yaml", compose)
 
     write("netns/bridges.txt", "".join(f"{n.bridge}\n" for n in plan.networks))
@@ -243,7 +277,16 @@ def render_bundle(
             if n.hypervisor_address is not None
         ),
     )
-    write("netns/range.nft", render_egress_nftables(spec, allocation, uplink="eth0"))
+    if allocation.probe_endpoints:
+        subnets = {
+            network.name: network.cidr
+            for network in plan.networks
+            if isinstance(network.cidr, IPv4Network)
+        }
+        write(f"netns/{PROBES_FILENAME}", render_probes_txt(allocation, subnets))
+    nft = render_egress_nftables(spec, allocation, uplink="eth0")
+    clamp = render_probe_clamp_nftables(allocation)
+    write("netns/range.nft", nft + clamp if clamp else nft)
     for network in plan.networks:
         conf = render_dnsmasq_conf(spec, allocation, network.name)
         if conf is not None:

@@ -3,8 +3,14 @@
 This module is named by the `inspect_ai` entry point in `pyproject.toml`, so inspect_ai imports it in every process that resolves registry names — add imports of tasks, solvers, scorers, and tools here to make them discoverable without anyone asking for them.
 """
 
+from ._challenges.scorer import challenge_scorer
 from ._challenges.setup import plant_goals
-from ._challenges.submission import submit
+from ._challenges.submission import submit_goal
 from ._provider.provider import LibvirtRangeSandboxEnvironment
 
-__all__ = ["LibvirtRangeSandboxEnvironment", "plant_goals", "submit"]
+__all__ = [
+    "LibvirtRangeSandboxEnvironment",
+    "challenge_scorer",
+    "plant_goals",
+    "submit_goal",
+]
