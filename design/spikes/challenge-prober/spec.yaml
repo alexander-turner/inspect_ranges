@@ -1,0 +1,31 @@
+# challenge-prober spike range: one flat segment with a target web host and
+# the attacker box. Static IPs keep the rendered compose at the exact
+# eight-capability floor (no DHCP, no range-served DNS). The probe endpoint
+# addresses used by the spike (10.95.10.250 persistent/transient veth,
+# 10.95.10.251 userspace AF_PACKET) are deliberately NOT declared here: the
+# spike measures what an undeclared-but-visible observer looks like.
+range:
+  name: challenge-prober
+  schema_version: "0.2"
+  description: >
+    Spike range for the active prober's attachment mechanism: a nonce-bound
+    HTTP service on the target, probed from outside every VM by three
+    candidate mechanisms, with agent-side visibility measured from the
+    attacker box.
+
+networks:
+  - name: lab
+    cidr: 10.95.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: chprobe-guest
+    interfaces: [{ network: lab, ip: 10.95.10.10 }]
+
+attacker:
+  image: chprobe-guest
+  interfaces: [{ network: lab, ip: 10.95.10.3 }]
+  entry: external
+  egress: none
