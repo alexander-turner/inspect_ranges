@@ -1,0 +1,45 @@
+# evidence-capture spike range: two static-IP segments joined by a router, so
+# the rendered compose carries exactly the eight-capability floor (no DHCP, no
+# range-served DNS: neither NET_RAW nor NET_BIND_SERVICE is granted). The ACL
+# admits icmp and the flood port so cross-segment flows exist to capture.
+range:
+  name: evidence-capture
+  schema_version: "0.2"
+  description: >
+    Spike range for per-bridge packet capture inside the hardened range
+    container: a dmz and an internal segment, a router between them, and
+    known cross-segment and same-segment flows generated over vsock exec.
+
+networks:
+  - name: dmz
+    cidr: 10.94.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.94.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    os: { type: linux }
+    image: evcap-guest
+    interfaces:
+      - { network: dmz, ip: 10.94.10.1 }
+      - { network: internal, ip: 10.94.20.1 }
+    acl:
+      - { from: dmz, to: internal, allow: [icmp, udp/9999] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: evcap-guest
+    interfaces: [{ network: dmz, ip: 10.94.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: evcap-guest
+    interfaces: [{ network: internal, ip: 10.94.20.10 }]
+
+attacker:
+  image: evcap-guest
+  interfaces: [{ network: dmz, ip: 10.94.10.3 }]
+  entry: external
+  egress: none
