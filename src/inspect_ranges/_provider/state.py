@@ -21,7 +21,7 @@ from .._compiler.render import render_bundle
 from .._host.host import HostProvider, RangeHost
 from .._runtime.down import DownResult, down
 from .._runtime.ownership import default_state_dir
-from .._runtime.up import UpOptions, UpResult, up
+from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..types import RangeSpec
 from .admission import HostCapacity, WeightedAdmission
 from .naming import CidAllocator
@@ -29,10 +29,12 @@ from .retry import RetryConfig, RetryStats
 
 if TYPE_CHECKING:
     from .._channel.channel import Transport
+    from .evidence import EvidenceSession
 
 logger = logging.getLogger("inspect_ranges.provider")
 
-UpFn = Callable[[Path, UpOptions], UpResult]
+UpFn = Callable[[Path, UpOptions, OnStage | None], UpResult]
+"""The boot seam. The third argument observes stage events (`evidence-v1.md`'s `stages`/`verify` streams and clock-offset pairs): the local backend passes it to `up(on_stage=...)` (host emit clocks), the uds backend invokes it per folded stage report (driver receive clocks). `None` when evidence is off."""
 DownFn = Callable[[str, Path], DownResult]
 RenderFn = Callable[["RangeSpec", Path, PlanOptions | None], ResolvedPlan]
 ChannelFactory = Callable[[dict[str, int], str], MessageChannel]
@@ -53,8 +55,8 @@ def _default_channel_factory(cids: dict[str, int], label: str) -> MessageChannel
     return MessageChannel(transport, label=label)
 
 
-def _default_up(bundle: Path, options: UpOptions) -> UpResult:
-    return up(bundle, options)
+def _default_up(bundle: Path, options: UpOptions, on_stage: OnStage | None) -> UpResult:
+    return up(bundle, options, on_stage=on_stage)
 
 
 def _default_down(project: str, state_dir: Path) -> DownResult:
@@ -80,6 +82,8 @@ class SampleHandle:
     admission_charged: bool = False
     host: RangeHost | None = None
     """The sample's leased host, set between render and boot; `None` again once the lease is released."""
+    evidence: "EvidenceSession | None" = None
+    """The sample's evidence session (`evidence-v1.md`), `None` when evidence is off; finalized by `_destroy` before `down`."""
 
 
 class ProviderRuntime:
@@ -179,10 +183,18 @@ class ProviderRuntime:
         self._resolved[config] = (spec, plan)
         return spec, plan
 
-    def plan_options(self, cid_base: int | None = None) -> PlanOptions:
+    def plan_options(
+        self, cid_base: int | None = None, evidence_capture: bool = False
+    ) -> PlanOptions:
         if cid_base is None:
-            return PlanOptions(image_cache=self.image_cache)
-        return PlanOptions(image_cache=self.image_cache, cid_base=cid_base)
+            return PlanOptions(
+                image_cache=self.image_cache, evidence_capture=evidence_capture
+            )
+        return PlanOptions(
+            image_cache=self.image_cache,
+            cid_base=cid_base,
+            evidence_capture=evidence_capture,
+        )
 
 
 _fallback_state: SandboxLifecycleState | None = None

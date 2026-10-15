@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -45,6 +46,12 @@ _CHAIN_PLACEHOLDER = "0" * 64
 
 DEFAULT_BUFFER_CAP_BYTES = 64 * 1024 * 1024
 """Default local backpressure cap; the runtime wires `INSPECT_RANGES_EVIDENCE_BUFFER_MB` to this at construction (slice 5)."""
+
+DEFAULT_PART_INTERVAL_S = 15.0
+"""Default manifest-part batching interval (chunk-2 verification finding 3): chunks still deliver on every flush (data durability is never delayed), but a manifest part is cut only when the oldest uncommitted record reaches this age, when `part_max_records` accumulate, or at seal. The trade is explicit: per-poll part objects (2 S3 objects per telemetry poll, ~29k per collector over 8h) collapse to a bounded cadence, while a crash can leave up to one interval of records committed to the in-memory chain but not yet in a delivered part, whose chunks then verify as unreferenced residue rather than referenced records. Set to 0 for cut-on-every-flush (the pre-batching behavior; unit tests pin exact part layouts with it)."""
+
+DEFAULT_PART_MAX_RECORDS = 256
+"""Records that force a part cut regardless of age (bounds part object size and the crash window under bursts)."""
 
 
 class EvidenceSink(Protocol):
@@ -129,12 +136,19 @@ class EvidenceWriter:
         lease_id: str | None = None,
         sample_id: str | None = None,
         buffer_cap_bytes: int = DEFAULT_BUFFER_CAP_BYTES,
+        max_total_bytes: int | None = None,
+        part_interval_s: float = DEFAULT_PART_INTERVAL_S,
+        part_max_records: int = DEFAULT_PART_MAX_RECORDS,
         put_attempts: int = 3,
         retry_wait_s: float = 0.1,
         clock: Callable[[], ClockStamp] = clock_now,
     ) -> None:
         if put_attempts < 1:
             raise ValueError("put_attempts must be >= 1")
+        if part_max_records < 1:
+            raise ValueError("part_max_records must be >= 1")
+        if part_interval_s < 0 or max_total_bytes is not None and max_total_bytes < 1:
+            raise ValueError("part_interval_s must be >= 0 and max_total_bytes >= 1")
         check_name(writer, WRITER_NAME_PATTERN, "writer")
         self._sink = sink
         self._writer = writer
@@ -142,12 +156,18 @@ class EvidenceWriter:
         self._lease_id = lease_id
         self._sample_id = sample_id
         self._buffer_cap = buffer_cap_bytes
+        self._max_total = max_total_bytes
+        self._part_interval_s = part_interval_s
+        self._part_max_records = part_max_records
         self._put_attempts = put_attempts
         self._retry_wait_s = retry_wait_s
         self._clock = clock
         self._pending_chunks: deque[_PendingChunk] = deque()
         self._pending_bytes = 0
+        self._total_bytes = 0
+        self._cap_breached = False
         self._records: list[ManifestRecord] = []
+        self._records_since: float | None = None
         self._pending_parts: deque[ManifestPart] = deque()
         self._next_part = 0
         self._streams: dict[str, _StreamState] = {}
@@ -169,6 +189,25 @@ class EvidenceWriter:
         async with self._lock:
             self._check_open()
             resolved = span if span is not None else self._point_span()
+            if (
+                self._max_total is not None
+                and self._total_bytes + len(data) > self._max_total
+            ):
+                # the per-sample volume cap (INSPECT_RANGES_EVIDENCE_MAX_MB):
+                # breach yields explicit gaps and flags the seal (a cap-hit
+                # record can never claim `complete`)
+                self._cap_breached = True
+                self._commit_gap(
+                    stream, resolved, cause="evidence-cap", dropped=len(data)
+                )
+                logger.warning(
+                    "evidence gap (evidence-cap): writer=%s stream=%s dropped=%d total=%d",
+                    self._writer,
+                    stream,
+                    len(data),
+                    self._total_bytes,
+                )
+                return
             if len(data) > self._buffer_cap:
                 self._commit_gap(
                     stream, resolved, cause="buffer-cap", dropped=len(data)
@@ -180,6 +219,7 @@ class EvidenceWriter:
                     len(data),
                 )
                 return
+            self._total_bytes += len(data)
             self._pending_chunks.append(
                 _PendingChunk(stream=stream, data=data, span=resolved)
             )
@@ -214,7 +254,7 @@ class EvidenceWriter:
     async def _flush_locked(self) -> FlushResult:
         result = FlushResult()
         await self._deliver_chunks(result)
-        self._cut_part()
+        self._cut_part(force=False)
         await self._deliver_parts(result)
         result.pending_chunks = len(self._pending_chunks)
         result.pending_parts = len(self._pending_parts)
@@ -253,13 +293,15 @@ class EvidenceWriter:
                 cause="unflushed",
                 dropped=len(pending.data),
             )
-        self._cut_part()
+        self._cut_part(force=True)
         await self._deliver_parts(result)
         if self._pending_parts:
             raise SealDeliveryError(
                 f"{len(self._pending_parts)} manifest part(s) undeliverable; record left unsealed"
             )
-        if unflushed > 0 and status == "complete":
+        if (unflushed > 0 or self._cap_breached) and status == "complete":
+            # a cap breach left evidence-cap gaps: the seal must not claim
+            # everything appended was delivered
             status = "incomplete"
         seal = Seal(
             writer=self._writer,
@@ -334,6 +376,8 @@ class EvidenceWriter:
         state.next_seq += 1
         state.chunks += 1
         state.size += len(pending.data)
+        if not self._records:
+            self._records_since = time.monotonic()
         self._records.append(record)
         return record
 
@@ -353,6 +397,8 @@ class EvidenceWriter:
         state.chain = record.chain
         state.next_seq += 1
         state.gaps += 1
+        if not self._records:
+            self._records_since = time.monotonic()
         self._records.append(record)
 
     def _enforce_cap(self) -> None:
@@ -369,14 +415,29 @@ class EvidenceWriter:
                 len(oldest.data),
             )
 
-    def _cut_part(self) -> None:
+    def _cut_part(self, *, force: bool) -> None:
+        """Batch committed records into a manifest part when due.
+
+        Chunks are already delivered by the time their records sit here; batching delays only the manifest commitment (`DEFAULT_PART_INTERVAL_S`). `force` (the seal path) always cuts.
+        """
         if not self._records:
             return
+        if not force:
+            due_by_count = len(self._records) >= self._part_max_records
+            age = (
+                0.0
+                if self._records_since is None
+                else time.monotonic() - self._records_since
+            )
+            due_by_age = self._part_interval_s == 0 or age >= self._part_interval_s
+            if not due_by_count and not due_by_age:
+                return
         part = ManifestPart(
             writer=self._writer, part=self._next_part, records=self._records
         )
         self._next_part += 1
         self._records = []
+        self._records_since = None
         self._pending_parts.append(part)
 
     async def _deliver_chunks(self, result: FlushResult) -> None:

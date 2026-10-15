@@ -80,7 +80,9 @@ def test_writer_never_reads(tmp_path: Path) -> None:
     async def scenario() -> None:
         spy = PutOnlySpy(LocalDirSink(tmp_path))
         clock = FakeClock()
-        writer = EvidenceWriter(spy, writer="host", clock=clock, retry_wait_s=0)
+        writer = EvidenceWriter(
+            spy, part_interval_s=0, writer="host", clock=clock, retry_wait_s=0
+        )
         await writer.append("console/web", b"boot output", span=_span(clock))
         await writer.gap(
             "pcap/dmz", span=_span(clock), cause="write-failed", dropped=10
@@ -99,6 +101,7 @@ def test_round_trip_verifies(tmp_path: Path) -> None:
         clock = FakeClock()
         writer = EvidenceWriter(
             LocalDirSink(tmp_path),
+            part_interval_s=0,
             writer="host",
             lease_id="lease-1",
             sample_id="s1",
@@ -132,7 +135,12 @@ def test_backend_errors_buffer_and_recover(tmp_path: Path) -> None:
         clock = FakeClock()
         dead = DeadSink(LocalDirSink(tmp_path))
         writer = EvidenceWriter(
-            dead, writer="host", clock=clock, put_attempts=2, retry_wait_s=0
+            dead,
+            part_interval_s=0,
+            writer="host",
+            clock=clock,
+            put_attempts=2,
+            retry_wait_s=0,
         )
         # append never raises while the sink is down
         await writer.append("stages", b"report-1", span=_span(clock))
@@ -156,7 +164,12 @@ def test_transient_errors_retry_within_flush(tmp_path: Path) -> None:
         clock = FakeClock()
         flaky = FlakySink(LocalDirSink(tmp_path), failures=2)
         writer = EvidenceWriter(
-            flaky, writer="host", clock=clock, put_attempts=3, retry_wait_s=0
+            flaky,
+            part_interval_s=0,
+            writer="host",
+            clock=clock,
+            put_attempts=3,
+            retry_wait_s=0,
         )
         await writer.append("verify", b"green", span=_span(clock))
         result = await writer.flush()
@@ -171,6 +184,7 @@ def test_buffer_cap_drops_oldest_with_gap(tmp_path: Path) -> None:
         dead = DeadSink(LocalDirSink(tmp_path))
         writer = EvidenceWriter(
             dead,
+            part_interval_s=0,
             writer="host",
             clock=clock,
             buffer_cap_bytes=10,
@@ -200,6 +214,7 @@ def test_oversized_chunk_gapped_immediately(tmp_path: Path) -> None:
         clock = FakeClock()
         writer = EvidenceWriter(
             LocalDirSink(tmp_path),
+            part_interval_s=0,
             writer="host",
             clock=clock,
             buffer_cap_bytes=4,
@@ -222,7 +237,11 @@ def test_seal_statuses_round_trip(tmp_path: Path) -> None:
         cases: list[tuple[SealStatus, str]] = [("complete", "a"), ("reaped", "b")]
         for status, sub in cases:
             writer = EvidenceWriter(
-                LocalDirSink(tmp_path / sub), writer="host", clock=clock, retry_wait_s=0
+                LocalDirSink(tmp_path / sub),
+                part_interval_s=0,
+                writer="host",
+                clock=clock,
+                retry_wait_s=0,
             )
             await writer.append("stages", b"x", span=_span(clock))
             seal, _ = await writer.seal(status)
@@ -250,6 +269,7 @@ def test_seal_degrades_to_incomplete_on_unflushed(tmp_path: Path) -> None:
 
         writer = EvidenceWriter(
             ChunkDeadSink(LocalDirSink(tmp_path)),
+            part_interval_s=0,
             writer="host",
             clock=clock,
             put_attempts=1,
@@ -272,7 +292,12 @@ def test_seal_raises_when_parts_undeliverable(tmp_path: Path) -> None:
         clock = FakeClock()
         dead = DeadSink(LocalDirSink(tmp_path))
         writer = EvidenceWriter(
-            dead, writer="host", clock=clock, put_attempts=1, retry_wait_s=0
+            dead,
+            part_interval_s=0,
+            writer="host",
+            clock=clock,
+            put_attempts=1,
+            retry_wait_s=0,
         )
         await writer.append("stages", b"x", span=_span(clock))
         with pytest.raises(SealDeliveryError):
@@ -290,7 +315,9 @@ def test_write_once_conflict_becomes_gap(tmp_path: Path) -> None:
         sink = LocalDirSink(tmp_path)
         # a foreign object already sits at the chunk key this stream will use
         await sink.put("chunks/host/stages/000000.bin", b"squatter")
-        writer = EvidenceWriter(sink, writer="host", clock=clock, retry_wait_s=0)
+        writer = EvidenceWriter(
+            sink, part_interval_s=0, writer="host", clock=clock, retry_wait_s=0
+        )
         await writer.append("stages", b"ours", span=_span(clock))
         seal, _ = await writer.seal()
         assert seal.streams["stages"].gaps == 1
@@ -307,7 +334,11 @@ def test_sealed_writer_refuses_further_use(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock = FakeClock()
         writer = EvidenceWriter(
-            LocalDirSink(tmp_path), writer="host", clock=clock, retry_wait_s=0
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="host",
+            clock=clock,
+            retry_wait_s=0,
         )
         await writer.seal()
         with pytest.raises(RuntimeError):
@@ -320,8 +351,12 @@ def test_interleaved_writers_stay_isolated(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock = FakeClock()
         sink = LocalDirSink(tmp_path)
-        host = EvidenceWriter(sink, writer="host", clock=clock, retry_wait_s=0)
-        driver = EvidenceWriter(sink, writer="driver", clock=clock, retry_wait_s=0)
+        host = EvidenceWriter(
+            sink, part_interval_s=0, writer="host", clock=clock, retry_wait_s=0
+        )
+        driver = EvidenceWriter(
+            sink, part_interval_s=0, writer="driver", clock=clock, retry_wait_s=0
+        )
         # interleaved appends and flushes at one location, disjoint streams
         await host.append("pcap/dmz", b"frame", span=_span(clock))
         await driver.append("plants", b"record", span=_span(clock))
@@ -344,8 +379,12 @@ def test_invalid_names_raise_at_the_boundary(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock = FakeClock()
         with pytest.raises(ValueError):
-            EvidenceWriter(LocalDirSink(tmp_path), writer="Host!", clock=clock)
-        writer = EvidenceWriter(LocalDirSink(tmp_path), writer="host", clock=clock)
+            EvidenceWriter(
+                LocalDirSink(tmp_path), part_interval_s=0, writer="Host!", clock=clock
+            )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path), part_interval_s=0, writer="host", clock=clock
+        )
         with pytest.raises(ValueError):
             await writer.append("Console", b"x", span=_span(clock))
         with pytest.raises(ValueError):
@@ -379,6 +418,7 @@ def test_ambiguous_file_exists_after_transient_assumed_delivered(
         clock = FakeClock()
         writer = EvidenceWriter(
             LandsButFails(LocalDirSink(tmp_path)),
+            part_interval_s=0,
             writer="host",
             clock=clock,
             retry_wait_s=0,
@@ -407,7 +447,11 @@ def test_concurrent_append_and_flush_stay_consistent(tmp_path: Path) -> None:
     async def scenario() -> None:
         clock = FakeClock()
         writer = EvidenceWriter(
-            SlowSink(LocalDirSink(tmp_path)), writer="host", clock=clock, retry_wait_s=0
+            SlowSink(LocalDirSink(tmp_path)),
+            part_interval_s=0,
+            writer="host",
+            clock=clock,
+            retry_wait_s=0,
         )
 
         async def producer() -> None:
@@ -430,5 +474,83 @@ def test_concurrent_append_and_flush_stay_consistent(tmp_path: Path) -> None:
         assert seal.streams["pcap/dmz"].records == 24  # 20 chunks + 4 gaps
         report = await verify_location(LocalDirStore(tmp_path))
         assert report.ok and not report.unreferenced
+
+    asyncio.run(scenario())
+
+
+def test_part_batching_delays_manifest_commitment_not_chunks(tmp_path: Path) -> None:
+    """Chunk-2 verification finding 3: chunks deliver on every flush, but manifest parts batch on the interval; the seal always cuts the remainder."""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=3600,
+            writer="driver",
+            clock=clock,
+            retry_wait_s=0,
+        )
+        await writer.append("telemetry-meta/app", b"poll-1", span=_span(clock))
+        result = await writer.flush()
+        assert result.delivered_chunks == 1, "data durability is never delayed"
+        assert result.delivered_parts == 0, "the manifest commitment batches"
+        await writer.append("telemetry-meta/app", b"poll-2", span=_span(clock))
+        await writer.flush()
+        store = LocalDirStore(tmp_path)
+        assert await store.list("manifests") == [], "no part cut before the interval"
+        seal, _ = await writer.seal()
+        assert seal.parts == 1 and seal.streams["telemetry-meta/app"].chunks == 2
+        report = await verify_location(store)
+        assert report.ok and not report.unreferenced
+
+    asyncio.run(scenario())
+
+
+def test_part_max_records_forces_a_cut_before_the_interval(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=3600,
+            part_max_records=3,
+            writer="driver",
+            clock=clock,
+            retry_wait_s=0,
+        )
+        for index in range(3):
+            await writer.append("s", f"c{index}".encode(), span=_span(clock))
+        result = await writer.flush()
+        assert result.delivered_parts == 1, "the record bound forces the cut"
+        await writer.seal()
+        report = await verify_location(LocalDirStore(tmp_path))
+        assert report.ok
+
+    asyncio.run(scenario())
+
+
+def test_evidence_cap_gaps_and_flags_the_seal(tmp_path: Path) -> None:
+    """`INSPECT_RANGES_EVIDENCE_MAX_MB` semantics: breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never silence and never a raise."""
+
+    async def scenario() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            max_total_bytes=10,
+            writer="host",
+            clock=clock,
+            retry_wait_s=0,
+        )
+        await writer.append("pcap/dmz", b"12345678", span=_span(clock))  # fits
+        await writer.append("pcap/dmz", b"12345678", span=_span(clock))  # breaches
+        await writer.flush()
+        seal, _ = await writer.seal()
+        assert seal.status == "incomplete"
+        summary = seal.streams["pcap/dmz"]
+        assert summary.chunks == 1 and summary.gaps == 1
+        report = await verify_location(LocalDirStore(tmp_path))
+        assert report.ok
+        gap = report.writers["host"].gaps[0]
+        assert gap.cause == "evidence-cap" and gap.dropped == 8
 
     asyncio.run(scenario())

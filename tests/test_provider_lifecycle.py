@@ -38,7 +38,13 @@ from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as 
 from inspect_ranges._provider.state import ProviderRuntime, provider_runtime
 from inspect_ranges._runtime.down import DownResult
 from inspect_ranges._runtime.ownership import owner_record, read_owner, write_owner
-from inspect_ranges._runtime.up import GuestState, UpError, UpOptions, UpResult
+from inspect_ranges._runtime.up import (
+    GuestState,
+    OnStage,
+    UpError,
+    UpOptions,
+    UpResult,
+)
 from inspect_ranges.types import (
     Attacker,
     Host,
@@ -105,12 +111,18 @@ class FakeSeams:
         self.plans[str(out)] = plan
         return plan
 
-    def up(self, bundle: Path, options: UpOptions) -> UpResult:
+    def up(
+        self, bundle: Path, options: UpOptions, on_stage: OnStage | None = None
+    ) -> UpResult:
         assert options.project is not None
         self.up_calls.append(options)
         self.registered_at_up.append(options.project in self.runtime.registry)
         if self.up_errors:
             raise self.up_errors.pop(0)
+        if on_stage is not None:
+            # mirror the real up: stage events reach the observer seam
+            on_stage("guest-boot", "ok", {})
+            on_stage("readiness", "ok", {})
         plan = self.plans[str(bundle)]
         # mimic the real up: ownership registers before resources
         write_owner(
