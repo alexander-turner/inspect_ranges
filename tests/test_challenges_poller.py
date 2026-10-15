@@ -207,3 +207,31 @@ class TestTimings:
         table = render_timing_table(snapshot)
         assert "goal:g" in table and "corroborate" in table
         assert store.get(TIMINGS_STORE_KEY) == snapshot
+
+
+class TestCandidates:
+    def test_wrong_then_right_in_one_tick_latches_the_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """The tick tries every distinct value oldest-first (same rule as the scorer)."""
+
+        async def scenario() -> None:
+            poller, store, _, value = await planted_poller(tmp_path)
+            submit(store, "f", "typo", wall=time.time() - 1)
+            submit(store, "f", value.decode())
+            poller._tick()  # pyright: ignore[reportPrivateUsage]
+            assert latched_records(store)["f"].achieved
+
+        asyncio.run(scenario())
+
+    def test_right_then_wrong_in_one_tick_latches_the_pass(
+        self, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            poller, store, _, value = await planted_poller(tmp_path)
+            submit(store, "f", value.decode(), wall=time.time() - 1)
+            submit(store, "f", "typo")
+            poller._tick()  # pyright: ignore[reportPrivateUsage]
+            assert latched_records(store)["f"].achieved
+
+        asyncio.run(scenario())
