@@ -44,6 +44,8 @@ from .reader import (
     StreamCoverage,
     VerifyReport,
     WriterReport,
+    manifest_records,
+    stream_chunks,
     verify_location,
 )
 from .sink import (
@@ -107,8 +109,10 @@ __all__ = [
     "derive_evidence_location",
     "evidence_location_for",
     "fallback_evidence_location",
+    "manifest_records",
     "part_key",
     "seal_digest",
     "seal_key",
+    "stream_chunks",
     "verify_location",
 ]
