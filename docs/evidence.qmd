@@ -42,7 +42,7 @@ The format's own guarantee has an exact scope. Everything **at or below the seal
 
 Two bounded windows are part of the design and visible in the record rather than silent:
 
-- **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with its cause (`buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, `applier-shutdown`). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
+- **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with a named cause (for example `buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, or `applier-shutdown`; the verifier inventories every gap in the record). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
 - **Manifest batching has a crash window.** Chunks deliver on every flush, but manifest parts are cut on a bounded cadence (15 seconds or 256 records, and always at seal). A crash can leave up to one interval of records whose chunks survive as listed, unreferenced residue rather than chain-committed records; the record never claims the missing window.
 
 ## In-guest telemetry export

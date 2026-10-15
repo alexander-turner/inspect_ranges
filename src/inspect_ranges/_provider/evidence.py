@@ -276,9 +276,10 @@ class EvidenceSession:
         """
         binding = self.binding()
         logger.info(
-            "evidence binding: location=%s seals=%s",
+            "evidence binding: location=%s seals=%s chain_heads=%s",
             binding["location"],
             binding["seals"],
+            binding["chain_heads"],
         )
         try:
             from inspect_ai.util import store

@@ -29,7 +29,7 @@ StreamName = Annotated[str, StringConstraints(pattern=STREAM_NAME_PATTERN)]
 WriterName = Annotated[str, StringConstraints(pattern=WRITER_NAME_PATTERN)]
 
 SealStatus = Literal["complete", "incomplete", "reaped"]
-"""`complete`: everything appended was delivered before sealing. `incomplete`: data was lost and recorded as in-chain gaps: an unflushed remainder at seal time, or a per-sample volume-cap breach (`evidence-cap` gaps) during the run. `reaped`: sealed by the reaper after the driver died; the record is honest up to its last delivered part."""
+"""`complete`: sealed through the normal finalize path with no unflushed remainder; data lost to in-chain gaps (`buffer-cap` drops, `write-once-conflict`) still seals `complete` because the loss is recorded in the chain and inventoried at verify. `incomplete`: data was lost and recorded as in-chain gaps: an unflushed remainder at seal time, or a per-sample volume-cap breach (`evidence-cap` gaps) during the run. `reaped`: sealed by the reaper after the driver died; the record is honest up to its last delivered part."""
 
 
 class EvidenceModel(BaseModel):
