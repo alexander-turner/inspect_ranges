@@ -59,12 +59,18 @@ def test_capture_service_and_floor(cache: Path, tmp_path: Path) -> None:
     assert ".:/render:ro" in capture["volumes"]
     assert "capture" in compose["volumes"]
 
-    # the range container's own floor is byte-identical to the no-evidence render
+    # the whole rendered compose minus the inserted sidecar block is
+    # byte-identical to the capture-off render (adopted from the chunk-1
+    # verification probe): nothing but the sidecar changes
+    from inspect_ranges._compiler.render import _COMPOSE_CAPTURE_SERVICE
+
     plain = tmp_path / "plain"
     render_bundle(two_segment_spec(), plain, options(cache, evidence=False))
-    assert compose["services"]["range"] == compose_of(plain)["services"]["range"], (
-        "the range service must be unchanged by evidence capture"
+    with_capture = (out / "compose.yaml").read_text()
+    stripped = with_capture.replace("\n" + _COMPOSE_CAPTURE_SERVICE, "", 1).replace(
+        "volumes:\n  scratch:\n  capture:\n", "volumes:\n  scratch:\n"
     )
+    assert stripped == (plain / "compose.yaml").read_text()
     # the range service never mounts the capture volume
     assert all("capture" not in v for v in compose["services"]["range"]["volumes"])
 
@@ -101,6 +107,16 @@ def test_capture_with_uplink_template(cache: Path, tmp_path: Path) -> None:
     assert "capture" in compose["volumes"] and "scratch" in compose["volumes"]
     # the sidecar shares the range netns; it must not join the uplink network
     assert "networks" not in compose["services"]["capture"]
+    # byte-identity holds for the uplink template too
+    from inspect_ranges._compiler.render import _COMPOSE_CAPTURE_SERVICE
+
+    plain = tmp_path / "plain"
+    render_bundle(nat_spec(), plain, options(cache, evidence=False))
+    with_capture = (out / "compose.yaml").read_text()
+    stripped = with_capture.replace("\n" + _COMPOSE_CAPTURE_SERVICE, "", 1).replace(
+        "volumes:\n  scratch:\n  capture:\n", "volumes:\n  scratch:\n"
+    )
+    assert stripped == (plain / "compose.yaml").read_text()
 
 
 def test_supervisor_source_compiles() -> None:
