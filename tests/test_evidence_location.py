@@ -4,6 +4,7 @@ The pin test exists so an `inspect_ai` upgrade that moves `sample_active` or res
 """
 
 import inspect
+import os
 
 import pytest
 from inspect_ranges._evidence.location import (
@@ -21,23 +22,24 @@ from inspect_ranges._evidence.location import (
     [
         (
             "logs/2026-10-14T12-00-00_task_ab12.eval",
-            "logs/2026-10-14T12-00-00_task_ab12.evidence/s1_1_1",
+            "{cwd}/logs/2026-10-14T12-00-00_task_ab12.evidence/s1_1_1",
         ),
         (
             "s3://bucket/logs/2026-10-14T12-00-00_task_ab12.eval",
             "s3://bucket/logs/2026-10-14T12-00-00_task_ab12.evidence/s1_1_1",
         ),
         # only the FINAL suffix is stripped; dots in timestamps survive
-        ("logs/run.v2.json", "logs/run.v2.evidence/s1_1_1"),
+        ("logs/run.v2.json", "{cwd}/logs/run.v2.evidence/s1_1_1"),
         # no directory component
-        ("barelog.eval", "barelog.evidence/s1_1_1"),
+        ("barelog.eval", "{cwd}/barelog.evidence/s1_1_1"),
     ],
 )
 def test_derive_beside_log(log_location: str, expected: str) -> None:
-    assert (
-        derive_evidence_location(log_location, sample_id="s1", epoch=1, attempt=1)
-        == expected
-    )
+    # filesystem locations absolutize at derivation (a relative path in the
+    # binding would only resolve from the eval's own working directory)
+    assert derive_evidence_location(
+        log_location, sample_id="s1", epoch=1, attempt=1
+    ) == expected.format(cwd=os.getcwd())
 
 
 def test_attempts_and_epochs_disjoint() -> None:
@@ -59,7 +61,7 @@ def test_sample_id_sanitized_without_collisions() -> None:
     location = derive_evidence_location(
         "logs/x.eval", sample_id=raw, epoch=1, attempt=1
     )
-    assert location == f"logs/x.evidence/web---shell-.py-{tag}_1_1"
+    assert location == f"{os.getcwd()}/logs/x.evidence/web---shell-.py-{tag}_1_1"
     # ids that only differ in disallowed characters stay distinct
     other = derive_evidence_location(
         "logs/x.eval", sample_id="web?/ shell/.py", epoch=1, attempt=1
@@ -67,7 +69,7 @@ def test_sample_id_sanitized_without_collisions() -> None:
     assert other != location
     # clean ids stay clean (no tag appended)
     clean = derive_evidence_location("logs/x.eval", sample_id="s1", epoch=1, attempt=1)
-    assert clean == "logs/x.evidence/s1_1_1"
+    assert clean == f"{os.getcwd()}/logs/x.evidence/s1_1_1"
 
 
 def test_override_reroots_layout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +85,7 @@ def test_fallback_layout() -> None:
         fallback_evidence_location(
             "logs/", "run-abc", sample_id="s1", epoch=2, attempt=1
         )
-        == "logs/run-abc.evidence/s1_2_1"
+        == f"{os.getcwd()}/logs/run-abc.evidence/s1_2_1"
     )
 
 
@@ -91,7 +93,7 @@ def test_identity_round_trip() -> None:
     identity = EvidenceIdentity(
         log_location="logs/x.eval", sample_id="s1", epoch=3, attempt=2
     )
-    assert evidence_location_for(identity) == "logs/x.evidence/s1_3_2"
+    assert evidence_location_for(identity) == f"{os.getcwd()}/logs/x.evidence/s1_3_2"
 
 
 def test_active_identity_outside_sample_is_none() -> None:
@@ -109,3 +111,23 @@ def test_inspect_ai_private_api_pin() -> None:
             f"inspect_ai private API moved: ActiveSample.__init__ lost {name!r}; "
             "update inspect_ranges._evidence.location.active_evidence_identity"
         )
+
+
+def test_relative_log_location_is_absolutized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inspect may report a cwd-relative log location; the binding's location must resolve from anywhere, so filesystem results anchor to the deriving process's cwd (s3:// passes through untouched)."""
+    import os
+
+    from inspect_ranges._evidence.location import derive_evidence_location
+
+    monkeypatch.delenv("INSPECT_RANGES_EVIDENCE_SINK", raising=False)
+    relative = derive_evidence_location(
+        "logs/run.eval", sample_id="s", epoch=1, attempt=1
+    )
+    assert relative.startswith("/")
+    assert relative == f"{os.getcwd()}/logs/run.evidence/s_1_1"
+    s3 = derive_evidence_location(
+        "s3://bucket/logs/run.eval", sample_id="s", epoch=1, attempt=1
+    )
+    assert s3 == "s3://bucket/logs/run.evidence/s_1_1"
