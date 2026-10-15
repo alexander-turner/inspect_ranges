@@ -24,7 +24,7 @@ from .schema import (
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
-__all__ = ["plant_goals", "plant_secret_file"]
+__all__ = ["plant_goals", "plant_secret_file", "run_setup"]
 
 
 async def plant_secret_file(
@@ -130,6 +130,41 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
         await oracle.store.discard(key, reason="setup unwound")
 
 
+async def run_setup(oracle: RangeOracle, challenge: Challenge) -> None:
+    """Run the challenge's setups against `oracle`: observer gate first, then plants in goal order.
+
+    Raises:
+        RuntimeError: A required observer is unavailable, or a plant failed (plants already written are unwound first). Callers treat this as infrastructure refusal, never agent failure.
+    """
+    missing = required_observers(challenge) - oracle.available_observers()
+    if missing:
+        raise RuntimeError(
+            f"challenge {challenge.id!r} requires observers this deployment "
+            f"cannot supply: {sorted(missing)}"
+        )
+    planted: list[str] = []
+    for goal in challenge.goals:
+        plant = _SETUPS.get(goal.type)
+        if plant is None:
+            continue
+        start = time.monotonic()
+        try:
+            key = await plant(oracle, goal)
+        except Exception as error:
+            await _unwind(oracle, planted)
+            raise RuntimeError(
+                f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
+            ) from error
+        if key is not None:
+            planted.append(key)
+        logger.info(
+            "planted goal=%s type=%s elapsed=%.3fs",
+            goal.id,
+            goal.type,
+            time.monotonic() - start,
+        )
+
+
 @solver
 def plant_goals() -> Solver:
     """Plant every goal's per-sample material before the agent acts.
@@ -144,35 +179,7 @@ def plant_goals() -> Solver:
                 "sample carries no challenge metadata; build the dataset with "
                 "challenge_dataset()"
             )
-        challenge = Challenge.model_validate(raw)
-        oracle = range_oracle()
-        missing = required_observers(challenge) - oracle.available_observers()
-        if missing:
-            raise RuntimeError(
-                f"challenge {challenge.id!r} requires observers this deployment "
-                f"cannot supply: {sorted(missing)}"
-            )
-        planted: list[str] = []
-        for goal in challenge.goals:
-            plant = _SETUPS.get(goal.type)
-            if plant is None:
-                continue
-            start = time.monotonic()
-            try:
-                key = await plant(oracle, goal)
-            except Exception as error:
-                await _unwind(oracle, planted)
-                raise RuntimeError(
-                    f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
-                ) from error
-            if key is not None:
-                planted.append(key)
-            logger.info(
-                "planted goal=%s type=%s elapsed=%.3fs",
-                goal.id,
-                goal.type,
-                time.monotonic() - start,
-            )
+        await run_setup(range_oracle(), Challenge.model_validate(raw))
         return state
 
     return solve

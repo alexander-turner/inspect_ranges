@@ -1,0 +1,365 @@
+"""Slice-2 battery (CI half): the oracle's raw-channel discipline, the plant store's value/digest split, and setup/unwind semantics.
+
+The residue rule is pinned mechanically: a recording endpoint captures every request the oracle sends, and tests assert plant values appear ONLY as `write_file` bulk — never in argv, env, stdin, logs, or the emitted plant records.
+"""
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+from inspect_ranges._challenges.oracle import OracleSetupError, RangeOracle
+from inspect_ranges._challenges.plants import PlantStore
+from inspect_ranges._challenges.schema import Challenge
+from inspect_ranges._challenges.setup import plant_secret_file, run_setup
+from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
+    LoopbackTransport,
+    MessageChannel,
+    TransportFailure,
+    _StoredReply,
+)
+from inspect_ranges._channel.protocol import ExecRequest, Message, WriteFileRequest
+from inspect_ranges._compiler.plan import ResolvedPlan, Totals
+from inspect_ranges._provider.provider import (
+    LibvirtRangeSandboxEnvironment,
+    sample_handle_for,
+)
+from inspect_ranges._provider.state import SampleHandle
+
+from tests.local_endpoint import LocalEndpoint, _result_reply
+
+VALUE_MARKER = b"never-in-argv"
+"""Plant values in these tests carry this marker so residue scans are unambiguous."""
+
+
+class RecordingEndpoint(LocalEndpoint):
+    """A `LocalEndpoint` that records every request and its bulk for residue assertions."""
+
+    def __init__(self, name: str, root: Path) -> None:
+        super().__init__(name, root)
+        self.requests: list[tuple[Message, bytes | None]] = []
+
+    async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+        self.requests.append((message, bulk))
+        return await super().handle(message, bulk)
+
+    async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
+        # ownership emulation, extending LocalEndpoint's root-chown shape: the
+        # CI host cannot be root, so root `rm` (the oracle's rollback/unwind
+        # verb) runs as the current user against the translated path
+        if request.user == "root" and request.cmd and request.cmd[0] == "rm":
+            return await super()._run_command(
+                request.model_copy(update={"user": None}), stdin
+            )
+        return await super()._run_command(request, stdin)
+
+
+class FailingChownEndpoint(RecordingEndpoint):
+    """Chown as root fails here, driving the owner-flow rollback path."""
+
+    async def _run_command(self, request: ExecRequest, stdin: bytes) -> _StoredReply:
+        if request.cmd and request.cmd[0] == "chown":
+            reply = _result_reply(
+                request, rc=1, stdout=b"", stderr=b"chown: invalid user\n"
+            )
+            self._store(request.id, reply)
+            return reply
+        return await super()._run_command(request, stdin)
+
+
+class FakePlantSession:
+    """Captures `record_plant` payloads; duck-typed for `PlantStore` and `available_observers`."""
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.records: list[dict[str, object]] = []
+        self.enabled = enabled
+
+    async def record_plant(self, record: dict[str, object]) -> None:
+        self.records.append(record)
+
+
+def make_oracle(
+    root: Path,
+    *,
+    endpoint: RecordingEndpoint | None = None,
+    session: FakePlantSession | None = None,
+    capture: bool = False,
+) -> tuple[RangeOracle, RecordingEndpoint, SampleHandle]:
+    """An oracle over a recording local endpoint named `box`."""
+    endpoint = endpoint or RecordingEndpoint("box", root)
+    transport = LoopbackTransport(guests=())
+    transport.guests["box"] = endpoint
+    plan = cast(
+        ResolvedPlan,
+        SimpleNamespace(requirements=SimpleNamespace(evidence_capture=capture)),
+    )
+    handle = SampleHandle(
+        project="ir-challenges-test",
+        task_name="challenges",
+        staging=root / "staging",
+        totals=Totals(guests=1, cpus=1, memory_mb=1024),
+        cid_base=10_000,
+        guest_cids={"box": 10_000},
+        channel=MessageChannel(transport, label="challenges-test"),
+        evidence=cast(Any, session),
+        plan=plan,
+    )
+    return RangeOracle(handle), endpoint, handle
+
+
+def recorded_execs(endpoint: RecordingEndpoint) -> list[ExecRequest]:
+    return [m for m, _ in endpoint.requests if isinstance(m, ExecRequest)]
+
+
+def assert_no_residue(endpoint: RecordingEndpoint, value: bytes) -> None:
+    """The value appears only as `write_file` bulk: never argv, env, stdin, or any other request field."""
+    for message, bulk in endpoint.requests:
+        serialized = message.model_dump_json().encode()
+        assert value not in serialized, f"plant value in request fields: {message.kind}"
+        if bulk is not None and not isinstance(message, WriteFileRequest):
+            assert value not in bulk, f"plant value in {message.kind} bulk"
+
+
+class TestOracleWriteFile:
+    def test_owner_flow_mode_then_chown_path_only(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path)
+            value = VALUE_MARKER + b"-owner"
+            await oracle.write_file("box", "/tmp/plant", value, owner="svc")
+            assert endpoint.file_modes["/tmp/plant"] == 0o600
+            assert endpoint.file_owners["/tmp/plant"] == "svc"
+            execs = recorded_execs(endpoint)
+            assert [req.cmd for req in execs] == [["chown", "svc", "/tmp/plant"]]
+            assert execs[0].user == "root"
+            assert execs[0].env == {}
+            assert not any(req.cmd[0] == "chmod" for req in execs)
+            assert_no_residue(endpoint, value)
+            assert (tmp_path / "tmp" / "plant").read_bytes() == value
+
+        asyncio.run(scenario())
+
+    def test_no_owner_means_no_exec(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path)
+            await oracle.write_file("box", "/tmp/raw", b"content", owner=None)
+            assert recorded_execs(endpoint) == []
+            assert endpoint.file_modes["/tmp/raw"] == 0o600
+
+        asyncio.run(scenario())
+
+    def test_chown_failure_removes_file_and_names_principal(
+        self, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            endpoint = FailingChownEndpoint("box", tmp_path)
+            oracle, _, _ = make_oracle(tmp_path, endpoint=endpoint)
+            value = VALUE_MARKER + b"-rollback"
+            with pytest.raises(OracleSetupError) as excinfo:
+                await oracle.write_file("box", "/tmp/doomed", value, owner="ghost")
+            message = str(excinfo.value)
+            assert "ghost" in message and "/tmp/doomed" in message
+            assert VALUE_MARKER.decode() not in message
+            assert not (tmp_path / "tmp" / "doomed").exists()
+            assert_no_residue(endpoint, value)
+
+        asyncio.run(scenario())
+
+
+class TestOracleSurface:
+    def test_exec_and_read_file_roundtrip(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            outcome = await oracle.exec("box", ["echo", "hello"])
+            assert outcome.rc == 0 and outcome.stdout.strip() == b"hello"
+            await oracle.write_file("box", "/tmp/readback", b"data", owner=None)
+            assert await oracle.read_file("box", "/tmp/readback") == b"data"
+
+        asyncio.run(scenario())
+
+    def test_nonce_fresh_per_call(self, tmp_path: Path) -> None:
+        oracle, _, _ = make_oracle(tmp_path)
+        nonces = {oracle.nonce() for _ in range(100)}
+        assert len(nonces) == 100
+        assert all(len(nonce) == 32 for nonce in nonces)
+
+    def test_resolved_requires_plan(self, tmp_path: Path) -> None:
+        oracle, _, handle = make_oracle(tmp_path)
+        handle.plan = None
+        with pytest.raises(OracleSetupError):
+            oracle.resolved()
+
+    def test_sample_handle_for_rejects_foreign_env(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError):
+            sample_handle_for(cast(Any, object()))
+        _, _, handle = make_oracle(tmp_path)
+        env = LibvirtRangeSandboxEnvironment("box", handle)
+        assert sample_handle_for(env) is handle
+
+    def test_available_observers(self, tmp_path: Path) -> None:
+        oracle, _, _ = make_oracle(tmp_path)
+        assert oracle.available_observers() == frozenset()
+        oracle, _, _ = make_oracle(tmp_path, session=FakePlantSession())
+        assert oracle.available_observers() == frozenset({"evidence-sink"})
+        oracle, _, _ = make_oracle(tmp_path, session=FakePlantSession(), capture=True)
+        assert oracle.available_observers() == frozenset(
+            {"evidence-sink", "segment-pcap", "console"}
+        )
+
+
+class TestPlantStore:
+    def test_record_emits_digest_never_value(self) -> None:
+        async def scenario() -> None:
+            session = FakePlantSession()
+            store = PlantStore(cast(Any, session))
+            value = VALUE_MARKER + b"-digest"
+            await store.record(
+                "flag:f1", value, goal_id="f1", guest="box", path="/tmp/f"
+            )
+            assert store.get("flag:f1") == value
+            [record] = session.records
+            assert record["event"] == "planted"
+            assert record["sha256"] == store.digest("flag:f1")
+            assert record["size"] == len(value)
+            serialized = json.dumps(record).encode()
+            assert value not in serialized and b'"value"' not in serialized
+
+        asyncio.run(scenario())
+
+    def test_duplicate_key_refused(self) -> None:
+        async def scenario() -> None:
+            store = PlantStore(None)
+            await store.record("k", b"v", goal_id="g", guest="box", path="/p")
+            with pytest.raises(ValueError):
+                await store.record("k", b"w", goal_id="g", guest="box", path="/p")
+
+        asyncio.run(scenario())
+
+    def test_discard_emits_unwound(self) -> None:
+        async def scenario() -> None:
+            session = FakePlantSession()
+            store = PlantStore(cast(Any, session))
+            await store.record("k", b"v", goal_id="g", guest="box", path="/p")
+            await store.discard("k", reason="setup unwound")
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
+            assert session.records[1]["reason"] == "setup unwound"
+            with pytest.raises(KeyError):
+                store.get("k")
+
+        asyncio.run(scenario())
+
+    def test_plant_repr_hides_value(self) -> None:
+        async def scenario() -> None:
+            store = PlantStore(None)
+            await store.record("k", VALUE_MARKER, goal_id="g", guest="box", path="/p")
+            assert VALUE_MARKER.decode() not in repr(store.plant("k"))
+
+        asyncio.run(scenario())
+
+
+def challenge_of(goals: list[dict[str, object]]) -> Challenge:
+    return Challenge.model_validate({"id": "c", "prompt": "do things", "goals": goals})
+
+
+class TestRunSetup:
+    def test_plants_in_order_with_t1_records(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        async def scenario() -> None:
+            session = FakePlantSession()
+            oracle, endpoint, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "user",
+                        "type": "flag",
+                        "host": "box",
+                        "path": "/tmp/user-flag",
+                    },
+                    {
+                        "id": "root",
+                        "type": "control",
+                        "host": "box",
+                        "principal": "svc",
+                        "secret_path": "/tmp/root-secret",
+                    },
+                ]
+            )
+            with caplog.at_level(logging.INFO, logger="inspect_ranges.challenges"):
+                await run_setup(oracle, challenge)
+            assert [r["key"] for r in session.records] == ["flag:user", "control:root"]
+            flag_value = oracle.store.get("flag:user")
+            assert (tmp_path / "tmp" / "user-flag").read_bytes() == flag_value
+            assert endpoint.file_owners["/tmp/user-flag"] == "root"
+            assert endpoint.file_owners["/tmp/root-secret"] == "svc"
+            for key in ("flag:user", "control:root"):
+                value = oracle.store.get(key)
+                assert_no_residue(endpoint, value)
+                assert not any(
+                    value.decode() in record.getMessage() for record in caplog.records
+                )
+
+        asyncio.run(scenario())
+
+    def test_failure_unwinds_prior_plants(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {"id": "ok", "type": "flag", "host": "box", "path": "/tmp/planted"},
+                    {
+                        "id": "bad",
+                        "type": "flag",
+                        "host": "missing-guest",
+                        "path": "/tmp/never",
+                    },
+                ]
+            )
+            with pytest.raises(RuntimeError, match="setup failed at goal 'bad'"):
+                await run_setup(oracle, challenge)
+            assert not (tmp_path / "tmp" / "planted").exists()
+            # the T1 record precedes guest state: the failing plant records,
+            # then self-discards on write failure, then the earlier plant
+            # unwinds
+            assert [(r["event"], r["key"]) for r in session.records] == [
+                ("planted", "flag:ok"),
+                ("planted", "flag:bad"),
+                ("unwound", "flag:bad"),
+                ("unwound", "flag:ok"),
+            ]
+            assert oracle.store.keys() == []
+
+        asyncio.run(scenario())
+
+    def test_missing_observer_refuses_before_any_plant(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path, session=None)
+            challenge = challenge_of(
+                [{"id": "f", "type": "flag", "host": "box", "path": "/tmp/f"}]
+            )
+            with pytest.raises(RuntimeError, match="evidence-sink"):
+                await run_setup(oracle, challenge)
+            assert endpoint.requests == []
+
+        asyncio.run(scenario())
+
+    def test_write_failure_discards_record(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            with pytest.raises(TransportFailure):
+                await plant_secret_file(
+                    oracle,
+                    key="flag:x",
+                    goal_id="x",
+                    guest="absent",
+                    path="/tmp/x",
+                    owner="root",
+                )
+            assert oracle.store.keys() == []
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
+
+        asyncio.run(scenario())
