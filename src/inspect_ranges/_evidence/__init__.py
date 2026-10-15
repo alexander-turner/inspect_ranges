@@ -46,6 +46,13 @@ from .reader import (
     WriterReport,
     verify_location,
 )
+from .s3 import (
+    S3Sink,
+    S3Store,
+    parse_s3_location,
+    sink_for_location,
+    store_for_location,
+)
 from .sink import (
     DEFAULT_BUFFER_CAP_BYTES,
     EvidenceSink,
@@ -76,6 +83,8 @@ __all__ = [
     "LocalDirStore",
     "LocalTap",
     "ManifestPart",
+    "S3Sink",
+    "S3Store",
     "Seal",
     "SealDeliveryError",
     "SealStatus",
@@ -93,8 +102,11 @@ __all__ = [
     "derive_evidence_location",
     "evidence_location_for",
     "fallback_evidence_location",
+    "parse_s3_location",
     "part_key",
     "seal_digest",
     "seal_key",
+    "sink_for_location",
+    "store_for_location",
     "verify_location",
 ]

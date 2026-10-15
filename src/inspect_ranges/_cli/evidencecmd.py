@@ -1,16 +1,15 @@
 """`inspect-ranges evidence`: offline verification of an evidence location."""
 
 import asyncio
-from pathlib import Path
 
 import click
 
 from .._evidence.reader import (
-    LocalDirStore,
     VerifyReport,
     WriterReport,
     verify_location,
 )
+from .._evidence.s3 import store_for_location
 
 
 def _echo_writer(report: WriterReport) -> None:
@@ -88,12 +87,8 @@ def verify(
 ) -> None:
     """Replay the hash chains at LOCATION and name the first break.
 
-    Exits 0 when every writer replays cleanly, 1 on any break or when no manifests exist. An unsealed writer is reported loudly but is not itself a break unless a binding was supplied for it (the lifecycle seals on finalize and on reap; unsealed-at-rest means neither happened). With `--expect-seal` the writer's result carries the full detection claim; without it, internal consistency only.
+    LOCATION is a local directory or an `s3://bucket/prefix` evidence location (S3 credentials follow standard AWS resolution). Exits 0 when every writer replays cleanly, 1 on any break or when no manifests exist. An unsealed writer is reported loudly but is not itself a break unless a binding was supplied for it (the lifecycle seals on finalize and on reap; unsealed-at-rest means neither happened). With `--expect-seal` the writer's result carries the full detection claim; without it, internal consistency only.
     """
-    if "://" in location:
-        raise click.ClickException(
-            "only local directories are supported in this build (the S3 store arrives with evidence-v1 slice 3)"
-        )
     expected: dict[str, str] = {}
     for item in expect_seal:
         writer_name, separator, digest = item.partition("=")
@@ -102,7 +97,10 @@ def verify(
                 f"--expect-seal takes WRITER=DIGEST, got {item!r}"
             )
         expected[writer_name] = digest
-    store = LocalDirStore(Path(location))
+    try:
+        store = store_for_location(location)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     report = asyncio.run(
         verify_location(
             store, location=location, deep=not shallow, expected_seals=expected or None

@@ -1,0 +1,212 @@
+"""S3 evidence backend: conditional-put write-once mapping, read-side ordering, factories.
+
+Everything here runs offline against `botocore.stub.Stubber`; the live off-instance leg (real bucket, watermark lag, cross-machine verify, deny-overwrite policy) is the slice-3 battery in `design/spikes/evidence-v1-s3/`.
+"""
+
+# boto3/botocore are untyped-by-nature (the _devbox rationale in
+# pyproject.toml, applied per-file)
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+
+import asyncio
+import io
+from pathlib import Path
+from typing import Any
+
+import pytest
+from botocore.exceptions import ClientError
+from botocore.response import StreamingBody
+from botocore.stub import Stubber
+from click.testing import CliRunner
+from inspect_ranges._cli.evidencecmd import evidence
+from inspect_ranges._evidence.reader import LocalDirStore
+from inspect_ranges._evidence.s3 import (
+    S3Sink,
+    S3Store,
+    parse_s3_location,
+    sink_for_location,
+    store_for_location,
+)
+from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+
+
+def _client() -> Any:
+    import boto3
+
+    # fixed fake credentials and region: construction must never consult the
+    # host's AWS environment, and the Stubber intercepts before the network
+    return boto3.client(
+        "s3",
+        region_name="us-east-1",
+        aws_access_key_id="stub",
+        aws_secret_access_key="stub",
+    )
+
+
+@pytest.mark.parametrize(
+    ("location", "bucket", "prefix"),
+    [
+        ("s3://bucket", "bucket", ""),
+        ("s3://bucket/", "bucket", ""),
+        ("s3://bucket/a/b", "bucket", "a/b"),
+        ("s3://bucket/a/b/", "bucket", "a/b"),
+    ],
+)
+def test_parse_s3_location(location: str, bucket: str, prefix: str) -> None:
+    assert parse_s3_location(location) == (bucket, prefix)
+
+
+@pytest.mark.parametrize("location", ["", "bucket/a", "http://bucket/a", "s3://"])
+def test_parse_s3_location_rejects(location: str) -> None:
+    with pytest.raises(ValueError):
+        parse_s3_location(location)
+
+
+def test_factories_dispatch_on_scheme(tmp_path: Path) -> None:
+    assert isinstance(sink_for_location("s3://bucket/p"), S3Sink)
+    assert isinstance(store_for_location("s3://bucket/p"), S3Store)
+    assert isinstance(sink_for_location(str(tmp_path)), LocalDirSink)
+    assert isinstance(store_for_location(str(tmp_path)), LocalDirStore)
+    with pytest.raises(ValueError):
+        sink_for_location("ftp://bucket/p")
+    with pytest.raises(ValueError):
+        store_for_location("ftp://bucket/p")
+
+
+def test_put_is_conditional_and_prefixed() -> None:
+    client = _client()
+    sink = S3Sink("s3://bucket/pre/fix", client=client)
+    stubber = Stubber(client)
+    stubber.add_response(
+        "put_object",
+        {},
+        expected_params={
+            "Bucket": "bucket",
+            "Key": "pre/fix/chunks/host/pcap/dmz/000000.bin",
+            "Body": b"data",
+            "IfNoneMatch": "*",
+        },
+    )
+    with stubber:
+        asyncio.run(sink.put("chunks/host/pcap/dmz/000000.bin", b"data"))
+    stubber.assert_no_pending_responses()
+
+
+def test_precondition_failed_maps_to_file_exists() -> None:
+    client = _client()
+    sink = S3Sink("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "put_object",
+        service_error_code="PreconditionFailed",
+        http_status_code=412,
+    )
+    with stubber:
+        with pytest.raises(FileExistsError):
+            asyncio.run(sink.put("manifests/host/seal.json", b"{}"))
+
+
+def test_conditional_conflict_raises_for_buffered_retry() -> None:
+    # 409 is a concurrent conditional put in flight: NOT FileExistsError (the
+    # writer must buffer and retry, resolving to success or 412 next pass)
+    client = _client()
+    sink = S3Sink("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "put_object",
+        service_error_code="ConditionalRequestConflict",
+        http_status_code=409,
+    )
+    with stubber:
+        with pytest.raises(ClientError):
+            asyncio.run(sink.put("chunks/host/s/000000.bin", b"x"))
+
+
+def test_writer_ambiguous_put_composes_with_s3() -> None:
+    """Transient failure then 412 on retry is the S3 lost-response shape: the writer treats the chunk as delivered (no gap), per the chunk-1 posture."""
+
+    class FlakyThen412:
+        """The chunk's first put loses its response; the retry meets 412. Everything else (manifest parts, seal) succeeds."""
+
+        def __init__(self) -> None:
+            self.chunk_calls = 0
+
+        async def put(self, key: str, data: bytes) -> None:
+            if not key.startswith("chunks/"):
+                return
+            self.chunk_calls += 1
+            if self.chunk_calls == 1:
+                raise ConnectionError("response lost")
+            raise FileExistsError(key)
+
+    async def scenario() -> None:
+        writer = EvidenceWriter(FlakyThen412(), writer="host", retry_wait_s=0.0)
+        await writer.append("stages", b"evt")
+        result = await writer.flush()
+        assert result.delivered_chunks == 1
+        assert not result.errors
+
+    asyncio.run(scenario())
+
+
+def test_get_maps_missing_and_returns_bytes() -> None:
+    client = _client()
+    store = S3Store("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    body = b'{"writer":"host"}'
+    stubber.add_response(
+        "get_object",
+        {"Body": StreamingBody(io.BytesIO(body), len(body))},
+        expected_params={"Bucket": "bucket", "Key": "p/manifests/host/seal.json"},
+    )
+    stubber.add_client_error(
+        "get_object", service_error_code="NoSuchKey", http_status_code=404
+    )
+    with stubber:
+        assert asyncio.run(store.get("manifests/host/seal.json")) == body
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(store.get("manifests/driver/seal.json"))
+
+
+def test_list_sorts_by_key_never_page_order() -> None:
+    client = _client()
+    store = S3Store("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    # two pages, deliberately unsorted within and across pages
+    stubber.add_response(
+        "list_objects_v2",
+        {
+            "IsTruncated": True,
+            "NextContinuationToken": "token",
+            "Contents": [
+                {"Key": "p/manifests/host/part-000001.json"},
+                {"Key": "p/manifests/driver/seal.json"},
+            ],
+        },
+        expected_params={"Bucket": "bucket", "Prefix": "p/manifests"},
+    )
+    stubber.add_response(
+        "list_objects_v2",
+        {
+            "IsTruncated": False,
+            "Contents": [{"Key": "p/manifests/host/part-000000.json"}],
+        },
+        expected_params={
+            "Bucket": "bucket",
+            "Prefix": "p/manifests",
+            "ContinuationToken": "token",
+        },
+    )
+    with stubber:
+        keys = asyncio.run(store.list("manifests"))
+    assert keys == [
+        "manifests/driver/seal.json",
+        "manifests/host/part-000000.json",
+        "manifests/host/part-000001.json",
+    ]
+
+
+def test_cli_verify_rejects_unknown_scheme() -> None:
+    result = CliRunner().invoke(evidence, ["verify", "ftp://bucket/p"])
+    assert result.exit_code != 0
+    assert "unsupported evidence location scheme" in result.output
