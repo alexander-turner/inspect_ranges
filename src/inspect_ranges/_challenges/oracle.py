@@ -6,7 +6,8 @@ Residue rule, enforced here by construction: plant VALUES never ride argv, env, 
 """
 
 import secrets
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, cast
 
 from inspect_ai.util import sandbox
 
@@ -26,6 +27,8 @@ from .evidenceread import (
 from .plants import PlantStore
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
+
     from .._provider.evidence import EvidenceSession
 
 __all__ = ["OracleSetupError", "RangeOracle", "range_oracle"]
@@ -61,6 +64,7 @@ class RangeOracle:
         if handle.plants is None:
             handle.plants = PlantStore(handle.evidence)
         self._plants = handle.plants
+        self._evidence_memo: dict[tuple[str, str], object] | None = None
 
     @property
     def store(self) -> PlantStore:
@@ -220,27 +224,78 @@ class RangeOracle:
 
     # -- evidence accessors (read-only) -----------------------------------------
 
+    @contextmanager
+    def evidence_memo(self) -> "Iterator[None]":
+        """Memoize the evidence accessors for the duration of one scoring pass.
+
+        The evidence record is immutable once written, so within a pass every accessor returns the same bytes; without the memo, scoring cost scales with the number of agent-submitted candidates (each candidate's `check` refetches the capture), which hands the agent linear control over scoring cost through `submit_goal` calls. The memo is per-key (`pcap/<segment>`, `telemetry/<collector>`, ...), cleared on exit, and only `score_challenge` opens it: the poller never fetches evidence, and setup runs before any evidence exists.
+        """
+        self._evidence_memo = {}
+        try:
+            yield
+        finally:
+            self._evidence_memo = None
+
+    async def _memoized(
+        self, key: tuple[str, str], fetch: "Callable[[], Awaitable[object]]"
+    ) -> object:
+        memo = self._evidence_memo
+        if memo is not None and key in memo:
+            return memo[key]
+        value = await fetch()
+        if memo is not None:
+            memo[key] = value
+        return value
+
     async def pcap(self, segment: str) -> list[bytes]:
         """The segment's captured pcap chunks from the sample's evidence record (host writer)."""
-        return await stream_chunks(self._evidence_store(), "host", f"pcap/{segment}")
+        return cast(
+            "list[bytes]",
+            await self._memoized(
+                ("pcap", segment),
+                lambda: stream_chunks(
+                    self._evidence_store(), "host", f"pcap/{segment}"
+                ),
+            ),
+        )
 
     async def telemetry(self, collector: str) -> list[bytes]:
         """The collector's exported telemetry chunks (driver writer); query semantics arrive with the detection engine."""
-        return await stream_chunks(
-            self._evidence_store(), "driver", f"telemetry/{collector}"
+        return cast(
+            "list[bytes]",
+            await self._memoized(
+                ("telemetry", collector),
+                lambda: stream_chunks(
+                    self._evidence_store(), "driver", f"telemetry/{collector}"
+                ),
+            ),
         )
 
     async def console(self, guest: str) -> list[bytes]:
         """The guest's continuous serial-console chunks from the sample's evidence record (host writer)."""
-        return await stream_chunks(self._evidence_store(), "host", f"console/{guest}")
+        return cast(
+            "list[bytes]",
+            await self._memoized(
+                ("console", guest),
+                lambda: stream_chunks(
+                    self._evidence_store(), "host", f"console/{guest}"
+                ),
+            ),
+        )
 
     async def probe_records(self, goal_id: str) -> "tuple[list[SpannedRecord], bool]":
         """The goal's recorded probe verdicts (driver writer) plus whether the stream carries gaps.
 
         A gap is an observation hole: the prober flushes `down` verdicts immediately, so a lost chunk is disproportionately likely to be the one carrying failures, and the prober types treat a gapped stream as indeterminate rather than trusting the survivors.
         """
-        return await stream_json_records(
-            self._evidence_store(), "driver", f"probe/{goal_id}"
+        return cast(
+            "tuple[list[SpannedRecord], bool]",
+            await self._memoized(
+                ("probe", goal_id),
+                lambda: stream_json_records(
+                    self._evidence_store(), "driver", f"probe/{goal_id}"
+                ),
+            ),
         )
 
     async def telemetry_export(
@@ -250,6 +305,17 @@ class RangeOracle:
 
         One manifest fetch serves both streams (the detection check runs per goal, possibly on a poller cadence, against a possibly remote store).
         """
+        return cast(
+            "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]",
+            await self._memoized(
+                ("telemetry-export", collector),
+                lambda: self._telemetry_export_fetch(collector),
+            ),
+        )
+
+    async def _telemetry_export_fetch(
+        self, collector: str
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]":
         store = self._evidence_store()
         manifest = await manifest_records(store, "driver")
         meta, meta_gapped = await stream_json_records(
