@@ -2,7 +2,7 @@
 
 Each challenge becomes one `Sample`: the prompt as input, the challenge id as the sample id, and the serialized challenge in metadata, where `challenge_scorer()` reads it back. Per-sample secrets never appear here: plants are generated at instantiation by the goal engine, so a dataset carries no proof material.
 
-Multi-goal challenges get a standard submission paragraph appended to the prompt, naming the `submit_goal` tool and the goal ids (the resolved submission convention, `challenges-v1.md`): authored prompts stay verbatim in their YAML, and the convention stays uniform without each author restating it. Single-goal challenges rely on the completion fallback, so plain `react()` works unmodified.
+Multi-goal challenges get a standard submission paragraph appended to the prompt, naming the `submit_goal` tool and the goal ids (the resolved submission convention, `challenges-v1.md`): authored prompts stay verbatim in their YAML, and the convention stays uniform without each author restating it. Single-goal challenges rely on the completion fallback, so plain `react()` works unmodified. For multi-goal challenges, `plant_goals()` adds the tool to `state.tools`; agents that carry their own toolset (`react(tools=...)`) must include `submit_goal()` themselves.
 """
 
 from pathlib import Path

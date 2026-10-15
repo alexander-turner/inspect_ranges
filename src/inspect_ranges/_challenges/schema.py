@@ -90,7 +90,7 @@ class GoalBase(_StrictModel):
     """Fields shared by every goal, independent of its proof contract."""
 
     id: str = Field(min_length=1)
-    """Goal name, unique within its challenge; `submit(goal_id, value)` binds to it."""
+    """Goal name, unique within its challenge; `submit_goal(goal_id, value)` binds to it."""
 
     weight: float = Field(default=1.0, ge=0)
     """Relative contribution under the challenge's scoring mode."""

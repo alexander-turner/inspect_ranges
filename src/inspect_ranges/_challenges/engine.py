@@ -72,6 +72,9 @@ class Observations(BaseModel):
     reads: dict[str, bytes]
     """Named raw observations; `compare` interprets them, never `check`."""
 
+    chunk_reads: dict[str, list[bytes]] = {}
+    """Named chunked observations (evidence streams: each pcap chunk is a standalone capture file with its own header, so chunks must never be concatenated)."""
+
 
 class GoalResult(BaseModel):
     """One goal's verdict, produced host-side by `compare` (or by the scorer on a failed check)."""
@@ -225,16 +228,25 @@ def latch(
         primitive=primitive,
         elapsed_s=elapsed_s,
     )
-    keep_existing = existing is not None and not (
-        result.achieved
-        or (existing.indeterminate and not result.indeterminate)
-        or (
-            result.partial is not None
-            and (existing.partial is None or result.partial > existing.partial)
+    if result.indeterminate and existing is not None:
+        # A fresh indeterminate REPLACES a non-achieved record: a stale
+        # observed-fail must not read as a valid agent failure when the final
+        # check could not run. Earned partial credit survives the replacement.
+        if fresh.partial is None:
+            fresh = fresh.model_copy(update={"partial": existing.partial})
+        record: LatchRecord = fresh
+    else:
+        keep_existing = existing is not None and not (
+            result.achieved
+            or (existing.indeterminate and not result.indeterminate)
+            or (
+                result.partial is not None
+                and (existing.partial is None or result.partial > existing.partial)
+            )
         )
-    )
-    record = existing if keep_existing else fresh
-    assert record is not None
+        kept = existing if keep_existing else fresh
+        assert kept is not None
+        record = kept
     raw[goal_id] = record.model_dump(mode="json")
     store.set(LATCHES_STORE_KEY, raw)
     return record
@@ -276,9 +288,13 @@ def aggregate(
         challenge.scoring.mode == "milestones"
         and challenge.scoring.later_implies_earlier
     ):
+        # Every achieved later goal implies the goals before it, each gated by
+        # the assurance rule independently: a low-assurance later pass must
+        # never REDUCE the implication a higher-assurance intermediate pass
+        # already grants.
         goals = challenge.goals
-        for later_index in range(len(goals) - 1, -1, -1):
-            later = records.get(goals[later_index].id)
+        for later_index, later_goal in enumerate(goals):
+            later = records.get(later_goal.id)
             if later is None or not later.achieved:
                 continue
             for earlier_index in range(later_index):
@@ -291,7 +307,6 @@ def aggregate(
                 )
                 if ASSURANCE_RANK[later.assurance] >= ASSURANCE_RANK[earlier_assurance]:
                     credits[earlier_goal.id] = 1.0
-            break
     total_weight = sum(goal.weight for goal in challenge.goals)
     if total_weight <= 0:
         return 0.0

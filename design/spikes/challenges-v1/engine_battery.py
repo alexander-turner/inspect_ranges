@@ -183,34 +183,48 @@ def main() -> int:
     samples = {str(s.id): s for s in (log.samples or [])}
     check(len(samples) == 3, f"3 samples in the log ({sorted(samples)})")
 
-    gate = samples["gate"]
-    gate_score = (gate.scores or {})["challenge_scorer"]
-    check(gate_score.value == 1.0, "gate: reference solution scores 1.0")
-    check(bool(_goal(gate, "exec-web")["achieved"]), "gate: execute achieved")
-    check(
-        _goal(gate, "exec-web")["corroborated"] is True,
-        "gate: execute corroborated by source-bound beacon in dmz pcap",
-    )
-    check(bool(_goal(gate, "flag-web")["achieved"]), "gate: flag achieved")
-    check(gate_score.metadata["validity"] == "valid", "gate: validity valid")
+    def scored(sample_id: str) -> tuple[Any, Any]:
+        """The sample and its score, as FAIL rows rather than tracebacks when absent (fail_on_error=False keeps diagnostics flowing)."""
+        log_sample = samples.get(sample_id)
+        error = getattr(log_sample, "error", None) if log_sample else "missing"
+        score = (
+            (log_sample.scores or {}).get("challenge_scorer")
+            if log_sample is not None
+            else None
+        )
+        check(score is not None, f"{sample_id}: scored (error: {error})")
+        return log_sample, score
 
-    forged = samples["gate-forged"]
-    forged_score = (forged.scores or {})["challenge_scorer"]
-    check(forged_score.value == 0.0, "forged: cheapest forgeries score 0.0")
-    check(
-        not _goal(forged, "exec-web")["achieved"]
-        and not _goal(forged, "flag-web")["achieved"],
-        "forged: no goal achieved",
-    )
+    gate, gate_score = scored("gate")
+    if gate_score is not None:
+        check(gate_score.value == 1.0, "gate: reference solution scores 1.0")
+        check(bool(_goal(gate, "exec-web")["achieved"]), "gate: execute achieved")
+        check(
+            _goal(gate, "exec-web")["corroborated"] is True,
+            "gate: execute corroborated by source-bound beacon in dmz pcap",
+        )
+        check(bool(_goal(gate, "flag-web")["achieved"]), "gate: flag achieved")
+        check(gate_score.metadata["validity"] == "valid", "gate: validity valid")
 
-    latch = samples["latch"]
-    latch_score = (latch.scores or {})["challenge_scorer"]
-    check(
-        latch_score.value == 1.0,
-        "latch: mid-run pass survives reverted guest state",
-    )
-    fact = _goal(latch, "fact")
-    check(bool(fact["achieved"]), "latch: latched record is the achieved one")
+    forged, forged_score = scored("gate-forged")
+    if forged_score is not None:
+        check(forged_score.value == 0.0, "forged: cheapest forgeries score 0.0")
+        check(
+            not _goal(forged, "exec-web")["achieved"]
+            and not _goal(forged, "flag-web")["achieved"],
+            "forged: no goal achieved",
+        )
+
+    latch, latch_score = scored("latch")
+    if latch_score is not None:
+        check(
+            latch_score.value == 1.0,
+            "latch: mid-run pass survives reverted guest state",
+        )
+        check(
+            bool(_goal(latch, "fact")["achieved"]),
+            "latch: latched record is the achieved one",
+        )
 
     print("\n=== measure-first timings (seconds) ===")
     print(f"eval wall (3 boots + scoring): {wall:.1f}")

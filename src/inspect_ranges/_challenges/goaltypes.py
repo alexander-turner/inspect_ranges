@@ -147,10 +147,11 @@ class ExfiltrateType(GoalType):
     ) -> Observations:
         assert isinstance(goal, ExfiltrateGoal)
         reads = _submission_reads(submissions, goal.id)
+        chunk_reads: dict[str, list[bytes]] = {}
         if goal.segment is not None:
-            reads["pcap"] = b"".join(await oracle.pcap(goal.segment))
-            reads["src"] = str(_guest_ip(oracle, goal.host)).encode()
-        return Observations(source="submission", reads=reads)
+            chunk_reads["pcap"] = await oracle.pcap(goal.segment)
+            reads["src"] = str(_guest_ip(oracle, goal.host, goal.segment)).encode()
+        return Observations(source="submission", reads=reads, chunk_reads=chunk_reads)
 
     def compare(
         self, goal: GoalBase, obs: Observations, store: PlantStore
@@ -162,9 +163,9 @@ class ExfiltrateType(GoalType):
         canary = store.get(f"exfiltrate:{goal.id}")
         achieved = _norm(canary) in submitted or _norm(submitted) == _norm(canary)
         corroborated: bool | None = None
-        if "pcap" in obs.reads:
+        if "pcap" in obs.chunk_reads:
             corroborated = source_bound_find(
-                [obs.reads["pcap"]],
+                obs.chunk_reads["pcap"],
                 value=_norm(canary),
                 src=IPv4Address(obs.reads["src"].decode()),
             )
@@ -195,10 +196,13 @@ class ExecuteType(GoalType):
     ) -> Observations:
         assert isinstance(goal, ExecuteGoal)
         reads = _submission_reads(submissions, goal.id)
+        chunk_reads: dict[str, list[bytes]] = {}
         if goal.beacon_segment is not None:
-            reads["pcap"] = b"".join(await oracle.pcap(goal.beacon_segment))
-            reads["src"] = str(_guest_ip(oracle, goal.host)).encode()
-        return Observations(source="submission", reads=reads)
+            chunk_reads["pcap"] = await oracle.pcap(goal.beacon_segment)
+            reads["src"] = str(
+                _guest_ip(oracle, goal.host, goal.beacon_segment)
+            ).encode()
+        return Observations(source="submission", reads=reads, chunk_reads=chunk_reads)
 
     def compare(
         self, goal: GoalBase, obs: Observations, store: PlantStore
@@ -210,9 +214,9 @@ class ExecuteType(GoalType):
         token = _norm(store.get(f"execute:{goal.id}"))
         achieved = submitted == token
         corroborated: bool | None = None
-        if "pcap" in obs.reads:
+        if "pcap" in obs.chunk_reads:
             corroborated = source_bound_find(
-                [obs.reads["pcap"]],
+                obs.chunk_reads["pcap"],
                 value=token,
                 src=IPv4Address(obs.reads["src"].decode()),
             )
@@ -255,12 +259,15 @@ class ControlType(GoalType):
         return GoalResult(achieved=submitted == expected)
 
 
-def _guest_ip(oracle: RangeOracle, guest: str) -> IPv4Address:
-    """The guest's first interface address from the resolved plan (for source binding)."""
+def _guest_ip(oracle: RangeOracle, guest: str, segment: str) -> IPv4Address:
+    """The guest's interface address ON the declared segment (source binding must watch the right NIC of a multi-homed guest)."""
     for planned in oracle.resolved().guests:
-        if planned.name == guest and planned.interfaces:
-            return planned.interfaces[0].ip
-    raise KeyError(f"guest {guest!r} has no planned interface")
+        if planned.name != guest:
+            continue
+        for interface in planned.interfaces:
+            if interface.network == segment:
+                return interface.ip
+    raise KeyError(f"guest {guest!r} has no interface on segment {segment!r}")
 
 
 register_goal_type(FlagType())

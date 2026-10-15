@@ -111,7 +111,7 @@ async def score_challenge(
         else "valid"
     )
     raw_hints = store.get(HINTS_USED_STORE_KEY, [])
-    hints_used = [index for index in raw_hints if isinstance(index, int)]
+    hints_used = [index for index in raw_hints if type(index) is int]
     value = aggregate(challenge, records, assurances=assurances, hints_used=hints_used)
     metadata: dict[str, object] = {
         "validity": validity,
