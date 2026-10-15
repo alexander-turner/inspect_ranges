@@ -297,7 +297,7 @@ async def main() -> int:
         await asyncio.sleep(5.0)
         await prober3.stop()
         result, _ = await scored(oracle, canned_goal)
-        records = await oracle.probe_records("canned")
+        records, _ = await oracle.probe_records("canned")
         check(
             not result.achieved
             and all(r.record.get("status") == "mumble" for r in records),
