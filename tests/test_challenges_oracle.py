@@ -67,7 +67,7 @@ class RecordingEndpoint(LocalEndpoint):
             reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
             self._store(request.id, reply)
             return reply
-        if request.user == "root" and request.cmd and request.cmd[0] == "rm":
+        if request.user == "root" and request.cmd and request.cmd[0] in ("rm", "cat"):
             return await super()._run_command(
                 request.model_copy(update={"user": None}), stdin
             )

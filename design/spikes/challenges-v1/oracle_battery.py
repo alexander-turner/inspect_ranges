@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -15,13 +16,13 @@ from pathlib import Path
 SPIKE = Path(__file__).resolve().parent
 sys.path.insert(0, str(SPIKE.parent.parent.parent / "src"))
 
-from inspect_ranges._challenges.oracle import RangeOracle  # noqa: E402
+from inspect_ranges._challenges.oracle import (  # noqa: E402
+    OracleSetupError,
+    RangeOracle,
+)
 from inspect_ranges._challenges.schema import Challenge  # noqa: E402
 from inspect_ranges._challenges.setup import run_setup  # noqa: E402
-from inspect_ranges._channel.channel import (  # noqa: E402
-    GuestError,
-    MessageChannel,
-)
+from inspect_ranges._channel.channel import MessageChannel  # noqa: E402
 from inspect_ranges._channel.vsock import VsockTransport  # noqa: E402
 from inspect_ranges._compiler import PlanOptions, render_bundle  # noqa: E402
 from inspect_ranges._compiler.plan import Totals  # noqa: E402
@@ -35,8 +36,6 @@ from inspect_ranges._provider.state import SampleHandle  # noqa: E402
 from inspect_ranges._runtime.down import down  # noqa: E402
 from inspect_ranges._runtime.up import UpOptions, up  # noqa: E402
 from inspect_ranges.schema import load_range  # noqa: E402
-
-import os  # noqa: E402
 
 TMP = SPIKE / "tmp"
 BUNDLE = TMP / "bundle"
@@ -61,9 +60,7 @@ def check(condition: bool, name: str) -> bool:
 async def sh(
     oracle: RangeOracle, guest: str, command: str, *, user: str | None = "root"
 ) -> tuple[int, bytes]:
-    outcome = await oracle.exec(
-        guest, ["sh", "-c", command], user=user, timeout_s=60.0
-    )
+    outcome = await oracle.exec(guest, ["sh", "-c", command], user=user, timeout_s=60.0)
     return outcome.rc, outcome.stdout
 
 
@@ -87,7 +84,9 @@ async def new_files(oracle: RangeOracle, guest: str, marker: str) -> list[str]:
 
 async def main() -> int:
     # per-plant timings (the measure-first rows) come from the setup logger
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
+    logging.basicConfig(
+        level=logging.WARNING, format="%(levelname)s %(name)s %(message)s"
+    )
     logging.getLogger("inspect_ranges.challenges").setLevel(logging.INFO)
     print("=== render + up (capture on, CID 30600) ===", flush=True)
     spec = load_range(SPIKE / "spec.yaml")
@@ -106,7 +105,9 @@ async def main() -> int:
         on_stage=session.recorder.on_stage,
     )
     project = result.project
-    check(all(g.ready for g in result.guests), f"range up: {project} ({result.seconds}s)")
+    check(
+        all(g.ready for g in result.guests), f"range up: {project} ({result.seconds}s)"
+    )
 
     boot = json.loads((BUNDLE / "boot.json").read_text())
     cids = {g["name"]: int(g["cid"]) for g in boot["guests"]}
@@ -183,16 +184,14 @@ async def main() -> int:
             rc == 0 and out.split() == [b"600", b"daemon"],
             f"secret placement 600 daemon (got {out.decode().strip()!r})",
         )
-        readback = await oracle.read_file("web", "/root/crown-flag")
+        readback = await oracle.read_file("web", "/root/crown-flag", user="root")
         check(readback == flag_value, "flag content matches the in-memory store")
 
         print("=== residue sweep: proc, disk, evidence, wire ===", flush=True)
         for guest in ("web", "db", "attacker", "router"):
             dump = await proc_dump(oracle, guest)
             check(
-                len(dump) > 0
-                and flag_value not in dump
-                and secret_value not in dump,
+                len(dump) > 0 and flag_value not in dump and secret_value not in dump,
                 f"proc sweep clean on {guest} ({len(dump)} bytes scanned)",
             )
 
@@ -204,8 +203,8 @@ async def main() -> int:
                 if path in plant_paths or path == "/tmp/residue-marker":
                     continue
                 try:
-                    content = await oracle.read_file(guest, path)
-                except GuestError:
+                    content = await oracle.read_file(guest, path, user="root")
+                except OracleSetupError:
                     continue  # vanished or special; a plant value cannot hide in ENOENT
                 if flag_value in content or secret_value in content:
                     dirty.append(path)
@@ -221,9 +220,7 @@ async def main() -> int:
         planted = [r for r in records if r["event"] == "planted"]
         check(
             [r["key"] for r in planted] == ["flag:crown", "control:owned"]
-            and all(
-                r["sha256"] == oracle.store.digest(r["key"]) for r in planted
-            ),
+            and all(r["sha256"] == oracle.store.digest(r["key"]) for r in planted),
             "plants stream carries both digests in order",
         )
         check(
@@ -256,13 +253,12 @@ async def main() -> int:
         check(refused, f"dead target refused ({time.monotonic() - started:.1f}s)")
         gone = False
         try:
-            await oracle.read_file("web", "/root/pre")
-        except GuestError:
+            # root read: EACCES-as-agent would be vacuous; only ENOENT counts
+            await oracle.read_file("web", "/root/pre", user="root")
+        except OracleSetupError:
             gone = True
         check(gone, "prior plant unwound from the guest")
-        check(
-            "flag:pre" not in oracle.store.keys(), "prior plant discarded from store"
-        )
+        check("flag:pre" not in oracle.store.keys(), "prior plant discarded from store")
 
         print("=== finalize, wire cleanliness, verify ===", flush=True)
         await session.finalize()
@@ -278,7 +274,6 @@ async def main() -> int:
         check(report.ok, "evidence record verifies offline")
         code = 0 if FAIL == 0 else 1
     finally:
-        await channel.aclose()
         await asyncio.to_thread(down, project)
         print(f"\n{PASS} passed, {FAIL} failed", flush=True)
     return code
