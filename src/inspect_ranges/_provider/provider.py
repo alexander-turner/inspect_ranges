@@ -243,6 +243,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 totals=charged_totals,
                 cid_base=lease.base,
                 retry=runtime.retry_config,
+                plan=plan,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
@@ -657,3 +658,25 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             "libvirt_range provides no interactive connection yet (a console "
             "command is a recorded follow-up in provider-v1.md)"
         )
+
+
+def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
+    """The sample handle behind a `libvirt_range` sandbox environment.
+
+    Scoring-internal: the oracle factory (`challenges-v1.md`) resolves the current sample's handle through the default sandbox. Never expose the handle to solver-visible surfaces.
+
+    Args:
+        environment: A sandbox environment obtained from the sample context.
+
+    Returns:
+        The sample's handle.
+
+    Raises:
+        TypeError: `environment` is not a `libvirt_range` environment.
+    """
+    if not isinstance(environment, LibvirtRangeSandboxEnvironment):
+        raise TypeError(
+            "expected a libvirt_range sandbox environment, got "
+            f"{type(environment).__name__}"
+        )
+    return environment._handle  # pyright: ignore[reportPrivateUsage]

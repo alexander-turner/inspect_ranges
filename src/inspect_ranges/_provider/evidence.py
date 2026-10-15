@@ -206,6 +206,22 @@ class EvidenceSession:
             ),
         )
 
+    @property
+    def enabled(self) -> bool:
+        """Whether this session is live: opened writers and not disabled (the evidence-sink observer exists)."""
+        return self._driver is not None and not self._disabled
+
+    async def record_plant(self, record: dict[str, object]) -> None:
+        """Record one plant observation on the `plants` stream (driver-side T1, `challenges-v1.md`).
+
+        The record carries metadata and a digest, NEVER a plant value: evidence is durable and auditor-readable, so the comparison value lives only in the sample's in-memory `PlantStore`. Clock stamps are added here; appends are best-effort like every driver stream.
+        """
+        stamp = clock_now()
+        await self._driver_append(
+            "plants",
+            json_lines([{**record, "wall": stamp.wall, "monotonic": stamp.monotonic}]),
+        )
+
     async def finalize(self) -> None:
         """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises."""
         if self._finalized or self._driver is None:
