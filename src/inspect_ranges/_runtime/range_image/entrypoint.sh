@@ -21,6 +21,19 @@ if [[ -s /render/netns/addresses.txt ]]; then
   done < /render/netns/addresses.txt
 fi
 
+# declared probe endpoints (challenges-v1.md, challenge-prober spike A2): a
+# clamped veth per requested segment; the clamp rules ride range.nft below
+if [[ -s /render/netns/probes.txt ]]; then
+  while read -r dev peer br mac addr; do
+    ip link add "$dev" type veth peer name "$peer"
+    ip link set "$dev" address "$mac"
+    ip link set "$peer" master "$br"
+    ip link set "$peer" up
+    ip link set "$dev" up
+    ip addr add "$addr" dev "$dev"
+  done < /render/netns/probes.txt
+fi
+
 if [[ -d /render/netns/dnsmasq ]]; then
   for conf in /render/netns/dnsmasq/*.conf; do
     [[ -e "$conf" ]] || continue

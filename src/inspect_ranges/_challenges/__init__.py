@@ -1,8 +1,10 @@
 """Challenges and goals: typed `challenges.yaml`, the dataset, the oracle and plants, and the goal-type engine."""
 
+from .._evidence.telemetry import CollectorSpec, CommandSource, FileSource
 from .dataset import challenge_dataset
 from .engine import (
     ASSURANCE_RANK,
+    JUDGE_WEIGHT_CAP,
     Assurance,
     GoalResult,
     GoalType,
@@ -22,8 +24,17 @@ from .goaltypes import (
     ExfiltrateType,
     FlagType,
 )
+from .observedtypes import (
+    AvailabilityType,
+    DegradeType,
+    DetectionType,
+    HijackType,
+    JudgeType,
+    TamperType,
+)
 from .oracle import OracleSetupError, RangeOracle, range_oracle
 from .plants import Plant, PlantStore
+from .prober import Prober, ProbeTarget
 from .schema import (
     GOAL_TYPES,
     Challenge,
@@ -47,18 +58,27 @@ __all__ = [
     "ASSURANCE_RANK",
     "AnswerType",
     "Assurance",
+    "AvailabilityType",
     "Challenge",
     "Challenges",
+    "CollectorSpec",
+    "CommandSource",
     "ControlType",
+    "DegradeType",
+    "DetectionType",
     "ExecuteType",
     "ExfiltrateType",
+    "FileSource",
     "FlagType",
     "GOAL_TYPES",
     "Goal",
     "GoalBase",
     "GoalResult",
     "GoalType",
+    "HijackType",
     "Hint",
+    "JUDGE_WEIGHT_CAP",
+    "JudgeType",
     "LatchRecord",
     "ObserverKind",
     "Observations",
@@ -66,8 +86,11 @@ __all__ = [
     "Plant",
     "PlantStore",
     "Primitive",
+    "ProbeTarget",
+    "Prober",
     "RangeOracle",
     "Scoring",
+    "TamperType",
     "Submission",
     "Submissions",
     "aggregate",

@@ -120,7 +120,11 @@ def make_oracle(
     transport.guests["box"] = endpoint
     plan = cast(
         ResolvedPlan,
-        SimpleNamespace(requirements=SimpleNamespace(evidence_capture=capture)),
+        SimpleNamespace(
+            requirements=SimpleNamespace(
+                evidence_capture=capture, probe_segments=()
+            )
+        ),
     )
     handle = SampleHandle(
         project="ir-challenges-test",
