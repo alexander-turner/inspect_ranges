@@ -133,6 +133,12 @@ def plan(
     show_default=True,
     help="First vsock CID (plan-time input; realizer batteries use 3000+).",
 )
+@click.option(
+    "--evidence-capture",
+    is_flag=True,
+    default=False,
+    help="Render the evidence-capture sidecar (per-segment pcap; evidence-v1).",
+)
 @click.pass_context
 def render(
     ctx: click.Context,
@@ -141,11 +147,15 @@ def render(
     image_cache: Path,
     cpu_model: str,
     cid_base: int,
+    evidence_capture: bool,
 ) -> None:
     """Render a `range.yaml` into its realization bundle (plan + every artifact `apply` needs)."""
     spec = _load_or_exit(ctx, path)
     options = PlanOptions(
-        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
+        image_cache=image_cache,
+        cpu_model=cpu_model,
+        cid_base=cid_base,
+        evidence_capture=evidence_capture,
     )
     try:
         render_bundle(spec, out, options)
