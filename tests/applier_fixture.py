@@ -33,8 +33,8 @@ FIXTURE_GUEST_CID = 20_000
 """First CID the fixture assigns (the range-host battery band, 20000+)."""
 
 
-def make_bundle(out: Path, name: str = "uds-fixture") -> str:
-    """A minimal CI bundle (manifest.json + plan.json) at `out`; returns its canonical digest."""
+def make_bundle(out: Path, name: str = "uds-fixture", *, evidence: bool = False) -> str:
+    """A minimal CI bundle (manifest.json + plan.json) at `out`; returns its canonical digest. With `evidence`, the plan carries `requirements.evidence_capture` so the applier's host-writer path engages."""
     import hashlib
     import json
 
@@ -63,7 +63,12 @@ def make_bundle(out: Path, name: str = "uds-fixture") -> str:
         attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
     )
     plan = resolve_plan(
-        spec, PlanOptions(image_cache=out / "cache", cid_base=FIXTURE_GUEST_CID + 500)
+        spec,
+        PlanOptions(
+            image_cache=out / "cache",
+            cid_base=FIXTURE_GUEST_CID + 500,
+            evidence_capture=evidence,
+        ),
     )
     out.mkdir(parents=True, exist_ok=True)
     (out / "plan.json").write_text(plan_json(plan))

@@ -92,9 +92,14 @@ class Rig:
         *,
         with_bundle: bool = True,
         expired: bool = False,
+        evidence_location: str | None = None,
     ) -> tuple[HostLease, str]:
         bundle = tmp_path / f"bundle-{project}"
-        digest = make_bundle(bundle) if with_bundle else "ab" * 32
+        digest = (
+            make_bundle(bundle, evidence=evidence_location is not None)
+            if with_bundle
+            else "ab" * 32
+        )
         store = self.store
         if expired:
             past = datetime.now(UTC) - timedelta(seconds=3600)
@@ -110,6 +115,7 @@ class Rig:
             staging=str(tmp_path / f"staging-{project}"),
             host_facts=facts(),
             ttl_s=600,
+            evidence_location=evidence_location,
         )
         return lease, digest
 
@@ -678,5 +684,45 @@ def test_reaper_tears_down_through_the_live_applier(tmp_path: Path) -> None:
             assert rig.store.leases() == []
             relays = rig.applier._relays  # pyright: ignore[reportPrivateUsage]
             assert lease.lease_id not in relays
+
+    asyncio.run(scenario())
+
+
+def test_applier_owns_the_host_capture_writer(tmp_path: Path) -> None:
+    """Separated-topology evidence (slice 5): a lease carrying an evidence location gets a `host` writer in the APPLIER; teardown harvests, seals `complete`, and the record (stage events included) verifies offline. The dead tap (no live compose project in CI) only costs unreachable gaps, never the seal."""
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(
+                tmp_path, "ir-evid", evidence_location=str(evidence_root)
+            )
+            channel = rig.channel(lease)
+            async for _ in channel.realize(digest, []):
+                pass
+            tracked = rig.applier._evidence  # pyright: ignore[reportPrivateUsage]
+            assert lease.lease_id in tracked, "capture tracked per lease"
+            await channel.teardown()
+            assert lease.lease_id not in tracked, "teardown stops and seals"
+            report = await verify_location(LocalDirStore(evidence_root))
+            host = report.writers["host"]
+            assert report.ok and host.seal_status == "complete"
+            assert host.lease_id == lease.lease_id
+            assert "stages" in host.streams, "up stage events reached the record"
+
+    asyncio.run(scenario())
+
+
+def test_applier_without_evidence_location_writes_nothing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(tmp_path, "ir-noev")
+            channel = rig.channel(lease)
+            async for _ in channel.realize(digest, []):
+                pass
+            tracked = rig.applier._evidence  # pyright: ignore[reportPrivateUsage]
+            assert tracked == {}
+            await channel.teardown()
 
     asyncio.run(scenario())
