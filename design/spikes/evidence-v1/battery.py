@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """evidence-v1 slice-2 battery: live capture, streaming, and verification on a real range.
 
-Run via ./run.sh (which stages the golden image, exports the env knobs, and holds the shared battery flock). The script renders an evidence-enabled bundle at CID base 30100, boots it, runs the CaptureStreamer against the live sidecar, generates known flows, injures the capture (restart, then exhaustion), stops, seals, and verifies the record offline — asserting per-segment correctness from the shipped chunks alone.
+Run via ./run.sh (which stages the golden image, exports the env knobs, and holds the shared battery flock). The script renders an evidence-enabled bundle at CID base 30100, boots it, runs the CaptureStreamer against the live sidecar, generates known flows, injures the capture (restart, then exhaustion), stops, seals, and verifies the record offline, asserting per-segment correctness from the shipped chunks alone.
 """
 
 import asyncio
@@ -278,9 +278,14 @@ async def main() -> int:
         f"counts: cross dmz={cross_dmz} int={cross_int}; same dmz={same_dmz} int={same_int}; flood int={flood_int}",
         flush=True,
     )
-    check(cross_dmz > 0 and cross_int > 0, "cross-segment flow in BOTH shipped pcap streams")
-    check(same_dmz > 0 and same_int == 0, "same-segment flow in its own stream ONLY")
-    check(flood_int > 0, "flood visible on the internal segment stream")
+    # 4 echo requests + 4 replies cross each segment at minimum; both segment
+    # captures must agree exactly (the same flow crossed both)
+    check(
+        cross_dmz == cross_int and cross_dmz >= 8,
+        "cross-segment flow identical on BOTH streams, >= all 8 echo frames",
+    )
+    check(same_dmz >= 8 and same_int == 0, "same-segment flow in its own stream ONLY")
+    check(flood_int == 8000, "flood complete on the internal stream (8000/8000)")
 
     print("=== down ===", flush=True)
     await asyncio.to_thread(down, project)
