@@ -296,7 +296,9 @@ class TestDisclosedValueFrameScrub:
             (HijackType, HijackGoal(id="h", host="db", service="crashsvc")),
         ):
 
-            async def scenario() -> list["types.FrameType"]:
+            async def scenario(
+                goal_type_cls: Any = goal_type_cls, goal: Any = goal
+            ) -> list["types.FrameType"]:
                 oracle = DiscloseFailOracle()
                 try:
                     await goal_type_cls().setup(goal, cast(RangeOracle, oracle))
