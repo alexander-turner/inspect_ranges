@@ -450,3 +450,25 @@ async def _verify_record(
             neighborhood=last_good,
         )
     return None
+
+
+async def manifest_records(
+    store: EvidenceStore, writer: str
+) -> list[ChunkRecord | GapRecord]:
+    """Every manifest record a writer committed, in part order, unverified.
+
+    A convenience for batteries and tests that assert on record contents (gap causes, sequences) after `verify_location` has done the integrity work; it performs no chain or digest checks itself.
+    """
+    records: list[ChunkRecord | GapRecord] = []
+    for key in sorted(await store.list(f"manifests/{writer}")):
+        if not key.split("/")[-1].startswith("part-"):
+            continue
+        part = ManifestPart.model_validate_json(await store.get(key))
+        records.extend(part.records)
+    return records
+
+
+async def stream_chunks(store: EvidenceStore, writer: str, stream: str) -> list[bytes]:
+    """A stream's delivered chunk objects in sequence order, unverified (see `manifest_records`)."""
+    keys = sorted(await store.list(f"chunks/{writer}/{stream}"))
+    return [await store.get(key) for key in keys]
