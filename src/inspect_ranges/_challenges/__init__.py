@@ -1,6 +1,27 @@
-"""Challenges and goals: typed `challenges.yaml`, the dataset, the oracle and plants, and (in later slices) the goal engine."""
+"""Challenges and goals: typed `challenges.yaml`, the dataset, the oracle and plants, and the goal-type engine."""
 
 from .dataset import challenge_dataset
+from .engine import (
+    ASSURANCE_RANK,
+    Assurance,
+    GoalResult,
+    GoalType,
+    LatchRecord,
+    Observations,
+    aggregate,
+    goal_type,
+    latch,
+    latched_records,
+    register_goal_type,
+    registered_goal_types,
+)
+from .goaltypes import (
+    AnswerType,
+    ControlType,
+    ExecuteType,
+    ExfiltrateType,
+    FlagType,
+)
 from .oracle import OracleSetupError, RangeOracle, range_oracle
 from .plants import Plant, PlantStore
 from .schema import (
@@ -18,17 +39,29 @@ from .schema import (
     required_observers,
     validate_challenges,
 )
+from .scorer import challenge_scorer, score_challenge
 from .setup import plant_goals, plant_secret_file
-from .submission import Submission, Submissions, submissions_from, submit
+from .submission import Submission, Submissions, submissions_from, submit_goal
 
 __all__ = [
-    "GOAL_TYPES",
+    "ASSURANCE_RANK",
+    "AnswerType",
+    "Assurance",
     "Challenge",
     "Challenges",
+    "ControlType",
+    "ExecuteType",
+    "ExfiltrateType",
+    "FlagType",
+    "GOAL_TYPES",
     "Goal",
     "GoalBase",
+    "GoalResult",
+    "GoalType",
     "Hint",
+    "LatchRecord",
     "ObserverKind",
+    "Observations",
     "OracleSetupError",
     "Plant",
     "PlantStore",
@@ -37,14 +70,22 @@ __all__ = [
     "Scoring",
     "Submission",
     "Submissions",
+    "aggregate",
     "challenge_dataset",
     "challenge_issues",
+    "challenge_scorer",
+    "goal_type",
+    "latch",
+    "latched_records",
     "load_challenges",
     "plant_goals",
     "plant_secret_file",
     "range_oracle",
+    "register_goal_type",
+    "registered_goal_types",
     "required_observers",
+    "score_challenge",
     "submissions_from",
-    "submit",
+    "submit_goal",
     "validate_challenges",
 ]

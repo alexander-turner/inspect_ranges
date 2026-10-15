@@ -16,6 +16,7 @@ from .._evidence.reader import EvidenceStore, stream_chunks
 from .._evidence.s3 import store_for_location
 from .._provider.provider import sample_handle_for
 from .._provider.state import SampleHandle
+from ..types import RangeSpec
 from .plants import PlantStore
 
 __all__ = ["OracleSetupError", "RangeOracle", "range_oracle"]
@@ -80,6 +81,12 @@ class RangeOracle:
         if self._handle.plan is None:
             raise OracleSetupError("the sample's resolved plan is unavailable")
         return self._handle.plan
+
+    def range_spec(self) -> RangeSpec:
+        """The sample's validated range spec: declared variables (defaults until draws land) and scenario content."""
+        if self._handle.spec is None:
+            raise OracleSetupError("the sample's range spec is unavailable")
+        return self._handle.spec
 
     # -- guest verbs (raw channel) ---------------------------------------------
 

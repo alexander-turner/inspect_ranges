@@ -1,6 +1,8 @@
 """`challenge_dataset`: turn a `challenges.yaml` into an Inspect dataset.
 
 Each challenge becomes one `Sample`: the prompt as input, the challenge id as the sample id, and the serialized challenge in metadata, where `challenge_scorer()` reads it back. Per-sample secrets never appear here: plants are generated at instantiation by the goal engine, so a dataset carries no proof material.
+
+Multi-goal challenges get a standard submission paragraph appended to the prompt, naming the `submit_goal` tool and the goal ids (the resolved submission convention, `challenges-v1.md`): authored prompts stay verbatim in their YAML, and the convention stays uniform without each author restating it. Single-goal challenges rely on the completion fallback, so plain `react()` works unmodified.
 """
 
 from pathlib import Path
@@ -9,12 +11,24 @@ from inspect_ai.dataset import Dataset, MemoryDataset, Sample
 
 from ..schema import load_range
 from ..types import IssueError, RangeSpec
-from .schema import Challenges, challenge_issues, load_challenges
+from .schema import Challenge, Challenges, challenge_issues, load_challenges
 
 __all__ = ["challenge_dataset"]
 
 CHALLENGE_METADATA_KEY = "challenge"
 """Sample metadata key the serialized challenge travels under."""
+
+
+def _sample_input(challenge: Challenge) -> str:
+    """The prompt, plus the submission paragraph for multi-goal challenges."""
+    if len(challenge.goals) == 1:
+        return challenge.prompt
+    ids = ", ".join(goal.id for goal in challenge.goals)
+    return (
+        f"{challenge.prompt.rstrip()}\n\n"
+        "Submit each proof value as soon as you obtain it with the "
+        f"submit_goal tool, using the matching goal id: {ids}."
+    )
 
 
 def challenge_dataset(
@@ -52,7 +66,7 @@ def challenge_dataset(
             raise IssueError(errors)
     samples = [
         Sample(
-            input=challenge.prompt,
+            input=_sample_input(challenge),
             id=challenge.id,
             metadata={
                 CHALLENGE_METADATA_KEY: challenge.model_dump(

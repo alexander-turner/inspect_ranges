@@ -244,6 +244,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 cid_base=lease.base,
                 retry=runtime.retry_config,
                 plan=plan,
+                spec=spec,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
