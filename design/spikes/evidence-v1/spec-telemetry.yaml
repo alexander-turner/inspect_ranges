@@ -1,0 +1,27 @@
+# evidence-v1 slice-4 battery range: telemetry export needs one Linux guest
+# reachable over vsock, so this is the minimal shape (one segment, one target,
+# the mandatory attacker). CID band 30300 via PlanOptions.
+range:
+  name: evidence-v1-telemetry
+  schema_version: "0.2"
+  description: >
+    Battery range for the evidence-v1 telemetry slice: a single target guest
+    whose journald and file logs are polled over vsock while a producer runs,
+    stalls, fails, and regresses.
+
+networks:
+  - name: lab
+    cidr: 10.95.10.0/24
+    mode: isolated
+
+hosts:
+  - name: db
+    os: { type: linux }
+    image: ev1-guest
+    interfaces: [{ network: lab, ip: 10.95.10.10 }]
+
+attacker:
+  image: ev1-guest
+  interfaces: [{ network: lab, ip: 10.95.10.3 }]
+  entry: external
+  egress: none
