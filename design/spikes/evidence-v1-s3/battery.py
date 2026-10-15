@@ -223,7 +223,11 @@ async def main() -> int:
         await guests.exec("attacker", "echo outage-window-marker > /dev/console")
         await asyncio.sleep(8.0)
         sink.down = False
-        check(sink.outage_failures > 0, f"outage exercised ({sink.outage_failures} failed puts buffered)")
+        check(
+            sink.outage_failures > 0,
+            f"outage exercised ({sink.outage_failures} failed put attempts; "
+            "the writer buffers the affected chunks for the next flush)",
+        )
         await asyncio.sleep(6.0)  # recovery flushes the buffer
 
         print("=== stop + seal ===", flush=True)
@@ -238,10 +242,14 @@ async def main() -> int:
             "host writer sealed on S3",
         )
 
-        print("=== put-only client audit ===", flush=True)
+        print("=== put-only client audit (the SINK's client only) ===", flush=True)
+        # scope stated precisely: the hook instruments the sink's client, so
+        # this proves the writer-side client issued only PutObject; the
+        # battery's own reads (S3Store polling, verify) use a separate
+        # client this hook never sees
         check(
             sink.operations == {"PutObject"},
-            f"writer issued only PutObject (observed: {sorted(sink.operations)})",
+            f"sink's client issued only PutObject (observed: {sorted(sink.operations)})",
         )
 
         print("=== store-level write-once (real 412) ===", flush=True)

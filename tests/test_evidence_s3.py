@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 from botocore.stub import Stubber
 from click.testing import CliRunner
@@ -106,9 +105,12 @@ def test_precondition_failed_maps_to_file_exists() -> None:
             asyncio.run(sink.put("manifests/host/seal.json", b"{}"))
 
 
-def test_conditional_conflict_raises_for_buffered_retry() -> None:
-    # 409 is a concurrent conditional put in flight: NOT FileExistsError (the
-    # writer must buffer and retry, resolving to success or 412 next pass)
+def test_conditional_conflict_maps_to_file_exists() -> None:
+    # 409 is a FOREIGN conditional put racing our key (the writer is
+    # single-flight per key): it must map to FileExistsError so the writer
+    # takes the explicit write-once-conflict gap. Raising it as a transient
+    # would feed the assume-landed branch (409 then 412 reads as "ours
+    # landed"), committing our digest over the foreign winner's bytes.
     client = _client()
     sink = S3Sink("s3://bucket/p", client=client)
     stubber = Stubber(client)
@@ -118,8 +120,34 @@ def test_conditional_conflict_raises_for_buffered_retry() -> None:
         http_status_code=409,
     )
     with stubber:
-        with pytest.raises(ClientError):
+        with pytest.raises(FileExistsError):
             asyncio.run(sink.put("chunks/host/s/000000.bin", b"x"))
+
+
+def test_sdk_retries_disabled() -> None:
+    # the writer is the ONLY retry layer: an SDK-internal retry would turn
+    # "landed but response lost" into a first-attempt 412, misread as a
+    # foreign object (falsely gapping delivered data or refusing a landed
+    # seal)
+    sink = S3Sink("s3://bucket/p")
+    retries = sink._s3().meta.config.retries
+    # total_max_attempts is the normalized form; 1 means NO hidden retry
+    # (botocore turns max_attempts=1 into total_max_attempts=2)
+    assert retries is not None and retries.get("total_max_attempts") == 1
+
+
+def test_access_denied_get_reads_as_missing() -> None:
+    # without s3:ListBucket, S3 reports a missing key as 403; a restricted
+    # verifier credential must get the chunk-missing break, not a traceback
+    client = _client()
+    store = S3Store("s3://bucket/p", client=client)
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "get_object", service_error_code="AccessDenied", http_status_code=403
+    )
+    with stubber:
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(store.get("chunks/host/s/000000.bin"))
 
 
 def test_writer_ambiguous_put_composes_with_s3() -> None:
@@ -183,7 +211,8 @@ def test_list_sorts_by_key_never_page_order() -> None:
                 {"Key": "p/manifests/driver/seal.json"},
             ],
         },
-        expected_params={"Bucket": "bucket", "Prefix": "p/manifests"},
+        # "/"-terminated so a writer named "host" never sweeps in "host2"
+        expected_params={"Bucket": "bucket", "Prefix": "p/manifests/"},
     )
     stubber.add_response(
         "list_objects_v2",
@@ -193,7 +222,7 @@ def test_list_sorts_by_key_never_page_order() -> None:
         },
         expected_params={
             "Bucket": "bucket",
-            "Prefix": "p/manifests",
+            "Prefix": "p/manifests/",
             "ContinuationToken": "token",
         },
     )

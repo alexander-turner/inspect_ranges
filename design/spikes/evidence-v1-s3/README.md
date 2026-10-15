@@ -10,9 +10,9 @@ Run: `./run.sh` (shared battery flock; CID band 30200+; needs AWS credentials an
 |---|---|
 | Watermark lag (chunk landed wall time minus capture span end), 30 chunks | median 1.1 s, worst 7.6 s |
 | First chunks visible on S3 | while the range was live, before any flow finished (streamed, not end-dumped) |
-| Uplink outage (8 s mid-sample) | 12 failed puts buffered; recovery flushed; seal `complete`; offline verify unbroken |
+| Uplink outage (8 s mid-sample) | failed put attempts observed (an attempt counter, not a chunk count); affected chunks buffered; recovery flushed; seal `complete`; offline verify unbroken |
 | Store-level write-once | re-put of the sealed manifest refused with a real 412 (`PreconditionFailed`) |
-| Put-only client audit | botocore event hook on the live client observed exactly one S3 operation: `PutObject` |
+| Put-only client audit (scope: the sink's client) | botocore event hook on the sink's live client observed exactly one S3 operation: `PutObject`. The battery's own reads (polling, lag replay, verify) use a separate client the hook does not see; the proof is per-client, paired with the CI pin that the writer holds no read path |
 | Bad credentials mid-sample | errors reported and buffered, nothing raised; `seal` refused with `SealDeliveryError` (record honestly unsealed) |
 | Binding checks from a scrubbed process | no binding: internal consistency OK; correct `--expect-seal`: OK; forged digest: exit 1 (`seal-digest-mismatch`) |
 
@@ -21,7 +21,7 @@ The worst-lag chunk (7.6 s) is the first chunk of a stream: it waits out the cap
 ## Honest substitutions and IAM limitations (devbox role `DEVBOX-ROLE`)
 
 - **Second machine.** No second machine was reachable (no SSH alias resolves from this host), so the cross-machine verify ran as a subprocess with a scrubbed environment: fresh `HOME`, minimal `PATH`, no repository state, credentials only via the instance role. That proves the verifier needs nothing from the writer's process or state, but it shares the instance role; a true second machine (different credentials) should replace this when the fleet work lands a second host.
-- **Put-only credentials.** `sts:AssumeRole` (self), `sts:GetFederationToken`, and all IAM introspection are denied to the devbox role, so no genuinely put-only credential could be minted. The put-only proof is client-layer: a botocore event hook on the real client records every S3 operation issued during the full battery run, and the set is exactly `{PutObject}`. The writer's never-reads property is additionally pinned in CI (`test_writer_never_reads`, and the S3 sink exposes no read path to the writer).
+- **Put-only credentials.** `sts:AssumeRole` (self), `sts:GetFederationToken`, and all IAM introspection are denied to the devbox role, so no genuinely put-only credential could be minted. The put-only proof is client-layer and scoped precisely: a botocore event hook on the sink's real client records every S3 operation that client issues across the run, and the set is exactly `{PutObject}`. It says nothing about other clients in the process (the battery's own reads use a separate store client), so it is paired with the CI pins: the writer holds no read path (`test_writer_never_reads`) and the S3 sink exposes none.
 - **Bucket policy.** `s3:PutBucketPolicy` (and `GetBucketPolicy`, and `CreateBucket`) are denied, so the deny-overwrite policy below is written as deployment guidance and could not be applied here. The mechanism it enforces fleet-wide (conditional-put refusal) was store-proven anyway: the bucket answers 412 on a conditional re-put today.
 
 ## Deployment guidance: deny-overwrite at the store

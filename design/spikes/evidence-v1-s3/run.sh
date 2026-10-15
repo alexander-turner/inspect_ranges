@@ -63,11 +63,16 @@ else
   echo "FAIL  residue: $LEFT containers"; CODE=1
 fi
 echo "=== s3 cleanup (objects removed; the shared bucket stays) ==="
-aws s3 rm --recursive "s3://${BUCKET}/${RUNS_PREFIX}/" --quiet || true
-COUNT=$(aws s3 ls "s3://${BUCKET}/${RUNS_PREFIX}/" --recursive 2>/dev/null | wc -l)
-if [[ "$COUNT" == "0" ]]; then
+aws s3 rm --recursive "s3://${BUCKET}/${RUNS_PREFIX}/" --quiet \
+  || { echo "FAIL  s3 cleanup errored (objects may remain)"; CODE=1; }
+# "aws s3 ls" exits 1 on an empty prefix, so emptiness is "no stdout AND no
+# stderr"; a listing ERROR must fail the check, never pass it vacuously
+LS_OUT=$(aws s3 ls "s3://${BUCKET}/${RUNS_PREFIX}/" --recursive 2>"$SPIKE/tmp/ls-err.txt")
+if [[ -s "$SPIKE/tmp/ls-err.txt" ]]; then
+  echo "FAIL  S3 residue check could not run:"; cat "$SPIKE/tmp/ls-err.txt"; CODE=1
+elif [[ -z "$LS_OUT" ]]; then
   echo "PASS  zero S3 residue under ${RUNS_PREFIX}/"
 else
-  echo "FAIL  S3 residue: $COUNT objects"; CODE=1
+  echo "FAIL  S3 residue: $(echo "$LS_OUT" | wc -l) objects"; CODE=1
 fi
 exit "$CODE"
