@@ -110,32 +110,31 @@ class Segment:
         self.state = "running"
 
     def harvest_drops(self):
-        # tcpdump prints its drop summary on exit; keep the running total
+        # tcpdump prints one drop summary per process exit; the file is
+        # append-only and carries only per-generation banner/summary lines,
+        # so summing the whole file is bounded and monotone
         try:
             with open(os.path.join(self.dir, "stderr.log"), "rb") as handle:
-                tail = handle.read()[-8192:].decode("utf-8", "replace")
+                text = handle.read().decode("utf-8", "replace")
         except OSError:
             return
-        total = sum(int(count) for count in DROPS_RE.findall(tail))
-        if total > self.kernel_drops:
-            self.kernel_drops = total
+        self.kernel_drops = sum(int(count) for count in DROPS_RE.findall(text))
 
     def tick(self):
         if self.state in ("exhausted", "stopped"):
             return
-        if self.proc is None:
-            if self.bridge_present():
-                self.start()
-            return
-        if self.proc.poll() is None:
-            return
-        self.harvest_drops()
-        if self.restarts >= MAX_RESTARTS:
-            self.state = "exhausted"
-            return
-        self.restarts += 1
-        self.state = "restarting"
-        if self.bridge_present():
+        if self.proc is not None and self.proc.poll() is not None:
+            # the restart budget is spent on actual starts, never on waiting
+            # for an absent bridge
+            self.harvest_drops()
+            self.proc = None
+            self.state = "restarting"
+        if self.proc is None and self.bridge_present():
+            if self.state == "restarting":
+                if self.restarts >= MAX_RESTARTS:
+                    self.state = "exhausted"
+                    return
+                self.restarts += 1
             self.start()
 
     def stop(self):

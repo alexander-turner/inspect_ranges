@@ -6,6 +6,7 @@ Evidence never destabilizes the sample it observes: every cycle step is guarded,
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -20,11 +21,10 @@ from typing import Any, Callable, Protocol, cast
 from .._runtime.up import run_command
 from .manifest import ClockSpan, ClockStamp, clock_now
 from .sink import EvidenceWriter
+from .supervisor import STATUS_FILENAME, STOP_FILENAME
 
 logger = logging.getLogger(__name__)
 
-STATUS_RELPATH = "status.json"
-STOP_RELPATH = "stop"
 STDERR_NAME = "stderr.log"
 
 _PCAP_NAME = re.compile(r"^g(\d+)\.pcap(\d*)$")
@@ -36,15 +36,16 @@ WALL_JUMP_THRESHOLD_S = 0.5
 class CaptureTap(Protocol):
     """Synchronous access to one range's capture volume and console files.
 
-    Methods raise `OSError`/`RuntimeError` on failure; the streamer guards every call and folds failures into heartbeats, never into the sample lifecycle. Paths are relative to the capture volume root.
+    Methods raise `OSError`/`RuntimeError` on failure; the streamer guards every call and folds failures into heartbeats, never into the sample lifecycle. Paths are relative to the capture volume root. The tail reads return `(total size, bytes from offset)` so growing files ship as deltas rather than being re-fetched whole every poll.
     """
 
     def read_status(self) -> bytes: ...
     def list_segment_files(self, segment: str) -> list[str]: ...
     def read_file(self, relpath: str) -> bytes: ...
+    def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]: ...
     def remove_file(self, relpath: str) -> None: ...
     def request_stop(self) -> None: ...
-    def read_console(self, guest: str) -> bytes: ...
+    def read_console(self, guest: str, offset: int) -> tuple[int, bytes]: ...
 
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -90,8 +91,17 @@ class ComposeTap:
                 )
             return target.read_bytes()
 
+    def _tail(self, service: str, path: str, offset: int) -> tuple[int, bytes]:
+        quoted = shlex.quote(path)
+        out = self._exec(
+            service,
+            f"wc -c < {quoted} && tail -c +{offset + 1} {quoted} | base64",
+        )
+        head, _, rest = out.partition("\n")
+        return int(head.strip()), base64.b64decode(rest)
+
     def read_status(self) -> bytes:
-        return self._cp_bytes(f"capture:/capture/{STATUS_RELPATH}")
+        return self._cp_bytes(f"capture:/capture/{STATUS_FILENAME}")
 
     def list_segment_files(self, segment: str) -> list[str]:
         quoted = shlex.quote(f"/capture/{segment}")
@@ -104,14 +114,17 @@ class ComposeTap:
     def read_file(self, relpath: str) -> bytes:
         return self._cp_bytes(f"capture:/capture/{relpath}")
 
+    def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+        return self._tail("capture", f"/capture/{relpath}", offset)
+
     def remove_file(self, relpath: str) -> None:
         self._exec("capture", f"rm -f {shlex.quote(f'/capture/{relpath}')}")
 
     def request_stop(self) -> None:
-        self._exec("capture", f"touch {shlex.quote(f'/capture/{STOP_RELPATH}')}")
+        self._exec("capture", f"touch {shlex.quote(f'/capture/{STOP_FILENAME}')}")
 
-    def read_console(self, guest: str) -> bytes:
-        return self._cp_bytes(f"range:/scratch/console/{guest}.log")
+    def read_console(self, guest: str, offset: int) -> tuple[int, bytes]:
+        return self._tail("range", f"/scratch/console/{guest}.log", offset)
 
 
 class LocalTap:
@@ -122,7 +135,7 @@ class LocalTap:
         self.console_dir = console_dir
 
     def read_status(self) -> bytes:
-        return (self.root / STATUS_RELPATH).read_bytes()
+        return (self.root / STATUS_FILENAME).read_bytes()
 
     def list_segment_files(self, segment: str) -> list[str]:
         directory = self.root / segment
@@ -137,14 +150,19 @@ class LocalTap:
     def read_file(self, relpath: str) -> bytes:
         return (self.root / relpath).read_bytes()
 
+    def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+        data = (self.root / relpath).read_bytes()
+        return len(data), data[offset:]
+
     def remove_file(self, relpath: str) -> None:
         (self.root / relpath).unlink(missing_ok=True)
 
     def request_stop(self) -> None:
-        (self.root / STOP_RELPATH).touch()
+        (self.root / STOP_FILENAME).touch()
 
-    def read_console(self, guest: str) -> bytes:
-        return (self.console_dir / f"{guest}.log").read_bytes()
+    def read_console(self, guest: str, offset: int) -> tuple[int, bytes]:
+        data = (self.console_dir / f"{guest}.log").read_bytes()
+        return len(data), data[offset:]
 
 
 class StageRecorder:
@@ -278,7 +296,7 @@ class CaptureStreamer:
                     await self._writer.gap(
                         f"pcap/{segment}", cause="capture-unreachable"
                     )
-        await self._cycle(final=True)
+        await self._cycle(final=True, sidecar_stopped=stopped)
         await self._guard("flush", self._writer.flush())
 
     async def poll_once(self) -> None:
@@ -311,13 +329,15 @@ class CaptureStreamer:
 
     # one cycle ---------------------------------------------------------------
 
-    async def _cycle(self, final: bool = False) -> None:
+    async def _cycle(self, final: bool = False, sidecar_stopped: bool = False) -> None:
         now = self._clock()
         span = ClockSpan(start=self._last_cycle or now, end=now)
         status = await self._read_status()
         if status is not None:
             await self._guard("status-deltas", self._status_deltas(status))
-        await self._guard("pcap", self._ship_pcap(status, span, final=final))
+        await self._guard(
+            "pcap", self._ship_pcap(status, span, ship_all=final and sidecar_stopped)
+        )
         await self._guard("stderr", self._ship_stderr(span))
         await self._guard("consoles", self._ship_consoles(span))
         await self._guard("stages", self._ship_stages(span))
@@ -372,18 +392,23 @@ class CaptureStreamer:
                 view.dead_reported = True
 
     async def _ship_pcap(
-        self, status: dict[str, Any] | None, span: ClockSpan, *, final: bool
+        self, status: dict[str, Any] | None, span: ClockSpan, *, ship_all: bool
     ) -> None:
         segments = _status_segments(status)
         for segment, view in self._segments.items():
+            entry = segments.get(segment)
+            ship_bound = self._ship_bound(entry, ship_all=ship_all)
+            if ship_bound is None:
+                # without a trustworthy claim about which file is being
+                # written, nothing ships: shipping (and then removing) a
+                # half-written active chunk would be silent evidence loss
+                continue
             try:
                 names = await asyncio.to_thread(self._tap.list_segment_files, segment)
             except Exception as error:
                 self._tap_errors += 1
                 logger.debug("pcap listing failed for %s: %s", segment, error)
                 continue
-            entry = segments.get(segment)
-            active: object = None if final or entry is None else entry.get("active")
             ordered = [
                 (match.group(0), int(match.group(1)), int(match.group(2) or 0))
                 for match in (_PCAP_NAME.match(name) for name in names)
@@ -391,10 +416,19 @@ class CaptureStreamer:
             ]
             ordered.sort(key=lambda item: (item[1], item[2]))
             view.shipped &= {name for name, _, _ in ordered}
-            for name, _, _ in ordered:
+            for name, generation, index in ordered:
                 relpath = f"{segment}/{name}"
-                if relpath == active or name in view.shipped:
+                if name in view.shipped:
+                    # shipped but the earlier remove failed: retry so cap
+                    # enforcement cannot later count these bytes as lost
+                    try:
+                        await asyncio.to_thread(self._tap.remove_file, relpath)
+                        view.shipped.discard(name)
+                    except Exception:
+                        self._tap_errors += 1
                     continue
+                if (generation, index) >= ship_bound:
+                    continue  # the declared active or newer: still being written
                 try:
                     data = await asyncio.to_thread(self._tap.read_file, relpath)
                 except Exception as error:
@@ -407,39 +441,67 @@ class CaptureStreamer:
                 view.watermark_wall = span.end.wall
                 try:
                     await asyncio.to_thread(self._tap.remove_file, relpath)
+                    view.shipped.discard(name)
                 except Exception as error:
                     # shipped but not removed: the shipped set suppresses a
-                    # double-ship on the next cycle
+                    # double-ship; the next cycle retries the removal
                     self._tap_errors += 1
                     logger.debug("pcap remove failed for %s: %s", relpath, error)
+
+    @staticmethod
+    def _ship_bound(
+        entry: dict[str, Any] | None, *, ship_all: bool
+    ) -> tuple[int, int] | None:
+        """Which rotation ranks are safe to ship: everything strictly below the bound.
+
+        The declared active file was being written when the supervisor last reported, so anything older is completed forever (rotation only moves forward); anything at or past it may still be open. States with no writer running (`exhausted`, `stopped`, `restarting`) and a confirmed sidecar stop ship everything. No status entry, or `running` without a declared active file, ships nothing: `None`.
+        """
+        unbounded = (1 << 31, 0)
+        if ship_all:
+            return unbounded
+        if entry is None:
+            return None
+        state = entry.get("state")
+        if state in ("exhausted", "stopped", "restarting"):
+            return unbounded
+        active = entry.get("active")
+        if not isinstance(active, str):
+            return None
+        match = _PCAP_NAME.match(active.rsplit("/", 1)[-1])
+        if match is None:
+            return None
+        return (int(match.group(1)), int(match.group(2) or 0))
 
     async def _ship_stderr(self, span: ClockSpan) -> None:
         for segment, view in self._segments.items():
             try:
-                data = await asyncio.to_thread(
-                    self._tap.read_file, f"{segment}/{STDERR_NAME}"
+                size, delta = await asyncio.to_thread(
+                    self._tap.read_tail, f"{segment}/{STDERR_NAME}", view.stderr_offset
                 )
             except Exception:
                 continue  # no stderr yet is routine
-            if len(data) > view.stderr_offset:
-                await self._writer.append(
-                    f"capture-stderr/{segment}", data[view.stderr_offset :], span=span
-                )
-                view.stderr_offset = len(data)
+            if size < view.stderr_offset:
+                view.stderr_offset = 0  # rewritten: re-ship from the start
+                continue
+            if delta:
+                await self._writer.append(f"capture-stderr/{segment}", delta, span=span)
+                view.stderr_offset += len(delta)
 
     async def _ship_consoles(self, span: ClockSpan) -> None:
         for guest, offset in self._consoles.items():
             try:
-                data = await asyncio.to_thread(self._tap.read_console, guest)
+                size, delta = await asyncio.to_thread(
+                    self._tap.read_console, guest, offset
+                )
             except Exception:
                 continue  # console file appears once the guest defines
-            if len(data) < offset:
+            if size < offset:
                 await self._writer.gap(f"console/{guest}", cause="console-truncated")
                 self._consoles[guest] = 0
-                offset = 0
-            if len(data) > offset:
-                await self._writer.append(f"console/{guest}", data[offset:], span=span)
-                self._consoles[guest] = len(data)
+                continue
+            if delta:
+                await self._writer.append(f"console/{guest}", delta, span=span)
+                self._consoles[guest] = offset + len(delta)
 
     async def _ship_stages(self, span: ClockSpan) -> None:
         if self._recorder is None:
@@ -476,17 +538,20 @@ class CaptureStreamer:
             await self._writer.append("clock", _json_lines(records))
 
     def _heartbeat_due(self, now: ClockStamp) -> bool:
-        return (
-            self._last_heartbeat is None
-            or now.wall - self._last_heartbeat >= self._heartbeat_s
-        )
+        # scheduled on the monotonic clock: a backwards wall jump (the very
+        # anomaly the clock stream records) must not silence the liveness
+        # stream until the wall catches up
+        if self._last_heartbeat is None:
+            return True
+        basis = now.monotonic if now.monotonic is not None else now.wall
+        return basis - self._last_heartbeat >= self._heartbeat_s
 
     async def _ship_heartbeat(
         self, status: dict[str, Any] | None, now: ClockStamp, *, final: bool
     ) -> None:
         if not final and not self._heartbeat_due(now):
             return
-        self._last_heartbeat = now.wall
+        self._last_heartbeat = now.monotonic if now.monotonic is not None else now.wall
         records: list[dict[str, Any]] = [
             {
                 "source": "streamer",
