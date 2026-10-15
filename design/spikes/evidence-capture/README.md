@@ -36,7 +36,7 @@ Prefer the **`NET_RAW`-only capture sidecar** over growing the range container's
 
 ## Files
 
-- `run.sh` — the full battery (flock-exclusive, zero-residue, `PASS=24 FAIL=0` on 2026-10-15)
-- `spec.yaml` — the static-IP two-segment range (asserts the eight-cap floor)
-- `blast.py` — in-guest UDP load generator
-- `measure.py` — host-side /proc CPU/RSS sampler
+- `run.sh`: the full battery (flock-exclusive, zero-residue, `PASS=24 FAIL=0` on 2026-10-15)
+- `spec.yaml`: the static-IP two-segment range (asserts the eight-cap floor)
+- `blast.py`: in-guest UDP load generator
+- `measure.py`: host-side /proc CPU/RSS sampler
