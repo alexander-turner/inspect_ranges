@@ -437,6 +437,43 @@ def test_valid_against_fixture(tmp_path: Path) -> None:
     assert report.valid, [issue.model_dump() for issue in report.issues]
 
 
+def test_goal_field_error_paths_are_authored_keys(tmp_path: Path) -> None:
+    """Union discriminator tags never leak into reported paths, positions, or hints."""
+    path = tmp_path / "challenges.yaml"
+    path.write_text(
+        "challenges:\n"
+        "  - id: c\n"
+        "    prompt: p\n"
+        "    goals:\n"
+        "      - id: g\n"
+        "        type: flag\n"
+        "        host: web\n"
+        "        path: 123\n"
+    )
+    report = validate_challenges(path)
+    issue = next(issue for issue in report.issues if issue.code == "invalid-type")
+    assert issue.path == ("challenges", 0, "goals", 0, "path")
+    assert (issue.line, issue.col) == (8, 15)
+
+
+def test_goal_unknown_key_hint(tmp_path: Path) -> None:
+    path = tmp_path / "challenges.yaml"
+    path.write_text(
+        "challenges:\n"
+        "  - id: c\n"
+        "    prompt: p\n"
+        "    goals:\n"
+        "      - id: g\n"
+        "        type: flag\n"
+        "        host: web\n"
+        "        pth: /f\n"
+    )
+    report = validate_challenges(path)
+    issue = next(issue for issue in report.issues if issue.code == "unknown-key")
+    assert issue.path == ("challenges", 0, "goals", 0, "pth")
+    assert issue.hint == "did you mean 'path'?"
+
+
 @pytest.mark.parametrize(
     "directory", EXAMPLES, ids=[directory.name for directory in EXAMPLES]
 )
