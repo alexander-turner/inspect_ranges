@@ -3,6 +3,13 @@
 The format and trust story live in `design/inspect-ranges/evidence-v1.md`: write-once chunks and hash-chained manifests at a per-sample location beside the eval log, written through a put-only sink, replayed offline by the verifier. This package is the T1/T2 machinery scoring corroboration consumes; it never participates in scoring decisions itself.
 """
 
+from .capture import (
+    CaptureStreamer,
+    CaptureTap,
+    ComposeTap,
+    LocalTap,
+    StageRecorder,
+)
 from .location import (
     EVIDENCE_SINK_OVERRIDE_VAR,
     EvidenceIdentity,
@@ -52,7 +59,10 @@ __all__ = [
     "EVIDENCE_SINK_OVERRIDE_VAR",
     "DEFAULT_BUFFER_CAP_BYTES",
     "Break",
+    "CaptureStreamer",
+    "CaptureTap",
     "ChunkRecord",
+    "ComposeTap",
     "ClockSpan",
     "ClockStamp",
     "EvidenceIdentity",
@@ -64,10 +74,12 @@ __all__ = [
     "GapRecord",
     "LocalDirSink",
     "LocalDirStore",
+    "LocalTap",
     "ManifestPart",
     "Seal",
     "SealDeliveryError",
     "SealStatus",
+    "StageRecorder",
     "StreamCoverage",
     "StreamSummary",
     "VerifyReport",

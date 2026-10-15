@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cloud-image-utils \
     iproute2 nftables dnsmasq \
     procps libcap2-bin \
+    python3 tcpdump \
     && rm -rf /var/lib/apt/lists/*
 
 RUN printf 'user = "libvirt-qemu"\ngroup = "kvm"\nsecurity_driver = "none"\ndynamic_ownership = 1\nremember_owner = 0\ncgroup_controllers = []\nnamespaces = []\nseccomp_sandbox = 1\n' \

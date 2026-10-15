@@ -41,6 +41,9 @@ class PlanOptions(BaseModel):
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
 
+    evidence_capture: bool = False
+    """Render the evidence-capture sidecar (per-segment pcap per `evidence-v1.md`). A plan-time input because the sidecar is part of the realization: the bundle's compose project and digest change with it."""
+
 
 class ImageRef(BaseModel):
     """An image as the plan records it: the logical reference plus its cache-resolved digest."""
@@ -104,6 +107,9 @@ class Requirements(BaseModel):
     """Host device nodes the range container needs."""
     egress_uplink: bool
     """Whether the deployment must supply an uplink network (any nat/routed network or attacker egress)."""
+
+    evidence_capture: bool = False
+    """Whether the bundle carries the evidence-capture sidecar (per-segment pcap on a `CAP_NET_RAW`-only compose service; the range container's own capability floor is unchanged by this)."""
 
 
 class Totals(BaseModel):
@@ -319,6 +325,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             cpu_model=options.cpu_model,
             devices=["/dev/kvm", "/dev/vhost-vsock", "/dev/vhost-net", "/dev/net/tun"],
             egress_uplink=egress_uplink,
+            evidence_capture=options.evidence_capture,
         ),
         totals=Totals(
             guests=len(guests),
