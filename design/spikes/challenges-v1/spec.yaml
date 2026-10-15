@@ -1,0 +1,46 @@
+# challenges-v1 battery range: the evidence-v1 two-segment shape (router
+# joining dmz and internal, eight-capability floor, capture-friendly ACL),
+# reused so oracle plants land on guests in distinct segments and the pcap
+# residue check reads real cross-segment captures.
+range:
+  name: challenges-v1
+  schema_version: "0.2"
+  description: >
+    Battery range for the challenges-v1 phase: oracle planting, the residue
+    sweep, and setup unwind against a dmz and an internal segment joined by
+    a router, with capture enabled so the wire-cleanliness check reads a
+    live pcap.
+
+networks:
+  - name: dmz
+    cidr: 10.95.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.95.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    os: { type: linux }
+    image: chv1-guest
+    interfaces:
+      - { network: dmz, ip: 10.95.10.1 }
+      - { network: internal, ip: 10.95.20.1 }
+    acl:
+      - { from: dmz, to: internal, allow: [icmp] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: chv1-guest
+    interfaces: [{ network: dmz, ip: 10.95.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: chv1-guest
+    interfaces: [{ network: internal, ip: 10.95.20.10 }]
+
+attacker:
+  image: chv1-guest
+  interfaces: [{ network: dmz, ip: 10.95.10.3 }]
+  entry: external
+  egress: none
