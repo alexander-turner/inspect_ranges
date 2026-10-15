@@ -552,3 +552,71 @@ def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
     assert closing.status == "ok", closing.detail
     acking = asyncio.run(scenario(b"\x06", tmp_path / "acking.sock"))
     assert acking.status == "warn", acking.detail
+
+
+# -- evidence group ------------------------------------------------------------
+
+
+def _evidence_results(
+    sink_override: str | None,
+    log_dir: str | None,
+    s3_client: object | None = None,
+) -> dict[str, CheckResult]:
+    from inspect_ranges._doctor.checks import check_evidence
+
+    return {
+        r.name: r for r in check_evidence(sink_override, log_dir, s3_client=s3_client)
+    }
+
+
+def test_check_evidence_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No override, no log dir: knobs ok, sink derived, local-only warned."""
+    monkeypatch.delenv("INSPECT_RANGES_EVIDENCE_BUFFER_MB", raising=False)
+    monkeypatch.delenv("INSPECT_RANGES_EVIDENCE_MAX_MB", raising=False)
+    results = _evidence_results(None, None)
+    assert results["knobs"].status == "ok"
+    assert results["sink"].status == "ok"
+    assert "derived from the eval log location" in results["sink"].detail
+    assert results["off-instance"].status == "warn"
+    assert results["off-instance"].fix is not None
+
+
+def test_check_evidence_bad_knob_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_RANGES_EVIDENCE_MAX_MB", "zero")
+    results = _evidence_results(None, None)
+    assert results["knobs"].status == "fail"
+    assert "INSPECT_RANGES_EVIDENCE_MAX_MB" in (results["knobs"].fix or "")
+
+
+def test_check_evidence_local_sink_probe(tmp_path: Path) -> None:
+    """A filesystem override is probed by writing and removing one file; the base is created like first use would."""
+    base = tmp_path / "evidence"
+    results = _evidence_results(str(base), None)
+    assert results["sink"].status == "ok"
+    assert base.is_dir()
+    assert list(base.iterdir()) == []  # probe file removed
+    assert results["off-instance"].status == "warn"
+
+
+def test_check_evidence_unwritable_local_sink_fails(tmp_path: Path) -> None:
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a file where the sink dir should be")
+    results = _evidence_results(str(blocker), None)
+    assert results["sink"].status == "fail"
+    assert "evidence disabled" in results["sink"].detail
+
+
+def test_check_evidence_off_instance_resolution() -> None:
+    """The override wins over the log dir; any non-file scheme counts as off-instance."""
+    s3_log = _evidence_results(None, "s3://bucket/logs")
+    assert s3_log["off-instance"].status == "ok"
+    local_override = _evidence_results("/tmp/evidence-x", "s3://bucket/logs")
+    assert local_override["off-instance"].status == "warn"
+
+
+# the stubbed probe of an s3:// sink lives in tests/test_evidence_s3.py
+# (that file carries the per-file boto pragmas)

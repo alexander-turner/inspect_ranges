@@ -269,3 +269,47 @@ def test_cli_verify_rejects_unknown_scheme() -> None:
     result = CliRunner().invoke(evidence, ["verify", "ftp://bucket/p"])
     assert result.exit_code != 0
     assert "unsupported evidence location scheme" in result.output
+
+
+def test_doctor_s3_probe_stubbed() -> None:
+    """The doctor's sink probe is one conditional put plus best-effort delete: denied credentials warn (a stated condition, never a host failure), and a put-only credential is ok with the residue noted."""
+    from botocore.stub import ANY, Stubber
+    from inspect_ranges._doctor.s3probe import probe_s3_sink
+
+    def client_with(responses: list[tuple[str, bool]]) -> Any:
+        client = _client()
+        stubber = Stubber(client)
+        for op, succeed in responses:
+            if succeed:
+                stubber.add_response(
+                    op,
+                    {},
+                    {"Bucket": "b", "Key": ANY, "Body": ANY, "IfNoneMatch": "*"}
+                    if op == "put_object"
+                    else {"Bucket": "b", "Key": ANY},
+                )
+            else:
+                stubber.add_client_error(op, "AccessDenied", "denied", 403)
+        stubber.activate()
+        return client
+
+    ok = probe_s3_sink(
+        "Evidence",
+        "s3://b/pre",
+        client=client_with([("put_object", True), ("delete_object", True)]),
+    )
+    assert ok.status == "ok"
+
+    put_only = probe_s3_sink(
+        "Evidence",
+        "s3://b/pre",
+        client=client_with([("put_object", True), ("delete_object", False)]),
+    )
+    assert put_only.status == "ok"
+    assert "residue" in put_only.detail
+
+    denied = probe_s3_sink(
+        "Evidence", "s3://b/pre", client=client_with([("put_object", False)])
+    )
+    assert denied.status == "warn"
+    assert "stated condition" in denied.detail
