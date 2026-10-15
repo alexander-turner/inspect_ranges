@@ -307,6 +307,10 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     )
                     result: UpResult = await asyncio.shield(boot)
                     rendered_plan: ResolvedPlan = render.result()
+                    # the rendered plan is the truthful one (it carries
+                    # evidence_capture and realized allocations); the oracle's
+                    # available_observers reads it off the handle
+                    handle.plan = rendered_plan
                 except asyncio.CancelledError:
                     # none of these can be aborted and all keep creating
                     # resources; drain them (up is internally bounded) so the
@@ -675,6 +679,16 @@ def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
     Raises:
         TypeError: `environment` is not a `libvirt_range` environment.
     """
+    # In a live eval, inspect_ai hands out sandboxes wrapped in its event
+    # proxy; unwrap it to reach the provider environment. Private API,
+    # isolated here with a CI pin (like `sample_active()` in location.py).
+    try:
+        from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
+        if isinstance(environment, SandboxEnvironmentProxy):
+            environment = environment._sandbox  # pyright: ignore[reportPrivateUsage]
+    except ImportError:  # pragma: no cover - inspect_ai moved the proxy
+        pass
     if not isinstance(environment, LibvirtRangeSandboxEnvironment):
         raise TypeError(
             "expected a libvirt_range sandbox environment, got "
