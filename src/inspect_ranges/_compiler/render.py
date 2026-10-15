@@ -13,6 +13,12 @@ from typing import Any
 
 import yaml
 
+from .._evidence.supervisor import (
+    BRIDGES_FILENAME,
+    SUPERVISOR_FILENAME,
+    SUPERVISOR_SOURCE,
+    render_bridges_tsv,
+)
 from ..types import Issue, IssueError, RangeSpec
 from .allocate import Allocation
 from .dnsmasq import render_dnsmasq_conf
@@ -106,6 +112,39 @@ volumes:
   scratch:
 """
 
+_COMPOSE_CAPTURE_SERVICE = """\
+  # evidence-capture sidecar (evidence-v1.md, evidence-capture spike): shares
+  # the range netns with CAP_NET_RAW alone, so the range container's measured
+  # capability floor does not grow and pre-stream pcap chunks live on a volume
+  # the range container never mounts
+  capture:
+    image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
+    init: true
+    network_mode: service:range
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["python3", "/render/capture/capture.py"]
+    environment:
+      - CAPTURE_CHUNK_MB=${CAPTURE_CHUNK_MB:-10}
+      - CAPTURE_CAP_MB=${CAPTURE_CAP_MB:-2048}
+      - CAPTURE_MAX_RESTARTS=${CAPTURE_MAX_RESTARTS:-5}
+    volumes:
+      - capture:/capture
+      - .:/render:ro
+"""
+
+
+def _compose_with_capture(compose: str) -> str:
+    """Insert the capture sidecar service and its private volume into a rendered compose text."""
+    compose = compose.replace(
+        "volumes:\n  scratch:\n", "volumes:\n  scratch:\n  capture:\n"
+    )
+    marker = "\nnetworks:\n" if "\nnetworks:\n" in compose else "\nvolumes:\n"
+    return compose.replace(marker, "\n" + _COMPOSE_CAPTURE_SERVICE + marker, 1)
+
+
 _COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
     "    network_mode: none\n",
     """    # this range requests egress: the deployment supplies the uplink network
@@ -185,7 +224,15 @@ def render_bundle(
     if any(network.dhcp for network in plan.networks):
         caps.append("NET_RAW")
     template = _COMPOSE_UPLINK if plan.requirements.egress_uplink else _COMPOSE_ISOLATED
-    write("compose.yaml", template.replace("__CAPS__", ", ".join(caps)))
+    compose = template.replace("__CAPS__", ", ".join(caps))
+    if plan.requirements.evidence_capture:
+        compose = _compose_with_capture(compose)
+        write(
+            f"capture/{BRIDGES_FILENAME}",
+            render_bridges_tsv({n.name: n.bridge for n in plan.networks}),
+        )
+        write(f"capture/{SUPERVISOR_FILENAME}", SUPERVISOR_SOURCE)
+    write("compose.yaml", compose)
 
     write("netns/bridges.txt", "".join(f"{n.bridge}\n" for n in plan.networks))
     write(
