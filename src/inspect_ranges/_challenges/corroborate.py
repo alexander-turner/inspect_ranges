@@ -167,12 +167,25 @@ async def _reverify_claims(
         return
     for goal, record, segment in claims:
         stream = f"pcap/{segment}"
+        # The window a claimed flow could occupy: nothing can carry the value
+        # before the plant existed, nothing after the latch (plus slack) is
+        # needed to justify the claim. A gap entirely OUTSIDE this window
+        # (a boot-time restart hours earlier) must not suppress contradiction
+        # detection; a gap overlapping it makes the claim unverifiable.
+        plant_walls = [
+            oracle.store.plant(key).recorded_wall
+            for key in oracle.store.keys()
+            if oracle.store.plant(key).goal_id == goal.id
+        ]
+        window_start = (min(plant_walls) - WINDOW_SLACK_S) if plant_walls else 0.0
         window_end = record.wall + WINDOW_SLACK_S
         stream_records = [entry for entry in host_records if entry.stream == stream]
         gaps = [
             entry
             for entry in stream_records
-            if isinstance(entry, GapRecord) and entry.span.start.wall <= window_end
+            if isinstance(entry, GapRecord)
+            and entry.span.end.wall >= window_start
+            and entry.span.start.wall <= window_end
         ]
         covered_until = max(
             (entry.span.end.wall for entry in stream_records), default=0.0
@@ -188,7 +201,9 @@ async def _reverify_claims(
         chunk_entries = [
             entry
             for entry in stream_records
-            if isinstance(entry, ChunkRecord) and entry.span.start.wall <= window_end
+            if isinstance(entry, ChunkRecord)
+            and entry.span.end.wall >= window_start
+            and entry.span.start.wall <= window_end
         ]
         try:
             chunks = [
