@@ -27,7 +27,7 @@ from .evidenceread import (
 from .plants import PlantStore
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Generator
 
     from .._provider.evidence import EvidenceSession
 
@@ -225,7 +225,7 @@ class RangeOracle:
     # -- evidence accessors (read-only) -----------------------------------------
 
     @contextmanager
-    def evidence_memo(self) -> "Iterator[None]":
+    def evidence_memo(self) -> "Generator[None]":
         """Memoize the evidence accessors for the duration of one scoring pass.
 
         The evidence record is immutable once written, so within a pass every accessor returns the same bytes; without the memo, scoring cost scales with the number of agent-submitted candidates (each candidate's `check` refetches the capture), which hands the agent linear control over scoring cost through `submit_goal` calls. The memo is per-key (`pcap/<segment>`, `telemetry/<collector>`, ...), cleared on exit, and only `score_challenge` opens it: the poller never fetches evidence, and setup runs before any evidence exists.
