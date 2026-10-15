@@ -64,6 +64,8 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 """Post-ack budget for the host plane's single request frame to arrive."""
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
+_EVIDENCE_STOP_BUDGET_S = 30.0
+"""Bound on the pre-teardown evidence harvest and seal (mirrors the driver's finalize budget): teardown is never hostage to a wedged capture tap."""
 _COMPLETED_RUN_CAP = 64
 """Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound).
 
@@ -654,15 +656,23 @@ class Applier:
             )
 
     async def _stop_evidence(self, lease_id: str) -> None:
-        """Harvest and seal one lease's capture before its containers die; never raises."""
+        """Harvest and seal one lease's capture before its containers die; bounded and never raises (a wedged tap must not stall the teardown reply)."""
         entry = self._evidence.pop(lease_id, None)
         if entry is None:
             return
         streamer, writer = entry
         try:
-            await streamer.stop()
-            _, digest = await writer.seal("complete")
+            async with asyncio.timeout(_EVIDENCE_STOP_BUDGET_S):
+                await streamer.stop()
+                _, digest = await writer.seal("complete")
             logger.info("evidence capture sealed: lease=%s digest=%s", lease_id, digest)
+        except TimeoutError:
+            logger.warning(
+                "evidence stop/seal for lease=%s exceeded its %.0fs budget "
+                "(record stays unsealed, reported as such by verify)",
+                lease_id,
+                _EVIDENCE_STOP_BUDGET_S,
+            )
         except Exception:
             logger.exception(
                 "evidence capture stop/seal failed for lease=%s (record stays "

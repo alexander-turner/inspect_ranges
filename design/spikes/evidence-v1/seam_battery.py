@@ -125,6 +125,13 @@ async def _nonempty(location: str) -> bool:
     return len(await chunk_keys(location)) > 0
 
 
+async def _has_manifests(location: str) -> bool:
+    try:
+        return len(await store_for_location(location).list("manifests")) > 0
+    except Exception:
+        return False
+
+
 class SessionProbe:
     def __init__(self, location: str, session) -> None:  # type: ignore[no-untyped-def]
         self.location = location
@@ -216,10 +223,19 @@ async def s2_kill9_reaper() -> None:
     pre_kill = await wait_for(
         lambda: _nonempty(location), "pre-kill evidence is on S3", timeout=120
     )
+    # the manifest commitment batches (part_interval_s): the headline claim is
+    # about COMMITTED evidence, so the kill waits for a delivered part; chunks
+    # newer than the last part are the bounded crash-window loss, visible
+    # below as listed-unreferenced residue
+    committed = await wait_for(
+        lambda: _has_manifests(location),
+        "pre-kill manifest part committed on S3",
+        timeout=60,
+    )
     keys_before = await chunk_keys(location)
     os.kill(child.pid, signal.SIGKILL)
     child.wait(timeout=10)
-    check(pre_kill, "kill -9 delivered AFTER evidence left the instance")
+    check(pre_kill and committed, "kill -9 delivered AFTER evidence left the instance")
     await asyncio.sleep(25)  # lease TTL 20s: expire
     # sweep is sync by design (the reaper is a fresh process); from the
     # battery's loop it runs in a thread so the reap-seal's own event loop
@@ -242,6 +258,13 @@ async def s2_kill9_reaper() -> None:
     check(
         set(keys_before) <= set(keys_after),
         "every pre-kill chunk survived the driver's death",
+    )
+    # chunks newer than the last committed part are the recorded batching
+    # trade-off: durable, listed as unreferenced residue, never a break
+    print(
+        f"unreferenced post-kill chunks (bounded crash window): "
+        f"{len(report.unreferenced)}",
+        flush=True,
     )
 
 
