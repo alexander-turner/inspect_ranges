@@ -419,3 +419,36 @@ class TestScorerWiring:
         assert metadata["validity"] == "valid"
         corroboration = cast(dict[str, Any], metadata["corroboration"])
         assert corroboration["incomplete"] is True
+
+
+class TestWindowScoping:
+    def test_gap_outside_window_does_not_suppress_contradiction(
+        self, tmp_path: Path
+    ) -> None:
+        """An ancient boot-time gap (long before the plant existed) must not shield a forged claim from contradiction."""
+
+        async def scenario() -> CorroborationReport:
+            now = time.time()
+            location = await write_evidence(
+                tmp_path,
+                pcap_chunks=[
+                    (
+                        pcap_chunk([(GUEST_IP, b"innocent")]),
+                        span(now - 60, now + 10),
+                    )
+                ],
+                gaps=[span(now - 7200, now - 7100)],
+            )
+            oracle = oracle_with_evidence(tmp_path, location)
+            await plant_token(oracle)  # recorded_wall ~ now, far after the gap
+            return await corroborate(
+                oracle,
+                Store(),
+                execute_challenge(),
+                {"g": claim_record(wall=now)},
+                Submissions([Submission(goal_id="g", value="x", wall=time.time())]),
+            )
+
+        report = run(scenario())
+        assert report.verdicts["g"] == "contradicted"
+        assert report.invalid
