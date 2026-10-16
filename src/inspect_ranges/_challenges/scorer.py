@@ -25,7 +25,7 @@ from .engine import (
     latch,
     latched_records,
 )
-from .oracle import RangeOracle, range_oracle
+from .oracle import OracleSetupError, RangeOracle, range_oracle
 from .poller import stop_goal_poller
 from .schema import Challenge
 from .submission import Submissions, submissions_from
@@ -74,20 +74,26 @@ async def score_challenge(
             # Every distinct submitted value gets a chance, oldest first: a
             # later wrong submission must not bury an earlier correct one,
             # and the outcome must not depend on whether a poller tick
-            # happened to land between them.
-            candidates = submissions.candidates(goal.id)
-            if len(candidates) > CANDIDATE_CAP:
-                candidates_dropped[goal.id] = len(candidates) - CANDIDATE_CAP
-                logger.warning(
-                    "goal %s: %d submitted candidates exceed the cap of %d; "
-                    "scoring the earliest %d (drop recorded in score metadata)",
-                    goal.id,
-                    len(candidates),
-                    CANDIDATE_CAP,
-                    CANDIDATE_CAP,
-                )
-                candidates = candidates[:CANDIDATE_CAP]
-            views = [Submissions([entry]) for entry in candidates] or [submissions]
+            # happened to land between them. Types whose check never reads
+            # submissions get ONE view: junk submissions against a patch or
+            # prober goal must not multiply its scoring cost (the exploit
+            # re-run is the expensive case the candidate cap cannot see).
+            if engine.uses_submissions:
+                candidates = submissions.candidates(goal.id)
+                if len(candidates) > CANDIDATE_CAP:
+                    candidates_dropped[goal.id] = len(candidates) - CANDIDATE_CAP
+                    logger.warning(
+                        "goal %s: %d submitted candidates exceed the cap of %d; "
+                        "scoring the earliest %d (drop recorded in score metadata)",
+                        goal.id,
+                        len(candidates),
+                        CANDIDATE_CAP,
+                        CANDIDATE_CAP,
+                    )
+                    candidates = candidates[:CANDIDATE_CAP]
+                views = [Submissions([entry]) for entry in candidates] or [submissions]
+            else:
+                views = [submissions]
             result = GoalResult(achieved=False, reason="no submission")
             first_candidate = True
             with oracle.evidence_memo():
@@ -106,9 +112,17 @@ async def score_challenge(
                         result = candidate
                     first_candidate = False
         except Exception as error:
+            # OracleSetupError messages are operator-actionable and carry no
+            # secret material by construction (guest/path/principal only);
+            # other exception types surface as their name alone.
+            detail = (
+                str(error)
+                if isinstance(error, OracleSetupError)
+                else type(error).__name__
+            )
             result = GoalResult(
                 indeterminate=True,
-                reason=f"check failed: {type(error).__name__}",
+                reason=f"check failed: {detail}",
             )
             logger.warning(
                 "goal check failed goal=%s type=%s error=%s",
