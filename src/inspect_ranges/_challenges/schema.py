@@ -5,6 +5,7 @@ The design of record is the challenges-and-goals reviewer document (`design/chal
 A goal in YAML is flat: `{id, type, weight, ...per-type fields}`. Goals parse as a discriminated union on `type`, so each type's fields validate against its own strict model and positions in errors point at the authored keys.
 """
 
+import re
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, cast
 
@@ -38,6 +39,7 @@ __all__ = [
     "ControlGoal",
     "DegradeGoal",
     "DetectionGoal",
+    "EvadeGoal",
     "ExecuteGoal",
     "ExfiltrateGoal",
     "FlagGoal",
@@ -51,6 +53,7 @@ __all__ = [
     "PatchGoal",
     "Primitive",
     "Scoring",
+    "SeverityFilter",
     "TamperGoal",
     "challenge_issues",
     "load_challenges",
@@ -358,6 +361,129 @@ class DetectionGoal(GoalBase):
         return super().observers() | _observers("telemetry-collector")
 
 
+class SeverityFilter(_StrictModel):
+    """How to read an alert's severity from one export record, and the floor that counts.
+
+    Severity vocabularies are collector-specific, so the goal declares the extraction: `pattern` is a regex with exactly one capture group, applied per newline-delimited export record. Numeric mode (no `levels`): the capture parses as an integer, `floor` is an integer, and `lower_is_more_severe` flips the comparison for vocabularies like journald's `PRIORITY` (0 is emergency, 7 is debug, so a floor of 4 counts captures of 4 or lower). Ordered mode (`levels` given, least to most severe): the capture and `floor` are both level names. Records the pattern does not match, or whose capture does not parse in the declared vocabulary, are not alerts and never count toward the threshold.
+    """
+
+    pattern: str = Field(min_length=1)
+    """Regex with exactly one capture group extracting the severity token from a record."""
+    floor: int | str
+    """Severity at or beyond which a record counts: an integer in numeric mode, a level name in ordered mode."""
+    levels: list[str] | None = None
+    """Ordered severity vocabulary, least to most severe; omitted means numeric mode."""
+    lower_is_more_severe: bool = False
+    """Numeric mode only: lower captured numbers are more severe (journald `PRIORITY` semantics)."""
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "SeverityFilter":
+        issues: list[Issue] = []
+        try:
+            groups = re.compile(self.pattern).groups
+        except re.error as error:
+            issues.append(
+                Issue(
+                    code="evade-severity-pattern",
+                    path=("pattern",),
+                    message=f"severity pattern does not compile: {error}",
+                )
+            )
+        else:
+            if groups != 1:
+                issues.append(
+                    Issue(
+                        code="evade-severity-pattern",
+                        path=("pattern",),
+                        message=f"severity pattern must carry exactly one capture group (has {groups})",
+                    )
+                )
+        if self.levels is not None:
+            if self.lower_is_more_severe:
+                issues.append(
+                    Issue(
+                        code="evade-severity-mode",
+                        path=("lower_is_more_severe",),
+                        message="`lower_is_more_severe` is numeric-mode only; ordered `levels` carry their own direction",
+                    )
+                )
+            if not isinstance(self.floor, str) or self.floor not in self.levels:
+                issues.append(
+                    Issue(
+                        code="evade-severity-mode",
+                        path=("floor",),
+                        message="ordered mode: `floor` must be one of the declared `levels`",
+                        hint=did_you_mean(str(self.floor), sorted(self.levels)),
+                    )
+                )
+        elif not isinstance(self.floor, int):
+            issues.append(
+                Issue(
+                    code="evade-severity-mode",
+                    path=("floor",),
+                    message="numeric mode (no `levels`): `floor` must be an integer",
+                )
+            )
+        if issues:
+            raise IssueError(issues)
+        return self
+
+
+class EvadeGoal(GoalBase):
+    """Achieve objectives while staying quiet (attacker direction): the dual of `detection`.
+
+    Alerts matching the declared filter stay below `threshold` within the window, scored from the exported telemetry under the same completeness precondition as `detection`: a silenced collector reads per `on_sensor_tamper`, never as a free stealth pass. Export records are newline-delimited (the v1 convention); window edges resolve at chunk-span granularity like `detection`.
+    """
+
+    type: Literal["evade"] = "evade"
+    collector: str = Field(min_length=1)
+    """Declared telemetry collector or sink whose export is counted."""
+    severity: SeverityFilter
+    """How severity is read from a record and the floor at which it counts."""
+    match: str | None = None
+    """Optional regex a record must also match to count (a tag or alert marker); omitted means every record is a candidate."""
+    threshold: int = Field(ge=0)
+    """Maximum qualifying alerts for full credit."""
+    zero_at: int | None = Field(default=None, gt=0)
+    """Count at which partial credit reaches zero (linear decay above `threshold`); omitted means binary at the threshold."""
+    window_s: float | None = Field(default=None, gt=0)
+    """Observation window in seconds; omitted means the whole run."""
+    on_sensor_tamper: Literal["indeterminate", "fail", "succeed"] = "indeterminate"
+    """What a completeness violation means: `indeterminate` (default; never a free stealth pass), `fail` (tampering is out of bounds; accepts that an infrastructure gap also fails this goal), or `succeed` (sensor destruction is legitimate evasion; waives completeness but never erases alerts already recorded)."""
+
+    default_primitive: ClassVar[Primitive | None] = None
+    """No default label: evade is a constraint on how objectives are reached, not a capability (the primitive mapping is a v1 proposal; see `challenges-v1.md`)."""
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "EvadeGoal":
+        issues: list[Issue] = []
+        if self.zero_at is not None and self.zero_at <= self.threshold:
+            issues.append(
+                Issue(
+                    code="evade-decay-incoherent",
+                    path=("zero_at",),
+                    message=f"`zero_at` ({self.zero_at}) must exceed `threshold` ({self.threshold}) for the decay to have a span",
+                )
+            )
+        if self.match is not None:
+            try:
+                re.compile(self.match)
+            except re.error as error:
+                issues.append(
+                    Issue(
+                        code="evade-match-pattern",
+                        path=("match",),
+                        message=f"match pattern does not compile: {error}",
+                    )
+                )
+        if issues:
+            raise IssueError(issues)
+        return self
+
+    def observers(self) -> frozenset[ObserverKind]:
+        return super().observers() | _observers("telemetry-collector")
+
+
 class JudgeGoal(GoalBase):
     """Produce an open-ended artifact graded by an LLM or human (`model-graded`, weight-capped by the engine)."""
 
@@ -398,6 +524,7 @@ Goal = Annotated[
     | TamperGoal
     | AvailabilityGoal
     | DetectionGoal
+    | EvadeGoal
     | JudgeGoal
     | PatchGoal,
     Field(discriminator="type"),
@@ -416,6 +543,7 @@ GOAL_TYPES: dict[str, type[GoalBase]] = {
     "tamper": TamperGoal,
     "availability": AvailabilityGoal,
     "detection": DetectionGoal,
+    "evade": EvadeGoal,
     "judge": JudgeGoal,
     "patch": PatchGoal,
 }
@@ -567,7 +695,7 @@ def required_observers(challenge: Challenge) -> frozenset[ObserverKind]:
 def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
     """Cross-reference validated challenges against a validated range, collecting all findings.
 
-    Checks: goal hosts name declared hosts or routers, segment references name declared networks, `answer` variables are declared range variables, `detection` collectors appear in the range's declared telemetry flows, and observers that are designed but not built refuse.
+    Checks: goal hosts name declared hosts or routers, segment references name declared networks, `answer` variables are declared range variables, `detection` and `evade` collectors appear in the range's declared telemetry flows, and observers that are designed but not built refuse.
 
     Args:
         challenges: A structurally valid challenges file.
@@ -638,7 +766,10 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
                             set(spec.variables),
                         )
                     )
-            if isinstance(goal, DetectionGoal) and goal.collector not in collectors:
+            if (
+                isinstance(goal, (DetectionGoal, EvadeGoal))
+                and goal.collector not in collectors
+            ):
                 issues.append(
                     unknown(
                         "unknown-collector",
