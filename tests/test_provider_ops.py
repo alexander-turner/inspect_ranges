@@ -310,23 +310,24 @@ def test_daemon_stream_truncation_raises_output_limit(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+class RestartAcrossDelivery(LocalEndpoint):
+    """Loses the first exec reply in flight and restarts before the resend arrives."""
+
+    def __init__(self, name: str, root: Path) -> None:
+        super().__init__(name, root)
+        self.interrupted = False
+
+    async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+        reply = await super().handle(message, bulk)
+        if isinstance(message, ExecRequest) and not self.interrupted:
+            self.interrupted = True
+            self.drop_next_reply = True  # the reply is lost in flight...
+            self.restart()  # ...and the daemon restarts before the resend
+        return reply
+
+
 def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> None:
     """Layer 2b: an exec whose delivery needed a same-id resend across a daemon restart surfaces `SessionChangedError` (the restart emptied the dedupe store, so exactly-once no longer holds); the re-pin lets the next op proceed."""
-
-    class RestartAcrossDelivery(LocalEndpoint):
-        """Loses the first exec reply in flight and restarts before the resend arrives."""
-
-        def __init__(self, name: str, root: Path) -> None:
-            super().__init__(name, root)
-            self.interrupted = False
-
-        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-            reply = await super().handle(message, bulk)
-            if isinstance(message, ExecRequest) and not self.interrupted:
-                self.interrupted = True
-                self.drop_next_reply = True  # the reply is lost in flight...
-                self.restart()  # ...and the daemon restarts before the resend
-            return reply
 
     async def scenario() -> None:
         transport = LoopbackTransport(guests=())
@@ -445,19 +446,6 @@ def test_resent_exec_that_times_out_still_confirms_the_session(
     tmp_path: Path,
 ) -> None:
     """A resent delivery that lands as a command-layer budget expiry is exactly as restart-risky as a resent success: the session verdict outranks the timeout verdict."""
-
-    class RestartAcrossDelivery(LocalEndpoint):
-        def __init__(self, name: str, root: Path) -> None:
-            super().__init__(name, root)
-            self.interrupted = False
-
-        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-            reply = await super().handle(message, bulk)
-            if isinstance(message, ExecRequest) and not self.interrupted:
-                self.interrupted = True
-                self.drop_next_reply = True
-                self.restart()
-            return reply
 
     async def scenario() -> None:
         transport = LoopbackTransport(guests=())

@@ -23,6 +23,7 @@ from .._diagnostics import (
     IssueError,
     ValidationReport,
     did_you_mean,
+    issues_from_read_error,
     issues_from_validation_error,
     issues_from_yaml_error,
     locate,
@@ -937,7 +938,7 @@ def validate_challenges(
 ) -> ValidationReport:
     """Validate a `challenges.yaml` file, reporting every detectable issue at once.
 
-    Like `validate_range`, this never raises on invalid content: YAML syntax errors, structural schema violations, and (when a range is supplied) cross-reference problems all become `Issue` entries with stable codes and source positions.
+    Like `validate_range`, this never raises on invalid content: unreadable files (a directory, permissions, non-UTF-8 content), YAML syntax errors, structural schema violations, and (when a range is supplied) cross-reference problems all become `Issue` entries with stable codes and source positions.
 
     Args:
         path: Path to the challenges YAML file.
@@ -948,6 +949,8 @@ def validate_challenges(
     """
     try:
         data, node = parse_marked(path.read_text())
+    except (OSError, UnicodeDecodeError) as error:
+        return ValidationReport(file=str(path), issues=issues_from_read_error(error))
     except yaml.YAMLError as error:
         return ValidationReport(file=str(path), issues=issues_from_yaml_error(error))
     if not isinstance(data, dict):

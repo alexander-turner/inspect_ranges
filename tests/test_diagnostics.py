@@ -942,6 +942,16 @@ def test_yaml_syntax_error_has_position(tmp_path: Path) -> None:
     assert report.issues[0].line is not None
 
 
+def test_unreadable_file_reports_not_raises(tmp_path: Path) -> None:
+    """A directory or non-UTF-8 file becomes a `file-unreadable` issue, never a raise."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    for path in (tmp_path, binary):
+        report = validate_range(path)
+        assert not report.valid
+        assert codes(report) == ["file-unreadable"]
+
+
 def test_variables_substitute_defaults_before_validation(tmp_path: Path) -> None:
     report = report_with(
         """

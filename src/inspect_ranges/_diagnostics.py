@@ -272,6 +272,13 @@ def issues_from_yaml_error(error: yaml.YAMLError) -> list[Issue]:
     return [Issue(code="yaml-syntax", path=(), line=line, col=col, message=message)]
 
 
+def issues_from_read_error(error: OSError | UnicodeDecodeError) -> list[Issue]:
+    """Translate a file read failure (a directory, permissions, non-UTF-8 content) into a single `file-unreadable` issue."""
+    return [
+        Issue(code="file-unreadable", path=(), message=f"cannot read file: {error}")
+    ]
+
+
 def issues_from_validation_error(
     error: ValidationError, root_model: type[BaseModel], node: yaml.Node | None
 ) -> tuple[list[Issue], bool]:
