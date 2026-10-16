@@ -23,6 +23,7 @@ from typing_extensions import override
 
 from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
+from .._evidence.sealer import seal_abandoned
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
 from .._metadata import (
@@ -665,6 +666,27 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             await asyncio.to_thread(runtime.allocator.release, project)
             for lease in host_leases:
                 if lease.project == project:
+                    if lease.evidence_location is not None:
+                        # the reaper's rule applies here too: after teardown,
+                        # before release, a record the dead driver never sealed
+                        # gets its reaped seal; releasing the lease first would
+                        # delete the only pointer to it (quality-review A7).
+                        # Best-effort like the reaper: evidence trouble never
+                        # blocks reclamation.
+                        try:
+                            await seal_abandoned(
+                                lease.evidence_location,
+                                lease_id=lease.lease_id,
+                                sample_id=lease.sample_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "cli_cleanup reap-seal failed for %s at %s "
+                                "(record stays unsealed, reported as such by "
+                                "verify)",
+                                project,
+                                lease.evidence_location,
+                            )
                     await asyncio.to_thread(lease_store.release, lease.lease_id)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)
