@@ -302,17 +302,22 @@ async def _start_producers(
         return
     if session is None or not session.enabled:
         raise RuntimeError("prober or telemetry goals need a live evidence session")
-    if targets:
-        prober = Prober(session, oracle.project, targets)
-        prober.start()
-        session.register_producer(prober.stop)
+    # every raise-able step happens BEFORE anything starts: a failing
+    # telemetry half must not leave an already-started prober probing the
+    # unwound range of a refused sample (review finding on the fix round)
+    poller: TelemetryPoller | None = None
     if collectors:
         writer = session.driver_writer
         if writer is None:
             raise RuntimeError("telemetry export needs the driver evidence writer")
         poller = TelemetryPoller(oracle.channel, writer, collectors)
+    if poller is not None:
         await poller.start()
         session.register_producer(poller.stop)
+    if targets:
+        prober = Prober(session, oracle.project, targets)
+        prober.start()
+        session.register_producer(prober.stop)
 
 
 def _probe_targets(oracle: RangeOracle, challenge: Challenge) -> list[ProbeTarget]:
