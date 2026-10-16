@@ -600,6 +600,22 @@ class TestScoreChallenge:
         right, wrong = asyncio.run(scenario())
         assert right == 1.0 and wrong == 0.0
 
+    def test_unknown_answer_variable_refuses_at_setup(self, tmp_path: Path) -> None:
+        """On the range_spec-omitted dataset path nothing re-checks `answer` variables before the sample runs; the setup gate must refuse an undeclared variable loudly instead of letting the full episode score an opaque indeterminate (quality review R2-8)."""
+
+        async def scenario() -> None:
+            oracle, _, handle = make_oracle(tmp_path, session=FakePlantSession())
+            handle.spec = minimal_spec()
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[AnswerGoal(id="which-port", variable="telnet_prot")],
+            )
+            await run_setup(oracle, challenge)
+
+        with pytest.raises(RuntimeError, match="telnet_prot"):
+            asyncio.run(scenario())
+
     def test_failed_check_is_indeterminate_not_agent_failure(
         self, tmp_path: Path
     ) -> None:

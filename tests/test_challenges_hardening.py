@@ -320,7 +320,7 @@ class TestScorerGuardPins:
     @staticmethod
     def _flag_scenario(
         store: Store,
-    ) -> "tuple[Any, Any, Challenge, Submissions]":
+    ) -> "tuple[Store, Challenge, Submissions]":
         challenge = Challenge.model_validate(
             {
                 "id": "c",
@@ -331,7 +331,7 @@ class TestScorerGuardPins:
         subs = Submissions(
             [Submission(goal_id="f", value="VAL-7b7b", wall=time.time())]
         )
-        return store, None, challenge, subs
+        return store, challenge, subs
 
     def test_score_survives_store_read_failures(self, tmp_path: Path) -> None:
         async def scenario() -> float:
@@ -339,7 +339,7 @@ class TestScorerGuardPins:
             await oracle.store.record(
                 "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
             )
-            store, _, challenge, subs = self._flag_scenario(HostileReadStore())
+            store, challenge, subs = self._flag_scenario(HostileReadStore())
             value, _ = await score_challenge(oracle, store, challenge, subs)
             return value
 
@@ -361,7 +361,7 @@ class TestScorerGuardPins:
             await oracle.store.record(
                 "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
             )
-            store, _, challenge, subs = self._flag_scenario(Store())
+            store, challenge, subs = self._flag_scenario(Store())
             return await score_challenge(oracle, store, challenge, subs)
 
         value, metadata = asyncio.run(scenario())
@@ -421,13 +421,35 @@ class DiscloseFailOracle:
 class TestDisclosedValueFrameScrub:
     """A failing disclose leaves no disclosed-value bytes in the challenge-layer frames (uniformity with the record's scrub claim; the values are agent-disclosed by design)."""
 
-    def test_tamper_and_hijack_setup_frames_scrubbed(self) -> None:
+    def test_tamper_and_hijack_setup_frames_scrubbed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from inspect_ranges._challenges import observedtypes
         from inspect_ranges._challenges.observedtypes import TamperType
         from inspect_ranges._challenges.schema import TamperGoal
 
-        for goal_type_cls, goal in (
-            (TamperType, TamperGoal(id="t", host="web", location="8080/status")),
-            (HijackType, HijackGoal(id="h", host="db", service="crashsvc")),
+        # markers the scrub must erase: tamper's value is the (patched)
+        # token_hex draw; hijack's derives deterministically from the fixed
+        # DiscloseFailOracle nonce (0x5A0000000000 | (0x5e5e5e5e & 0xFFFFFFF0))
+        tamper_marker = "ab54cd32ef10ab54cd32ef10"
+        hijack_marker = "5a005e5e5e50"
+
+        def fixed_token_hex(nbytes: int | None = None) -> str:
+            return tamper_marker
+
+        monkeypatch.setattr(observedtypes, "token_hex", fixed_token_hex)
+
+        for goal_type_cls, goal, marker in (
+            (
+                TamperType,
+                TamperGoal(id="t", host="web", location="8080/status"),
+                tamper_marker,
+            ),
+            (
+                HijackType,
+                HijackGoal(id="h", host="db", service="crashsvc"),
+                hijack_marker,
+            ),
         ):
 
             async def scenario(
@@ -450,14 +472,22 @@ class TestDisclosedValueFrameScrub:
                 raise AssertionError("disclose unexpectedly succeeded")
 
             frames = asyncio.run(scenario())
-            disclosed = (
-                oracle_value
+            # marker-in-repr over ALL locals (the oracle-test scrub pattern),
+            # not just locals named `value`: a retained int whose hex is the
+            # disclosed value leaks it too (quality review R2-14)
+            ours = [
+                frame
                 for frame in frames
-                if "_challenges" in frame.f_code.co_filename
-                for name, oracle_value in frame.f_locals.items()
-                if name in ("value",)
-            )
-            leaked = list(disclosed)
-            assert leaked == [], (
-                f"{goal_type_cls.__name__}: disclosed value survived in frames: {leaked}"
-            )
+                if "inspect_ranges/_challenges" in frame.f_code.co_filename
+            ]
+            assert ours, "expected challenge-layer frames in the chain"
+            for frame in ours:
+                for name, local in frame.f_locals.items():
+                    renderings = [repr(local)]
+                    if isinstance(local, int) and not isinstance(local, bool):
+                        renderings.append(format(local, "x"))
+                    for rendering in renderings:
+                        assert marker not in rendering, (
+                            f"{goal_type_cls.__name__}: disclosed value in frame "
+                            f"{frame.f_code.co_name} local {name!r}"
+                        )

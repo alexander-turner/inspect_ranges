@@ -18,6 +18,8 @@ from inspect_ranges._challenges.schema import (
 )
 from pydantic import ValidationError
 
+from tests.telemetry_fixtures import meta_record, telemetry_obs
+
 EMPTY_STORE = cast(PlantStore, None)
 
 JOURNALD = SeverityFilter(
@@ -41,32 +43,6 @@ def goal(**overrides: Any) -> EvadeGoal:
     }
     fields.update(overrides)
     return EvadeGoal(**fields)
-
-
-def evade_obs(
-    meta: list[dict[str, Any]],
-    data: list[bytes],
-    gapped: bool = False,
-    data_spans: list[list[float]] | None = None,
-) -> Observations:
-    spans = data_spans if data_spans is not None else [[0.0, 10.0]] * len(data)
-    return Observations(
-        source="evidence",
-        reads={
-            "meta": json.dumps(meta).encode(),
-            "gapped": b"1" if gapped else b"0",
-            "data_spans": json.dumps(spans).encode(),
-        },
-        chunk_reads={"data": data},
-    )
-
-
-def meta_record(wall: float, outcome: str = "ok", **extra: Any) -> dict[str, Any]:
-    defaults: dict[str, Any] = {
-        "advanced": outcome == "ok",
-        "bytes": 10 if outcome == "ok" else 0,
-    }
-    return {"_wall": wall, "outcome": outcome, **defaults, **extra}
 
 
 def alerts(*priorities: int) -> bytes:
@@ -155,7 +131,7 @@ class TestSeverityCounting:
     GOAL = goal(threshold=1)
 
     def complete(self, data: list[bytes]) -> Observations:
-        return evade_obs([meta_record(1.0), meta_record(2.0)], data)
+        return telemetry_obs([meta_record(1.0), meta_record(2.0)], data)
 
     def test_journald_lower_is_more_severe(self) -> None:
         # floor 4: priorities 3 and 4 count, 5 does not
@@ -184,7 +160,7 @@ class TestSeverityCounting:
         assert EvadeType().compare(self.GOAL, obs, EMPTY_STORE).achieved
 
     def test_pre_window_chunks_do_not_count(self) -> None:
-        obs = evade_obs(
+        obs = telemetry_obs(
             [meta_record(95.0), meta_record(100.0)],
             [alerts(0, 0, 0), alerts(6)],
             data_spans=[[0.0, 5.0], [95.0, 100.0]],
@@ -206,13 +182,15 @@ class TestDecay:
         ],
     )
     def test_linear_decay(self, count: int, achieved: bool, partial: float) -> None:
-        obs = evade_obs([meta_record(1.0), meta_record(2.0)], [alerts(*([2] * count))])
+        obs = telemetry_obs(
+            [meta_record(1.0), meta_record(2.0)], [alerts(*([2] * count))]
+        )
         result = EvadeType().compare(goal(threshold=2, zero_at=6), obs, EMPTY_STORE)
         assert result.achieved is achieved
         assert result.partial == pytest.approx(partial)
 
     def test_binary_without_zero_at(self) -> None:
-        obs = evade_obs([meta_record(1.0), meta_record(2.0)], [alerts(2, 2, 2)])
+        obs = telemetry_obs([meta_record(1.0), meta_record(2.0)], [alerts(2, 2, 2)])
         result = EvadeType().compare(goal(threshold=2), obs, EMPTY_STORE)
         assert not result.achieved and result.partial is None
 
@@ -224,7 +202,7 @@ class TestSensorTamper:
     ]
 
     def gapped(self, data: list[bytes]) -> Observations:
-        return evade_obs([meta_record(1.0)], data, gapped=True)
+        return telemetry_obs([meta_record(1.0)], data, gapped=True)
 
     def test_default_indeterminate_never_a_free_pass(self) -> None:
         result = EvadeType().compare(goal(), self.gapped(self.QUIET), EMPTY_STORE)
@@ -252,7 +230,7 @@ class TestSensorTamper:
         assert not result.achieved and "5 qualifying" in (result.reason or "")
 
     def test_dirty_poll_routes_like_a_gap(self) -> None:
-        obs = evade_obs([meta_record(1.0), meta_record(2.0, outcome="error")], [])
+        obs = telemetry_obs([meta_record(1.0), meta_record(2.0, outcome="error")], [])
         assert EvadeType().compare(goal(), obs, EMPTY_STORE).indeterminate
 
     def test_non_flowing_window_routes_like_a_gap(self) -> None:
@@ -260,11 +238,13 @@ class TestSensorTamper:
             meta_record(1.0, outcome="quiet", advanced=False, bytes=0),
             meta_record(2.0, outcome="quiet", advanced=False, bytes=0),
         ]
-        result = EvadeType().compare(goal(), evade_obs(quiet_window, []), EMPTY_STORE)
+        result = EvadeType().compare(
+            goal(), telemetry_obs(quiet_window, []), EMPTY_STORE
+        )
         assert result.indeterminate
 
     def test_no_export_routes_through_tamper(self) -> None:
-        empty = evade_obs([], [])
+        empty = telemetry_obs([], [])
         assert EvadeType().compare(goal(), empty, EMPTY_STORE).indeterminate
         assert (
             EvadeType()
@@ -275,7 +255,9 @@ class TestSensorTamper:
 
 class TestQuietPass:
     def test_quiet_complete_flowing_achieves(self) -> None:
-        obs = evade_obs([meta_record(1.0), meta_record(2.0)], [b"routine lines only"])
+        obs = telemetry_obs(
+            [meta_record(1.0), meta_record(2.0)], [b"routine lines only"]
+        )
         result = EvadeType().compare(goal(), obs, EMPTY_STORE)
         assert result.achieved and "0 qualifying" in (result.reason or "")
 
@@ -288,7 +270,7 @@ class TestReviewPins:
         loud = b"\n".join(
             [json.dumps({"PRIORITY": "2"}, separators=(",", ":")).encode()] * 5
         )
-        obs = evade_obs([], [loud])
+        obs = telemetry_obs([], [loud])
         result = EvadeType().compare(goal(on_sensor_tamper="succeed"), obs, EMPTY_STORE)
         assert not result.achieved and "5 qualifying" in (result.reason or "")
         assert EvadeType().compare(goal(), obs, EMPTY_STORE).indeterminate
