@@ -161,7 +161,7 @@ One recorded tradeoff: the functional half checks the LAST recorded probe verdic
 
 ## Performance
 
-Scoring is measured, not budgeted: every setup and scoring stage records wall-clock per goal into the eval log (store key `inspect_ranges:timings`). Recorded reality across the reference batteries: plants cost ~0.01 s each; check-plus-compare runs 0.000 to 0.018 s per goal across all thirteen types; corroboration scans megabytes of capture in milliseconds; sample wall time is dominated by range boot and teardown, not scoring. The one deliberate exception is `patch`, whose exploit re-run is a real chain execution (about a second against the battery's chains; minutes against real CVE chains when those arrive). The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
+Scoring is measured, not budgeted: every setup and scoring stage records wall-clock per goal into the eval log (store key `inspect_ranges:timings`). Recorded reality across the reference batteries: plants cost ~0.01 s each; check-plus-compare runs 0.000 to 0.018 s per goal across every type except `patch`; corroboration scans megabytes of capture in milliseconds; sample wall time is dominated by range boot and teardown, not scoring. The one deliberate exception is `patch`, whose exploit re-run is a real chain execution (about a second against the battery's chains; minutes against real CVE chains when those arrive). The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
 
 ## What arrives with the images arc
 
