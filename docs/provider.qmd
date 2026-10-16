@@ -6,7 +6,7 @@ llms-description: "The libvirt_range Inspect sandbox provider: configuration (ra
 
 ## Overview
 
-Installing `inspect_ranges` registers the `libvirt_range` sandbox provider with Inspect. A task that names it gets a freshly booted range per sample: the attacker box is the default sandbox, every other guest is reachable as a named sandbox, and the whole range is torn down when the sample ends.
+Installing `inspect_ranges` registers the `libvirt_range` sandbox provider with Inspect. A task that names it gets a freshly booted range per sample: the attacker box (or foothold host) is the sample's sandbox, and the whole range is torn down when the sample ends. By default only the foothold is registered, so the agent's tool loop cannot reach targets by name; targets are reachable solely through the range network. See [Challenges](challenges.qmd) for why that wall exists.
 
 ``` {.python .fragment}
 from inspect_ai import Task, task
@@ -61,16 +61,19 @@ attacker:
   egress: none
 ```
 
-## Named sandboxes
+## The foothold sandbox
 
-`sandbox()` is the attacker's foothold host (or the attacker box itself); every other guest is addressable by its spec name:
+`sandbox()` is the attacker's foothold host (or the attacker box itself), and by default it is the ONLY registered sandbox: targets are not addressable by name from the agent's tool loop, which is the structural wall challenge scoring relies on (see [Challenges](challenges.qmd)).
 
 ``` {.python .fragment}
 from inspect_ai.util import sandbox
 
-await sandbox().exec(["id", "-un"])                 # the attacker box
-await sandbox("web").read_file("/home/agent/flag")  # the named target
+await sandbox().exec(["id", "-un"])  # the attacker box
 ```
+
+One inspect_ai semantic to know: with a single registered environment, `sandbox(name)` returns that environment for ANY name rather than raising, so `sandbox("web")` silently hands back the foothold. Treat any named `sandbox()` call in solver code as a bug under the default registration.
+
+For interactive range development, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox (attacker first). It is logged loudly because it removes the wall; never set it on scoring runs.
 
 Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts.
 
@@ -113,6 +116,7 @@ Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults
 | `INSPECT_RANGES_IMAGE_CACHE` | `~/.cache/inspect-ranges/images` | Where goldens and vendor images live (`images derive` writes here). |
 | `XDG_STATE_HOME` | `~/.local/state` | Root of provider state: project ownership, CID leases, staging (`<state>/inspect-ranges/`). |
 | `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides Inspect's default sample concurrency for this provider (the resource-weighted admission gate still applies). |
+| `INSPECT_RANGES_REGISTER_ALL_GUESTS` | unset | Registers every guest as a named sandbox (development only; removes the foothold wall and is logged loudly). |
 | `INSPECT_RANGES_RETRY_EXEC_ATTEMPTS` | 3 | Retry attempts for `exec`. |
 | `INSPECT_RANGES_RETRY_FILE_ATTEMPTS` | 5 | Retry attempts for file operations. |
 | `INSPECT_RANGES_RETRY_WAIT_INITIAL_S` | 1 | First retry backoff (exponential with jitter). |
