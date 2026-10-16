@@ -315,6 +315,43 @@ class TestPlantAndStart:
 
         asyncio.run(scenario())
 
+    def test_cancellation_during_producer_start_still_unwinds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sample cancellation mid-start must not leave the half-planted state (shielded unwind)."""
+        import inspect_ranges._challenges.setup as setup_module
+
+        async def hanging(*args: object, **kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        async def scenario() -> None:
+            monkeypatch.setattr(setup_module, "_start_producers", hanging)
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "user",
+                        "type": "flag",
+                        "host": "box",
+                        "path": "/tmp/user-flag",
+                    }
+                ]
+            )
+            task = asyncio.create_task(
+                plant_and_start(oracle, challenge, None, [])
+            )
+            await asyncio.sleep(0.2)  # plants land, producers hang
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # a detached unwind gets its beat
+            assert oracle.store.keys() == []
+            assert not (tmp_path / "tmp" / "user-flag").exists()
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
+
+        asyncio.run(scenario())
+
 
 class TestOracleSurface:
     def test_exec_and_read_file_roundtrip(self, tmp_path: Path) -> None:

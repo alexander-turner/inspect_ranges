@@ -5,6 +5,7 @@ Setup is symmetric with scoring (`challenges-v1.md`): a prepended solver builds 
 Setup dispatches through the goal-type registry (`engine.py`): each type's `setup` plants what its proof contract needs and returns plant keys for unwind. Observer-arming types (prober, detection) join with their slices.
 """
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -113,6 +114,34 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
         await oracle.store.discard(key, reason="setup unwound")
 
 
+async def _unwind_shielded(oracle: RangeOracle, keys: list[str]) -> None:
+    """`_unwind`, immune to the caller's cancellation (review finding on the fix round).
+
+    A sample cancellation arriving mid-unwind would otherwise abort it partway: exactly the half-planted ledger state the unwind exists to prevent. The range teardown removes planted files regardless; what this preserves is the plant ledger's discard events, so on a second cancellation the unwind finishes detached rather than dying.
+    """
+    if not keys:
+        return
+    task = asyncio.create_task(_unwind(oracle, keys))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if task.cancelled():
+            raise
+
+        def _log_outcome(done: "asyncio.Task[None]") -> None:
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning(
+                    "detached setup unwind failed: %s",
+                    type(done.exception()).__name__,
+                )
+
+        task.add_done_callback(_log_outcome)
+        logger.warning(
+            "setup unwind detached under cancellation (range teardown removes planted files)"
+        )
+        raise
+
+
 async def run_setup(
     oracle: RangeOracle,
     challenge: Challenge,
@@ -147,7 +176,7 @@ async def run_setup(
         try:
             goal_engine = goal_type(goal.type)
         except KeyError as error:
-            await _unwind(oracle, planted)
+            await _unwind_shielded(oracle, planted)
             raise RuntimeError(
                 f"challenge {challenge.id!r} uses goal type {goal.type!r} "
                 "with no registered engine (slice 4 types arrive with their "
@@ -156,11 +185,15 @@ async def run_setup(
         start = time.monotonic()
         try:
             keys = await goal_engine.setup(goal, oracle)
-        except Exception as error:
-            await _unwind(oracle, planted)
-            raise RuntimeError(
-                f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
-            ) from error
+        except BaseException as error:
+            # BaseException: a sample cancellation mid-plant must unwind too
+            # (shielded), not leave the half-planted state (review finding)
+            await _unwind_shielded(oracle, planted)
+            if isinstance(error, Exception):
+                raise RuntimeError(
+                    f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
+                ) from error
+            raise
         planted.extend(keys)
         elapsed = time.monotonic() - start
         if store is not None:
@@ -253,7 +286,7 @@ async def plant_and_start(
     try:
         await _start_producers(oracle, challenge, collectors)
     except BaseException:
-        await _unwind(oracle, planted)
+        await _unwind_shielded(oracle, planted)
         raise
 
 
