@@ -91,7 +91,7 @@ async def one_realize(
     error: Exception | None = None
     try:
         async for report in channel.realize(
-            digest, [], verify_allowance_s=envelope if use_envelope else None
+            digest, [], gap_allowances={"verify": envelope} if use_envelope else None
         ):
             stages.append(report.stage)
             if report.stage == "verify":

@@ -342,7 +342,19 @@ async def main() -> int:
             f"s.sendall(b'{address}\\n'); s.close()\" || true",
         )
         await asyncio.sleep(3.0)
-        result, _ = await scored(oracle, hijack)
+        # bounded corroboration wait (round 2): the dmesg conjunct lands with the
+        # next telemetry poll, but the console conjunct waits on console-chunk
+        # rotation and delivery, which the fixed 3 s sleep raced (21/22 twice on
+        # the post-integration re-run). Re-score until both conjuncts corroborate
+        # or the window closes; a real corroboration gap still fails here.
+        corroborate_deadline = time.monotonic() + 30.0
+        while True:
+            result, _ = await scored(oracle, hijack)
+            if bool(result.achieved) and result.corroborated is True:
+                break
+            if time.monotonic() > corroborate_deadline:
+                break
+            await asyncio.sleep(2.0)
         check(
             bool(result.achieved) and result.corroborated is True,
             "hijack: crash record carries the disclosed address "
