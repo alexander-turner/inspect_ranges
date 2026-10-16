@@ -304,6 +304,17 @@ def _window_flowing(in_window: list[dict[str, object]]) -> bool:
     )
 
 
+def _in_window_chunks(obs: Observations, window_start: float) -> "list[bytes]":
+    """Data chunks whose span reaches the window (chunk-span granularity, the shared caveat)."""
+    spans = _window_spans(obs)
+    kept: list[bytes] = []
+    for position, chunk in enumerate(obs.chunk_reads["data"]):
+        span_end = float(spans[position][1]) if position < len(spans) else 0.0
+        if span_end >= window_start:
+            kept.append(chunk)
+    return kept
+
+
 def _window_spans(obs: Observations) -> list[list[float]]:
     raw_spans: object = json.loads(obs.reads["data_spans"].decode() or "[]")
     return cast("list[list[float]]", raw_spans) if isinstance(raw_spans, list) else []
@@ -337,15 +348,10 @@ class DetectionType(GoalType):
         # the signal search is windowed too, at chunk-span granularity: a
         # pre-window signal must not decide this window's verdict in either
         # direction (chunk-B review finding)
-        spans = _window_spans(obs)
-        found = False
-        for position, chunk in enumerate(obs.chunk_reads["data"]):
-            span_end = float(spans[position][1]) if position < len(spans) else 0.0
-            if span_end < window_start:
-                continue
-            if signal.search(chunk) is not None:
-                found = True
-                break
+        found = any(
+            signal.search(chunk) is not None
+            for chunk in _in_window_chunks(obs, window_start)
+        )
         complete = _window_complete(obs.reads["gapped"], in_window)
         if not goal.stealth:
             if found:
@@ -376,12 +382,26 @@ def _qualifying_alerts(
     severity = goal.severity
     sev_pattern = re.compile(severity.pattern.encode())
     match_pattern = re.compile(goal.match.encode()) if goal.match is not None else None
-    spans = _window_spans(obs)
+    if severity.levels is not None:
+        level_rank = {name: rank for rank, name in enumerate(severity.levels)}
+        floor_rank = level_rank[cast(str, severity.floor)]
+
+        def qualifies(token: str) -> bool:
+            rank = level_rank.get(token)
+            return rank is not None and rank >= floor_rank
+    else:
+        floor_value = cast(int, severity.floor)
+        lower_wins = severity.lower_is_more_severe
+
+        def qualifies(token: str) -> bool:
+            try:
+                value = int(token)
+            except ValueError:
+                return False
+            return value <= floor_value if lower_wins else value >= floor_value
+
     count = 0
-    for position, chunk in enumerate(obs.chunk_reads["data"]):
-        span_end = float(spans[position][1]) if position < len(spans) else 0.0
-        if span_end < window_start:
-            continue
+    for chunk in _in_window_chunks(obs, window_start):
         for line in chunk.split(b"\n"):
             if not line:
                 continue
@@ -390,24 +410,7 @@ def _qualifying_alerts(
             captured = sev_pattern.search(line)
             if captured is None:
                 continue
-            token = captured.group(1).decode(errors="replace")
-            if severity.levels is not None:
-                if token not in severity.levels:
-                    continue
-                floor = severity.levels.index(cast(str, severity.floor))
-                qualifies = severity.levels.index(token) >= floor
-            else:
-                try:
-                    value = int(token)
-                except ValueError:
-                    continue
-                floor_value = cast(int, severity.floor)
-                qualifies = (
-                    value <= floor_value
-                    if severity.lower_is_more_severe
-                    else value >= floor_value
-                )
-            if qualifies:
+            if qualifies(captured.group(1).decode(errors="replace")):
                 count += 1
     return count
 
@@ -447,8 +450,14 @@ class EvadeType(GoalType):
         assert isinstance(goal, EvadeGoal)
         meta = _parse_records(obs.reads["meta"])
         if not meta:
+            # Data chunks can exist without meta (meta batches on its own
+            # cadence), so count what WAS recorded: succeed-mode must never
+            # read a loud-then-silenced run as quiet.
+            recorded = _qualifying_alerts(goal, obs, 0.0)
             return self._tamper_route(
-                goal, count=0, reason="collector exported no records"
+                goal,
+                count=recorded,
+                reason=f"collector exported no meta records ({recorded} qualifying alerts in recorded chunks)",
             )
         in_window, window_start = _window_meta(meta, goal.window_s)
         count = _qualifying_alerts(goal, obs, window_start)
