@@ -8,13 +8,12 @@ import click
 from .._compiler import PlanOptions, render_bundle
 from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
+from .._runtime.images import default_image_cache
 from .._runtime.ownership import default_state_dir
 from .._runtime.up import UpError, UpOptions
 from .._runtime.up import up as run_up
 from ..schema import load_range
 from ..types import IssueError
-
-_DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 
 
 @click.command()
@@ -33,8 +32,8 @@ _DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
 )
 @click.option(
     "--cid-base",
@@ -58,7 +57,7 @@ def up(
     bundle: Path | None,
     from_spec: Path | None,
     project: str | None,
-    image_cache: Path,
+    image_cache: Path | None,
     cid_base: int,
     readiness_timeout: float,
     keep: bool,
@@ -70,6 +69,8 @@ def up(
     """
     if (bundle is None) == (from_spec is None):
         raise click.UsageError("pass a BUNDLE directory or --from-spec, not both")
+    if image_cache is None:
+        image_cache = default_image_cache()
     options = UpOptions(
         project=project,
         image_cache=image_cache,

@@ -6,10 +6,9 @@ import click
 
 from .._compiler import PlanOptions, plan_json, render_bundle, resolve_plan
 from .._diagnostics import IssueError, ValidationReport, locate, parse_marked
+from .._runtime.images import default_image_cache
 from ..schema import validate_range
 from ..types import Issue, RangeSpec
-
-_DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 
 
 def _load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
@@ -47,8 +46,8 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
@@ -64,7 +63,7 @@ def plan(
     ctx: click.Context,
     path: Path,
     as_json: bool,
-    image_cache: Path,
+    image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
 ) -> None:
@@ -73,6 +72,8 @@ def plan(
     Unsupported constructs fail here, at planning, with the same diagnostics as `validate`.
     """
     spec = _load_or_exit(ctx, path)
+    if image_cache is None:
+        image_cache = default_image_cache()
     options = PlanOptions(
         image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
     )
@@ -121,8 +122,8 @@ def plan(
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
@@ -144,13 +145,15 @@ def render(
     ctx: click.Context,
     path: Path,
     out: Path,
-    image_cache: Path,
+    image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
     evidence_capture: bool,
 ) -> None:
     """Render a `range.yaml` into its realization bundle (plan + every artifact `apply` needs)."""
     spec = _load_or_exit(ctx, path)
+    if image_cache is None:
+        image_cache = default_image_cache()
     options = PlanOptions(
         image_cache=image_cache,
         cpu_model=cpu_model,

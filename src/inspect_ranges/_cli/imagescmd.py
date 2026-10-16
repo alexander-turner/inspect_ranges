@@ -5,9 +5,7 @@ from pathlib import Path
 import click
 
 from .._runtime import DeriveError, derive_golden, list_images
-from .._runtime.images import RECIPE_VERSION
-
-_DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
+from .._runtime.images import RECIPE_VERSION, default_image_cache
 
 
 @click.group()
@@ -29,8 +27,8 @@ def images() -> None:
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache the golden is derived into.",
 )
 @click.option(
@@ -50,7 +48,7 @@ def derive(
     vendor: Path,
     vendor_sha256: str,
     name: str | None,
-    image_cache: Path,
+    image_cache: Path | None,
     daemon_bundle: Path | None,
     daemon_sha256: str | None,
 ) -> None:
@@ -58,6 +56,8 @@ def derive(
 
     Offline derivation (Ubuntu noble vendor images in v1): verifies the vendor digest, bakes the pinned control daemon, disables ssh and the resolved stub listener, and records provenance beside the golden. Idempotent: re-running with the same inputs is a cache hit.
     """
+    if image_cache is None:
+        image_cache = default_image_cache()
     try:
         metadata, hit = derive_golden(
             vendor,
@@ -88,12 +88,14 @@ def derive(
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache to list.",
 )
-def list_cmd(image_cache: Path) -> None:
+def list_cmd(image_cache: Path | None) -> None:
     """List the cache: managed goldens with provenance, then unmanaged files."""
+    if image_cache is None:
+        image_cache = default_image_cache()
     try:
         managed, unmanaged = list_images(image_cache)
     except OSError as error:
