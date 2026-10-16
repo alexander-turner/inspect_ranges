@@ -54,6 +54,7 @@ from inspect_ranges._compiler.probe import render_probe_clamp_nftables
 from inspect_ranges._evidence.manifest import STREAM_NAME_PATTERN, check_name
 from inspect_ranges.types import IssueError
 
+from tests.telemetry_fixtures import meta_record, telemetry_obs
 from tests.test_compiler import two_segment_spec
 
 
@@ -418,32 +419,6 @@ class TestTamper:
         assert result.achieved
 
 
-def detection_obs(
-    meta: list[dict[str, Any]],
-    data: list[bytes],
-    gapped: bool = False,
-    data_spans: list[list[float]] | None = None,
-) -> Observations:
-    spans = data_spans if data_spans is not None else [[0.0, 10.0]] * len(data)
-    return Observations(
-        source="evidence",
-        reads={
-            "meta": json.dumps(meta).encode(),
-            "gapped": b"1" if gapped else b"0",
-            "data_spans": json.dumps(spans).encode(),
-        },
-        chunk_reads={"data": data},
-    )
-
-
-def meta_record(wall: float, outcome: str = "ok", **extra: Any) -> dict[str, Any]:
-    defaults: dict[str, Any] = {
-        "advanced": outcome == "ok",
-        "bytes": 10 if outcome == "ok" else 0,
-    }
-    return {"_wall": wall, "outcome": outcome, **defaults, **extra}
-
-
 class TestDetection:
     GOAL = DetectionGoal(id="alert", collector="journal", signal="FAILED LOGIN")
     STEALTH = DetectionGoal(
@@ -451,35 +426,35 @@ class TestDetection:
     )
 
     def test_signal_found_achieves(self) -> None:
-        obs = detection_obs([meta_record(1.0)], [b"xx FAILED LOGIN root xx"])
+        obs = telemetry_obs([meta_record(1.0)], [b"xx FAILED LOGIN root xx"])
         assert DetectionType().compare(self.GOAL, obs, EMPTY_STORE).achieved
 
     def test_absent_over_complete_window_fails(self) -> None:
-        obs = detection_obs([meta_record(1.0), meta_record(2.0)], [b"nothing here"])
+        obs = telemetry_obs([meta_record(1.0), meta_record(2.0)], [b"nothing here"])
         result = DetectionType().compare(self.GOAL, obs, EMPTY_STORE)
         assert not result.achieved and not result.indeterminate
 
     def test_poll_failure_in_window_is_indeterminate(self) -> None:
-        obs = detection_obs(
+        obs = telemetry_obs(
             [meta_record(1.0), meta_record(2.0, outcome="error")], [b"nothing"]
         )
         assert DetectionType().compare(self.GOAL, obs, EMPTY_STORE).indeterminate
 
     def test_gap_is_indeterminate(self) -> None:
-        obs = detection_obs([meta_record(1.0)], [b"nothing"], gapped=True)
+        obs = telemetry_obs([meta_record(1.0)], [b"nothing"], gapped=True)
         assert DetectionType().compare(self.GOAL, obs, EMPTY_STORE).indeterminate
 
     def test_no_export_is_indeterminate(self) -> None:
-        obs = detection_obs([], [])
+        obs = telemetry_obs([], [])
         assert DetectionType().compare(self.GOAL, obs, EMPTY_STORE).indeterminate
 
     def test_stealth_present_fails(self) -> None:
-        obs = detection_obs([meta_record(1.0)], [b"FAILED LOGIN"])
+        obs = telemetry_obs([meta_record(1.0)], [b"FAILED LOGIN"])
         result = DetectionType().compare(self.STEALTH, obs, EMPTY_STORE)
         assert not result.achieved
 
     def test_stealth_absent_over_flowing_window_achieves(self) -> None:
-        obs = detection_obs([meta_record(1.0), meta_record(2.0)], [b"routine noise"])
+        obs = telemetry_obs([meta_record(1.0), meta_record(2.0)], [b"routine noise"])
         assert DetectionType().compare(self.STEALTH, obs, EMPTY_STORE).achieved
 
     def test_stealth_without_flow_is_indeterminate(self) -> None:
@@ -488,7 +463,7 @@ class TestDetection:
             meta_record(2.0, outcome="quiet", advanced=False, bytes=0),
         ]
         result = DetectionType().compare(
-            self.STEALTH, detection_obs(quiet, []), EMPTY_STORE
+            self.STEALTH, telemetry_obs(quiet, []), EMPTY_STORE
         )
         assert result.indeterminate
 
