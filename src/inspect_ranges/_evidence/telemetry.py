@@ -373,21 +373,26 @@ class TelemetryPoller:
                 ),
             ),
         )
-        if state.replay_next and state.cursor is None:
-            # this bootstrap follows a reset (truncation or a missing cursor),
-            # so its window may re-ship entries already in the record; the
-            # flag makes the duplicate window decidable from the meta stream
-            meta["replay"] = True
-            state.replay_next = False
         meta["rc"] = outcome.rc
         meta["attempts"] = outcome.attempts
         if outcome.rc != 0:
             # the collector command itself failed (journald stopped, tool
-            # missing): an observation failure, same family as channel loss
+            # missing): an observation failure, same family as channel loss.
+            # A pending replay flag survives the failure: it marks the window
+            # that actually re-ships, not the attempt that failed (B11).
             raise RuntimeError(
                 f"poll command rc={outcome.rc}: "
                 + outcome.stderr[:200].decode("utf-8", errors="replace")
             )
+        if state.replay_next and state.cursor is None:
+            # this bootstrap follows a reset (truncation or a missing cursor),
+            # so its window may re-ship entries already in the record; the
+            # flag makes the duplicate window decidable from the meta stream,
+            # so it is consumed only by a bootstrap that SUCCEEDED (B11: a
+            # failed bootstrap previously ate it, leaving the real replayed
+            # window unflagged)
+            meta["replay"] = True
+            state.replay_next = False
         # the per-poll cap is enforced driver-side: the `RangeChannel` seam
         # carries no per-call output cap (`MessageChannel.exec` offers
         # `bulk_cap`, but the poller stays on the protocol seam), so the

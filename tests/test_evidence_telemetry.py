@@ -706,3 +706,28 @@ def test_alert_embedding_cursor_pattern_reaches_the_record(tmp_path: Path) -> No
         assert (await verify_location(store)).ok
 
     asyncio.run(run())
+
+
+def test_replay_flag_survives_a_failed_bootstrap(tmp_path: Path) -> None:
+    """B11: the flag marks the window that actually re-ships, not a failed attempt."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"x" * 5000, truncated=True),  # truncation -> replay_next
+            exec_ok(b"", rc=1),  # bootstrap FAILS: must not consume the flag
+            exec_ok(b"old window again\n-- cursor: s=2\n"),  # the real replay
+        ]
+        poller, writer, store = make_poller(
+            tmp_path, channel, [journal_spec(max_poll_bytes=4096)]
+        )
+        for _ in range(3):
+            await poller.poll_once("journal")
+        await writer.seal("incomplete")
+
+        meta = await meta_records(store, "journal")
+        flags = [(m["poll"], m["outcome"], m.get("replay")) for m in meta]
+        assert flags[1] == (2, "error", None), flags
+        assert flags[2] == (3, "ok", True), flags
+
+    asyncio.run(run())
