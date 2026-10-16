@@ -270,7 +270,6 @@ def test_hanging_sink_bounds_the_seal_phase(
         writer = session._driver  # pyright: ignore[reportPrivateUsage]
         assert writer is not None
         writer._sink = HangingSink()  # pyright: ignore[reportPrivateUsage]
-        monkeypatch.setattr(evidence_mod, "FINALIZE_BUDGET_S", 0.6)
         monkeypatch.setattr(evidence_mod, "SEAL_RESERVE_S", 0.3)
         started = time_mod.monotonic()
         await session.finalize()

@@ -41,9 +41,9 @@ The original battery's E3 covered only `egress: none`; the quality review found 
 
 ## Files
 
-- `spec.yaml` — the v0.2 NAT allowlist spec (validates green)
-- `compile.py` — production stages for allocation + NAT gateway election + the netns egress ruleset; spike glue for seeds/bridges/boot
-- `compose.yaml` — range + upstream on a static-subnet simulated internet; `ip_forward` via sysctls
-- `range/` — entrypoint extended to put the reserved gateway address on nat bridges
-- `run.sh` — validate, compile, boot, the 8-check battery, then the 4-check attacker-scoped phase (`spec-scoped.yaml`)
-- `tmp/run1.log` — the clean first-try run
+- `spec.yaml`: the v0.2 NAT allowlist spec (validates green)
+- `compile.py`: production stages for allocation + NAT gateway election + the netns egress ruleset; spike glue for seeds/bridges/boot
+- `compose.yaml`: range + upstream on a static-subnet simulated internet; `ip_forward` via sysctls
+- `range/`: entrypoint extended to put the reserved gateway address on nat bridges
+- `run.sh`: validate, compile, boot, the 8-check battery, then the 4-check attacker-scoped phase (`spec-scoped.yaml`)
+- `tmp/run1.log`: the clean first-try run
