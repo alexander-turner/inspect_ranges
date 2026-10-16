@@ -253,6 +253,23 @@ def test_unavailable_after_retries_against_a_dead_endpoint(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_dead_daemon_at_confirm_time_still_maps_read_file(tmp_path: Path) -> None:
+    """With a PINNED session, the confirm ping hits the same dead daemon: its own failure must not replace the mapped SandboxUnavailableError (quality-review B4; exec and write_file already behaved)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        env._handle.sessions["box"] = "a" * 32  # pyright: ignore[reportPrivateUsage]
+        transport.guests = {}  # dead: op fails, and the confirm ping fails too
+        with pytest.raises(SandboxUnavailableError):
+            await env.read_file("x", text=False)
+        with pytest.raises(SandboxUnavailableError):
+            await env.exec(["echo", "hi"])
+        with pytest.raises(SandboxUnavailableError):
+            await env.write_file("x", b"data")
+
+    asyncio.run(scenario())
+
+
 def test_tamper_is_never_unavailable(tmp_path: Path) -> None:
     """A tampering guest fails the sample hard; it must never read as 'temporarily unavailable'."""
 
