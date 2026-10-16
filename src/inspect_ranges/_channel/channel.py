@@ -1283,7 +1283,7 @@ class _StoredReply:
 class FakeGuest:
     """A deterministic in-memory guest endpoint speaking protocol v3.
 
-    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
+    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): every durable kind (`exec`, `read_file`, `write_file`) deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), while `ack`, `poll`, `ping`, and `diag` are answered fresh without touching the durable store, exactly as both daemons dispatch; durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
     """
 
     exec_count: int
@@ -1329,7 +1329,7 @@ class FakeGuest:
     # -- daemon behavior ----------------------------------------------------
 
     async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-        """Produce the reply for one request; every kind dedupes on id."""
+        """Produce the reply for one request; durable kinds dedupe on id, control kinds answer fresh."""
         if isinstance(message, AckRequest):
             self._stored.pop(message.target_id, None)
             self._tombstones.pop(message.target_id, None)
@@ -1361,6 +1361,10 @@ class FakeGuest:
                 ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
                 None,
             )
+        if isinstance(message, (PingRequest, DiagRequest)):
+            # answered fresh, never charged to the durable store: both daemons
+            # dispatch ack/poll/ping/diag before the store acquire
+            return self._handle_fresh(message, bulk)
         if (stored := self._stored.get(message.id)) is not None:
             return stored
         if message.id in self._tombstones:
