@@ -597,15 +597,31 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # LEAVE the lease, so the independent reaper reclaims the
                     # range after the lease expires
                     await runtime.host_provider.abandon(handle.host)
-                logger.warning(
-                    "range %s left up (--no-sandbox-cleanup); its host lease is "
-                    "no longer renewed, so 'inspect-ranges reaper' reclaims it "
-                    "after expiry; remove it sooner with: inspect-ranges down %s  "
-                    "(or: inspect sandbox cleanup libvirt_range %s)",
-                    handle.project,
-                    handle.project,
-                    handle.project,
-                )
+                if runtime.host_backend.startswith("uds:"):
+                    # a direct `inspect-ranges down` bypasses the applier and
+                    # leaks its admission charge and relay map (the recorded
+                    # direct-down hazard); the recovery advice must not
+                    # recommend it on this topology (quality-review B18)
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host lease "
+                        "is no longer renewed, so 'inspect-ranges reaper' "
+                        "reclaims it through the applier after expiry; remove "
+                        "it sooner with: inspect sandbox cleanup "
+                        "libvirt_range %s",
+                        handle.project,
+                        handle.project,
+                    )
+                else:
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host "
+                        "lease is no longer renewed, so 'inspect-ranges "
+                        "reaper' reclaims it after expiry; remove it sooner "
+                        "with: inspect-ranges down %s  (or: inspect sandbox "
+                        "cleanup libvirt_range %s)",
+                        handle.project,
+                        handle.project,
+                        handle.project,
+                    )
             return
         failures: list[str] = []
         for handle in remaining:

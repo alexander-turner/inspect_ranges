@@ -100,7 +100,7 @@ The daemon runs commands as the `agent` user via an absolute-path `runuser` unle
 
 - **Normal completion**: each sample's range is destroyed at sample end; the eval's remaining ranges are swept at task end.
 - **Interrupted samples** (Ctrl-C): teardown is deferred to task end, the Docker provider's convention, so cancellation never stalls on a slow teardown. The range stays booted but hypervisor-isolated and egress-controlled until the run finishes: containment does not depend on teardown having happened.
-- **`--no-sandbox-cleanup`**: ranges stay up, and the log names the removal commands per project: `inspect-ranges down <project>` or `inspect sandbox cleanup libvirt_range <project>`.
+- **`--no-sandbox-cleanup`**: ranges stay up, and the log names the removal commands per project. On the default local topology that is `inspect-ranges down <project>` or `inspect sandbox cleanup libvirt_range <project>`; on the separated (`uds:`) topology use `inspect sandbox cleanup` or the reaper, never a direct `inspect-ranges down`, which bypasses the applier and leaks its admission charge until the lease expires.
 - **Crash recovery**: `inspect sandbox cleanup libvirt_range` (no project argument) removes EVERY provider-origin project found in on-disk state (the CID lease registry plus provider-marked ownership records), from any shell, after any crash. It does not touch ranges booted by the CLI or other tools.
 
 A destroyed range releases its CID lease, ownership record, staging, and admission charge only after the teardown actually succeeded, so a failed teardown stays visible and recoverable rather than leaking.
