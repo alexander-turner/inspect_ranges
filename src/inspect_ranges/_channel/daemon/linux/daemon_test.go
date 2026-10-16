@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func execMessage(id string, argv ...string) *Message {
@@ -309,5 +313,79 @@ func TestReadFileBoundedForHugeSources(t *testing.T) {
 	if *reply.message.Size != limit || !*reply.message.Truncated {
 		t.Fatalf("expected truncated read at %d, got size=%d truncated=%v",
 			limit, *reply.message.Size, *reply.message.Truncated)
+	}
+}
+
+// TestCompletedCommandWithPipeHoldingChildIsNotEtime pins quality-review
+// finding B6: a command that exits within its budget reports its honest rc
+// even when a background descendant holds the stdout pipe and delays
+// cmd.Wait past the budget (bounded by WaitDelay). Before the fix this
+// returned ETIME, durably storing a budget error for a completed command.
+func TestCompletedCommandWithPipeHoldingChildIsNotEtime(t *testing.T) {
+	daemon := NewDaemon()
+	message := execMessage(rid(6401), "sh", "-c", "sleep 2 & echo done")
+	budget := int64(900)
+	message.Budget = &Budget{CommandMs: &budget}
+	start := time.Now()
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "exec_result" {
+		t.Fatalf("got %s/%v (%v): completed command misread as budget expiry",
+			reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+	if reply.message.Rc == nil || *reply.message.Rc != 0 {
+		t.Fatalf("rc = %v, want 0", reply.message.Rc)
+	}
+	if !bytes.Contains(reply.bulk, []byte("done")) {
+		t.Fatalf("stdout should carry the completed output, got %q", reply.bulk)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("returned in %v, before the budget fired: the pin never exercised the peek", elapsed)
+	}
+}
+
+// TestFileOpsRefuseWedgingTypes pins quality-review finding B10: FIFOs would
+// otherwise block the file planes at open(2) (writer-less read-open hangs
+// forever; each same-id retry pins another limiter slot), letting an agent
+// convert its own obstruction into an infrastructure-shaped failure. Both
+// planes refuse fast and loud; device reads keep their bounded contract
+// (TestReadFileBoundedForHugeSources).
+func TestFileOpsRefuseWedgingTypes(t *testing.T) {
+	daemon := NewDaemon()
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	start := time.Now()
+	reply := daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6501), Kind: "read_file", Path: fifo,
+	}, nil)
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("read_file blocked on the FIFO for %v", time.Since(start))
+	}
+	if reply.message.Kind != "error" || reply.message.Errno != "EINVAL" {
+		t.Fatalf("read: got %s/%v (%v), want error/EINVAL",
+			reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+
+	start = time.Now()
+	reply = daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6502), Kind: "write_file", Path: fifo,
+		DataSize: i64(1),
+	}, []byte("x"))
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("write_file blocked on the FIFO for %v", time.Since(start))
+	}
+	if reply.message.Kind != "error" {
+		t.Fatalf("reader-less FIFO write: got %s, want a loud error", reply.message.Kind)
+	}
+
+	mode := int64(0o600)
+	reply = daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6503), Kind: "write_file", Path: fifo,
+		Mode: &mode, DataSize: i64(1),
+	}, []byte("x"))
+	if reply.message.Kind != "error" {
+		t.Fatalf("mode-carrying FIFO write: got %s, want a loud error", reply.message.Kind)
 	}
 }

@@ -81,6 +81,11 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 - Both scans (the type's `compare` and `corroborate`'s rescan) apply the identical probe-frame exclusion (`netident.py`), so they cannot disagree and manufacture a false contradiction.
 - Gaps never fail a passing sample: B3's score is byte-identical to a gapless pass; only the corroboration section differs.
 
+### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
+
+- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
+- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding below.
+
 ## Honest notes
 
 - Per-plant setup timings print from the `inspect_ranges.challenges` logger (the measure-first rows); the eval-log timing instrumentation is slice 5.
@@ -111,7 +116,7 @@ Measure-first rows: check plus compare 0.000-0.002 s for every submission goal; 
 
 Scope reality, stated plainly: the six examples' actual vulnerable services (Zabbix 3.0.3 and friends) arrive only with the build/images arc, so these chains exercise the goal and chain MECHANICS against harness-realized weaknesses (users, sshd keys, a leaked reused key, a sudo misconfiguration) on standing images. The reference chains for the public CVEs drop into this battery's harness shape (arming solver, SUBMIT-line chains, per-check samples) when real images exist.
 
-Operational findings: an exec that leaves live background children (the armed services) holds the exec plane to its FULL in-guest budget and then returns rc 0 (observed: 180 s at the default, 40 s with an explicit 30 s arming budget; setsid plus fd redirection does not release it), which also explains the slice-3 battery's 173 s/sample wall; arming therefore sets an explicit short budget, and the proper fix (close-the-pipes semantics or a daemon-side drain rule) is recorded for the phase ledger. `su` was replaced by `setpriv` for service launches on general principle (PAM-free identity switch), though the budget, not PAM, was the actual cost.
+Operational findings: an exec that leaves live background children (the armed services) HELD the call for the full window and then returned rc 0 (observed: 180 s at the default, 40 s with an explicit 30 s arming budget; setsid plus fd redirection did not release it), which also explains the slice-3 battery's 173 s/sample wall; arming therefore sets an explicit short budget. Corrected by the quality review (finding A1): the hold was never in-guest (the daemon returned within WaitDelay, 5 s, and the budget never fired); the child's inherited copy of the connection's vsock fd kept the stream open past the daemon's close, stranding the driver's residual read. Fixed with CLOEXEC at the daemon's socket-creation sites; the explicit arming budgets stay as good practice. `su` was replaced by `setpriv` for service launches on general principle (PAM-free identity switch), though the fd inheritance, not PAM, was the actual cost.
 
 ## Post-close: the `evade` battery (`run_evade.sh`, CID 30950)
 
