@@ -149,3 +149,29 @@ def test_image_cache_knob_reaches_the_cli(
     )
     assert overridden.exit_code == 0
     assert str(explicit) in overridden.output
+
+
+def test_applier_startup_refusal_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unhealthy host's documented refusal surfaces as a one-line error with a nonzero exit, not a traceback (every other command converts expected failures the same way)."""
+    from inspect_ranges._cli import appliercmd
+    from inspect_ranges._host.local import HostNotReadyError
+
+    class RefusingApplier:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            raise HostNotReadyError("host not ready: docker daemon (fail)")
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(appliercmd, "Applier", RefusingApplier)
+    result = CliRunner().invoke(
+        ranges, ["applier", "--socket", str(tmp_path / "applier.sock")]
+    )
+    assert result.exit_code == 1
+    assert "host not ready" in result.output
+    assert "Traceback" not in result.output

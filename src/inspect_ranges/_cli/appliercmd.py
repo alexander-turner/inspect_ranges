@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from .._host.applier import Applier
+from .._host.local import HostNotReadyError
 from .._provider.state import default_image_cache
 from .._runtime.ownership import default_state_dir
 
@@ -77,3 +78,10 @@ def applier(
     except KeyboardInterrupt:
         # only reachable in the sliver before the loop installs handlers
         click.echo("applier stopped (interrupted during startup)")
+    except HostNotReadyError as error:
+        # the documented refusal ("refuses to serve unhealthy") is an expected
+        # condition, not a traceback
+        raise click.ClickException(str(error)) from error
+    except OSError as error:
+        # bind failures (socket path in use, unwritable directory)
+        raise click.ClickException(f"cannot serve on {socket_path}: {error}") from error
