@@ -305,7 +305,7 @@ def test_preamble_garbage_overlength_and_timeout_never_crash_the_server(
             assert await reader.read(1) == b""
             writer.close()
 
-            # the server survived all three: a good route still works
+            # the server survived all four: a good route still works
             beat = await rig.channel(lease).heartbeat()
             assert beat.uptime_ms >= 0
 

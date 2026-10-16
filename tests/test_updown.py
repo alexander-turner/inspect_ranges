@@ -546,26 +546,10 @@ def test_boot_json_shape_is_enforced(bundle: Path) -> None:
             load_boot(bundle)
 
 
-def test_boot_script_shell_quotes_values(bundle: Path) -> None:
-    from inspect_ranges._runtime.up import BootGuest, BootPlan
-    from inspect_ranges._runtime.up import boot_script as script
-
-    plan = BootPlan(
-        parallel=True,
-        verify={},
-        guests=[
-            BootGuest(
-                name="we.b-1",
-                cid=3000,
-                image_file="img.qcow2",
-                image_digest=None,
-                overlay_gb=10,
-                readiness="cloud-init",
-            )
-        ],
-    )
-    text = script(plan)
-    assert "we.b-1" in text and ";" not in text.replace(";\n", "")
+# NOTE: no quoting pin for boot_script. BootGuest's name/image grammar
+# forecloses shell metacharacters (pinned above) and shlex.quote is the
+# identity on every legal name, so a quoting test cannot fail through the
+# public API; the quoting is defense in depth only (quality-review R2-24).
 
 
 def test_cloud_init_probe_command_behaves(
