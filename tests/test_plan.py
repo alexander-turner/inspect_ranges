@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from inspect_ranges._compiler import (
     PlanOptions,
     plan_json,
@@ -189,6 +190,21 @@ def test_uplink_compose_variant(cache: Path, tmp_path: Path) -> None:
     compose = (out / "compose.yaml").read_text()
     assert "network_mode: none" not in compose
     assert "UPLINK_NETWORK" in compose and "ip_forward=1" in compose
+
+
+@pytest.mark.parametrize(
+    "spec", [two_segment_spec(), nat_spec()], ids=["isolated", "uplink"]
+)
+def test_range_netns_disables_ipv6_on_new_interfaces(
+    spec: RangeSpec, cache: Path, tmp_path: Path
+) -> None:
+    # bridges come up after the container starts: they must inherit IPv6 off,
+    # so no management address answers on a segment (agent-containment.md)
+    out = tmp_path / "bundle"
+    render_bundle(spec, out, options(cache))
+    compose = yaml.safe_load((out / "compose.yaml").read_text())
+    sysctls = compose["services"]["range"]["sysctls"]
+    assert "net.ipv6.conf.default.disable_ipv6=1" in sysctls
 
 
 def test_render_refuses_nonempty_directory(cache: Path, tmp_path: Path) -> None:
