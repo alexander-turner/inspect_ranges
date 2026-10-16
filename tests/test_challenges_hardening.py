@@ -442,6 +442,10 @@ class TestDisclosedValueFrameScrub:
                     while tb is not None:
                         frames.append(tb.tb_frame)
                         tb = tb.tb_next
+                    # the primary plant record must not outlive the failed
+                    # disclose: setup raised before returning its keys, so
+                    # run_setup's unwind can never discard it (review finding)
+                    assert oracle.store.keys() == []
                     return frames
                 raise AssertionError("disclose unexpectedly succeeded")
 
