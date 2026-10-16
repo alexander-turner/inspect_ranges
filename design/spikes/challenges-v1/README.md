@@ -14,11 +14,11 @@ A two-segment range (the evidence-v1 shape: dmz and internal joined by a router,
 - **evidence**: the `plants` stream carries both digests in order and zero value bytes.
 - **wire**: the live per-segment pcap (real cross-segment noise generated first, so the check is non-vacuous) contains no plant bytes; the control plane is vsock, not a network.
 
-The failure leg plants one goal then targets a nonexistent guest: setup refuses with the prior plant removed from the guest and discarded from the store (`planted`/`unwound` events in the stream). The record then seals and verifies offline.
+The failure leg plants one goal then targets a nonexistent guest: setup refuses with the prior plant removed from the guest (ENOENT on a root read) and discarded from the store; the stream check reads the `planted` events and digests, and the unwind is verified from guest and store state, not from the stream. The record then seals and verifies offline.
 
 ### Results
 
-22/22 green plus zero residue (2026-10-15, this devbox; re-run green after the review round, see the ledger; disk-sweep check strengthened in round 2, pending re-run):
+24/24 green plus zero residue (2026-10-16, this devbox, incl. the two quality-review A1 fd-hygiene checks below; the initial 22-check run 2026-10-15, re-run green after the review round, see the ledger; disk-sweep check strengthened in round 2, pending re-run):
 
 | Measure | Value |
 |---|---|
@@ -32,6 +32,13 @@ The failure leg plants one goal then targets a nonexistent guest: setup refuses 
 | plants stream | both digests in order, no values, record verifies offline |
 
 Two live-range findings drove oracle design during this battery (both now in the implementation and its CI pins): the daemon's file plane runs as the agent identity, so privileged plants ride the exec plane as root with the value on stdin (`PLANT_SCRIPT`: `umask 077 && cat`, chmod/chown by positional argument, remove-on-any-failure), and privileged reads likewise ride `cat` as the requested user because `read_file` cannot open another principal's 0600 file.
+
+### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
+
+These two checks live in `oracle_battery.py` (`./run_oracle.sh`); round 2 moved this subsection here from the slice-5 section, where it had drifted during the review round.
+
+- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
+- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding in the slice-6 section.
 
 ## Slice 3: the real inspect-eval gate (`./run_engine.sh`)
 
@@ -82,11 +89,6 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 - The scan runs FIRST: presence in the delivered capture confirms with no completeness precondition (the delivered chunk objects are the same source the type's check read; manifest parts batch at 15 s, so a manifest-only scan moments after a rotation would manufacture false trouble). Absence contradicts ONLY over committed, gap-free coverage reaching the latch; everything else is unverifiable and flags incomplete.
 - Both scans (the type's `compare` and `corroborate`'s rescan) apply the identical probe-frame exclusion (`netident.py`), so they cannot disagree and manufacture a false contradiction.
 - Gaps never fail a passing sample: B3's score is byte-identical to a gapless pass; only the corroboration section differs.
-
-### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
-
-- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
-- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding below.
 
 ## Honest notes
 
