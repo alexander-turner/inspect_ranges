@@ -5,6 +5,7 @@ A driver that dies mid-sample leaves its writers unsealed, and an unsealed recor
 Two honest limitations, by design. Sealing needs a read-capable credential (the parts must be replayed), so a host whose evidence credential is put-only cannot reap-seal and the record stays unsealed, reported as such by verify. And a record whose parts are unparseable or non-contiguous is left alone with a warning: fabricating a seal over state the sealer cannot replay would anchor a lie. Sealing failures never block reclamation; the reaper logs and moves on.
 """
 
+import asyncio
 import logging
 
 from pydantic import ValidationError
@@ -21,8 +22,33 @@ from .manifest import (
 )
 from .reader import EvidenceStore
 from .s3 import sink_for_location, store_for_location
+from .sink import EvidenceSink
 
 logger = logging.getLogger(__name__)
+
+SEAL_PUT_ATTEMPTS = 3
+SEAL_RETRY_WAIT_S = 0.1
+"""The writer's bounded-put discipline, applied to the one-shot-ever reap-seal put (B14: a single transient 5xx previously left the record permanently unsealed, since the reaper never revisits a reaped lease)."""
+
+
+async def _put_seal_with_retry(sink: EvidenceSink, key: str, data: bytes) -> None:
+    """Deliver the seal with bounded retries; every `FileExistsError` propagates.
+
+    The ambiguity mapping differs from the writer's: a `FileExistsError` after a transient failure means EITHER our earlier put landed or another sealer (a racing reaper, or finalize) won. Both read as the race lost: the caller skips, and the record is sealed either way (quality-review B14).
+    """
+    last: Exception | None = None
+    for attempt in range(SEAL_PUT_ATTEMPTS):
+        try:
+            await sink.put(key, data)
+            return
+        except FileExistsError:
+            raise
+        except Exception as error:
+            last = error
+            if attempt + 1 < SEAL_PUT_ATTEMPTS:
+                await asyncio.sleep(SEAL_RETRY_WAIT_S * (attempt + 1))
+    assert last is not None
+    raise last
 
 
 async def seal_abandoned(
@@ -51,8 +77,11 @@ async def seal_abandoned(
         if seal is None:
             continue
         try:
-            await sink.put(seal_key(writer), canonical_bytes(seal))
+            await _put_seal_with_retry(sink, seal_key(writer), canonical_bytes(seal))
         except FileExistsError:
+            # first-attempt: another sealer won outright; post-transient: our
+            # earlier put may itself have landed. Either way the record is
+            # sealed and this sealer skips (race lost).
             logger.info("reap-seal race lost for writer %r at %s", writer, location)
             continue
         except Exception as error:
