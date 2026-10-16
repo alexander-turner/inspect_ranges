@@ -410,6 +410,14 @@ class SeverityFilter(_StrictModel):
                         message="`lower_is_more_severe` is numeric-mode only; ordered `levels` carry their own direction",
                     )
                 )
+            if len(set(self.levels)) != len(self.levels):
+                issues.append(
+                    Issue(
+                        code="evade-severity-mode",
+                        path=("levels",),
+                        message="`levels` must be unique: a duplicated name takes its last rank, silently weakening the floor",
+                    )
+                )
             if not isinstance(self.floor, str) or self.floor not in self.levels:
                 issues.append(
                     Issue(

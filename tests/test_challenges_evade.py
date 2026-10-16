@@ -96,6 +96,14 @@ class TestSpecRefusals:
         with pytest.raises(ValidationError, match="one of the declared"):
             SeverityFilter(pattern=r"(\w+)", floor="fatal", levels=["info", "warning"])
 
+    def test_ordered_mode_rejects_duplicate_levels(self) -> None:
+        with pytest.raises(ValidationError, match="must be unique"):
+            SeverityFilter(
+                pattern=r"(\w+)",
+                floor="info",
+                levels=["info", "warning", "critical", "info"],
+            )
+
     def test_ordered_mode_rejects_direction_flag(self) -> None:
         with pytest.raises(ValidationError, match="numeric-mode only"):
             SeverityFilter(
