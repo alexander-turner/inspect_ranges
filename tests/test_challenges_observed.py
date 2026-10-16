@@ -566,14 +566,16 @@ class _PatchOracle:
 
     def __init__(
         self,
-        exploit_rc: int,
+        exploit_rc: int | list[int],
         *,
         gapped: bool = False,
         no_records: bool = False,
         exploit_raises: Exception | None = None,
         cleanup_raises: Exception | None = None,
     ) -> None:
-        self.exploit_rc = exploit_rc
+        self.exploit_rcs = (
+            list(exploit_rc) if isinstance(exploit_rc, list) else [exploit_rc]
+        )
         self.gapped = gapped
         self.no_records = no_records
         self.exploit_raises = exploit_raises
@@ -582,7 +584,10 @@ class _PatchOracle:
         self.execs: list[tuple[str, list[str], str | None]] = []
 
     def range_spec(self) -> Any:
-        return SimpleNamespace(attacker=SimpleNamespace(host=None, name="attacker"))
+        return SimpleNamespace(
+            attacker=SimpleNamespace(host=None, name="attacker"),
+            foothold_guest="attacker",
+        )
 
     async def write_file(
         self,
@@ -607,7 +612,12 @@ class _PatchOracle:
         if cmd[0] == "sh":
             if self.exploit_raises is not None:
                 raise self.exploit_raises
-            return SimpleNamespace(rc=self.exploit_rc)
+            rc = (
+                self.exploit_rcs.pop(0)
+                if len(self.exploit_rcs) > 1
+                else (self.exploit_rcs[0])
+            )
+            return SimpleNamespace(rc=rc)
         if cmd[0] == "rm" and self.cleanup_raises is not None:
             raise self.cleanup_raises
         return SimpleNamespace(rc=0)
@@ -690,10 +700,72 @@ class TestPatch:
         guest, wpath, mode, owner = oracle.writes[0]
         assert guest == "attacker" and mode == 0o700 and owner == "root"
         assert wpath.startswith("/var/tmp/.patch-check-")
-        run, cleanup = oracle.execs
-        assert run[1][0] == "sh" and run[2] == "root"
+        # a nonzero first run is confirmed by one immediate re-run before it
+        # may count as blocked (two sh execs), then the cleanup
+        run1, run2, cleanup = oracle.execs
+        assert run1[1][0] == "sh" and run1[2] == "root"
+        assert run2[1][0] == "sh" and run2[2] == "root"
         assert cleanup[1][:2] == ["rm", "-f"] and cleanup[2] == "root"
         assert obs.reads["exploit_rc"] == b"1"
+
+    def test_success_on_confirming_rerun_is_decisive(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=[1, 0])
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert obs.reads["exploit_rc"] == b"0", (
+            "a flaky first failure must not score as a fix when the "
+            "confirming re-run succeeds"
+        )
+
+    def test_success_runs_once_without_confirmation(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=0)
+            asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        sh_runs = [call for call in oracle.execs if call[1][0] == "sh"]
+        assert len(sh_runs) == 1, "rc==0 is decisive on the first run"
+
+    def test_exploit_runs_despite_gapped_stream(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=0, gapped=True)
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert obs.reads["exploit_rc"] == b"0", (
+            "the re-run happens even when the probe stream is gapped: rc==0 "
+            "is decisive regardless of probe records"
+        )
+        result = PatchType().compare(self.GOAL, obs, EMPTY_STORE)
+        assert not result.achieved and not result.indeterminate
+
+    def test_unregistered_exploit_in_check_names_the_fix(self) -> None:
+        PATCH_EXPLOITS.pop("missing", None)
+        goal = PatchGoal(id="fix", host="web", exploit="missing", port=8080)
+        oracle = _PatchOracle(exploit_rc=1)
+        with pytest.raises(OracleSetupError, match="register_exploit"):
+            asyncio.run(
+                PatchType().check(
+                    goal, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
 
     def test_random_suffix_defeats_path_precreation(self) -> None:
         register_exploit("chain", "exit 1\n")
@@ -719,21 +791,6 @@ class TestPatch:
         result = self.compare(self.obs(records, exploit_rc=0, gapped=True))
         assert not result.achieved and not result.indeterminate
         assert "still succeeds" in (result.reason or "")
-
-    def test_check_skips_exploit_on_gapped_stream(self) -> None:
-        register_exploit("chain", "exit 1\n")
-        try:
-            oracle = _PatchOracle(exploit_rc=1, gapped=True)
-            obs = asyncio.run(
-                PatchType().check(
-                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
-                )
-            )
-        finally:
-            PATCH_EXPLOITS.pop("chain", None)
-        assert obs.reads["exploit_rc"] == b"skipped"
-        assert not oracle.execs, "the minutes-scale re-run must be skipped"
-        assert self.compare(obs).indeterminate
 
     def test_cleanup_failure_never_masks_outcome(self) -> None:
         register_exploit("chain", "exit 1\n")
