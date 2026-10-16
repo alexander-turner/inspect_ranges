@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from inspect_ai.util import Store
-from inspect_ranges._challenges.engine import Observations
+from inspect_ranges._challenges.engine import GoalResult, Observations
 from inspect_ranges._challenges.observedtypes import HijackType
 from inspect_ranges._challenges.oracle import RangeOracle
 from inspect_ranges._challenges.plants import PlantStore
@@ -113,6 +113,61 @@ class TestCandidateAmplification:
         pcap_calls, metadata = asyncio.run(scenario())
         assert pcap_calls == 1, "the evidence memo must make the fetch per-pass"
         assert metadata["candidates_dropped"] == {"g": 300 - CANDIDATE_CAP}
+
+    def test_submission_blind_type_checks_once_under_flood(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A type whose check never reads submissions runs ONE check however many values the agent submits: junk `submit_goal` calls against a patch or prober goal must not multiply the expensive re-run (the per-candidate fan-out is gated on `uses_submissions`)."""
+        from inspect_ranges._challenges.engine import GoalType
+        from inspect_ranges._challenges.schema import FlagGoal
+
+        calls = {"check": 0}
+
+        class BlindType(GoalType):
+            name = "flag"  # reuses a parseable schema type for the fixture
+            spec = FlagGoal
+            assurance = "guest-corroborated"
+            uses_submissions = False
+
+            async def check(self, goal: Any, oracle: Any, submissions: Any) -> Any:
+                calls["check"] += 1
+                return Observations(source="guest", reads={"v": b""})
+
+            def compare(self, goal: Any, obs: Any, store: Any) -> GoalResult:
+                return GoalResult(achieved=False, reason="blind fixture")
+
+        blind = BlindType()
+        monkeypatch.setattr(
+            "inspect_ranges._challenges.scorer.goal_type",
+            lambda name: blind,  # type: ignore[misc]  # pyright: ignore[reportUnknownLambdaType]
+        )
+
+        async def scenario() -> None:
+            _, _, handle = make_oracle(tmp_path)
+            handle.plants = None
+            oracle = RangeOracle(handle)
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[FlagGoal(id="g", host="box", path="/f")],
+            )
+            await score_challenge(oracle, Store(), challenge, _flood("g", 50))
+
+        asyncio.run(scenario())
+        assert calls["check"] == 1, (
+            "uses_submissions=False must collapse the candidate fan-out"
+        )
+
+    def test_observed_types_are_submission_blind(self) -> None:
+        """The six observed types never read submissions in check, so their flags pin the fan-out gate; judge and the submission types stay fanned."""
+        from inspect_ranges._challenges.engine import registered_goal_types
+
+        types = registered_goal_types()
+        blind = {"availability", "degrade", "tamper", "detection", "hijack", "patch"}
+        for name in blind:
+            assert types[name].uses_submissions is False, name
+        for name in ("flag", "answer", "exfiltrate", "execute", "control", "judge"):
+            assert types[name].uses_submissions is True, name
 
     def test_judge_flood_generates_exactly_cap(
         self, tmp_path: Path, monkeypatch: Any
@@ -278,7 +333,10 @@ class DiscloseFailOracle:
         return "5e5e5e5e" * 8
 
     def range_spec(self) -> Any:
-        return SimpleNamespace(attacker=SimpleNamespace(host=None, name="attacker"))
+        return SimpleNamespace(
+            attacker=SimpleNamespace(host=None, name="attacker"),
+            foothold_guest="attacker",
+        )
 
     async def write_file(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("foothold write failed")

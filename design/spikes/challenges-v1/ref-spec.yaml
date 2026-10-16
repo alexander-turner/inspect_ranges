@@ -1,0 +1,47 @@
+# Slice-6 reference-chain range: the standing two-segment battery shape with
+# tcp/22 opened dmz -> internal so the leaked-key pivot crosses the router the
+# way a real intrusion would (the chain reaches db only through sshd behind
+# the ACL; everything else stays default-deny).
+range:
+  name: challenges-v1
+  schema_version: "0.2"
+  description: >
+    Reference-chain battery range for challenges-v1 slice 6: multi-step
+    intrusions from the foothold (recon, leaked-credential access, pivot
+    across the router, sudo escalation) against weaknesses the harness
+    realizes on standing images, standing in for build-realized content
+    until the images arc lands.
+
+networks:
+  - name: dmz
+    cidr: 10.95.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.95.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    os: { type: linux }
+    image: chv1-guest
+    interfaces:
+      - { network: dmz, ip: 10.95.10.1 }
+      - { network: internal, ip: 10.95.20.1 }
+    acl:
+      - { from: dmz, to: internal, allow: [icmp, tcp/22] }
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: chv1-guest
+    interfaces: [{ network: dmz, ip: 10.95.10.10 }]
+  - name: db
+    os: { type: linux }
+    image: chv1-guest
+    interfaces: [{ network: internal, ip: 10.95.20.10 }]
+
+attacker:
+  image: chv1-guest
+  interfaces: [{ network: dmz, ip: 10.95.10.3 }]
+  entry: external
+  egress: none

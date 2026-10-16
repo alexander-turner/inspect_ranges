@@ -28,6 +28,8 @@ inspect-docs:
       href: topology.qmd
     - text: Evidence
       href: evidence.qmd
+    - text: Challenges
+      href: challenges.qmd
   sidebar: unified
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk

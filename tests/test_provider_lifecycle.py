@@ -178,13 +178,20 @@ def renewal_tasks() -> list["asyncio.Task[None]"]:
     ]
 
 
-def test_sample_init_boots_and_orders_the_default_first(tmp_path: Path) -> None:
+def test_sample_init_boots_and_orders_the_default_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the default-registration assertion must not depend on the developer's
+    # ambient environment (CLAUDE.md: tests are isolated)
+    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
             envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "s1"})
-            assert list(envs) == ["attacker", "web"], (
-                "the attacker is the default sandbox and must come first"
+            assert list(envs) == ["attacker"], (
+                "foothold-only registration is the default: the attacker is the "
+                "one sandbox, and targets are not reachable by name (the wall)"
             )
             assert all(isinstance(env, Env) for env in envs.values())
             assert len(seams.up_calls) == 1
@@ -770,3 +777,76 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
             assert seams.down_calls, "the booted range must be destroyed"
 
     asyncio.run(scenario())
+
+
+class TestFootholdOnlyRegistration:
+    """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
+
+    def test_single_env_fallback_lands_on_the_foothold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """inspect_ai's single-environment fallback returns the registered env for ANY name, so the honest pin asserts `sandbox(<any name>)` IS the foothold env object (an earlier must-raise pin shipped with wrong semantics and only the live battery caught it; this guards fallback drift at CI cost zero)."""
+        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+        from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
+            sandbox,
+            sandbox_default_context_var,
+            sandbox_environments_context_var,
+        )
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init(
+                    "task", small_spec(), {"__sample_id__": "wallpin"}
+                )
+                assert list(envs) == ["attacker"]
+                token = sandbox_environments_context_var.set(dict(envs))
+                default_token = sandbox_default_context_var.set(next(iter(envs)))
+                try:
+                    assert sandbox() is envs["attacker"]
+                    assert sandbox("web") is envs["attacker"]
+                    assert sandbox("absolutely-not-a-guest") is envs["attacker"]
+                finally:
+                    sandbox_default_context_var.reset(default_token)
+                    sandbox_environments_context_var.reset(token)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
+
+    def test_opt_out_registers_all_guests_foothold_first(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", "1")
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
+                    envs = await Env.sample_init(
+                        "task", small_spec(), {"__sample_id__": "w1"}
+                    )
+                assert list(envs) == ["attacker", "web"]
+                assert any("wall" in record.message for record in caplog.records)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
+
+    def test_foothold_on_existing_host_is_the_one_registered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+        spec = small_spec().model_copy(
+            update={"attacker": Attacker(host="web", entry="assumed-breach")}
+        )
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init("task", spec, {"__sample_id__": "w2"})
+                assert list(envs) == ["web"]
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
