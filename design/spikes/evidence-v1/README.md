@@ -2,6 +2,8 @@
 
 The live battery for the evidence-v1 phase ([record](../../inspect-ranges/evidence-v1.md)). This README accumulates per-slice sections as the phase lands; the headline kill -9 / compromise-window demonstrations arrive with slice 5 (seam wiring).
 
+Round 2 (2026-10-16) reordered the `run.sh` and `run_telemetry.sh` residue checks to count containers BEFORE the sweep (and to fail on a `docker ps` failure instead of reading it as zero); the zero-residue rows recorded below were counted after the sweep and stand pending the post-integration re-run.
+
 ## Slice 2: capture in the range container (2026-10-15)
 
 Run on the metal devbox: **24/24 checks green plus zero residue**, `./run.sh`, CID base 30100, shared battery flock. (Round 2 removed the unconditional down row from the count; pending re-run.) Re-run green after the fresh-context review's fixes (51.0 s up), whose main change is the fail-safe ship rule: a chunk ships only when the supervisor's status proves it completed (strictly older than the declared active file, or a writer-less segment state), so a missing or stale status can delay shipping but can never truncate a chunk. The range is a static-IP two-segment topology (dmz / internal, router, attacker) rendered with `evidence_capture=True` at 1 MB chunks and `CAPTURE_MAX_RESTARTS=2`.
