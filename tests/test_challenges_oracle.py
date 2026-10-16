@@ -315,6 +315,61 @@ class TestPlantAndStart:
 
         asyncio.run(scenario())
 
+    def test_failing_telemetry_half_never_starts_the_prober(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Raise-able producer steps run before anything starts: a refused sample must not leave a prober probing its unwound range."""
+        import inspect_ranges._challenges.setup as setup_module
+        from inspect_ranges._challenges.prober import ProbeTarget
+
+        started: list[str] = []
+
+        class RecordingProber:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                started.append("prober")
+
+            async def stop(self) -> None:  # pragma: no cover - never started
+                pass
+
+        async def scenario() -> None:
+            monkeypatch.setattr(setup_module, "Prober", RecordingProber)
+            monkeypatch.setattr(
+                setup_module,
+                "_probe_targets",
+                lambda oracle, challenge: [
+                    ProbeTarget(goal_id="t", ip="10.0.0.9", port=8080)
+                ],
+            )
+            session = FakePlantSession()  # driver_writer None: telemetry refuses
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "seen",
+                        "type": "detection",
+                        "collector": "siem",
+                        "signal": "intrusion",
+                    }
+                ]
+            )
+            collector = CollectorSpec(
+                name="siem", guest="box", source=FileSource(path="/var/log/app.log")
+            )
+            with pytest.raises(RuntimeError, match="driver evidence writer"):
+                await plant_and_start(
+                    oracle,
+                    challenge,
+                    None,
+                    [collector],
+                    extra_observers=frozenset({"telemetry-collector"}),
+                )
+            assert started == []
+
+        asyncio.run(scenario())
+
     def test_cancellation_during_producer_start_still_unwinds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
