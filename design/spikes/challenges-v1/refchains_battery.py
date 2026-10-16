@@ -157,7 +157,7 @@ async def _arm_weaknesses() -> float:
         "true",
     )
     leaked = await oracle.read_file("web", "/srv/backup/id_deploy")
-    admin = await oracle.read_file("web", "/root/.ssh/admin_id")
+    admin = await oracle.read_file("web", "/root/.ssh/admin_id", user="root")
     await root(
         "db",
         "useradd -m -s /bin/bash deploy 2>/dev/null; "
