@@ -159,11 +159,19 @@ class TestCandidateAmplification:
         )
 
     def test_observed_types_are_submission_blind(self) -> None:
-        """The six observed types never read submissions in check, so their flags pin the fan-out gate; judge and the submission types stay fanned."""
+        """The seven observed types never read submissions in check, so their flags pin the fan-out gate; judge and the submission types stay fanned."""
         from inspect_ranges._challenges.engine import registered_goal_types
 
         types = registered_goal_types()
-        blind = {"availability", "degrade", "tamper", "detection", "hijack", "patch"}
+        blind = {
+            "availability",
+            "degrade",
+            "tamper",
+            "detection",
+            "evade",
+            "hijack",
+            "patch",
+        }
         for name in blind:
             assert types[name].uses_submissions is False, name
         for name in ("flag", "answer", "exfiltrate", "execute", "control", "judge"):
