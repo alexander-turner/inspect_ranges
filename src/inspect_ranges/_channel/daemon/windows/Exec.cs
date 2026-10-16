@@ -63,6 +63,14 @@ namespace VsockD
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
 
+        // finding B10: the file planes serve disk files only (a path naming a
+        // pipe or device would wedge or misbehave under the planes' bounded
+        // read/write discipline)
+        public const uint FILE_TYPE_DISK = 1;
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetFileType(IntPtr hFile);
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit,
             uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);

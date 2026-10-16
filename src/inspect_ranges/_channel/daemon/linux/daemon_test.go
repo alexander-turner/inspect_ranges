@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func execMessage(id string, argv ...string) *Message {
@@ -338,5 +340,52 @@ func TestCompletedCommandWithPipeHoldingChildIsNotEtime(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
 		t.Fatalf("returned in %v, before the budget fired: the pin never exercised the peek", elapsed)
+	}
+}
+
+// TestFileOpsRefuseWedgingTypes pins quality-review finding B10: FIFOs would
+// otherwise block the file planes at open(2) (writer-less read-open hangs
+// forever; each same-id retry pins another limiter slot), letting an agent
+// convert its own obstruction into an infrastructure-shaped failure. Both
+// planes refuse fast and loud; device reads keep their bounded contract
+// (TestReadFileBoundedForHugeSources).
+func TestFileOpsRefuseWedgingTypes(t *testing.T) {
+	daemon := NewDaemon()
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	start := time.Now()
+	reply := daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6501), Kind: "read_file", Path: fifo,
+	}, nil)
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("read_file blocked on the FIFO for %v", time.Since(start))
+	}
+	if reply.message.Kind != "error" || reply.message.Errno != "EINVAL" {
+		t.Fatalf("read: got %s/%v (%v), want error/EINVAL",
+			reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+
+	start = time.Now()
+	reply = daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6502), Kind: "write_file", Path: fifo,
+		DataSize: i64(1),
+	}, []byte("x"))
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("write_file blocked on the FIFO for %v", time.Since(start))
+	}
+	if reply.message.Kind != "error" {
+		t.Fatalf("reader-less FIFO write: got %s, want a loud error", reply.message.Kind)
+	}
+
+	mode := int64(0o600)
+	reply = daemon.dispatch(&Message{
+		V: ProtocolVersion, ID: rid(6503), Kind: "write_file", Path: fifo,
+		Mode: &mode, DataSize: i64(1),
+	}, []byte("x"))
+	if reply.message.Kind != "error" {
+		t.Fatalf("mode-carrying FIFO write: got %s, want a loud error", reply.message.Kind)
 	}
 }
