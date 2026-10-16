@@ -17,6 +17,10 @@ from typing import TYPE_CHECKING
 
 from .._evidence.capture import json_lines
 
+# Re-exported for compatibility: the grammar lives in schema.py so validation
+# enforces the same rule the runtime parses (quality review B15).
+from .schema import parse_tamper_location as parse_tamper_location
+
 if TYPE_CHECKING:
     from .._provider.evidence import EvidenceSession
 
@@ -35,7 +39,10 @@ PROBE_EXEC_TIMEOUT_S = 15.0
 
 
 async def _run_probe_client(argv: list[str]) -> bytes:
-    """Run the probe client in the sidecar and return its stdout (the default client runner)."""
+    """Run the probe client in the sidecar and return its stdout (the default client runner).
+
+    The kill lives in `finally`: external cancellation (the prober's own `stop()`, the exact moment a wedged `docker compose exec` matters) must not leak the child, which the old timeout-only arm did (quality review B19). The event loop's child watcher reaps the killed process.
+    """
     process = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
@@ -44,26 +51,11 @@ async def _run_probe_client(argv: list[str]) -> bytes:
     try:
         async with asyncio.timeout(PROBE_EXEC_TIMEOUT_S):
             stdout, _ = await process.communicate()
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        raise
-    return stdout
-
-
-def parse_tamper_location(location: str) -> tuple[int, str]:
-    """Parse the v1 `tamper` location grammar: `PORT/PATH` observed over HTTP.
-
-    v1 interprets the protected location as an HTTP surface (e.g. `8080/status` probes `http://<host>:8080/status`); richer grammars arrive with demand, per the schema's "interpreted by the goal engine".
-
-    Raises:
-        ValueError: The location does not parse as `PORT/PATH`.
-    """
-    port_text, _, path = location.partition("/")
-    port = int(port_text)
-    if not 1 <= port <= 65535:
-        raise ValueError(f"tamper location port out of range: {location!r}")
-    return port, "/" + path
+        return stdout
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
 
 
 @dataclass

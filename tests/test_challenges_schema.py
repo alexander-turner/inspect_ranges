@@ -131,7 +131,7 @@ GOAL_CASES: list[tuple[str, dict[str, Any], type, str | None, set[str]]] = [
     ),
     (
         "tamper",
-        {"host": "web", "location": "/index.html"},
+        {"host": "web", "location": "80/index.html"},
         TamperGoal,
         "write",
         {"active-prober"},
@@ -258,6 +258,23 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
             ]
         ),
         "duplicate-goal-id",
+    ),
+    (
+        "goal-id-grammar",
+        challenge_with([{"id": "Recon-1", "type": "flag", "host": "w", "path": "/f"}]),
+        "goal-id-grammar",
+    ),
+    (
+        "tamper-location-grammar",
+        challenge_with(
+            [{"id": "t", "type": "tamper", "host": "w", "location": "web/admin"}]
+        ),
+        "tamper-location-grammar",
+    ),
+    (
+        "goal-id-grammar-space",
+        challenge_with([{"id": "recon 1", "type": "flag", "host": "w", "path": "/f"}]),
+        "goal-id-grammar",
     ),
     (
         "scoring-mode-mismatch",
