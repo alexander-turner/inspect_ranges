@@ -25,7 +25,6 @@ from inspect_ranges._challenges.setup import (
     plant_secret_file,
     run_setup,
 )
-from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
     LoopbackTransport,
     MessageChannel,
@@ -34,6 +33,7 @@ from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUs
 )
 from inspect_ranges._channel.protocol import ExecRequest, Message, WriteFileRequest
 from inspect_ranges._compiler.plan import ResolvedPlan, Totals
+from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._provider.provider import (
     LibvirtRangeSandboxEnvironment,
     sample_handle_for,

@@ -58,8 +58,6 @@ async def _run_probe_client(argv: list[str]) -> bytes:
                 process.kill()
 
 
-
-
 @dataclass
 class ProbeTarget:
     """One probed surface, derived from a prober-based goal at plant time."""

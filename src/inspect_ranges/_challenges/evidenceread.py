@@ -59,17 +59,13 @@ async def stream_chunks_with_spans(
             gapped = True
     chunks = await stream_chunks(store, writer, stream)
     ordered_seqs = sorted(spans)
-    spanned: list[tuple[bytes, float | None, float | None]] = [
-        (
-            chunk,
-            *(
-                spans[ordered_seqs[position]]
-                if position < len(ordered_seqs)
-                else (None, None)
-            ),
-        )
-        for position, chunk in enumerate(chunks)
-    ]
+    spanned: list[tuple[bytes, float | None, float | None]] = []
+    for position, chunk in enumerate(chunks):
+        if position < len(ordered_seqs):
+            start, end = spans[ordered_seqs[position]]
+            spanned.append((chunk, start, end))
+        else:
+            spanned.append((chunk, None, None))
     return spanned, gapped
 
 
