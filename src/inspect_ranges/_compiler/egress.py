@@ -34,7 +34,7 @@ def render_egress_nftables(
     """
     rules: list[str] = []
 
-    attacker_name = spec.attacker.host or spec.attacker.name
+    attacker_name = spec.foothold_guest
     attacker_match = _address_match(allocation.addresses(attacker_name), "saddr")
     if spec.attacker.egress == "none":
         rules.append(f'{attacker_match} oifname "{uplink}" drop')

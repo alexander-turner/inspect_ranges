@@ -74,7 +74,7 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
 
 def _default_guest(spec: RangeSpec) -> str:
     """The default sandbox: the attacker's foothold host, or the attacker box itself."""
-    return spec.attacker.host or spec.attacker.name
+    return spec.foothold_guest
 
 
 def _register_all_guests() -> bool:
