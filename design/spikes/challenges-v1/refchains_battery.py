@@ -139,7 +139,12 @@ async def _arm_weaknesses() -> float:
         last = now
 
     async def root(guest: str, script: str) -> None:
-        outcome = await oracle.exec(guest, ["sh", "-c", script], user="root")
+        # explicit short budget: an exec that leaves live background children
+        # (the armed services) otherwise waits out the full default in-guest
+        # budget (observed: 180 s, rc 0) even with setsid + redirected fds
+        outcome = await oracle.exec(
+            guest, ["sh", "-c", script], user="root", timeout_s=30.0
+        )
         assert outcome.rc == 0, f"arming on {guest} rc {outcome.rc}: {script[:80]}"
 
     await oracle.write_file("web", "/tmp/obsvc.py", OBSVC.encode(), mode=0o644)
