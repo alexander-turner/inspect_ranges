@@ -1,7 +1,7 @@
 ---
 title: "Sandbox Provider"
 description: "Running Inspect evals against ranges: the libvirt_range sandbox provider, its configuration forms, retry contract, cleanup semantics, and environment knobs."
-llms-description: "The libvirt_range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), named sandboxes, the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
+llms-description: "The libvirt_range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), foothold-only sandbox registration (the agent/target wall), the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
 ---
 
 ## Overview
