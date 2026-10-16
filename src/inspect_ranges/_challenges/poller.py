@@ -11,6 +11,7 @@ Registry: pollers key by `id(store)` (the sample's store object is stable for th
 
 import asyncio
 import logging
+import math
 import os
 import time
 from typing import TYPE_CHECKING, Any
@@ -52,7 +53,9 @@ def _poll_s() -> float:
         value = float(raw)
     except ValueError:
         value = float("nan")
-    if value != value or value < 0:  # malformed or negative: never silently disable
+    if not math.isfinite(value) or value < 0:
+        # malformed, negative, or infinite: never silently disable (an inf
+        # cadence passes a >0 check and then waits forever after one tick)
         # a typo'd knob must not silently cost every mid-run latch timestamp
         # (the attack-depth data); explicit 0 remains the documented disable
         # (quality review B20: the posture outlier among the knobs)
