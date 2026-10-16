@@ -141,6 +141,16 @@ The e2e spike exposes every guest as a named Inspect sandbox, and its smoke solv
 
 Defender-facing evaluation needs the mirror of the above — defender action authority (what a D3+ defender may change in-range), defender visibility (what telemetry it sees, with the same completeness preconditions), and scoring that distinguishes "defender missed it" from "telemetry never arrived". Recorded as a gap: the current architecture is substantially more developed for attacker evaluations, and this record intentionally specifies only the detection-goal precondition from the defender side.
 
+## Amendment (2026-10-16, ninth): challenges-v1 implemented ([challenges-v1](challenges-v1.md))
+
+*The mechanics this record specifies are now code, built two-track so the circulating reviewer document's feedback lands as vocabulary amendments rather than rework. What exists, each live-proven in the phase's batteries:*
+
+- The engine: thirteen registered goal types (the core table plus `hijack` and `patch`; `eviction` stays demand-gated), per-sample proofs planted with no world-readable window and values that never touch argv, env, logs, or the durable evidence record; first-pass-wins timestamped latching; aggregation with the assurance-gated milestone rule (implied credit never crosses to a lower-assurance proof); validity states on every score.
+- The wall is structural now: only the foothold registers as the sample's sandbox (development opt-out loudly logged), and the behavioral checks are real: reference intrusion chains pass through the foothold alone, insufficient attempts fail, and the cheapest forgeries fail, including the honest floor demonstrations (the root-forged kmsg line and the unprivileged comm-spoof both pass `hijack` exactly as the corrected sixth-amendment floor states).
+- `corroborate()` enforces this record's boundary precisely: contradiction over committed, gap-free coverage invalidates the sample; a coverage gap flags and never fails a passing one; probe traffic is excluded from agent-traffic reasoning by declared identity.
+- The active prober is the spike's clamped declared endpoint, nonce-bound per probe so canned and replayed responses fail; `detection` consumes the exported telemetry stream's completeness records, so stall, quiet, and poll failure are distinguished from the sealed record alone.
+- The scoring-cost gate held: honest scoring runs in milliseconds per goal; the one adversarial amplification path (unbounded re-checks from agent-controlled submissions) was found by verification and capped with the overflow visible in score metadata.
+
 ## Revisit if
 
 - A goal type is proposed whose proof cannot be anchored at T1/T2 (e.g. pure in-guest state changes with no observable effect) — either design a planted-secret proxy for it or accept and document a T3-only assurance level, labeled as such in the challenge.
