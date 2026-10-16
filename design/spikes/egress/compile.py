@@ -27,7 +27,8 @@ def bridge(network: str) -> str:
 
 
 def main() -> None:
-    spec = load_range(HERE / "spec.yaml")
+    spec_name = sys.argv[1] if len(sys.argv) > 1 else "spec.yaml"
+    spec = load_range(HERE / spec_name)
     allocation = allocate(spec)
     networks = {network.name: network for network in spec.networks}
 
