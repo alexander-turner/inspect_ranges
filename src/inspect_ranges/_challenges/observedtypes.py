@@ -563,6 +563,13 @@ class JudgeType(GoalType):
         from inspect_ai.model import get_model
 
         submitted = submissions.value(goal.id) or ""
+        if not submitted:
+            # compare returns "no submission" whenever submitted is 0 and would
+            # discard any grade, so a judge generate over an empty submission
+            # is a wasted model call (quality review R2-20)
+            return Observations(
+                source="submission", reads={"graded": b"", "submitted": b"0"}
+            )
         boundary = token_hex(8)
         prompt = _JUDGE_TEMPLATE.format(
             rubric=goal.rubric, boundary=boundary, submission=submitted
@@ -570,10 +577,7 @@ class JudgeType(GoalType):
         output = await get_model().generate(prompt)
         return Observations(
             source="submission",
-            reads={
-                "graded": output.completion.encode(),
-                "submitted": b"1" if submitted else b"0",
-            },
+            reads={"graded": output.completion.encode(), "submitted": b"1"},
         )
 
     def compare(
