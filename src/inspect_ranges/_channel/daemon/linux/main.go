@@ -49,8 +49,23 @@ func (c *vsockConn) Write(p []byte) (int, error) {
 
 func (c *vsockConn) Close() error { return unix.Close(c.fd) }
 
+// streamSocket and acceptConn carry the daemon's fd-inheritance discipline:
+// every socket is created close-on-exec, because exec'd children otherwise
+// inherit the LISTENER (letting an unrooted guest process accept() driver
+// connections: read plant-bearing requests, forge honest-shaped replies) and
+// any held CONNECTION fds (keeping the stream un-EOF'd past the daemon's
+// close, stranding the driver's residual read for its whole allowance
+// window). Quality-review finding A1; pinned by TestDaemonSocketsAreCloexec.
+func streamSocket(family int) (int, error) {
+	return unix.Socket(family, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+}
+
+func acceptConn(fd int) (int, unix.Sockaddr, error) {
+	return unix.Accept4(fd, unix.SOCK_CLOEXEC)
+}
+
 func listen(port uint32) (int, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	fd, err := streamSocket(unix.AF_VSOCK)
 	if err != nil {
 		return -1, err
 	}
@@ -101,7 +116,7 @@ func main() {
 func acceptLoop(fd int, daemon *Daemon, limiter chan struct{}) {
 	consecutiveFailures := 0
 	for {
-		connFd, peer, err := unix.Accept(fd)
+		connFd, peer, err := acceptConn(fd)
 		if err != nil {
 			if err == unix.EINTR || err == unix.ECONNABORTED {
 				continue

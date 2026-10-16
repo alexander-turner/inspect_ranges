@@ -661,3 +661,141 @@ def test_spec_validation_table() -> None:
             EvidenceWriter(LocalDirSink(Path("/tmp/unused")), writer="driver"),
             [file_spec(), file_spec()],
         )
+
+
+# -- cursor stripping (quality-review finding A3) -------------------------------
+
+
+def test_extract_cursor_strips_only_the_banner_line() -> None:
+    from inspect_ranges._evidence.telemetry import _extract_cursor
+
+    alert = b"Oct 16 10:00:01 db sshd[1]: ALERT intrusion from user '-- cursor: pwn'"
+    banner = b"-- cursor: s=real123"
+    cursor, payload = _extract_cursor(
+        alert + b"\n" + banner + b"\n", r"-- cursor: (\S+)"
+    )
+    # the real banner (last matching line) wins the cursor ...
+    assert cursor == "s=real123"
+    # ... and an event line that merely CONTAINS a pattern match SHIPS: stripping
+    # it would hand the agent a silent alert-suppression primitive
+    assert b"ALERT" in payload
+
+
+def test_alert_embedding_cursor_pattern_reaches_the_record(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        alert = (
+            b"Oct 16 10:00:01 db sshd[1]: ALERT login by attacker-chosen-user "
+            b"'x -- cursor: y'\n"
+        )
+        channel.exec_script = [
+            exec_ok(b"boot line\n-- cursor: s=0\n"),
+            exec_ok(b"benign line\n" + alert + b"-- cursor: s=1\n"),
+        ]
+        poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
+        await poller.poll_once("journal")
+        await poller.poll_once("journal")
+        await writer.seal()
+
+        shipped = await data_bytes(store, "journal")
+        assert b"benign line" in shipped
+        assert b"ALERT" in shipped, shipped
+        assert await gap_causes(store, "telemetry/journal") == []
+        meta = await meta_records(store, "journal")
+        assert [m["watermark"] for m in meta] == ["s=0", "s=1"]
+        assert (await verify_location(store)).ok
+
+    asyncio.run(run())
+
+
+def test_extract_cursor_tests_only_the_final_nonempty_line() -> None:
+    """A3 residual (review): with the real banner absent, a mid-window event line embedding the pattern must neither be stripped nor win the cursor."""
+    from inspect_ranges._evidence.telemetry import _extract_cursor
+
+    alert = b"evt: ALERT embeds '-- cursor: pwn' mid-window"
+    data = alert + b"\nplain trailing line\n"
+    cursor, payload = _extract_cursor(data, r"-- cursor: (\S+)")
+    assert cursor is None and payload == data
+
+
+def test_replay_flag_kept_by_an_empty_bootstrap_and_cleared_by_a_quiet_one(
+    tmp_path: Path,
+) -> None:
+    """Review findings on B11: an EMPTY-output bootstrap keeps the flag (the real replay is ahead); a banner-only bootstrap clears it without marking (the window is provably empty)."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"x" * 5000, truncated=True),  # reset 1: arms replay
+            exec_ok(b""),  # empty bootstrap: flag kept
+            exec_ok(b"old window\n-- cursor: s=1\n"),  # the real replay: flagged
+            exec_ok(b"y" * 5000, truncated=True),  # reset 2: re-arms
+            exec_ok(b"-- cursor: s=2\n"),  # banner-only: cleared, unmarked
+            exec_ok(b"new\n-- cursor: s=3\n"),  # ordinary delta: no flag
+        ]
+        poller, writer, store = make_poller(
+            tmp_path, channel, [journal_spec(max_poll_bytes=4096)]
+        )
+        for _ in range(6):
+            await poller.poll_once("journal")
+        await writer.seal("incomplete")
+
+        meta = await meta_records(store, "journal")
+        flags = [(m["outcome"], m.get("replay")) for m in meta]
+        assert flags == [
+            ("truncated", None),  # initial bootstrap: nothing can duplicate yet
+            ("quiet", None),  # EMPTY bootstrap: flag kept, replay still ahead
+            ("ok", True),  # the window that actually re-ships is flagged
+            ("truncated", None),  # a truncated DELTA poll ships new entries
+            ("quiet", None),  # banner-only bootstrap: provably empty, unmarked
+            ("ok", None),  # ordinary delta after the cleared flag
+        ], flags
+
+    asyncio.run(run())
+
+
+def test_replay_flag_survives_a_failed_bootstrap(tmp_path: Path) -> None:
+    """B11: the flag marks the window that actually re-ships, not a failed attempt."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"x" * 5000, truncated=True),  # truncation -> replay_next
+            exec_ok(b"", rc=1),  # bootstrap FAILS: must not consume the flag
+            exec_ok(b"old window again\n-- cursor: s=2\n"),  # the real replay
+        ]
+        poller, writer, store = make_poller(
+            tmp_path, channel, [journal_spec(max_poll_bytes=4096)]
+        )
+        for _ in range(3):
+            await poller.poll_once("journal")
+        await writer.seal("incomplete")
+
+        meta = await meta_records(store, "journal")
+        flags = [(m["poll"], m["outcome"], m.get("replay")) for m in meta]
+        assert flags[1] == (2, "error", None), flags
+        assert flags[2] == (3, "ok", True), flags
+
+    asyncio.run(run())
+
+
+def test_truncated_poll_prefix_precedes_its_gap_in_the_chain(tmp_path: Path) -> None:
+    """B12: the shipped prefix takes seq 0 and its lost tail's gap seq 1, matching event order."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [exec_ok(b"x" * 5000, truncated=True)]
+        poller, writer, store = make_poller(
+            tmp_path, channel, [journal_spec(max_poll_bytes=4096)]
+        )
+        await poller.poll_once("journal")
+        await writer.seal("incomplete")
+
+        kinds = [
+            (record.seq, record.kind)
+            for record in await manifest_records(store, "driver")
+            if record.stream == "telemetry/journal"
+        ]
+        assert kinds == [(0, "chunk"), (1, "gap")], kinds
+
+    asyncio.run(run())

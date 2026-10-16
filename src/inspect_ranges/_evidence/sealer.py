@@ -21,6 +21,7 @@ from .manifest import (
 )
 from .reader import EvidenceStore
 from .s3 import sink_for_location, store_for_location
+from .sink import bounded_put
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,17 @@ async def seal_abandoned(
         if seal is None:
             continue
         try:
-            await sink.put(seal_key(writer), canonical_bytes(seal))
+            # bounded retries (B14: one transient 5xx must not leave the
+            # record permanently unsealed, the reaper never revisits);
+            # conflict_after_transient="raise" because a FileExistsError here
+            # means EITHER our earlier put landed or another sealer won, and
+            # both read as the race lost: the record is sealed either way
+            await bounded_put(
+                sink,
+                seal_key(writer),
+                canonical_bytes(seal),
+                conflict_after_transient="raise",
+            )
         except FileExistsError:
             logger.info("reap-seal race lost for writer %r at %s", writer, location)
             continue

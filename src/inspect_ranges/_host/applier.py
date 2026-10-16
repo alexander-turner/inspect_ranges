@@ -65,7 +65,10 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
 _EVIDENCE_STOP_BUDGET_S = 30.0
-"""Bound on the pre-teardown evidence harvest and seal (mirrors the driver's finalize budget): teardown is never hostage to a wedged capture tap."""
+"""Bound on one lease's capture harvest at teardown or shutdown."""
+
+_EVIDENCE_SEAL_RESERVE_S = 10.0
+"""The stop budget's reserved seal share: a wedged capture stop can never starve the seal (or the shutdown checkpoint) attempt (quality-review A6, mirroring the driver's finalize phases)."""
 _COMPLETED_RUN_CAP = 64
 """Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound).
 
@@ -674,9 +677,22 @@ class Applier:
         if entry is None:
             return
         streamer, writer, segments = entry
+        stops_clean = True
         try:
-            async with asyncio.timeout(_EVIDENCE_STOP_BUDGET_S):
-                await streamer.stop()
+            # stop() is internally bounded; no outer timeout, which would
+            # cancel its own gap-recording handlers mid-write (review finding
+            # on A6). Harvest sized for a real teardown tail; the seal reserve
+            # below stays protected regardless.
+            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+        except Exception:
+            stops_clean = False
+            logger.exception(
+                "evidence capture stop failed for lease=%s (sealing what was "
+                "delivered)",
+                lease_id,
+            )
+        try:
+            async with asyncio.timeout(_EVIDENCE_SEAL_RESERVE_S):
                 if not seal:
                     for segment in segments:
                         await writer.gap(f"pcap/{segment}", cause="applier-shutdown")
@@ -691,18 +707,21 @@ class Applier:
                         lease_id,
                     )
                     return
-                _, digest = await writer.seal("complete")
+                _, digest = await writer.seal(
+                    "complete" if stops_clean else "incomplete"
+                )
             logger.info("evidence capture sealed: lease=%s digest=%s", lease_id, digest)
         except TimeoutError:
             logger.warning(
-                "evidence stop/seal for lease=%s exceeded its %.0fs budget "
-                "(record stays unsealed, reported as such by verify)",
+                "evidence seal for lease=%s exceeded its %.0fs reserve (record "
+                "stays unsealed, reported as such by verify; the reaper can "
+                "reap-seal only while the lease lives)",
                 lease_id,
-                _EVIDENCE_STOP_BUDGET_S,
+                _EVIDENCE_SEAL_RESERVE_S,
             )
         except Exception:
             logger.exception(
-                "evidence capture stop/seal failed for lease=%s (record stays "
+                "evidence capture seal failed for lease=%s (record stays "
                 "unsealed, reported as such by verify)",
                 lease_id,
             )

@@ -20,7 +20,11 @@ from inspect_ranges._challenges.oracle import (
 )
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import Challenge
-from inspect_ranges._challenges.setup import plant_secret_file, run_setup
+from inspect_ranges._challenges.setup import (
+    plant_and_start,
+    plant_secret_file,
+    run_setup,
+)
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
     LoopbackTransport,
     MessageChannel,
@@ -29,6 +33,7 @@ from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUs
 )
 from inspect_ranges._channel.protocol import ExecRequest, Message, WriteFileRequest
 from inspect_ranges._compiler.plan import ResolvedPlan, Totals
+from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._provider.provider import (
     LibvirtRangeSandboxEnvironment,
     sample_handle_for,
@@ -102,6 +107,8 @@ class FakePlantSession:
     def __init__(self, *, enabled: bool = True) -> None:
         self.records: list[dict[str, object]] = []
         self.enabled = enabled
+        self.driver_writer: object | None = None
+        """Mimics `EvidenceSession.driver_writer`; `None` makes telemetry producer start refuse."""
 
     async def record_plant(self, record: dict[str, object]) -> None:
         self.records.append(record)
@@ -235,6 +242,164 @@ class TestOracleWriteFile:
             assert VALUE_MARKER.decode() not in message
             assert not (tmp_path / "tmp" / "doomed").exists()
             assert_no_residue(endpoint, value)
+
+        asyncio.run(scenario())
+
+
+class TestAnswerOracleRead:
+    def test_oracle_read_source_scores_the_live_fact(self, tmp_path: Path) -> None:
+        """The host+path answer source (coverage pass T4): the expected value is read from the live guest as root at check time."""
+        import time as _time
+
+        from inspect_ranges._challenges.goaltypes import AnswerType
+        from inspect_ranges._challenges.schema import AnswerGoal
+        from inspect_ranges._challenges.submission import Submission, Submissions
+
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.write_file("box", "/tmp/fact", b"a1b2c3\n")
+            goal = AnswerGoal(id="fact", host="box", path="/tmp/fact")
+            engine = AnswerType()
+            assert engine.assurance_for(goal) == "guest-corroborated"
+            right = Submissions(
+                [Submission(goal_id="fact", value="a1b2c3", wall=_time.time())]
+            )
+            observations = await engine.check(goal, oracle, right)
+            assert engine.compare(goal, observations, oracle.store).achieved
+            wrong = Submissions(
+                [Submission(goal_id="fact", value="zzz", wall=_time.time())]
+            )
+            observations = await engine.check(goal, oracle, wrong)
+            assert not engine.compare(goal, observations, oracle.store).achieved
+
+        asyncio.run(scenario())
+
+
+class TestPlantAndStart:
+    def test_producer_start_failure_unwinds_plants(self, tmp_path: Path) -> None:
+        """B15: the never-half-planted contract covers producer start, not only plants."""
+
+        async def scenario() -> None:
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "user",
+                        "type": "flag",
+                        "host": "box",
+                        "path": "/tmp/user-flag",
+                    },
+                    {
+                        "id": "seen",
+                        "type": "detection",
+                        "collector": "siem",
+                        "signal": "intrusion",
+                    },
+                ]
+            )
+            collector = CollectorSpec(
+                name="siem", guest="box", source=FileSource(path="/var/log/app.log")
+            )
+            with pytest.raises(RuntimeError, match="driver evidence writer"):
+                await plant_and_start(
+                    oracle,
+                    challenge,
+                    None,
+                    [collector],
+                    extra_observers=frozenset({"telemetry-collector"}),
+                )
+            assert oracle.store.keys() == []
+            assert not (tmp_path / "tmp" / "user-flag").exists()
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
+
+        asyncio.run(scenario())
+
+    def test_failing_telemetry_half_never_starts_the_prober(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Raise-able producer steps run before anything starts: a refused sample must not leave a prober probing its unwound range."""
+        import inspect_ranges._challenges.setup as setup_module
+        from inspect_ranges._challenges.prober import ProbeTarget
+
+        started: list[str] = []
+
+        class RecordingProber:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                started.append("prober")
+
+            async def stop(self) -> None:  # pragma: no cover - never started
+                pass
+
+        async def scenario() -> None:
+            monkeypatch.setattr(setup_module, "Prober", RecordingProber)
+
+            def fixed_targets(oracle: object, challenge: object) -> list[ProbeTarget]:
+                return [ProbeTarget(goal_id="t", ip="10.0.0.9", port=8080)]
+
+            monkeypatch.setattr(setup_module, "_probe_targets", fixed_targets)
+            session = FakePlantSession()  # driver_writer None: telemetry refuses
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "seen",
+                        "type": "detection",
+                        "collector": "siem",
+                        "signal": "intrusion",
+                    }
+                ]
+            )
+            collector = CollectorSpec(
+                name="siem", guest="box", source=FileSource(path="/var/log/app.log")
+            )
+            with pytest.raises(RuntimeError, match="driver evidence writer"):
+                await plant_and_start(
+                    oracle,
+                    challenge,
+                    None,
+                    [collector],
+                    extra_observers=frozenset({"telemetry-collector"}),
+                )
+            assert started == []
+
+        asyncio.run(scenario())
+
+    def test_cancellation_during_producer_start_still_unwinds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sample cancellation mid-start must not leave the half-planted state (shielded unwind)."""
+        import inspect_ranges._challenges.setup as setup_module
+
+        async def hanging(*args: object, **kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        async def scenario() -> None:
+            monkeypatch.setattr(setup_module, "_start_producers", hanging)
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "user",
+                        "type": "flag",
+                        "host": "box",
+                        "path": "/tmp/user-flag",
+                    }
+                ]
+            )
+            task = asyncio.create_task(plant_and_start(oracle, challenge, None, []))
+            await asyncio.sleep(0.2)  # plants land, producers hang
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.2)  # a detached unwind gets its beat
+            assert oracle.store.keys() == []
+            assert not (tmp_path / "tmp" / "user-flag").exists()
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
 
         asyncio.run(scenario())
 

@@ -20,9 +20,30 @@ namespace VsockD
         }
     }
 
+    // quality-review B8: all internal timing is monotonic. DateTime.UtcNow
+    // steps backwards on w32time resyncs (routine on Windows guests): a step
+    // while a command ran minted NEGATIVE pending elapsed_ms / diag ts_ms,
+    // which the host's strict decode rejects as TAMPER (an honest guest in
+    // the wrong failure class), and skewed exec budget deadlines by the step
+    // size. Stopwatch rides QPC and never steps; the Go daemon's time.Since
+    // is already monotonic.
+    static class Mono
+    {
+        public static long NowMs()
+        {
+            // split arithmetic: ts * 1000 overflows long on TSC-scale QPC
+            // frequencies (~3 GHz on VMs without the hypervisor QPC
+            // enlightenment) after ~35 days of uptime, which would mint the
+            // very negative timestamps this helper exists to prevent
+            long ts = System.Diagnostics.Stopwatch.GetTimestamp();
+            long f = System.Diagnostics.Stopwatch.Frequency;
+            return (ts / f) * 1000L + (ts % f) * 1000L / f;
+        }
+    }
+
     sealed class RunningEntry
     {
-        public long StartTicks = DateTime.UtcNow.Ticks;
+        public long StartMs = Mono.NowMs();
         public ManualResetEvent Done = new ManualResetEvent(false);
     }
 

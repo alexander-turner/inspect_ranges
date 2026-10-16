@@ -51,6 +51,7 @@ from inspect_ranges._challenges.submission import Submissions
 from inspect_ranges._compiler.allocate import allocate
 from inspect_ranges._compiler.plan import PlanOptions, resolve_plan
 from inspect_ranges._compiler.probe import render_probe_clamp_nftables
+from inspect_ranges._evidence.manifest import STREAM_NAME_PATTERN, check_name
 from inspect_ranges.types import IssueError
 
 from tests.test_compiler import two_segment_spec
@@ -132,6 +133,36 @@ class TestClampRendering:
         assert render_probe_clamp_nftables(allocate(two_segment_spec())) == ""
 
 
+class TestProbeClientLifecycle:
+    def test_external_cancellation_kills_the_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B19: `stop()`'s cancel must not leak the `docker compose exec` child."""
+        from inspect_ranges._challenges.prober import _run_probe_client
+
+        async def scenario() -> None:
+            captured: dict[str, asyncio.subprocess.Process] = {}
+            real = asyncio.create_subprocess_exec
+
+            async def capturing(
+                *argv: Any, **kwargs: Any
+            ) -> asyncio.subprocess.Process:
+                process = await real(*argv, **kwargs)
+                captured["process"] = process
+                return process
+
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing)
+            task = asyncio.create_task(_run_probe_client(["sleep", "30"]))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            rc = await asyncio.wait_for(captured["process"].wait(), 5)
+            assert rc == -9
+
+        asyncio.run(scenario())
+
+
 class TestProber:
     """Exercised through the public surface (start/stop plus the injectable client runner)."""
 
@@ -140,6 +171,10 @@ class TestProber:
             self.shipped: list[tuple[str, list[dict[str, Any]]]] = []
 
         async def append_driver(self, stream: str, data: bytes) -> None:
+            # Enforce the REAL stream grammar: a fixture more permissive than
+            # the production seam is how the goal-id class hid (quality
+            # review A8); the real writer raises ValueError at this boundary.
+            check_name(stream, STREAM_NAME_PATTERN, "stream")
             self.shipped.append(
                 (stream, [json.loads(line) for line in data.splitlines()])
             )
@@ -292,6 +327,29 @@ class TestDegrade:
         ]
         result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
         assert not result.achieved and result.partial == pytest.approx(1 / 3)
+
+    def test_latency_failed_and_slow_records_count_once(self) -> None:
+        """A5: a slow MUMBLE is one degraded probe, not two (the client records rtt_ms on mumble paths)."""
+        goal = self.goal(measure="latency", threshold=100.0)
+        records = [
+            probe_record(1000.0, "ok", 10.0),
+            probe_record(1001.0, "mumble", 900.0),
+            probe_record(1002.0, "mumble", 900.0),
+            probe_record(1003.0, "ok", 10.0),
+        ]
+        result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
+        assert not result.achieved
+        # pre-fix the sum of overlapping sets read 4/3, clamped to full credit
+        assert result.partial == pytest.approx(2 / 3)
+        # the same degradation expressed as slow-but-ok scores identically
+        control = [
+            probe_record(1000.0, "ok", 10.0),
+            probe_record(1001.0, "ok", 900.0),
+            probe_record(1002.0, "ok", 900.0),
+            probe_record(1003.0, "ok", 10.0),
+        ]
+        control_result = DegradeType().compare(goal, observations(control), EMPTY_STORE)
+        assert control_result.partial == result.partial
 
     def test_error_fraction_below_threshold_scores_zero(self) -> None:
         goal = self.goal(measure="error-fraction", threshold=0.8)
@@ -907,6 +965,28 @@ class TestDatasetProbeSegments:
         noprobe_meta = by_id["noprobe"].metadata
         assert noprobe_meta is not None
         assert PROBE_SEGMENTS_METADATA_KEY not in noprobe_meta
+
+    def test_router_hosted_goal_requests_its_segment(self, tmp_path: Any) -> None:
+        """B16: routers are legal goal hosts, so the no-segment fallback must see them (a router-hosted prober goal used to refuse at plant time instead of requesting its endpoint here)."""
+        from inspect_ranges._challenges.dataset import challenge_dataset
+        from inspect_ranges._challenges.schema import Challenges
+        from inspect_ranges._provider.provider import PROBE_SEGMENTS_METADATA_KEY
+
+        challenges = Challenges(
+            challenges=[
+                Challenge(
+                    id="router-up",
+                    prompt="p",
+                    goals=[
+                        DegradeGoal(id="deny", host="router", port=80, window_s=30.0)
+                    ],
+                )
+            ]
+        )
+        dataset = challenge_dataset(challenges, range_spec=two_segment_spec())
+        sample = next(iter(dataset))
+        assert sample.metadata is not None
+        assert sample.metadata[PROBE_SEGMENTS_METADATA_KEY] == "dmz"
 
 
 class TestSegmentField:

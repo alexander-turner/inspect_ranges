@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from inspect_ranges._evidence.manifest import seal_key
 from inspect_ranges._evidence.reader import LocalDirStore, verify_location
 from inspect_ranges._evidence.sealer import seal_abandoned
@@ -60,6 +61,49 @@ def test_seal_abandoned_skips_sealed_writers_and_races(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_seal_abandoned_continues_past_a_lost_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost seal-put race on one writer never stops the sweep: the next writer still gets its reaped seal (quality-review C-list: reap-seal continuation)."""
+    import inspect_ranges._evidence.sealer as sealer_mod
+    from inspect_ranges._evidence.s3 import sink_for_location
+    from inspect_ranges._evidence.sink import EvidenceSink
+
+    async def scenario() -> None:
+        driver = EvidenceWriter(
+            LocalDirSink(tmp_path), part_interval_s=0, writer="driver", retry_wait_s=0
+        )
+        await driver.append("session", b"pinned")
+        await driver.checkpoint()
+        host = EvidenceWriter(
+            LocalDirSink(tmp_path), part_interval_s=0, writer="host", retry_wait_s=0
+        )
+        await host.append("pcap/dmz", b"frames")
+        await host.checkpoint()
+
+        class RacingSink:
+            def __init__(self, inner: EvidenceSink) -> None:
+                self._inner = inner
+
+            async def put(self, key: str, data: bytes) -> None:
+                if key == seal_key("driver"):
+                    raise FileExistsError(key)  # another sealer won this one
+                await self._inner.put(key, data)
+
+        def racing(location: str) -> EvidenceSink:
+            return RacingSink(sink_for_location(location))
+
+        monkeypatch.setattr(sealer_mod, "sink_for_location", racing)
+        sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
+        assert set(sealed) == {"host"}, "the lost race skips, the sweep continues"
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"host": sealed["host"]}
+        )
+        assert report.writers["host"].seal_status == "reaped"
+
+    asyncio.run(scenario())
+
+
 def test_seal_abandoned_leaves_broken_records_unsealed(tmp_path: Path) -> None:
     async def scenario() -> None:
         await _abandoned_record(tmp_path)
@@ -109,3 +153,93 @@ def test_reaper_sweep_reap_seals_the_lease_evidence(tmp_path: Path) -> None:
         assert host.lease_id == lease.lease_id
 
     asyncio.run(check())
+
+
+# -- B14: the reap-seal put gets the bounded retry discipline --------------------
+
+
+class _FlakySealSink:
+    """Delegates to a `LocalDirSink`, failing the first `failures` puts; optionally pre-seeding the key so the retry meets `FileExistsError`."""
+
+    def __init__(self, root: Path, *, failures: int) -> None:
+        self.inner = LocalDirSink(root)
+        self.failures = failures
+        self.puts = 0
+
+    async def put(self, key: str, data: bytes) -> None:
+        self.puts += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise OSError("transient 5xx")
+        await self.inner.put(key, data)
+
+
+def test_reap_seal_retries_a_transient_put(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """B14: one transient failure no longer leaves the record permanently unsealed."""
+
+    async def scenario() -> None:
+        await _abandoned_record(tmp_path)
+        flaky = _FlakySealSink(tmp_path, failures=2)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return flaky
+
+        monkeypatch.setattr(
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
+        )
+        sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
+        assert set(sealed) == {"host"} and flaky.puts == 3
+        report = await verify_location(LocalDirStore(tmp_path))
+        assert report.ok and report.writers["host"].seal_status == "reaped"
+
+    asyncio.run(scenario())
+
+
+def test_reap_seal_transient_then_conflict_reads_as_race_lost(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """A FileExistsError after a transient failure means a sealer won (possibly us); skip, never raise."""
+
+    class _ConflictAfterTransient(_FlakySealSink):
+        async def put(self, key: str, data: bytes) -> None:
+            self.puts += 1
+            if self.puts == 1:
+                raise OSError("transient 5xx")
+            raise FileExistsError(key)
+
+    async def scenario() -> None:
+        await _abandoned_record(tmp_path)
+        conflicted = _ConflictAfterTransient(tmp_path, failures=0)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return conflicted
+
+        monkeypatch.setattr(
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
+        )
+        sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
+        assert sealed == {} and conflicted.puts == 2
+
+    asyncio.run(scenario())
+
+
+def test_reap_seal_persistent_failure_stays_unsealed(
+    tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    async def scenario() -> None:
+        await _abandoned_record(tmp_path)
+        dead = _FlakySealSink(tmp_path, failures=99)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return dead
+
+        monkeypatch.setattr(
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
+        )
+        sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
+        assert sealed == {} and dead.puts == 3
+        assert not (tmp_path / seal_key("host")).exists()
+
+    asyncio.run(scenario())
