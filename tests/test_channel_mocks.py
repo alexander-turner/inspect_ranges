@@ -104,6 +104,11 @@ async def _drive(channel: MessageChannel, operation: str) -> None:
         await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
     elif operation == "write_file":
         await channel.write_file("web", "/tmp/x", b"payload")
+    elif operation == "ping":
+        # the declared operation matters: a schema-valid sessionless pong is
+        # wrong-kind tamper on any other path, so only ping pins the session
+        # requirement itself
+        await channel.ping("web")
     else:
         await channel.read_file("web", "/etc/shadow", cap=1024)
 
