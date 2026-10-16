@@ -311,6 +311,56 @@ def test_wedged_producer_stop_cannot_starve_a_sibling_stop(
     asyncio.run(scenario())
 
 
+def test_cancelled_finalize_is_not_latched_and_the_retry_seals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finalize cancelled mid-stops (the second-ctrl-C family during teardown) must not latch as finalized: the retried teardown re-enters finalize and the record still seals with a binding that carries the digest (quality-review round 2, adopted from the unit-2 probe B: pre-fix the retry was a no-op that wrote `seals={}` and then released the lease, leaving a permanently unsealed record with unreferenced chunks)."""
+    import inspect_ranges._provider.evidence as evidence_mod
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            project="ir-probe",
+            bundle=tmp_path / "bundle",
+            plan=plan,
+        )
+        await session.append_driver("session", b'{"event": "pinned"}\n')
+
+        started = asyncio.Event()
+
+        async def blocking_stop() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        session.register_producer(blocking_stop)
+        monkeypatch.setattr(evidence_mod, "PRODUCER_STOPS_SHARE_S", 0.2)
+        task = asyncio.create_task(session.finalize())
+        await started.wait()
+        task.cancel()  # the operator's second ctrl-C during teardown
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # task_cleanup retries _destroy: finalize again, then the binding
+        await session.finalize()
+        session.write_binding()
+        seals = cast(dict[str, str], session.binding()["seals"])
+        assert set(seals) == {"driver"}, "the retry re-enters finalize and seals"
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"driver": seals["driver"]}
+        )
+        driver = report.writers["driver"]
+        assert report.ok and driver.sealed and driver.binding_checked
+        assert driver.seal_status == "incomplete", (
+            "the blocking producer's tail was lost; the seal says so"
+        )
+        assert not report.unreferenced, (
+            "the delivered session chunk is referenced by the sealed record"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_hanging_sink_bounds_the_seal_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

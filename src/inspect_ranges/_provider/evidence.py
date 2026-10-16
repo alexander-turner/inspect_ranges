@@ -237,14 +237,25 @@ class EvidenceSession:
         )
 
     async def finalize(self) -> None:
-        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises.
+        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises (cancellation excepted).
 
         Phase-split budgets (quality-review A6): the stops run under the budget minus the reserved seal share, and the seal phase ALWAYS runs, sealing `complete` after clean stops and `incomplete` after a stop timeout (producer tails were lost, which is what `incomplete` means). Only a sink that is itself unresponsive leaves the record unsealed, reported as such by verify; the reaper can reap-seal it only while the lease still exists, so the warning says so instead of promising recovery.
+
+        Cancellation (the second-ctrl-C family during teardown) propagates, and it is NOT completion: the idempotency latch resets so a retried teardown re-enters finalize and the seal still happens (quality-review round 2: a latched cancel made the retry a no-op that wrote `seals={}` and then released the lease, destroying the reap-seal anchor).
         """
         if self._finalized or self._driver is None:
             self._finalized = True
             return
         self._finalized = True
+        try:
+            await self._finalize_phases()
+        except asyncio.CancelledError:
+            self._finalized = False
+            raise
+
+    async def _finalize_phases(self) -> None:
+        """The finalize phases (producer stops, capture stop, drain and seal), each under its own share."""
+        assert self._driver is not None
         stops_clean = True
         if self._producers:
             # every stop() starts before any is awaited: the share is one
