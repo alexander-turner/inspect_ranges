@@ -26,7 +26,11 @@ def _probe_segments(challenge: Challenge, spec: RangeSpec) -> list[str]:
     One segment per probed goal: the goal's declared `segment`, else the host's first declared network (the v1 convention for single-homed hosts; multi-homed hosts should declare `segment`). The provider reads the result from sample metadata at render time, which is how a challenge's observer needs become plan options without the compiler ever seeing challenges.
     """
     segments: set[str] = set()
-    by_name = {host.name: host for host in spec.hosts}
+    # routers are legal goal hosts (challenge_issues accepts them), so the
+    # no-segment fallback must see them too (quality review B16: a
+    # router-hosted prober goal validated green, then refused at plant time
+    # because its probe endpoint was never requested)
+    by_name = {guest.name: guest for guest in (*spec.hosts, *spec.routers)}
     for goal in challenge.goals:
         if "active-prober" not in goal.observers():
             continue

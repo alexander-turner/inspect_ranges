@@ -211,7 +211,13 @@ async def score_challenge(
         if any(record.indeterminate for record in records.values())
         else "valid"
     )
-    raw_hints = store.get(HINTS_USED_STORE_KEY, [])
+    try:
+        raw_hints = store.get(HINTS_USED_STORE_KEY, [])
+    except Exception as error:
+        # the one store read the latch guards did not cover (coverage pass
+        # T5): a failing read costs the hint penalties, never the sample
+        logger.warning("hints read failed: %s", type(error).__name__)
+        raw_hints = []
     hints_used = list(dict.fromkeys(index for index in raw_hints if type(index) is int))
     value = aggregate(challenge, records, assurances=assurances, hints_used=hints_used)
     metadata: dict[str, object] = {
@@ -254,9 +260,13 @@ def challenge_scorer() -> Scorer:
         await stop_goal_poller(state.store)
         challenge = Challenge.model_validate(raw)
         submissions = submissions_from(state, challenge=challenge)
-        value, metadata = await score_challenge(
-            range_oracle(), state.store, challenge, submissions
-        )
+        oracle = range_oracle()
+        # one memo for the whole pass: two goals on the same segment or
+        # collector share one evidence fetch (the per-goal opens nest)
+        with oracle.evidence_memo():
+            value, metadata = await score_challenge(
+                oracle, state.store, challenge, submissions
+            )
         achieved = metadata.get("achieved_count", 0)
         return Score(
             value=value,

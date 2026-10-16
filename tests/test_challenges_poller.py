@@ -180,6 +180,49 @@ class TestStartKnob:
 
         asyncio.run(scenario())
 
+    def test_stop_gives_up_on_a_wedged_tick_within_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coverage pass T12: a tick that swallows cancellation cannot hold teardown past STOP_BUDGET_S or raise."""
+        import time as _time
+
+        from inspect_ranges._challenges.poller import STOP_BUDGET_S, GoalPoller
+
+        async def wedged(self: GoalPoller) -> None:
+            while True:
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:  # noqa: PERF203
+                    continue  # a wedged tick swallowing its cancellation
+
+        async def scenario() -> None:
+            monkeypatch.setenv(POLL_S_ENV, "60")
+            monkeypatch.setattr(GoalPoller, "_run", wedged)
+            oracle, _, _ = make_oracle(tmp_path)
+            store = Store()
+            assert start_goal_poller(oracle, flag_challenge(), store) is not None
+            started = _time.monotonic()
+            await stop_goal_poller(store)  # must neither hang nor raise
+            assert _time.monotonic() - started < STOP_BUDGET_S + 2
+
+        asyncio.run(scenario())
+
+    def test_malformed_cadence_falls_back_to_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B20: a typo'd knob must not silently cost every mid-run latch (only explicit 0 disables)."""
+
+        async def scenario() -> None:
+            for raw in ("fast", "-5", "nan", "inf", "1e999"):
+                monkeypatch.setenv(POLL_S_ENV, raw)
+                oracle, _, _ = make_oracle(tmp_path)
+                store = Store()
+                poller = start_goal_poller(oracle, flag_challenge(), store)
+                assert poller is not None, raw
+                await stop_goal_poller(store)
+
+        asyncio.run(scenario())
+
     def test_start_registers_and_stop_unregisters(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

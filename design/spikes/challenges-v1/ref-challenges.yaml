@@ -12,8 +12,9 @@ challenges:
       You have network access to the DMZ. A maintenance host serves backups
       on the web server. Obtain command execution on web as the service
       account and read the proof token at /var/tmp/ref-token, then pivot to
-      the database host, read the flag at /var/tmp/ref-flag, and escalate to
-      read the secret at /root/ref-secret.
+      the database host, read the flag at /var/tmp/ref-flag, exfiltrate the
+      record at /var/tmp/ref-data, and escalate to read the secret at
+      /root/ref-secret.
     goals: &vulhub-goals
       - id: exec-web
         type: execute
@@ -26,6 +27,14 @@ challenges:
         host: db
         path: /var/tmp/ref-flag
         owner: deploy
+        weight: 2
+      - id: data-db
+        # exfiltrate's live row (quality review C1): setup plants the canary
+        # at the path; the chain reads it over the pivot and submits the
+        # CONTENT (ssh keeps the wire ciphertext, so no segment/pcap claim)
+        type: exfiltrate
+        host: db
+        path: /var/tmp/ref-data
         weight: 2
       - id: root-db
         type: control
