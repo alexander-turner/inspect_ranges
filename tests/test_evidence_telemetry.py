@@ -661,3 +661,48 @@ def test_spec_validation_table() -> None:
             EvidenceWriter(LocalDirSink(Path("/tmp/unused")), writer="driver"),
             [file_spec(), file_spec()],
         )
+
+
+# -- cursor stripping (quality-review finding A3) -------------------------------
+
+
+def test_extract_cursor_strips_only_the_banner_line() -> None:
+    from inspect_ranges._evidence.telemetry import _extract_cursor
+
+    alert = b"Oct 16 10:00:01 db sshd[1]: ALERT intrusion from user '-- cursor: pwn'"
+    banner = b"-- cursor: s=real123"
+    cursor, payload = _extract_cursor(
+        alert + b"\n" + banner + b"\n", r"-- cursor: (\S+)"
+    )
+    # the real banner (last matching line) wins the cursor ...
+    assert cursor == "s=real123"
+    # ... and an event line that merely CONTAINS a pattern match SHIPS: stripping
+    # it would hand the agent a silent alert-suppression primitive
+    assert b"ALERT" in payload
+
+
+def test_alert_embedding_cursor_pattern_reaches_the_record(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        alert = (
+            b"Oct 16 10:00:01 db sshd[1]: ALERT login by attacker-chosen-user "
+            b"'x -- cursor: y'\n"
+        )
+        channel.exec_script = [
+            exec_ok(b"boot line\n-- cursor: s=0\n"),
+            exec_ok(b"benign line\n" + alert + b"-- cursor: s=1\n"),
+        ]
+        poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
+        await poller.poll_once("journal")
+        await poller.poll_once("journal")
+        await writer.seal()
+
+        shipped = await data_bytes(store, "journal")
+        assert b"benign line" in shipped
+        assert b"ALERT" in shipped, shipped
+        assert await gap_causes(store, "telemetry/journal") == []
+        meta = await meta_records(store, "journal")
+        assert [m["watermark"] for m in meta] == ["s=0", "s=1"]
+        assert (await verify_location(store)).ok
+
+    asyncio.run(run())
