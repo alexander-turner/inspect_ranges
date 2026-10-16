@@ -40,7 +40,7 @@ from .probe import (
     render_probes_txt,
 )
 
-_DOMAIN_XML = """<domain type='kvm'>
+_DOMAIN_XML = """<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{name}</name>
   <memory unit='MiB'>{memory_mb}</memory>
   <vcpu>{cpus}</vcpu>
@@ -48,8 +48,11 @@ _DOMAIN_XML = """<domain type='kvm'>
     <type arch='x86_64' machine='q35'>hvm</type>
     <boot dev='hd'/>
   </os>
-  <features><acpi/><apic/></features>
+  <features><acpi/><apic/><vmport state='off'/></features>
   {cpu}
+  <clock offset='utc'>
+    <timer name='hpet' present='no'/>
+  </clock>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
@@ -79,6 +82,15 @@ _DOMAIN_XML = """<domain type='kvm'>
     <memballoon model='none'/>
     <controller type='usb' model='none'/>
   </devices>
+  <!-- q35 legacy devices no guest uses and libvirt 10.0 has no element for
+       (the AHCI controller, the SMBus and its SPD EEPROMs, the i8042 keyboard
+       controller, the kvmvapic option ROM); the PIT and PIC stay on -->
+  <qemu:commandline>
+    <qemu:arg value='-machine'/>
+    <qemu:arg value='sata=off,smbus=off,i8042=off'/>
+    <qemu:arg value='-global'/>
+    <qemu:arg value='kvm-apic.vapic=false'/>
+  </qemu:commandline>
 </domain>
 """
 

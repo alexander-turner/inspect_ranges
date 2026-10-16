@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 from inspect_ranges._compiler import (
@@ -181,6 +182,28 @@ def test_bundle_artifacts_reflect_the_plan(cache: Path, tmp_path: Path) -> None:
         "r2",
         "attacker",
     ]
+
+
+def test_domain_turns_off_q35_legacy_devices(cache: Path, tmp_path: Path) -> None:
+    # q35 adds devices no configuration names; the domain removes those no
+    # guest uses (natively where libvirt 10.0 can, else on the QEMU command
+    # line) and keeps the PIT and PIC
+    out = tmp_path / "bundle"
+    render_bundle(chained_spec(), out, options(cache))
+    qemu = "{http://libvirt.org/schemas/domain/qemu/1.0}"
+    for xml in sorted(out.glob("guests/*/domain.xml")):
+        domain = ElementTree.fromstring(xml.read_text())
+        vmport = domain.find("features/vmport")
+        assert vmport is not None and vmport.get("state") == "off"
+        hpet = domain.find("clock/timer[@name='hpet']")
+        assert hpet is not None and hpet.get("present") == "no"
+        args = [arg.get("value") for arg in domain.iter(f"{qemu}arg")]
+        assert args == [
+            "-machine",
+            "sata=off,smbus=off,i8042=off",
+            "-global",
+            "kvm-apic.vapic=false",
+        ]
 
 
 def test_uplink_compose_variant(cache: Path, tmp_path: Path) -> None:
