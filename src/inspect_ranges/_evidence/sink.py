@@ -101,6 +101,19 @@ class _PendingChunk:
 
 
 @dataclass
+class _PendingGap:
+    """A gap awaiting commitment in the same FIFO as the chunks around it.
+
+    Gaps have no backend object, but they take their chain slot in delivery order (B12): committing a gap immediately while earlier chunks sat undelivered gave the gap an earlier sequence number than events that preceded it, so the permanent record inverted event order.
+    """
+
+    stream: str
+    span: ClockSpan
+    cause: str
+    dropped: int
+
+
+@dataclass
 class _StreamState:
     chain: str
     next_seq: int = 0
@@ -164,7 +177,7 @@ class EvidenceWriter:
         self._put_attempts = put_attempts
         self._retry_wait_s = retry_wait_s
         self._clock = clock
-        self._pending_chunks: deque[_PendingChunk] = deque()
+        self._pending: deque[_PendingChunk | _PendingGap] = deque()
         self._pending_bytes = 0
         self._total_bytes = 0
         self._cap_breached = False
@@ -197,10 +210,16 @@ class EvidenceWriter:
             ):
                 # the per-sample volume cap (INSPECT_RANGES_EVIDENCE_MAX_MB):
                 # breach yields explicit gaps and flags the seal (a cap-hit
-                # record can never claim `complete`)
+                # record can never claim `complete`). The gap rides the FIFO so
+                # its chain slot follows the chunks appended before it (B12).
                 self._cap_breached = True
-                self._commit_gap(
-                    stream, resolved, cause="evidence-cap", dropped=len(data)
+                self._pending.append(
+                    _PendingGap(
+                        stream=stream,
+                        span=resolved,
+                        cause="evidence-cap",
+                        dropped=len(data),
+                    )
                 )
                 logger.warning(
                     "evidence gap (evidence-cap): writer=%s stream=%s dropped=%d total=%d",
@@ -211,8 +230,13 @@ class EvidenceWriter:
                 )
                 return
             if len(data) > self._buffer_cap:
-                self._commit_gap(
-                    stream, resolved, cause="buffer-cap", dropped=len(data)
+                self._pending.append(
+                    _PendingGap(
+                        stream=stream,
+                        span=resolved,
+                        cause="buffer-cap",
+                        dropped=len(data),
+                    )
                 )
                 logger.warning(
                     "evidence gap (buffer-cap, oversized chunk): writer=%s stream=%s dropped=%d",
@@ -222,9 +246,7 @@ class EvidenceWriter:
                 )
                 return
             self._total_bytes += len(data)
-            self._pending_chunks.append(
-                _PendingChunk(stream=stream, data=data, span=resolved)
-            )
+            self._pending.append(_PendingChunk(stream=stream, data=data, span=resolved))
             self._pending_bytes += len(data)
             self._enforce_cap()
 
@@ -236,15 +258,20 @@ class EvidenceWriter:
         cause: str,
         dropped: int = 0,
     ) -> None:
-        """Record an explicit hole in a stream (data lost before it reached the writer)."""
+        """Record an explicit hole in a stream (data lost before it reached the writer).
+
+        The gap rides the same FIFO as pending chunks, so its chain slot reflects event order even when earlier chunks are still awaiting delivery (B12).
+        """
         check_name(stream, STREAM_NAME_PATTERN, "stream")
         async with self._lock:
             self._check_open()
-            self._commit_gap(
-                stream,
-                span if span is not None else self._point_span(),
-                cause=cause,
-                dropped=dropped,
+            self._pending.append(
+                _PendingGap(
+                    stream=stream,
+                    span=span if span is not None else self._point_span(),
+                    cause=cause,
+                    dropped=dropped,
+                )
             )
 
     async def flush(self) -> FlushResult:
@@ -258,7 +285,9 @@ class EvidenceWriter:
         await self._deliver_chunks(result)
         self._cut_part(force=False)
         await self._deliver_parts(result)
-        result.pending_chunks = len(self._pending_chunks)
+        result.pending_chunks = sum(
+            1 for entry in self._pending if isinstance(entry, _PendingChunk)
+        )
         result.pending_parts = len(self._pending_parts)
         for error in result.errors:
             logger.warning("evidence delivery failure (buffered for retry): %s", error)
@@ -275,7 +304,9 @@ class EvidenceWriter:
             await self._deliver_chunks(result)
             self._cut_part(force=True)
             await self._deliver_parts(result)
-            result.pending_chunks = len(self._pending_chunks)
+            result.pending_chunks = sum(
+                1 for entry in self._pending if isinstance(entry, _PendingChunk)
+            )
             result.pending_parts = len(self._pending_parts)
             for error in result.errors:
                 logger.warning(
@@ -304,8 +335,18 @@ class EvidenceWriter:
     ) -> tuple[Seal, str]:
         result = await self._flush_locked()
         unflushed = 0
-        while self._pending_chunks:
-            pending = self._pending_chunks.popleft()
+        while self._pending:
+            pending = self._pending.popleft()
+            if isinstance(pending, _PendingGap):
+                # an explicit gap stuck behind an undeliverable chunk: commit
+                # it as itself, preserving event order
+                self._commit_gap(
+                    pending.stream,
+                    pending.span,
+                    cause=pending.cause,
+                    dropped=pending.dropped,
+                )
+                continue
             self._pending_bytes -= len(pending.data)
             unflushed += len(pending.data)
             self._commit_gap(
@@ -423,12 +464,28 @@ class EvidenceWriter:
         self._records.append(record)
 
     def _enforce_cap(self) -> None:
-        while self._pending_bytes > self._buffer_cap and self._pending_chunks:
-            oldest = self._pending_chunks.popleft()
-            self._pending_bytes -= len(oldest.data)
-            self._commit_gap(
-                oldest.stream, oldest.span, cause="buffer-cap", dropped=len(oldest.data)
+        while self._pending_bytes > self._buffer_cap:
+            # drop the OLDEST pending chunk, replacing it in place so the gap
+            # takes exactly the dropped chunk's position in the FIFO (B12)
+            position = next(
+                (
+                    index
+                    for index, entry in enumerate(self._pending)
+                    if isinstance(entry, _PendingChunk)
+                ),
+                None,
             )
+            if position is None:
+                return
+            oldest = self._pending[position]
+            assert isinstance(oldest, _PendingChunk)
+            self._pending[position] = _PendingGap(
+                stream=oldest.stream,
+                span=oldest.span,
+                cause="buffer-cap",
+                dropped=len(oldest.data),
+            )
+            self._pending_bytes -= len(oldest.data)
             logger.warning(
                 "evidence gap (buffer-cap): writer=%s stream=%s dropped=%d",
                 self._writer,
@@ -463,9 +520,20 @@ class EvidenceWriter:
 
     async def _deliver_chunks(self, result: FlushResult) -> None:
         # strict FIFO: stopping at the first failure preserves per-stream
-        # sequence order between delivery and commitment
-        while self._pending_chunks:
-            pending = self._pending_chunks[0]
+        # sequence order between delivery and commitment; gaps commit in their
+        # queue position (no backend object), so chain order equals event
+        # order even across delivery failures (B12)
+        while self._pending:
+            pending = self._pending[0]
+            if isinstance(pending, _PendingGap):
+                self._pending.popleft()
+                self._commit_gap(
+                    pending.stream,
+                    pending.span,
+                    cause=pending.cause,
+                    dropped=pending.dropped,
+                )
+                continue
             # the lock guarantees nothing else commits to this stream between
             # the key computation here and _commit_chunk below
             next_seq = self._stream_state(pending.stream).next_seq
@@ -475,7 +543,7 @@ class EvidenceWriter:
             except FileExistsError:
                 # a foreign object at our key: write-once forbids replacing it,
                 # so the chunk is lost explicitly rather than retried forever
-                self._pending_chunks.popleft()
+                self._pending.popleft()
                 self._pending_bytes -= len(pending.data)
                 self._commit_gap(
                     pending.stream,
@@ -492,7 +560,7 @@ class EvidenceWriter:
             except Exception as error:
                 result.errors.append(f"chunk {key}: {error}")
                 return
-            self._pending_chunks.popleft()
+            self._pending.popleft()
             self._pending_bytes -= len(pending.data)
             self._commit_chunk(pending)
             result.delivered_chunks += 1

@@ -731,3 +731,25 @@ def test_replay_flag_survives_a_failed_bootstrap(tmp_path: Path) -> None:
         assert flags[2] == (3, "ok", True), flags
 
     asyncio.run(run())
+
+
+def test_truncated_poll_prefix_precedes_its_gap_in_the_chain(tmp_path: Path) -> None:
+    """B12: the shipped prefix takes seq 0 and its lost tail's gap seq 1, matching event order."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [exec_ok(b"x" * 5000, truncated=True)]
+        poller, writer, store = make_poller(
+            tmp_path, channel, [journal_spec(max_poll_bytes=4096)]
+        )
+        await poller.poll_once("journal")
+        await writer.seal("incomplete")
+
+        kinds = [
+            (record.seq, record.kind)
+            for record in await manifest_records(store, "driver")
+            if record.stream == "telemetry/journal"
+        ]
+        assert kinds == [(0, "chunk"), (1, "gap")], kinds
+
+    asyncio.run(run())
