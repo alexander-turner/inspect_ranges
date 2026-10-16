@@ -26,7 +26,7 @@ Run on the metal devbox: **18/18 checks green plus zero residue**, `./run_teleme
 
 What the run demonstrated, in order:
 
-- **Events flow with watermarks advancing**: a real in-guest appender (0.3 s period) and `logger`-emitted journald events both appear in the record; the file watermark advanced across at least 3 separate polls and the journal cursor was extracted and re-substituted per poll.
+- **Events flow with watermarks advancing**: a real in-guest appender (0.3 s period) and `logger`-emitted journald events both appear in the record; the file watermark advanced across at least 3 separate polls and the journal cursor was extracted into a string cursor watermark on an ok poll (per-poll re-substitution is the poller's mechanism, CI-pinned in `tests/test_evidence_telemetry.py`, not re-asserted here).
 - **A producer kill is a visible stall, not silence**: after `pkill` of the appender, at least 4 further polls ran (proven from the record's own poll counters), every one `quiet` with the watermark frozen; coverage demonstrably continued. The paired post-hoc invariant: every data chunk corresponds to an `ok` poll, so nothing shipped during the stall.
 - **An unreachable guest is a poll-failed gap, and recovery is clean**: `virsh suspend` of the target produced `error` meta records and exactly one in-chain `poll-failed` gap for the streak; after `virsh resume`, polling recovered with no chain break.
 - **Log truncation is a watermark regression**: `: > tele.log` produced the `watermark-regression` gap and shipping resumed from the new content.

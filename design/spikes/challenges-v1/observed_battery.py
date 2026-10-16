@@ -179,7 +179,9 @@ async def main() -> int:
             "attacker",
             "timeout 3 bash -c 'echo > /dev/tcp/10.95.10.254/80' 2>&1; echo rc=$?",
         )
-        check(b"rc=0" not in out, "clamp: no RST, closed port reads filtered")
+        # rc=124 is timeout(1) firing: the SYN was dropped (filtered); a
+        # refused RST would return promptly with rc=1
+        check(b"rc=124" in out, "clamp: no RST, closed port reads filtered")
 
         print("=== target services on web ===")
         for name, content in (
@@ -341,7 +343,11 @@ async def main() -> int:
         )
         await asyncio.sleep(3.0)
         result, _ = await scored(oracle, hijack)
-        check(bool(result.achieved), "hijack: crash record carries the disclosed address")
+        check(
+            bool(result.achieved) and result.corroborated is True,
+            "hijack: crash record carries the disclosed address "
+            "(console and dmesg corroborated)",
+        )
         forged = HijackGoal(id="forged", host="db", service="crashsvc")
         await goal_type("hijack").setup(forged, oracle)
         forged_address = oracle.store.get("hijack:forged").decode()

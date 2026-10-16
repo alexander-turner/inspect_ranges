@@ -330,6 +330,7 @@ async def _stalled(store: LocalDirStore, collector: str, count: int) -> bool:
     return (
         len(tail) >= count
         and all(m["outcome"] == "quiet" for m in tail)
+        and all(m["watermark"] == meta[last_ok]["watermark"] for m in tail)
         and tail[-1]["poll"] - meta[last_ok]["poll"] >= count
     )
 
