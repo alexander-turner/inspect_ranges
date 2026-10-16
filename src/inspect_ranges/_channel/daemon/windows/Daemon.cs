@@ -345,6 +345,12 @@ namespace VsockD
                 // forged bytes into it
                 try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
                 try { conn.Blocking = true; } catch (Exception) { }
+                // quality-review B9: idle deadlines matching the Go daemon's
+                // 60 s SO_RCVTIMEO/SNDTIMEO, so a connected-silent peer (the
+                // nested-virt storm's half-open shape) cannot pin a thread
+                // and socket forever; the timeout surfaces as a
+                // SocketException, which HandleConn's catch closes.
+                try { conn.ReceiveTimeout = 60000; conn.SendTimeout = 60000; } catch (Exception) { }
                 try { conn.SendBufferSize = 4 << 20; conn.ReceiveBufferSize = 4 << 20; } catch (Exception) { }
                 VSockEndPoint peer = null;
                 try { peer = conn.RemoteEndPoint as VSockEndPoint; } catch (Exception) { }
