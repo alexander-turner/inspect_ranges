@@ -56,7 +56,7 @@ CollectorName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*
 class CommandSource(EvidenceModel):
     r"""Poll a collector by running a declared command in the guest.
 
-    `command` runs when a watermark exists and must carry `{cursor}` in exactly one argument; `bootstrap` runs first (and after an explicit re-bootstrap) and must not reference the cursor. `cursor_pattern` is a regex with exactly one capture group, searched over the final `CURSOR_TAIL_WINDOW` bytes of the poll's decoded output (the banner trails the events, and the window bounds regex cost over adversarial guest output, so the cursor must appear within it); the last match's group becomes the next watermark, and matching tail lines are stripped from the shipped payload so the data stream carries events only. Example (journald): bootstrap `journalctl -t app -n 100 --show-cursor -q`, command `journalctl -t app --after-cursor={cursor} --show-cursor -q`, pattern `-- cursor: (\\S+)`.
+    `command` runs when a watermark exists and must carry `{cursor}` in exactly one argument; `bootstrap` runs first (and after an explicit re-bootstrap) and must not reference the cursor. `cursor_pattern` is a regex with exactly one capture group, searched over the final `CURSOR_TAIL_WINDOW` bytes of the poll's decoded output (the banner trails the events, and the window bounds regex cost over adversarial guest output, so the cursor must appear within it); the last match's group becomes the next watermark, and ONLY the banner line it was taken from is stripped from the shipped payload (an event line that merely contains a pattern match ships: stripping by match would hand the agent a silent alert-suppression primitive). Example (journald): bootstrap `journalctl -t app -n 100 --show-cursor -q`, command `journalctl -t app --after-cursor={cursor} --show-cursor -q`, pattern `-- cursor: (\\S+)`.
     """
 
     kind: Literal["command"] = "command"
@@ -126,15 +126,13 @@ CURSOR_TAIL_WINDOW = 4096
 
 
 def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
-    """Extract the last cursor from `data`'s tail window and strip banner lines.
+    """Extract the last cursor from `data`'s tail window and strip ONLY its line.
 
-    Returns the cursor (or `None` when the pattern matches nothing in the window) and the payload with every matching tail-window line removed, so the data stream carries events only. Lines outside the window are never regex-tested (the window is the bound on matching cost) and ship untouched.
+    Returns the cursor (or `None` when the pattern matches nothing in the window) and the payload with exactly one line removed: the line the cursor was taken from (the tool's trailing banner). Nothing else is dropped, by design: event text routinely embeds attacker-controlled material, so a line that merely CONTAINS a pattern match must ship, or the evaluated agent could craft activity whose alert line embeds the pattern and silently suppress it from the exported record (quality-review finding A3). The backwards scan stops at the first match, so lines before the banner are never regex-tested; `CURSOR_TAIL_WINDOW` bounds the bytes tested over adversarial guest output, and lines outside the window ship untouched.
     """
     compiled = re.compile(pattern)
     lines = data.split(b"\n")
     tested = 0
-    cursor: str | None = None
-    drop: set[int] = set()
     for index in range(len(lines) - 1, -1, -1):
         line = lines[index]
         tested += len(line) + 1
@@ -142,13 +140,11 @@ def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
             break
         match = compiled.search(line.decode("utf-8", errors="replace"))
         if match is not None:
-            if cursor is None:
-                cursor = match.group(1)
-            drop.add(index)
-    if not drop:
-        return None, data
-    payload = b"\n".join(line for index, line in enumerate(lines) if index not in drop)
-    return cursor, payload
+            payload = b"\n".join(
+                part for position, part in enumerate(lines) if position != index
+            )
+            return match.group(1), payload
+    return None, data
 
 
 class TelemetryPoller:
