@@ -1035,3 +1035,54 @@ class TestSegmentField:
         sample = next(iter(dataset))
         assert sample.metadata is not None
         assert sample.metadata[PROBE_SEGMENTS_METADATA_KEY] == "internal"
+
+
+class _LoglevelOracle:
+    """Duck-typed oracle recording execs, with a configurable loglevel rc (R2-25)."""
+
+    def __init__(self, loglevel_rc: int = 0) -> None:
+        self.store = PlantStore(None)
+        self.execs: list[tuple[str, list[str], str | None]] = []
+        self.loglevel_rc = loglevel_rc
+
+    def nonce(self) -> str:
+        return "5e5e5e5e" * 8
+
+    def range_spec(self) -> Any:
+        return SimpleNamespace(
+            attacker=SimpleNamespace(host=None, name="attacker"),
+            foothold_guest="attacker",
+        )
+
+    async def exec(
+        self,
+        guest: str,
+        cmd: list[str],
+        *,
+        user: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Any:
+        self.execs.append((guest, cmd, user))
+        rc = self.loglevel_rc if cmd[:2] == ["dmesg", "-n"] else 0
+        return SimpleNamespace(rc=rc)
+
+    async def write_file(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class TestHijackSetupLoglevel:
+    """Hijack setup raises the target's console loglevel before any plant state (quality review R2-25): the default guest console loglevel filters the kernel's INFO segfault line off the serial console, so console corroboration is structurally unattainable without the raise."""
+
+    GOAL = HijackGoal(id="pwn", host="srv", service="crashsvc")
+
+    def test_setup_raises_the_console_loglevel_before_any_plant(self) -> None:
+        oracle = _LoglevelOracle()
+        keys = asyncio.run(HijackType().setup(self.GOAL, cast(RangeOracle, oracle)))
+        assert oracle.execs[0] == ("srv", ["dmesg", "-n", "7"], "root")
+        assert "hijack:pwn" in keys
+
+    def test_a_failed_loglevel_raise_refuses_with_no_plant_residue(self) -> None:
+        oracle = _LoglevelOracle(loglevel_rc=1)
+        with pytest.raises(RuntimeError, match="console loglevel"):
+            asyncio.run(HijackType().setup(self.GOAL, cast(RangeOracle, oracle)))
+        assert oracle.store.keys() == []

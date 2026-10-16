@@ -617,6 +617,22 @@ class HijackType(GoalType):
 
     async def setup(self, goal: GoalBase, oracle: RangeOracle) -> list[str]:
         assert isinstance(goal, HijackGoal)
+        # console corroboration needs the kernel's INFO-level segfault line on
+        # the serial console, and the default guest console loglevel
+        # (kernel.printk 4) filters it, so `corroborated` would be structurally
+        # unattainable (quality review R2-25). Raised per target at setup,
+        # before any plant state, failing loudly: a target whose loglevel
+        # cannot be raised would otherwise surface as an opaque corroboration
+        # miss at scoring.
+        raised = await oracle.exec(
+            goal.host, ["dmesg", "-n", "7"], user="root", timeout_s=20.0
+        )
+        if raised.rc != 0:
+            raise RuntimeError(
+                f"hijack goal {goal.id!r}: raising the console loglevel on "
+                f"guest {goal.host!r} failed (rc {raised.rc}); console "
+                "corroboration would be unattainable"
+            )
         # a canonical, 16-aligned, almost-certainly-unmapped user address: the
         # jump faults AT the disclosed value, so the crash record carries it
         address = 0x5A0000000000 | (int(oracle.nonce()[:8], 16) & 0xFFFFFFF0)
