@@ -69,7 +69,6 @@ _EVIDENCE_STOP_BUDGET_S = 30.0
 
 _EVIDENCE_SEAL_RESERVE_S = 10.0
 """The stop budget's reserved seal share: a wedged capture stop can never starve the seal (or the shutdown checkpoint) attempt (quality-review A6, mirroring the driver's finalize phases)."""
-"""Bound on the pre-teardown evidence harvest and seal (mirrors the driver's finalize budget): teardown is never hostage to a wedged capture tap."""
 _COMPLETED_RUN_CAP = 64
 """Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound).
 
@@ -680,18 +679,11 @@ class Applier:
         streamer, writer, segments = entry
         stops_clean = True
         try:
-            async with asyncio.timeout(
-                max(_EVIDENCE_STOP_BUDGET_S - _EVIDENCE_SEAL_RESERVE_S, 1.0)
-            ):
-                await streamer.stop()
-        except TimeoutError:
-            stops_clean = False
-            logger.warning(
-                "evidence capture stop for lease=%s exceeded its %.0fs share "
-                "(sealing what was delivered; the seal reads incomplete)",
-                lease_id,
-                _EVIDENCE_STOP_BUDGET_S - _EVIDENCE_SEAL_RESERVE_S,
-            )
+            # stop() is internally bounded; these shares keep its worst case
+            # (two stop windows plus one harvest window) inside the stop
+            # budget's remainder, so no outer timeout can cancel its own
+            # gap-recording handlers mid-write (review finding on A6)
+            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=6.0)
         except Exception:
             stops_clean = False
             logger.exception(

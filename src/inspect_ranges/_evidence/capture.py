@@ -305,11 +305,29 @@ class CaptureStreamer:
     ) -> None:
         """Stop the sidecar, harvest everything still on the volume, and end the loop.
 
-        Returns with the writer flushed as far as the sink allowed; the caller seals. A sidecar that cannot be reached leaves `capture-unreachable` gaps on its segments rather than an error, and the final harvest is itself bounded (`harvest_timeout_s`): a wedged tap at teardown leaves `harvest-timeout` gaps instead of holding the caller's finalize budget hostage (quality-review A6).
+        Returns with the writer flushed as far as the sink allowed; the caller seals. Internally bounded end to end (quality-review A6 review round): the in-flight poll cycle is awaited for at most `stop_timeout_s` and then cancelled (a tap wedged mid-poll is the likeliest wedge), the sidecar stop wait gets `stop_timeout_s`, and the final harvest gets `harvest_timeout_s`, so the worst case is roughly two stop windows plus one harvest window and a caller can derive its own share from that. A sidecar that cannot be reached leaves `capture-unreachable` gaps; a timed-out harvest leaves `harvest-timeout` gaps on EVERY segment, deliberately conservative (we cannot know which segment's listing wedged; over-flagging can only withhold credit, never grant it).
         """
         self._stopping.set()
         if self._task is not None:
-            await self._task
+            try:
+                async with asyncio.timeout(stop_timeout_s):
+                    await self._task
+            except TimeoutError:
+                # a tap call wedged mid-cycle: cancel the poll task rather
+                # than letting the caller's whole budget die here
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    if not self._task.cancelled():
+                        raise  # stop() itself was cancelled: propagate honestly
+                except Exception:
+                    pass  # the loop's own failure; its steps are guarded anyway
+                logger.warning(
+                    "capture poll cycle did not finish within %.0fs at stop "
+                    "(cancelled; the harvest still runs under its own bound)",
+                    stop_timeout_s,
+                )
             self._task = None
         stopped = await self._request_and_await_stop(stop_timeout_s)
         if not stopped:
@@ -330,8 +348,9 @@ class CaptureStreamer:
                 await self._cycle(final=True, sidecar_stopped=stopped)
         except TimeoutError:
             logger.warning(
-                "capture final harvest exceeded its %.0fs bound: whatever was "
-                "not shipped is recorded as harvest-timeout gaps",
+                "capture final harvest exceeded its %.0fs bound: recording "
+                "harvest-timeout gaps on every segment (conservative: the "
+                "wedged listing hides which segments were actually complete)",
                 harvest_timeout_s,
             )
             for segment in self._segments:
