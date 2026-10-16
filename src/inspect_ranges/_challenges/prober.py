@@ -39,7 +39,10 @@ PROBE_EXEC_TIMEOUT_S = 15.0
 
 
 async def _run_probe_client(argv: list[str]) -> bytes:
-    """Run the probe client in the sidecar and return its stdout (the default client runner)."""
+    """Run the probe client in the sidecar and return its stdout (the default client runner).
+
+    The kill lives in `finally`: external cancellation (the prober's own `stop()`, the exact moment a wedged `docker compose exec` matters) must not leak the child, which the old timeout-only arm did (quality review B19). The event loop's child watcher reaps the killed process.
+    """
     process = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
@@ -48,11 +51,11 @@ async def _run_probe_client(argv: list[str]) -> bytes:
     try:
         async with asyncio.timeout(PROBE_EXEC_TIMEOUT_S):
             stdout, _ = await process.communicate()
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        raise
-    return stdout
+        return stdout
+    finally:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
 
 
 
