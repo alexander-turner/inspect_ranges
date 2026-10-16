@@ -127,6 +127,7 @@ async def _drive_realize(
     bundle: Path,
     project: str,
     on_stage: OnStage | None,
+    options: UpOptions,
 ) -> UpResult:
     """`channel.realize` folded back into the `up` contract (`UpResult` or `UpError`).
 
@@ -135,9 +136,20 @@ async def _drive_realize(
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
     channel = _lease_channel(socket_path, lease, project)
+    # the verify -> ready gap carries the applier's whole sequential readiness
+    # pass (no intermediate report exists in the seam vocabulary), so its
+    # allowance is the plan-derived envelope: the readiness deadline plus every
+    # guest's minimum probe window plus grace (quality-review A10)
+    verify_allowance_s = (
+        options.readiness_timeout
+        + len(plan.guests) * options.readiness_min_window
+        + 30.0
+    )
     started = time.monotonic()
     try:
-        async for report in channel.realize(digest, []):
+        async for report in channel.realize(
+            digest, [], verify_allowance_s=verify_allowance_s
+        ):
             if on_stage is not None:
                 # never let an observer failure alter the realize outcome
                 try:
@@ -188,7 +200,7 @@ def remote_seams(socket_path: Path, state_dir: Path) -> RemoteSeams:
                 "verify-bundle", f"no host lease found for project {project!r}"
             )
         return asyncio.run(
-            _drive_realize(socket_path, lease, bundle, project, on_stage)
+            _drive_realize(socket_path, lease, bundle, project, on_stage, options)
         )
 
     def down_fn(project: str, state_dir_arg: Path) -> DownResult:
