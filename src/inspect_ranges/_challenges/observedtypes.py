@@ -628,7 +628,9 @@ class HijackType(GoalType):
         try:
             disclosed = await _disclose(oracle, goal.id, "0x" + value)
         except BaseException:
-            del value
+            # scrub the int form too: its hex rendering IS the disclosed value
+            # (quality review R2-14)
+            del value, address
             await oracle.store.discard(key, reason="disclose failed")
             raise
         return [key, disclosed]
