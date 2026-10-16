@@ -326,3 +326,27 @@ def test_protocol_skewed_artifact_refuses(
             runner=fake_runner,
             artifact_dir=artifact,
         )
+
+
+def test_list_cmd_labels_unparseable_recipe_version(
+    tmp_path: Path, vendor: tuple[Path, str], artifact: Path
+) -> None:
+    """A non-integer recipe version must not be labeled with an ordering that could not be computed (the doctor's three-way split, mirrored)."""
+    import json as json_module
+
+    from click.testing import CliRunner
+    from inspect_ranges._cli.main import ranges
+
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    metadata, _ = derive_golden(
+        image, digest, cache, runner=fake_runner, artifact_dir=artifact
+    )
+    sidecar = cache / (Path(metadata.file).stem + ".json")
+    doctored = json_module.loads(sidecar.read_text())
+    doctored["recipe_version"] = "beta"
+    sidecar.write_text(json_module.dumps(doctored))
+    result = CliRunner().invoke(ranges, ["images", "list", "--image-cache", str(cache)])
+    assert result.exit_code == 0
+    assert "RECIPE UNPARSEABLE" in result.output
+    assert "STALE RECIPE" not in result.output

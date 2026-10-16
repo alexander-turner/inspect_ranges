@@ -108,15 +108,20 @@ def list_cmd(image_cache: Path | None) -> None:
         if not (image_cache / metadata.file).is_file():
             flags += "  MISSING GOLDEN (interrupted derive; re-run derive)"
         if metadata.recipe_version != RECIPE_VERSION:
+            # mirror doctor's three-way split: an unparseable version must not
+            # be labeled with an ordering that could not be computed
             try:
-                cache_newer = int(metadata.recipe_version) > int(RECIPE_VERSION)
+                cache_newer: bool | None = int(metadata.recipe_version) > int(
+                    RECIPE_VERSION
+                )
             except ValueError:
-                cache_newer = False
-            flags += (
-                f"  RECIPE MISMATCH (cache v{metadata.recipe_version} vs tool v{RECIPE_VERSION}; upgrade the tool or re-derive)"
-                if cache_newer
-                else f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
-            )
+                cache_newer = None
+            if cache_newer:
+                flags += f"  RECIPE MISMATCH (cache v{metadata.recipe_version} vs tool v{RECIPE_VERSION}; upgrade the tool or re-derive)"
+            elif cache_newer is None:
+                flags += f"  RECIPE UNPARSEABLE (v{metadata.recipe_version}, not v{RECIPE_VERSION}; re-derive)"
+            else:
+                flags += f"  STALE RECIPE (v{metadata.recipe_version} < v{RECIPE_VERSION}; re-derive)"
         click.echo(
             f"{metadata.file}  sha256:{metadata.golden_sha256[:12]}  "
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "
