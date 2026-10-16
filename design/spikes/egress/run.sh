@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# one VM battery at a time on this host (shared convention)
+exec 9>/tmp/inspect-ranges-battery.lock
+flock 9
+
 export IMAGE_CACHE="${IMAGE_CACHE:-$HOME/.cache/inspect-ranges/images}"
 C="python3 ../vsock-exec/host/client.py"
 # CIDs follow spec order: workstation=3 attacker=4
@@ -50,5 +54,24 @@ echo "E7 gateway is the hypervisor bridge (workstation default route via 10.90.1
 $C $WS exec 'ip route show default | grep -q "via 10.90.10.1" && echo PASS nat-gateway'
 echo "E8 host netns invisibility (bridge inside the container only):"
 [ "$(ip -o link | grep -c 'br-corp')" -eq 0 ] && echo "PASS 0 range bridges on host"
+
+echo "=== attacker-scoped egress battery (quality-review A2) ==="
+docker compose down -v >/dev/null 2>&1
+(cd ../../.. && uv run inspect-ranges validate design/spikes/egress/spec-scoped.yaml)
+(cd ../../.. && uv run python design/spikes/egress/compile.py spec-scoped.yaml)
+docker compose up -d --build --wait
+docker compose exec -T range bash /render/boot-vms.sh >/dev/null 2>&1
+for cid in 3 4; do $C $cid wait; done
+for cid in 3 4; do
+  $C $cid exec 'cloud-init status --wait >/dev/null 2>&1; echo done' >/dev/null
+done
+echo "ES1 attacker's own entry works (attacker->198.51.100.7:80, masqueraded):"
+$C $AGENT exec 'timeout 3 bash -c "echo > /dev/tcp/198.51.100.7/80" && echo PASS connected'
+echo "ES2 the network allowlist does NOT leak to the attacker (attacker->198.51.100.7:443, allowed network-wide, listener live):"
+$C $AGENT exec 'timeout 3 bash -c "echo > /dev/tcp/198.51.100.7/443" 2>/dev/null; [ $? -eq 124 ] && echo PASS dropped'
+echo "ES3 workstation unaffected (workstation->198.51.100.7:443):"
+$C $WS exec 'timeout 3 bash -c "echo > /dev/tcp/198.51.100.7/443" && echo PASS connected'
+echo "ES4 trailing attacker drop live in the netns ruleset:"
+docker compose exec -T range sh -c 'nft list chain inet rangehost forward | grep -qE "ip saddr 10.90.10.2 oifname .eth0. drop" && echo PASS trailing-drop-live'
 
 echo "OK. Tear down with: ./run.sh down"
