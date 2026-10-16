@@ -49,6 +49,7 @@ from inspect_ranges._challenges.schema import (
 )
 from inspect_ranges._challenges.submission import Submissions
 from inspect_ranges._compiler.allocate import allocate
+from inspect_ranges._evidence.manifest import STREAM_NAME_PATTERN, check_name
 from inspect_ranges._compiler.plan import PlanOptions, resolve_plan
 from inspect_ranges._compiler.probe import render_probe_clamp_nftables
 from inspect_ranges.types import IssueError
@@ -140,6 +141,10 @@ class TestProber:
             self.shipped: list[tuple[str, list[dict[str, Any]]]] = []
 
         async def append_driver(self, stream: str, data: bytes) -> None:
+            # Enforce the REAL stream grammar: a fixture more permissive than
+            # the production seam is how the goal-id class hid (quality
+            # review A8); the real writer raises ValueError at this boundary.
+            check_name(stream, STREAM_NAME_PATTERN, "stream")
             self.shipped.append(
                 (stream, [json.loads(line) for line in data.splitlines()])
             )
