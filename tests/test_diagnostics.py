@@ -772,6 +772,21 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
         pytest.param(
             """
             hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+                services:
+                  - { name: httpd, port: 80 }
+                  - { name: httpd, port: 8080 }
+            """,
+            "duplicate-service-name",
+            "hosts[0].services[1].name",
+            id="duplicate-service-name",
+        ),
+        pytest.param(
+            """
+            hosts:
               - name: ../../escape
                 os: { type: linux }
                 image: img

@@ -38,7 +38,7 @@ class PlanOptions(BaseModel):
     """Guest CPU model; checkpointed fleets use a named model (see range-build.md)."""
 
     default_router_image: str = "noble-range-guest"
-    """Image for routers that declare none (the backend's default router appliance)."""
+    """Image for routers, and the attacker, when none is declared (one default guest image today; a dedicated attack image arrives with the images arc)."""
 
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
