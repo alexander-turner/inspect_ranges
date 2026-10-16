@@ -213,7 +213,7 @@ class TestStartKnob:
         """B20: a typo'd knob must not silently cost every mid-run latch (only explicit 0 disables)."""
 
         async def scenario() -> None:
-            for raw in ("fast", "-5", "nan"):
+            for raw in ("fast", "-5", "nan", "inf", "1e999"):
                 monkeypatch.setenv(POLL_S_ENV, raw)
                 oracle, _, _ = make_oracle(tmp_path)
                 store = Store()
