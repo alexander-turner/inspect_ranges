@@ -243,7 +243,14 @@ async def main() -> int:
             raise RuntimeError("cannot run the injury scenario without the domain")
         assert domain is not None
         virsh(project, "suspend", domain)
-        await asyncio.sleep(5.0)
+        # the poll must actually fail (channel budget 10 s) and its gap land in
+        # the record; wait on the predicate compare consumes rather than a sleep
+        deadline = time.monotonic() + 60.0
+        gapped = False
+        while time.monotonic() < deadline and not gapped:
+            await asyncio.sleep(2.0)
+            _, _, gapped = await oracle.telemetry_export("chv1e")
+        check(gapped, "suspension produced a recorded gap in the export stream")
         virsh(project, "resume", domain)
         await asyncio.sleep(4.0)
         await poller.stop()
