@@ -70,8 +70,6 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 """Post-ack budget for the host plane's single request frame to arrive."""
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
-_EVIDENCE_STOP_BUDGET_S = 30.0
-"""Bound on one lease's capture harvest at teardown or shutdown."""
 
 _EVIDENCE_SEAL_RESERVE_S = 10.0
 """The stop budget's reserved seal share: a wedged capture stop can never starve the seal (or the shutdown checkpoint) attempt (quality-review A6, mirroring the driver's finalize phases)."""
