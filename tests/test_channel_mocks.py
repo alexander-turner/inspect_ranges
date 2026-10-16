@@ -346,7 +346,7 @@ def test_overdue_exec_with_liveness_is_command_layer() -> None:
 
 @pytest.mark.parametrize("scenario", sorted(HOSTILE_APPLIER_HANGS))
 def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
-    """Every realize transport interaction is budget-bounded (the two probe-demonstrated hangs)."""
+    """Every realize transport interaction is budget-bounded, and post-terminal loss never fails a delivered realize (the three probe-demonstrated scenarios)."""
     channel = MessageChannel(
         HostileApplierTransport(scenario),
         label=f"hang-{scenario}",
@@ -445,6 +445,19 @@ def test_provably_undelivered_exec_resends_exactly_once() -> None:
         assert fleet.guest("web").exec_count == 1
 
     asyncio.run(scenario_run())
+
+
+@pytest.mark.parametrize("scenario", ["wrong-id", "wrong-kind"])
+def test_exec_post_delivery_tamper_carries_attempts(scenario: str) -> None:
+    """Exec's post-delivery tamper verdicts carry the honest delivery count on both the wrong-id and the `_expect` wrong-kind paths."""
+    channel = MessageChannel(HostileTransport(scenario), label=f"exec-{scenario}")
+
+    async def scenario_run() -> int | None:
+        with pytest.raises(TamperError) as failure:
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+        return failure.value.attempts
+
+    assert asyncio.run(scenario_run()) == 1
 
 
 class HangConnects:

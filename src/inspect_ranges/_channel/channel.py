@@ -515,13 +515,21 @@ class MessageChannel:
         return reply, reply_bulk
 
     def _expect[ReplyT: Message](
-        self, reply: Message, expected: type[ReplyT], request: Message, endpoint: str
+        self,
+        reply: Message,
+        expected: type[ReplyT],
+        request: Message,
+        endpoint: str,
+        *,
+        attempts: int | None = None,
     ) -> ReplyT:
+        """Narrow a reply to its expected type; a mismatch is a post-delivery tamper verdict carrying `attempts` from the caller's counting path."""
         if not isinstance(reply, expected):
             self._tamper(
                 request,
                 endpoint,
                 f"expected {expected.__name__}, got {reply.kind}",
+                attempts=attempts,
             )
         return reply
 
@@ -529,8 +537,8 @@ class MessageChannel:
         """Acknowledge a consumed durable result. Loss is best-effort (logged); tamper re-raises."""
         ack = AckRequest(id=request_id(), target_id=target_id)
         try:
-            reply, _, _ = await self._exchange(endpoint, ack)
-            self._expect(reply, OkReply, ack, endpoint)
+            reply, _, attempts = await self._exchange(endpoint, ack)
+            self._expect(reply, OkReply, ack, endpoint, attempts=attempts)
         except TamperError:
             raise
         except ChannelError as failure:
@@ -547,8 +555,8 @@ class MessageChannel:
     async def ping(self, guest: str) -> PongReply:
         """Liveness and protocol-version probe for one guest."""
         request = PingRequest(id=request_id())
-        reply, _, _ = await self._exchange(guest, request)
-        return self._expect(reply, PongReply, request, guest)
+        reply, _, attempts = await self._exchange(guest, request)
+        return self._expect(reply, PongReply, request, guest, attempts=attempts)
 
     async def session(self, guest: str) -> str:
         """The guest daemon's current session id, via a fresh ping.
@@ -677,8 +685,9 @@ class MessageChannel:
                     # no reply within the allowance: switch to liveness polling
                     polling = True
                 # a window that expired still inside connect provably sent
-                # nothing: not a delivery, and the request itself is resent
-                # (same-id, at-most-once-safe) rather than polled for
+                # nothing: not a delivery, and polling is not engaged by it
+                # (when polling is not already active, the request itself is
+                # resent same-id, which dedupe makes at-most-once-safe)
                 silent_windows += 1  # consecutive: any successful reply resets
                 if silent_windows >= _SILENT_WINDOW_LIMIT:
                     self._dump_trace(request, guest, "silent transport")
@@ -784,7 +793,7 @@ class MessageChannel:
         self._log(
             logging.DEBUG, "reply", rid=request.id, endpoint=guest, detail=reply.kind
         )
-        result = self._expect(reply, ExecResult, request, guest)
+        result = self._expect(reply, ExecResult, request, guest, attempts=deliveries)
         await self._ack(guest, request.id)
         payload = bulk or b""
         stdout = payload[: result.stdout_size]
@@ -808,10 +817,10 @@ class MessageChannel:
             GuestError: Errno-tagged guest failure (`ENOENT`, `EISDIR`, ...).
         """
         request = ReadFileRequest(id=request_id(), path=path, max_bytes=cap)
-        reply, bulk, _ = await self._exchange(
+        reply, bulk, attempts = await self._exchange(
             guest, request, bulk_cap=cap, ack_consumed=True
         )
-        data = self._expect(reply, FileData, request, guest)
+        data = self._expect(reply, FileData, request, guest, attempts=attempts)
         if data.truncated:
             raise FileLimitExceeded(path, bulk or b"")
         return bulk or b""
@@ -839,7 +848,7 @@ class MessageChannel:
         reply, _, deliveries = await self._exchange(
             guest, request, data, ack_consumed=True
         )
-        self._expect(reply, OkReply, request, guest)
+        self._expect(reply, OkReply, request, guest, attempts=deliveries)
         return deliveries
 
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply:
@@ -852,8 +861,8 @@ class MessageChannel:
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply:
         """Read the daemon's diagnostics: the in-guest ring buffer tail plus the supervised listener-restart count."""
         request = DiagRequest(id=request_id(), max_entries=max_entries)
-        reply, _, _ = await self._exchange(guest, request)
-        return self._expect(reply, DiagReply, request, guest)
+        reply, _, attempts = await self._exchange(guest, request)
+        return self._expect(reply, DiagReply, request, guest, attempts=attempts)
 
     # -- host lifecycle plane -----------------------------------------------
 
@@ -863,8 +872,8 @@ class MessageChannel:
         The seam's "periodic heartbeat" (`host-provider.md`) is driver-polled: a pull verb fits per-operation-connect and connectionless transports where an unsolicited push does not. The poll reuses the existing `PingRequest` to the host endpoint and expects the existing `Heartbeat` reply with the matching id, so no wire kind was added; a dedicated `HeartbeatRequest` kind is the recorded multi-host growth path (`range-host-v1.md`).
         """
         request = PingRequest(id=request_id())
-        reply, _, _ = await self._exchange(HOST_APPLIER, request)
-        return self._expect(reply, Heartbeat, request, HOST_APPLIER)
+        reply, _, attempts = await self._exchange(HOST_APPLIER, request)
+        return self._expect(reply, Heartbeat, request, HOST_APPLIER, attempts=attempts)
 
     async def realize(
         self, bundle_digest: Sha256Hex, grants: Sequence[str]
@@ -981,7 +990,9 @@ class MessageChannel:
                             detail=f"{message.errno}: {message.message}",
                         )
                         raise HostRefused(message.errno, message.message)
-                    report = self._expect(message, StageReport, request, HOST_APPLIER)
+                    report = self._expect(
+                        message, StageReport, request, HOST_APPLIER, attempts=attempt
+                    )
                     if report.id != request.id:
                         self._tamper(
                             request,
@@ -1034,7 +1045,7 @@ class MessageChannel:
                                         HOST_APPLIER,
                                         "data after the terminal stage",
                                     )
-                        except (TimeoutError, ConnectionError) as drain_failure:
+                        except (TimeoutError, OSError) as drain_failure:
                             # the terminal report is already delivered; a stream
                             # that never closes, or resets instead of closing
                             # (abnormal applier death), is logged, not a failure
@@ -1060,8 +1071,8 @@ class MessageChannel:
     async def teardown(self) -> None:
         """Tear the range down. Teardown is contractually idempotent: callers may retry with a fresh id."""
         request = TeardownRequest(id=request_id())
-        reply, _, _ = await self._exchange(HOST_APPLIER, request)
-        self._expect(reply, OkReply, request, HOST_APPLIER)
+        reply, _, attempts = await self._exchange(HOST_APPLIER, request)
+        self._expect(reply, OkReply, request, HOST_APPLIER, attempts=attempts)
 
 
 # ---------------------------------------------------------------------------
