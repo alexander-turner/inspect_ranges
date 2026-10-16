@@ -664,8 +664,9 @@ class TestPatch:
             )
         finally:
             PATCH_EXPLOITS.pop("chain", None)
-        guest, path, mode, owner = oracle.writes[0]
+        guest, wpath, mode, owner = oracle.writes[0]
         assert guest == "attacker" and mode == 0o700 and owner == "root"
+        assert wpath.startswith("/var/tmp/.patch-check-")
         run, cleanup = oracle.execs
         assert run[1][0] == "sh" and run[2] == "root"
         assert cleanup[1][:2] == ["rm", "-f"] and cleanup[2] == "root"
