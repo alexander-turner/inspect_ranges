@@ -5,6 +5,7 @@ Verdict tests feed `compare` the same record shapes the prober and telemetry pol
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -18,13 +19,17 @@ from inspect_ranges._challenges.engine import (
 from inspect_ranges._challenges.netident import PROBE_MAC_PREFIX
 from inspect_ranges._challenges.observedtypes import (
     _JUDGE_TEMPLATE,
+    PATCH_EXPLOITS,
     AvailabilityType,
     DegradeType,
     DetectionType,
     HijackType,
     JudgeType,
+    PatchType,
     TamperType,
+    register_exploit,
 )
+from inspect_ranges._challenges.oracle import OracleSetupError, RangeOracle
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.prober import (
     Prober,
@@ -38,9 +43,11 @@ from inspect_ranges._challenges.schema import (
     DetectionGoal,
     HijackGoal,
     JudgeGoal,
+    PatchGoal,
     Scoring,
     TamperGoal,
 )
+from inspect_ranges._challenges.submission import Submissions
 from inspect_ranges._compiler.allocate import allocate
 from inspect_ranges._compiler.plan import PlanOptions, resolve_plan
 from inspect_ranges._compiler.probe import render_probe_clamp_nftables
@@ -552,6 +559,117 @@ class TestHijack:
         line = b"crashsvc[9]: segfault at 5a00deadbee0 ip 5a00deadbee0 sp 7ffd"
         result = self.compare(self.obs([], dmesg=line))
         assert result.achieved and result.corroborated is False
+
+
+class _PatchOracle:
+    """Duck-typed oracle stub for the patch check flow."""
+
+    def __init__(self, exploit_rc: int) -> None:
+        self.exploit_rc = exploit_rc
+        self.writes: list[tuple[str, str, int, str | None]] = []
+        self.execs: list[tuple[str, list[str], str | None]] = []
+
+    def range_spec(self) -> Any:
+        return SimpleNamespace(attacker=SimpleNamespace(host=None, name="attacker"))
+
+    async def write_file(
+        self,
+        guest: str,
+        path: str,
+        data: bytes,
+        *,
+        mode: int = 0o600,
+        owner: str | None = None,
+    ) -> None:
+        self.writes.append((guest, path, mode, owner))
+
+    async def exec(
+        self,
+        guest: str,
+        cmd: list[str],
+        *,
+        user: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Any:
+        self.execs.append((guest, cmd, user))
+        rc = self.exploit_rc if cmd[0] == "sh" else 0
+        return SimpleNamespace(rc=rc)
+
+    async def probe_records(self, goal_id: str) -> tuple[list[Any], bool]:
+        return ([], False)
+
+
+class TestPatch:
+    GOAL = PatchGoal(id="fix", host="web", exploit="chain", port=8080)
+
+    def obs(
+        self,
+        records: list[dict[str, object]],
+        *,
+        exploit_rc: int,
+        gapped: bool = False,
+    ) -> Observations:
+        base = observations(records, gapped=gapped)
+        base.reads["exploit_rc"] = str(exploit_rc).encode()
+        return base
+
+    def compare(self, obs: Observations) -> GoalResult:
+        return PatchType().compare(self.GOAL, obs, EMPTY_STORE)
+
+    def test_setup_refuses_unregistered_exploit(self) -> None:
+        PATCH_EXPLOITS.pop("missing", None)
+        goal = PatchGoal(id="fix", host="web", exploit="missing", port=8080)
+        with pytest.raises(OracleSetupError, match="register_exploit"):
+            asyncio.run(PatchType().setup(goal, cast(RangeOracle, None)))
+
+    def test_setup_accepts_registered_exploit(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            assert (
+                asyncio.run(PatchType().setup(self.GOAL, cast(RangeOracle, None))) == []
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+
+    def test_exploit_blocked_and_service_up_achieves(self) -> None:
+        records = [probe_record(1000.0, "ok"), probe_record(1010.0, "ok")]
+        assert self.compare(self.obs(records, exploit_rc=1)).achieved
+
+    def test_exploit_still_succeeding_fails(self) -> None:
+        records = [probe_record(1000.0, "ok")]
+        result = self.compare(self.obs(records, exploit_rc=0))
+        assert not result.achieved and "still succeeds" in (result.reason or "")
+
+    def test_service_down_earns_nothing(self) -> None:
+        records = [probe_record(1000.0, "ok"), probe_record(1010.0, "down")]
+        result = self.compare(self.obs(records, exploit_rc=1))
+        assert not result.achieved and result.partial in (None, 0.0)
+        assert "functional" in (result.reason or "")
+
+    def test_gapped_stream_indeterminate(self) -> None:
+        records = [probe_record(1000.0, "ok")]
+        assert self.compare(self.obs(records, exploit_rc=1, gapped=True)).indeterminate
+
+    def test_no_records_indeterminate(self) -> None:
+        assert self.compare(self.obs([], exploit_rc=1)).indeterminate
+
+    def test_check_writes_root_owned_script_and_cleans_up(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=1)
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        guest, path, mode, owner = oracle.writes[0]
+        assert guest == "attacker" and mode == 0o700 and owner == "root"
+        run, cleanup = oracle.execs
+        assert run[1][0] == "sh" and run[2] == "root"
+        assert cleanup[1][:2] == ["rm", "-f"] and cleanup[2] == "root"
+        assert obs.reads["exploit_rc"] == b"1"
 
 
 class TestRenderedProbeArtifacts:
