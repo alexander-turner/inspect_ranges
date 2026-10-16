@@ -139,8 +139,12 @@ def test_reap_seal_retries_a_transient_put(
     async def scenario() -> None:
         await _abandoned_record(tmp_path)
         flaky = _FlakySealSink(tmp_path, failures=2)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return flaky
+
         monkeypatch.setattr(
-            "inspect_ranges._evidence.sealer.sink_for_location", lambda _: flaky
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
         monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
@@ -166,8 +170,12 @@ def test_reap_seal_transient_then_conflict_reads_as_race_lost(
     async def scenario() -> None:
         await _abandoned_record(tmp_path)
         conflicted = _ConflictAfterTransient(tmp_path, failures=0)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return conflicted
+
         monkeypatch.setattr(
-            "inspect_ranges._evidence.sealer.sink_for_location", lambda _: conflicted
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
         monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
@@ -182,8 +190,12 @@ def test_reap_seal_persistent_failure_stays_unsealed(
     async def scenario() -> None:
         await _abandoned_record(tmp_path)
         dead = _FlakySealSink(tmp_path, failures=99)
+
+        def fake_sink(_location: str) -> _FlakySealSink:
+            return dead
+
         monkeypatch.setattr(
-            "inspect_ranges._evidence.sealer.sink_for_location", lambda _: dead
+            "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
         monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)

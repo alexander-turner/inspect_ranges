@@ -56,7 +56,12 @@ def evidence_buffer_bytes() -> int:
     raw = os.environ.get(EVIDENCE_BUFFER_MB_VAR)
     if raw is None:
         return DEFAULT_BUFFER_CAP_BYTES
-    value = int(raw)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{EVIDENCE_BUFFER_MB_VAR} must be an integer, got {raw!r}"
+        ) from None
     if value < 1:
         raise ValueError(f"{EVIDENCE_BUFFER_MB_VAR} must be >= 1, got {raw!r}")
     return value * 1024 * 1024
@@ -71,7 +76,12 @@ def evidence_max_bytes() -> int:
     raw = os.environ.get(EVIDENCE_MAX_MB_VAR)
     if raw is None:
         return DEFAULT_EVIDENCE_MAX_MB * 1024 * 1024
-    value = int(raw)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{EVIDENCE_MAX_MB_VAR} must be an integer, got {raw!r}"
+        ) from None
     if value < 1:
         raise ValueError(f"{EVIDENCE_MAX_MB_VAR} must be >= 1, got {raw!r}")
     return value * 1024 * 1024

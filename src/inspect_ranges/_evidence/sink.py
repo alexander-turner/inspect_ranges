@@ -280,10 +280,10 @@ class EvidenceWriter:
             self._check_open()
             return await self._flush_locked()
 
-    async def _flush_locked(self) -> FlushResult:
+    async def _flush_locked(self, *, force_cut: bool = False) -> FlushResult:
         result = FlushResult()
         await self._deliver_chunks(result)
-        self._cut_part(force=False)
+        self._cut_part(force=force_cut)
         await self._deliver_parts(result)
         result.pending_chunks = sum(
             1 for entry in self._pending if isinstance(entry, _PendingChunk)
@@ -300,19 +300,7 @@ class EvidenceWriter:
         """
         async with self._lock:
             self._check_open()
-            result = FlushResult()
-            await self._deliver_chunks(result)
-            self._cut_part(force=True)
-            await self._deliver_parts(result)
-            result.pending_chunks = sum(
-                1 for entry in self._pending if isinstance(entry, _PendingChunk)
-            )
-            result.pending_parts = len(self._pending_parts)
-            for error in result.errors:
-                logger.warning(
-                    "evidence delivery failure (buffered for retry): %s", error
-                )
-            return result
+            return await self._flush_locked(force_cut=True)
 
     async def seal(
         self,
