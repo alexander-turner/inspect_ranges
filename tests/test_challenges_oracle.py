@@ -336,13 +336,11 @@ class TestPlantAndStart:
 
         async def scenario() -> None:
             monkeypatch.setattr(setup_module, "Prober", RecordingProber)
-            monkeypatch.setattr(
-                setup_module,
-                "_probe_targets",
-                lambda oracle, challenge: [
-                    ProbeTarget(goal_id="t", ip="10.0.0.9", port=8080)
-                ],
-            )
+
+            def fixed_targets(oracle: object, challenge: object) -> list[ProbeTarget]:
+                return [ProbeTarget(goal_id="t", ip="10.0.0.9", port=8080)]
+
+            monkeypatch.setattr(setup_module, "_probe_targets", fixed_targets)
             session = FakePlantSession()  # driver_writer None: telemetry refuses
             oracle, _, _ = make_oracle(tmp_path, session=session)
             challenge = challenge_of(
@@ -393,9 +391,7 @@ class TestPlantAndStart:
                     }
                 ]
             )
-            task = asyncio.create_task(
-                plant_and_start(oracle, challenge, None, [])
-            )
+            task = asyncio.create_task(plant_and_start(oracle, challenge, None, []))
             await asyncio.sleep(0.2)  # plants land, producers hang
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
