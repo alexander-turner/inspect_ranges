@@ -20,7 +20,12 @@ from inspect_ranges._challenges.oracle import (
 )
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import Challenge
-from inspect_ranges._challenges.setup import plant_secret_file, run_setup
+from inspect_ranges._challenges.setup import (
+    plant_and_start,
+    plant_secret_file,
+    run_setup,
+)
+from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
     LoopbackTransport,
     MessageChannel,
@@ -102,6 +107,8 @@ class FakePlantSession:
     def __init__(self, *, enabled: bool = True) -> None:
         self.records: list[dict[str, object]] = []
         self.enabled = enabled
+        self.driver_writer: object | None = None
+        """Mimics `EvidenceSession.driver_writer`; `None` makes telemetry producer start refuse."""
 
     async def record_plant(self, record: dict[str, object]) -> None:
         self.records.append(record)
@@ -235,6 +242,47 @@ class TestOracleWriteFile:
             assert VALUE_MARKER.decode() not in message
             assert not (tmp_path / "tmp" / "doomed").exists()
             assert_no_residue(endpoint, value)
+
+        asyncio.run(scenario())
+
+
+class TestPlantAndStart:
+    def test_producer_start_failure_unwinds_plants(self, tmp_path: Path) -> None:
+        """B15: the never-half-planted contract covers producer start, not only plants."""
+
+        async def scenario() -> None:
+            session = FakePlantSession()
+            oracle, _, _ = make_oracle(tmp_path, session=session)
+            challenge = challenge_of(
+                [
+                    {
+                        "id": "user",
+                        "type": "flag",
+                        "host": "box",
+                        "path": "/tmp/user-flag",
+                    },
+                    {
+                        "id": "seen",
+                        "type": "detection",
+                        "collector": "siem",
+                        "signal": "intrusion",
+                    },
+                ]
+            )
+            collector = CollectorSpec(
+                name="siem", guest="box", source=FileSource(path="/var/log/app.log")
+            )
+            with pytest.raises(RuntimeError, match="driver evidence writer"):
+                await plant_and_start(
+                    oracle,
+                    challenge,
+                    None,
+                    [collector],
+                    extra_observers=frozenset({"telemetry-collector"}),
+                )
+            assert oracle.store.keys() == []
+            assert not (tmp_path / "tmp" / "user-flag").exists()
+            assert [r["event"] for r in session.records] == ["planted", "unwound"]
 
         asyncio.run(scenario())
 
