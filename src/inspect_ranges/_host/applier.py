@@ -530,13 +530,28 @@ class Applier:
             plan = await asyncio.to_thread(self._load_plan, bundle)
         except (OSError, ValueError) as error:
             return ("EINVAL", f"lease bundle {bundle} has no readable plan: {error}")
+        totals = plan.totals
+        if lease.evidence_location is not None and plan.requirements.evidence_capture:
+            # the `host` evidence writer this realize will open is resident in
+            # THIS process: its buffer cap joins the memory charge exactly as
+            # the driver's resident writers join the sample's (`evidence-v1.md`
+            # accounting; quality-review round 2). A malformed buffer knob
+            # disables evidence at _start_evidence, so it charges nothing here
+            # either.
+            try:
+                buffer_mb = evidence_buffer_bytes() // (1024 * 1024)
+            except ValueError:
+                buffer_mb = 0
+            totals = totals.model_copy(
+                update={"memory_mb": totals.memory_mb + buffer_mb}
+            )
         try:
-            charged = self.admission.charge_now(plan.totals)
+            charged = self.admission.charge_now(totals)
         except AdmissionRefused as refusal:
             return ("ENOSPC", str(refusal))
         if not charged:
             return ("EAGAIN", "applier capacity is full now; respin when it frees")
-        self._charges[lease.lease_id] = plan.totals
+        self._charges[lease.lease_id] = totals
         self._plans[lease.lease_id] = plan
         self._guest_states[lease.lease_id] = dict.fromkeys(
             (guest.name for guest in plan.guests), "pending"
