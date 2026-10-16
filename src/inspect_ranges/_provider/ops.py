@@ -355,10 +355,13 @@ async def provider_read_file(handle: SampleHandle, guest: str, file: str) -> byt
     except ChannelBudgetError as failure:
         if failure.layer == "command":
             raise timeout_error(failure, None) from failure
-        await confirm_session(handle, guest, "read_file")
+        # best-effort like the exec/write_file siblings: the confirm ping
+        # hitting the same dead daemon must not replace the mapped
+        # SandboxUnavailableError with its own raw failure (quality-review B4)
+        await _confirm_session_best_effort(handle, guest, "read_file")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "read_file")
+        await _confirm_session_best_effort(handle, guest, "read_file")
         raise unavailable(failure) from failure
 
 
