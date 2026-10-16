@@ -686,6 +686,45 @@ def test_shipped_chunk_is_claimed_and_removal_retries_without_reship(
     asyncio.run(scenario())
 
 
+def test_new_claims_pause_while_removals_fail(tmp_path: Path) -> None:
+    """Review finding on B13: cap-invisible claimed files stay bounded when removal fails persistently; the remainder stays unclaimed and cap-visible."""
+    from inspect_ranges._evidence.capture import CLAIMED_PENDING_LIMIT
+
+    class RemovalsDeadTap(LocalTap):
+        def remove_file(self, relpath: str) -> None:
+            raise OSError("removal dead")
+
+    async def scenario() -> None:
+        location = tmp_path / "evidence"
+        capture = tmp_path / "capture"
+        consoles = tmp_path / "consoles"
+        capture.mkdir()
+        consoles.mkdir()
+        writer = EvidenceWriter(
+            LocalDirSink(location), part_interval_s=0, writer="host"
+        )
+        tap = RemovalsDeadTap(capture, consoles)
+        (capture / "dmz").mkdir()
+        for index in range(CLAIMED_PENDING_LIMIT + 4):
+            (capture / "dmz" / f"g0.pcap{index if index else ''}").write_bytes(b"chunk")
+        (capture / "dmz" / "g0.pcap99").write_bytes(b"active")
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap99"}})
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)
+        await one_cycle(streamer)
+        claimed = list((capture / "dmz").glob("*.shipped"))
+        unclaimed = [
+            p
+            for p in (capture / "dmz").glob("g0.pcap*")
+            if not p.name.endswith(".shipped")
+        ]
+        assert len(claimed) == CLAIMED_PENDING_LIMIT
+        # the active file plus the 4 past-limit chunks stay cap-visible
+        assert len(unclaimed) == 5
+
+    asyncio.run(scenario())
+
+
 def test_claimed_file_from_a_dead_streamer_ships_without_a_status_claim(
     tmp_path: Path,
 ) -> None:

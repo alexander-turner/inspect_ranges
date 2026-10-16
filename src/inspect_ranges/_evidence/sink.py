@@ -14,7 +14,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 from .manifest import (
     STREAM_NAME_PATTERN,
@@ -84,6 +84,40 @@ class LocalDirSink:
             os.link(tmp, target)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+async def bounded_put(
+    sink: EvidenceSink,
+    key: str,
+    data: bytes,
+    *,
+    attempts: int = 3,
+    wait_s: float = 0.1,
+    conflict_after_transient: Literal["assume-delivered", "raise"],
+) -> None:
+    """One put with bounded linear-backoff retries (the shared discipline).
+
+    `FileExistsError` on the FIRST attempt always propagates: a foreign object genuinely sits at the key. After a transient failure the same error is ambiguous (our bytes may have landed with the response lost, routine for S3): `assume-delivered` returns success with a warning, the writer's posture, where a genuinely foreign object surfaces at verify as a loud digest break; `raise` propagates it, the sealer's posture, where a seal exists either way and the caller reads it as the race lost (B14).
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            await sink.put(key, data)
+            return
+        except FileExistsError:
+            if last is None or conflict_after_transient == "raise":
+                raise
+            logger.warning(
+                "evidence put ambiguous after transient failure, assuming delivered: key=%s",
+                key,
+            )
+            return
+        except Exception as error:
+            last = error
+            if attempt + 1 < attempts:
+                await asyncio.sleep(wait_s * (attempt + 1))
+    assert last is not None
+    raise last
 
 
 class SealDeliveryError(Exception):
@@ -578,30 +612,13 @@ class EvidenceWriter:
             )
 
     async def _put_with_retry(self, key: str, data: bytes) -> None:
-        last: Exception | None = None
-        for attempt in range(self._put_attempts):
-            try:
-                await self._sink.put(key, data)
-                return
-            except FileExistsError:
-                if last is None:
-                    # first attempt: a foreign object genuinely sits at our
-                    # key; write-once forbids replacing it, surface it
-                    raise
-                # a prior attempt failed transiently but may have landed
-                # (routine for S3: bytes accepted, response lost). Assume the
-                # object is ours: if it is in fact foreign, verify reports a
-                # loud digest break instead of us silently gapping delivered
-                # data. Read-back disambiguation is unavailable by design
-                # (put-only credentials).
-                logger.warning(
-                    "evidence put ambiguous after transient failure, assuming delivered: key=%s",
-                    key,
-                )
-                return
-            except Exception as error:
-                last = error
-                if attempt + 1 < self._put_attempts:
-                    await asyncio.sleep(self._retry_wait_s * (attempt + 1))
-        assert last is not None
-        raise last
+        # read-back disambiguation of the ambiguous-conflict case is
+        # unavailable by design (put-only credentials); see bounded_put
+        await bounded_put(
+            self._sink,
+            key,
+            data,
+            attempts=self._put_attempts,
+            wait_s=self._retry_wait_s,
+            conflict_after_transient="assume-delivered",
+        )

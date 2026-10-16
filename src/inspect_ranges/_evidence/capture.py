@@ -34,6 +34,9 @@ CLAIMED_SUFFIX = ".shipped"
 
 _CLAIMED_NAME = re.compile(r"^g(\d+)\.pcap(\d*)\.shipped$")
 
+CLAIMED_PENDING_LIMIT = 8
+"""New claims pause while this many claimed files await removal in a segment (review finding on B13): claimed files sit outside the sidecar's disk cap, so a persistently failing removal must not convert the whole volume into cap-invisible files; the bound caps the excess at a few chunks while removal retries, visible as tap errors in the heartbeat."""
+
 WALL_JUMP_THRESHOLD_S = 0.5
 """A wall-vs-monotonic delta divergence beyond this is recorded as a `wall-jump` anomaly in the `clock` stream."""
 
@@ -446,12 +449,17 @@ class CaptureStreamer:
                     )
             ordered.sort(key=lambda item: (item[1], item[2]))
             view.shipped &= {name for name, _, _, _ in ordered}
+            claimed_pending = sum(1 for _, _, _, is_claimed in ordered if is_claimed)
             for name, generation, index, claimed in ordered:
                 if not claimed:
                     if ship_bound is None or (generation, index) >= ship_bound:
                         # the declared active or newer (still being written), or
                         # no trustworthy claim about which file is being written:
                         # shipping a half-written chunk would be silent loss
+                        continue
+                    if claimed_pending >= CLAIMED_PENDING_LIMIT:
+                        # removals are failing: pause new claims so cap-invisible
+                        # files stay bounded; this cycle still retries removals
                         continue
                     try:
                         await asyncio.to_thread(
@@ -466,6 +474,7 @@ class CaptureStreamer:
                         )
                         continue
                     name = f"{name}{CLAIMED_SUFFIX}"
+                    claimed_pending += 1
                 relpath = f"{segment}/{name}"
                 if name in view.shipped:
                     # shipped but the earlier remove failed: retry; the claim
@@ -473,6 +482,7 @@ class CaptureStreamer:
                     try:
                         await asyncio.to_thread(self._tap.remove_file, relpath)
                         view.shipped.discard(name)
+                        claimed_pending -= 1
                     except Exception:
                         self._tap_errors += 1
                     continue
@@ -489,6 +499,7 @@ class CaptureStreamer:
                 try:
                     await asyncio.to_thread(self._tap.remove_file, relpath)
                     view.shipped.discard(name)
+                    claimed_pending -= 1
                 except Exception as error:
                     # shipped but not removed: the shipped set suppresses a
                     # double-ship; the next cycle retries the removal

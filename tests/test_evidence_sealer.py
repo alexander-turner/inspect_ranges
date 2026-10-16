@@ -146,7 +146,6 @@ def test_reap_seal_retries_a_transient_put(
         monkeypatch.setattr(
             "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
-        monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
         assert set(sealed) == {"host"} and flaky.puts == 3
         report = await verify_location(LocalDirStore(tmp_path))
@@ -177,7 +176,6 @@ def test_reap_seal_transient_then_conflict_reads_as_race_lost(
         monkeypatch.setattr(
             "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
-        monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
         assert sealed == {} and conflicted.puts == 2
 
@@ -197,7 +195,6 @@ def test_reap_seal_persistent_failure_stays_unsealed(
         monkeypatch.setattr(
             "inspect_ranges._evidence.sealer.sink_for_location", fake_sink
         )
-        monkeypatch.setattr("inspect_ranges._evidence.sealer.SEAL_RETRY_WAIT_S", 0.0)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
         assert sealed == {} and dead.puts == 3
         assert not (tmp_path / seal_key("host")).exists()
