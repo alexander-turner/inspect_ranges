@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from inspect_ranges import __version__
 from inspect_ranges._cli.main import ranges
@@ -128,3 +129,23 @@ def test_doctor_json_exit_code_reflects_result() -> None:
         "fail",
         "skip",
     }
+
+
+def test_image_cache_knob_reaches_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`INSPECT_RANGES_IMAGE_CACHE` is the one cache default for every surface: the CLI must resolve through it, or the docs' claim ("images derive writes here") sends goldens to the wrong cache and doctor's printed fix reproduces the miss."""
+    knob_cache = tmp_path / "knob-cache"
+    knob_cache.mkdir()
+    monkeypatch.setenv("INSPECT_RANGES_IMAGE_CACHE", str(knob_cache))
+    result = CliRunner().invoke(ranges, ["images", "list"])
+    assert result.exit_code == 0
+    assert str(knob_cache) in result.output
+
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    overridden = CliRunner().invoke(
+        ranges, ["images", "list", "--image-cache", str(explicit)]
+    )
+    assert overridden.exit_code == 0
+    assert str(explicit) in overridden.output
