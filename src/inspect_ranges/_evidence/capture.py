@@ -190,7 +190,8 @@ class StageRecorder:
     `on_stage` is called synchronously from `up()`'s thread; the deque is the thread boundary (append and popleft are atomic). Events land in the `stages` stream; `readiness` and `ready` events additionally land in `verify`. The emit clock on each event is one side of the clock-offset pairs (`evidence-v1.md`): a driver on another machine records its receive clock for the same stage report.
     """
 
-    VERIFY_STAGES = frozenset({"readiness", "ready"})
+    VERIFY_STAGES = frozenset({"readiness", "ready", "verify"})
+    """Stages mirrored into the `verify` stream: `readiness`/`ready` from `up()`'s vocabulary, `verify` from the seam vocabulary the uds driver's recorder observes (the stage reports fold through `_drive_realize` with seam names)."""
 
     def __init__(self, clock: Callable[[], ClockStamp] = clock_now) -> None:
         self._clock = clock
