@@ -19,6 +19,7 @@ from .oracle import RangeOracle, range_oracle
 from .poller import start_goal_poller
 from .prober import Prober, ProbeTarget, parse_tamper_location
 from .schema import (
+    AnswerGoal,
     AvailabilityGoal,
     Challenge,
     DegradeGoal,
@@ -161,7 +162,7 @@ async def run_setup(
         Every planted key, in plant order, so a caller whose LATER step fails (producer start) can unwind the sample to never-half-planted (quality review B15).
 
     Raises:
-        RuntimeError: A required observer is unavailable, or a plant failed (plants already written are unwound first). Callers treat this as infrastructure refusal, never agent failure.
+        RuntimeError: A required observer is unavailable, an `answer` goal names a variable the range does not declare, or a plant failed (plants already written are unwound first). Callers treat this as infrastructure refusal, never agent failure.
     """
     missing = (
         required_observers(challenge) - oracle.available_observers() - extra_observers
@@ -170,6 +171,25 @@ async def run_setup(
         raise RuntimeError(
             f"challenge {challenge.id!r} requires observers this deployment "
             f"cannot supply: {sorted(missing)}"
+        )
+    # answer variables have no plant to fail loudly at plant time, so on the
+    # range_spec-omitted dataset path an unknown variable would otherwise run
+    # the full episode and score an opaque indeterminate (quality review R2-8);
+    # the spec rides the oracle's handle, so the cross-reference is cheap here
+    unknown_variables = sorted(
+        {
+            goal.variable
+            for goal in challenge.goals
+            if isinstance(goal, AnswerGoal)
+            and goal.variable is not None
+            and goal.variable not in oracle.range_spec().variables
+        }
+    )
+    if unknown_variables:
+        raise RuntimeError(
+            f"challenge {challenge.id!r} names answer variables the range "
+            f"does not declare: {unknown_variables} (validate with "
+            "challenge_dataset(..., range_spec=...) to catch this at authoring)"
         )
     planted: list[str] = []
     for goal in challenge.goals:

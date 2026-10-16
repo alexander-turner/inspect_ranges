@@ -272,6 +272,22 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
         "tamper-location-grammar",
     ),
     (
+        "detection-signal-pattern",
+        challenge_with(
+            [
+                {
+                    "id": "alert",
+                    "type": "detection",
+                    "collector": "splunk",
+                    # prose that is not a legal regex: scoring compiles the
+                    # signal, so authoring must refuse it (quality review R2-7)
+                    "signal": "CPU usage > 100% (critical",
+                }
+            ]
+        ),
+        "detection-signal-pattern",
+    ),
+    (
         "goal-id-grammar-space",
         challenge_with([{"id": "recon 1", "type": "flag", "host": "w", "path": "/f"}]),
         "goal-id-grammar",
