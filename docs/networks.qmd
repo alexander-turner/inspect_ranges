@@ -97,7 +97,7 @@ hosts:
     interfaces: [{ network: lab }]  # allocated: 10.10.10.10
 
 attacker:
-  interfaces: [{ network: lab }]  # allocated: 10.10.10.2
+  interfaces: [{ network: lab }]  # allocated: 10.10.10.1
   entry: external
 ```
 
