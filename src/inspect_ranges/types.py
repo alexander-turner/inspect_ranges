@@ -1550,4 +1550,25 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 hint=did_you_mean(spec.attacker.host, host_names),
             )
         )
+    if spec.attacker.egress != "none":
+        foothold_interfaces = spec.attacker.interfaces or []
+        if spec.attacker.host is not None:
+            foothold_host = next(
+                (host for host in spec.hosts if host.name == spec.attacker.host), None
+            )
+            foothold_interfaces = foothold_host.interfaces if foothold_host else []
+        attached_modes = {
+            networks[interface.network].mode
+            for interface in foothold_interfaces
+            if interface.network in networks
+        }
+        if attached_modes and not attached_modes & {"nat", "routed"}:
+            issues.append(
+                Issue(
+                    code="attacker-egress-requires-nat",
+                    path=("attacker", "egress"),
+                    message="the attacker declares egress but no attached network is mode nat or routed, so no flow could ever leave (nothing masquerades or routes back)",
+                    hint="set an attached network's mode to nat (or routed), or declare egress: none",
+                )
+            )
     return issues
