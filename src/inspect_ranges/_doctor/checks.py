@@ -517,14 +517,33 @@ def check_evidence(
         )
 
     if sink_override is None:
-        results.append(
-            CheckResult(
-                EVIDENCE,
-                "sink",
-                "ok",
-                "derived from the eval log location at run time (no standing sink to probe)",
+        # the derived arm needs the same scheme guard as the override arm:
+        # evidence derives from the log location, and sink_for_location
+        # accepts only s3:// or plain paths, so a gs://-class log dir
+        # disables evidence for every sample at run time
+        if log_dir is not None and "://" in log_dir and not log_dir.startswith("s3://"):
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "fail",
+                    f"evidence derives from the eval log location, and {log_dir!r} carries a scheme the sink does not support; the runtime would disable evidence for every sample",
+                    fix=(
+                        "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                        "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                        "or a filesystem path"
+                    ),
+                )
             )
-        )
+        else:
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "ok",
+                    "derived from the eval log location at run time (no standing sink to probe)",
+                )
+            )
     elif sink_override.startswith("s3://"):
         from .s3probe import probe_s3_sink
 
@@ -546,17 +565,33 @@ def check_evidence(
         results.append(_probe_local_sink(sink_override))
 
     resolved = sink_override or log_dir
-    if (
-        resolved is not None
-        and re.match(r"^[a-z0-9+.-]+://", resolved)
-        and not resolved.startswith("file://")
-    ):
+    if resolved is not None and resolved.startswith("s3://"):
         results.append(
             CheckResult(
                 EVIDENCE,
                 "off-instance",
                 "ok",
                 f"evidence resolves off-instance ({resolved})",
+            )
+        )
+    elif (
+        resolved is not None
+        and re.match(r"^[a-z0-9+.-]+://", resolved)
+        and not resolved.startswith("file://")
+    ):
+        # never bless a value the sink row rejected: the location is nominally
+        # off-instance, but the runtime cannot write to it
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "warn",
+                f"evidence names an off-instance location ({resolved}) whose scheme the runtime does not support; the sink row carries the failure",
+                fix=(
+                    "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                    "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                    "or a filesystem path"
+                ),
             )
         )
     else:
