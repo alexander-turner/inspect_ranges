@@ -713,6 +713,12 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 // proves exit: we started this pid, and nothing else waits on it. On a state
 // change waitid fills si_signo with SIGCHLD; x/sys exposes no portable
 // si_pid, so the zeroed-struct Signo check is the still-running signal.
+// Known residual window, accepted: if the pid is reaped AND reused by a
+// concurrent exec's child between the timer and this peek, the reused pid
+// reads still-running and the command is treated as timed out: the pre-fix
+// behavior, reachable only through pid-space wraparound into a sibling child
+// inside a microsecond window (and the group kill that follows had the same
+// reuse exposure before this function existed).
 func processExited(pid int) bool {
 	var info unix.Siginfo
 	for {
@@ -799,20 +805,17 @@ func (d *Daemon) readFile(request *Message) *storedReply {
 		return errorReply(request.ID, "EISDIR", "Is a directory", nil)
 	}
 	// incremental, bounded read: at most limit+1 bytes ever in memory, so a
-	// multi-GiB file or an endless device cannot OOM the daemon; O_NONBLOCK
-	// plus the type refusal below keep FIFOs from wedging it (finding B10)
+	// multi-GiB file or an endless device cannot OOM the daemon; the
+	// openServedFile discipline keeps FIFOs from wedging it (finding B10)
 	limit := int64(DefaultBulkCap)
 	if request.MaxBytes != nil {
 		limit = *request.MaxBytes
 	}
-	handle, err := os.OpenFile(request.Path, os.O_RDONLY|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return fileError(request.ID, err)
+	handle, refusal := openServedFile(request.ID, request.Path, unix.O_RDONLY, 0)
+	if refusal != nil {
+		return refusal
 	}
 	defer handle.Close()
-	if reply := refuseWedgingType(request.ID, handle); reply != nil {
-		return reply
-	}
 	data := make([]byte, 0, min64(limit+1, 1<<20))
 	chunk := make([]byte, 1<<20)
 	for int64(len(data)) <= limit {
@@ -865,18 +868,13 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 	}
 	if request.Mode == nil {
 		// os.WriteFile semantics (create 0644-through-umask, truncate keeps a
-		// pre-existing file's bits) with the finding-B10 guards: O_NONBLOCK
-		// so a reader-less FIFO refuses ENXIO at open instead of blocking a
-		// limiter slot forever, and the type refusal below for the rest
-		handle, err := os.OpenFile(request.Path,
-			os.O_WRONLY|os.O_CREATE|os.O_TRUNC|unix.O_NONBLOCK, 0o644)
-		if err != nil {
-			return fileError(request.ID, err)
+		// pre-existing file's bits) through the finding-B10 open discipline
+		handle, refusal := openServedFile(request.ID, request.Path,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC, 0o644)
+		if refusal != nil {
+			return refusal
 		}
 		defer handle.Close()
-		if reply := refuseWedgingType(request.ID, handle); reply != nil {
-			return reply
-		}
 		if _, err := handle.Write(data); err != nil {
 			return fileError(request.ID, err)
 		}
@@ -891,14 +889,12 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 	// the fresh secret until a trailing chmod), so open without truncating,
 	// fchmod to the exact bits, then truncate and write
 	mode := fileModeFromWire(*request.Mode)
-	handle, err := os.OpenFile(request.Path, os.O_WRONLY|os.O_CREATE|unix.O_NONBLOCK, mode)
-	if err != nil {
-		return fileError(request.ID, err)
+	handle, refusal := openServedFile(request.ID, request.Path,
+		unix.O_WRONLY|unix.O_CREAT, mode)
+	if refusal != nil {
+		return refusal
 	}
 	defer handle.Close()
-	if reply := refuseWedgingType(request.ID, handle); reply != nil {
-		return reply
-	}
 	if err := handle.Chmod(mode); err != nil {
 		return fileError(request.ID, err)
 	}
@@ -930,24 +926,60 @@ func parentDir(path string) string {
 	return ""
 }
 
-// refuseWedgingType closes the finding-B10 hole: FIFOs (and sockets) wedge
-// the file planes: open(2) on a writer-less FIFO blocks forever, pinning a
+// openServedFile is the file planes' open discipline (finding B10): open
+// O_NONBLOCK so a writer-less FIFO cannot block open(2) forever (pinning a
 // limiter slot per same-id retry and surfacing driver-side as an
 // infrastructure-shaped failure an agent can manufacture by planting a FIFO
-// at a path scoring later reads. Both planes open O_NONBLOCK (a no-op for
-// the types that pass) and refuse these types outright. Character and block
-// devices stay served: their reads are already cap-bounded, and
-// TestReadFileBoundedForHugeSources pins that contract.
-func refuseWedgingType(id string, handle *os.File) *storedReply {
-	info, err := handle.Stat()
+// at a path scoring later reads; a reader-less FIFO write refuses ENXIO at
+// open), refuse FIFOs and sockets outright, then RESTORE blocking semantics
+// before wrapping the fd: character and block devices keep their
+// pre-existing blocking, cap-bounded contract
+// (TestReadFileBoundedForHugeSources), where a still-nonblocking fd would
+// flatten a mid-loop EAGAIN into EIO or tangle with the runtime poller.
+// O_CLOEXEC for the same reason as every daemon fd (finding A1). The raw
+// unix.Open avoids os.OpenFile registering a nonblocking device with the
+// poller before the flag can be cleared.
+func openServedFile(id, path string, flag int, mode fs.FileMode) (*os.File, *storedReply) {
+	fd, err := unix.Open(path, flag|unix.O_NONBLOCK|unix.O_CLOEXEC, sysMode(mode))
 	if err != nil {
-		return fileError(id, err)
+		return nil, fileError(id, &fs.PathError{Op: "open", Path: path, Err: err})
 	}
-	if info.Mode().Type()&(fs.ModeNamedPipe|fs.ModeSocket) != 0 {
-		return errorReply(id, "EINVAL",
-			fmt.Sprintf("refusing %v: FIFOs and sockets wedge the file plane", info.Mode().Type()), nil)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, fileError(id, &fs.PathError{Op: "stat", Path: path, Err: err})
 	}
-	return nil
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFIFO, unix.S_IFSOCK:
+		unix.Close(fd)
+		return nil, errorReply(id, "EINVAL",
+			"refusing FIFO/socket: they wedge the file plane", nil)
+	}
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err == nil {
+		_, err = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags&^unix.O_NONBLOCK)
+	}
+	if err != nil {
+		unix.Close(fd)
+		return nil, fileError(id, &fs.PathError{Op: "fcntl", Path: path, Err: err})
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+// sysMode translates fs.FileMode permission and set-id/sticky bits to the
+// raw open(2) mode, mirroring os's syscallMode for the direct unix.Open.
+func sysMode(mode fs.FileMode) uint32 {
+	bits := uint32(mode.Perm())
+	if mode&fs.ModeSetuid != 0 {
+		bits |= unix.S_ISUID
+	}
+	if mode&fs.ModeSetgid != 0 {
+		bits |= unix.S_ISGID
+	}
+	if mode&fs.ModeSticky != 0 {
+		bits |= unix.S_ISVTX
+	}
+	return bits
 }
 
 func fileError(id string, err error) *storedReply {

@@ -31,8 +31,13 @@ namespace VsockD
     {
         public static long NowMs()
         {
-            return System.Diagnostics.Stopwatch.GetTimestamp() * 1000L /
-                System.Diagnostics.Stopwatch.Frequency;
+            // split arithmetic: ts * 1000 overflows long on TSC-scale QPC
+            // frequencies (~3 GHz on VMs without the hypervisor QPC
+            // enlightenment) after ~35 days of uptime, which would mint the
+            // very negative timestamps this helper exists to prevent
+            long ts = System.Diagnostics.Stopwatch.GetTimestamp();
+            long f = System.Diagnostics.Stopwatch.Frequency;
+            return (ts / f) * 1000L + (ts % f) * 1000L / f;
         }
     }
 

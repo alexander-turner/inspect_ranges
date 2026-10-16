@@ -155,6 +155,15 @@ namespace VsockD
                 _entries.Add(entry);
                 if (_entries.Count > Bound) _entries.RemoveAt(0);
             }
+            // -console runs only: without this echo a persistent listen
+            // failure is undiagnosable (the ring is readable only over the
+            // channel the listener provides). Stdout of an interactive
+            // console, never a guest-visible file (B7).
+            if (Daemon.ConsoleEcho)
+            {
+                try { Console.WriteLine(level + " " + eventName + " " + detail); }
+                catch (Exception) { }
+            }
         }
 
         public List<object> Tail(long limit)
@@ -225,6 +234,9 @@ namespace VsockD
         // change rather than a silent loss of exactly-once (provider-v1
         // layer 2b)
         public static readonly string Session = Guid.NewGuid().ToString("N");
+        // set by -console mode only: echo diag entries to stdout (B7 keeps
+        // everything else off guest-visible surfaces)
+        public static bool ConsoleEcho;
 
         // quality-review B7: diagnostics live ONLY in the in-memory ring
         // (read over the channel via diag_result). The daemon used to also
@@ -293,6 +305,12 @@ namespace VsockD
                 if (!readable) { wedgeSignals = 0; continue; }
 
                 Socket conn;
+                // Native.InheritLock closes the accept-to-uninherit window
+                // against a concurrent exec's bInheritHandles=true snapshot
+                // (review finding on A1); Accept here is non-blocking (Poll
+                // said readable), so the lock is held only across fast calls.
+                lock (Native.InheritLock)
+                {
                 try { conn = listener.Accept(); }
                 catch (SocketException se)
                 {
@@ -327,14 +345,15 @@ namespace VsockD
                     Thread.Sleep(10);
                     continue;
                 }
-                consecutiveFailures = 0;
-                wedgeSignals = 0;
-
                 // quality-review A1: un-inherit each accepted connection so a
                 // child spawned mid-request cannot hold the stream open past
                 // our close (stranding the host's residual read) or write
                 // forged bytes into it
                 try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
+                }
+                consecutiveFailures = 0;
+                wedgeSignals = 0;
+
                 try { conn.Blocking = true; } catch (Exception) { }
                 // quality-review B9: idle deadlines matching the Go daemon's
                 // 60 s SO_RCVTIMEO/SNDTIMEO, so a connected-silent peer (the
@@ -591,10 +610,8 @@ namespace VsockD
                 // incremental, bounded: at most limit+1 bytes ever in memory
                 using (FileStream fs = File.OpenRead(path))
                 {
-                    // finding B10: a named-pipe or device path wedges or
-                    // misbehaves under the bounded loop; disk files only
-                    if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
-                        return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
+                    StoredReply refusal = RefuseNonDisk(id, fs, path);
+                    if (refusal != null) return refusal;
                     MemoryStream data = new MemoryStream();
                     byte[] chunk = new byte[1 << 20];
                     while (data.Length <= limit)
@@ -637,15 +654,27 @@ namespace VsockD
                 // the Windows daemon deliberately ignores it
                 using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
                 {
-                    // finding B10: FileMode.Create on a \\.\pipe\ path
-                    // connects as a pipe client; disk files only
-                    if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
-                        return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
+                    StoredReply refusal = RefuseNonDisk(id, fs, path);
+                    if (refusal != null) return refusal;
                     fs.Write(data, 0, data.Length);
                 }
                 return OkReply(id);
             }
             catch (Exception e) { return FileError(id, e, path); }
+        }
+
+        // finding B10: the Windows file planes serve FILE_TYPE_DISK only
+        // (FileMode.Create on a \\.\pipe\ path connects as a pipe client).
+        // Deliberate per-platform deviation, recorded in the B10 commit: the
+        // Go daemon keeps serving character/block devices because a battery
+        // pins its bounded /dev/zero read as a contract; Windows has no such
+        // pinned contract, and device paths (NUL, CON) are not oracle or
+        // provider inputs, so the stricter refusal stands here.
+        static StoredReply RefuseNonDisk(string id, FileStream fs, string path)
+        {
+            if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
+                return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
+            return null;
         }
 
         static StoredReply FileError(string id, Exception e, string path)
