@@ -5,6 +5,7 @@ Hostile replies must surface as typed failures (tamper, never a parse fallback),
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable, Coroutine
 from typing import Literal, cast
@@ -161,17 +162,18 @@ def test_hostile_failure_dumps_the_trace_tail(
 def test_hostile_wrong_id_names_both_ids() -> None:
     channel = MessageChannel(HostileTransport("wrong-id"))
 
-    async def scenario_run() -> tuple[str, str, int | None]:
-        request = request_id()
+    async def scenario_run() -> tuple[str, int | None]:
         try:
             await channel.read_file("web", "/x")
         except TamperError as failure:
-            return request, str(failure), failure.attempts
+            return str(failure), failure.attempts
         raise AssertionError("wrong-id reply was accepted")
 
-    _, message, attempts = asyncio.run(scenario_run())
+    message, attempts = asyncio.run(scenario_run())
     assert "f" * 32 in message, "the tamper error must name the forged id"
-    assert "request was id" in message, "the tamper error must name the request id"
+    named = re.search(r"request was id ([0-9a-f]{32})", message)
+    assert named is not None, "the tamper error must name the request id"
+    assert named.group(1) != "f" * 32, "the named request id must be the honest one"
     assert attempts == 1, "a post-delivery tamper verdict carries the honest count"
 
 
@@ -566,11 +568,6 @@ class SilentAfterNConnects:
             return await self._inner.connect(endpoint)
         client_side, _server = stream_pair()
         return client_side
-
-    # a liveness check needs the pending path: expose the fleet for setup
-    @property
-    def fleet(self) -> LoopbackTransport:
-        return self._inner
 
 
 def test_stale_liveness_does_not_blame_the_command_layer() -> None:
