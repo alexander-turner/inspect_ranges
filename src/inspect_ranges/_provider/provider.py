@@ -1,13 +1,15 @@
 """`LibvirtRangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
 
-Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), environments keyed by guest name with the attacker first (the first key is Inspect's default sandbox), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages.
+Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), the FOOTHOLD alone registered as the sample's sandbox by default (the agent/target wall from challenges-overview.qmd: targets are reachable only through the range network and the scoring oracle; `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out that registers every guest, attacker first), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages.
 
 The op surface (`exec`, `read_file`, `write_file`) lands in slice 3 of the phase; until then the methods raise `NotImplementedError`.
 """
 
 import asyncio
 import logging
+import os
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -73,6 +75,28 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
 def _default_guest(spec: RangeSpec) -> str:
     """The default sandbox: the attacker's foothold host, or the attacker box itself."""
     return spec.attacker.host or spec.attacker.name
+
+
+def _register_all_guests() -> bool:
+    """The development opt-out that weakens the agent/target wall.
+
+    By default only the foothold is registered as an Inspect sandbox, so an agent tool loop cannot reach targets by name (`sandbox("target")`): targets are reachable solely through the range network (tradecraft) and the oracle (scoring). Setting `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest, which is useful when developing ranges interactively and is logged loudly because it removes that wall.
+    """
+    value = os.environ.get("INSPECT_RANGES_REGISTER_ALL_GUESTS", "")
+    return value.strip().lower() in ("1", "true", "yes")
+
+
+def _registered_guests(spec: RangeSpec, guest_names: Iterable[str]) -> list[str]:
+    """Sandbox registration order: the foothold alone by default (the wall), every guest first-is-default under the opt-out."""
+    default = _default_guest(spec)
+    if not _register_all_guests():
+        return [default]
+    logger.warning(
+        "INSPECT_RANGES_REGISTER_ALL_GUESTS is set: every guest is registered "
+        "as a named Inspect sandbox, which removes the agent/target wall "
+        "(challenges-overview.qmd); development only"
+    )
+    return [default, *(name for name in guest_names if name != default)]
 
 
 @sandboxenv(name="libvirt_range")  # pyright: ignore[reportUntypedClassDecorator]
@@ -220,8 +244,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 raise failure from teardown_error
             raise
 
-        default = _default_guest(spec)
-        ordered = [default, *(name for name in handle.guest_cids if name != default)]
+        ordered = _registered_guests(spec, handle.guest_cids)
         return {name: cls(name, handle) for name in ordered}
 
     @classmethod
