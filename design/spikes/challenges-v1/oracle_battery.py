@@ -77,12 +77,16 @@ async def new_files(oracle: RangeOracle, guest: str, marker: str) -> list[str]:
     # tmpfs mounts (/run, /dev/shm) are their own filesystems, so a bare
     # `find / -xdev` would skip exactly the scratch locations where residue
     # could hide; list each start point explicitly
+    # no shell pipeline: a `| sort -u` tail made the rc sort's, so a failed
+    # find read as an empty, clean listing; dedupe and sort host-side instead
     rc, out = await sh(
         oracle,
         guest,
-        f"find / /run /dev/shm -xdev -type f -newer {marker} 2>/dev/null | sort -u",
+        f"find / /run /dev/shm -xdev -type f -newer {marker} 2>/dev/null",
     )
-    return [line for line in out.decode().splitlines() if line] if rc == 0 else []
+    if rc != 0:
+        return []
+    return sorted({line for line in out.decode().splitlines() if line})
 
 
 async def main() -> int:
@@ -242,8 +246,13 @@ async def main() -> int:
             )
 
         plant_paths = {"/root/crown-flag", "/opt/owned-secret"}
+        planted_on = {"web": "/root/crown-flag", "db": "/opt/owned-secret"}
         for guest in ("web", "db"):
             listed = await new_files(oracle, guest, "/tmp/residue-marker")
+            # the plant file is guaranteed newer than the marker, so its
+            # presence proves the listing is real: an empty or failed find
+            # can no longer read as a clean sweep
+            plant_listed = planted_on[guest] in listed
             dirty: list[str] = []
             for path in listed:
                 if path in plant_paths or path == "/tmp/residue-marker":
@@ -258,8 +267,9 @@ async def main() -> int:
                 if flag_value in content or secret_value in content:
                     dirty.append(path)
             check(
-                not dirty,
-                f"disk sweep clean on {guest} ({len(listed)} new files; dirty={dirty})",
+                plant_listed and not dirty,
+                f"disk sweep clean on {guest} ({len(listed)} new files; "
+                f"plant listed={plant_listed}; dirty={dirty})",
             )
 
         plants_raw = b"".join(await stream_chunks(store, "driver", "plants"))

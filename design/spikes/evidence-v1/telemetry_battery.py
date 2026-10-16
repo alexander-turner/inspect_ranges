@@ -196,13 +196,19 @@ async def main() -> int:
         print("=== producers: file appender + journald events ===", flush=True)
         # setsid: the daemon reaps the exec's process group on return, so a
         # plain backgrounded loop dies with its exec; a new session survives
-        rc = await guests.exec(
+        await guests.exec(
             "db",
             "setsid sh -c 'i=0; while :; do i=$((i+1)); "
             f'echo "file-line-$i" >> {LOG_PATH}; sleep 0.3; done\' '
             "</dev/null >/dev/null 2>&1 & echo ok",
         )
-        check(rc == 0, "file producer started")
+        # the spawn's rc was the trailing echo's (cannot fail); the evidence
+        # the producer actually runs is content landing in the log
+        await wait_for(
+            lambda: _producing(guests),
+            "file producer started (log file non-empty)",
+            timeout=15,
+        )
         for n in range(1, 4):
             await guests.exec("db", f"logger -t evtest journal-event-{n}")
 
@@ -296,6 +302,10 @@ async def main() -> int:
 
     print(f"\n{PASS} passed, {FAIL} failed", flush=True)
     return 1 if FAIL else 0
+
+
+async def _producing(guests: Guests) -> bool:
+    return await guests.exec("db", f"test -s {LOG_PATH}") == 0
 
 
 async def _advanced(store: LocalDirStore, collector: str, count: int) -> bool:
