@@ -118,21 +118,12 @@ namespace VsockD
     sealed class SockSource : Wire.IByteSource
     {
         private readonly Socket _s;
-        private byte[] _buf = new byte[0];
-        private int _pos;
 
         public SockSource(Socket s) { _s = s; }
 
         public void ReadExact(byte[] dest, int count)
         {
             int got = 0;
-            int avail = _buf.Length - _pos;
-            if (avail > 0)
-            {
-                int take = Math.Min(avail, count);
-                Array.Copy(_buf, _pos, dest, 0, take);
-                _pos += take; got = take;
-            }
             while (got < count)
             {
                 int n = Io.Recv(_s, dest, got, count - got);
