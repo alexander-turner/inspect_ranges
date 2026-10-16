@@ -38,7 +38,7 @@ class PlanOptions(BaseModel):
     """Guest CPU model; checkpointed fleets use a named model (see range-build.md)."""
 
     default_router_image: str = "noble-range-guest"
-    """Image for routers that declare none (the backend's default router appliance)."""
+    """Image for routers, and the attacker, when none is declared (one default guest image today; a dedicated attack image arrives with the images arc)."""
 
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
@@ -272,6 +272,16 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
+        for field_name in ("hostname", "fqdn"):
+            if getattr(host, field_name) is not None:
+                issues.append(
+                    Issue(
+                        code="guest-config-not-realized",
+                        path=("hosts", index, field_name),
+                        message=f"host {host.name!r} declares {field_name}, which render v1 does not realize (the rendered in-guest hostname is the host's name)",
+                        hint=_GUEST_CONTENT_HINT,
+                    )
+                )
     for index, router in enumerate(spec.routers):
         if router.users:
             issues.append(

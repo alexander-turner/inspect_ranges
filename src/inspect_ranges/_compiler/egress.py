@@ -1,6 +1,6 @@
 """Hypervisor-side egress realization: NAT exactly the allowlist out of the range netns, drop everything else.
 
-Scoped egress is enforced where the agent cannot reach it: in the range container's network namespace, not on any guest. The forward chain stays default-deny with stateful returns; each `mode: nat` network's allowlist entries become accepts from its bridge to the uplink, and the attacker's own egress policy composes ahead of network policy (an explicit drop for `none`, so a network allowlist never grants the attacker a path; its own entries for a scoped policy). A masquerade rule NATs whatever the filter admitted.
+Scoped egress is enforced where the agent cannot reach it: in the range container's network namespace, not on any guest. The forward chain stays default-deny with stateful returns; each `mode: nat` network's allowlist entries become accepts from its bridge to the uplink, and the attacker's own egress policy composes ahead of network policy (an explicit drop for `none`, and a scoped policy's entries followed by a trailing drop, so a network allowlist never grants the attacker a path it did not declare itself). A masquerade rule NATs whatever the filter admitted.
 
 `mode: routed` networks realize here too: un-NATed, two-way forwarding between the bridge and the uplink (the routed posture; upstream must route the subnet back). `mode: nat` traffic is masqueraded per source subnet, so routed traffic keeps real addresses even when both modes coexist.
 
@@ -9,14 +9,14 @@ Realization scope (networking-v0.2 §3): routerless `mode: nat`/`routed` network
 
 from ipaddress import IPv4Address
 
-from ..types import EgressPolicy, RangeSpec, parse_egress_entry
+from ..types import EgressPolicy, RangeSpec, derive_device, parse_egress_entry
 from .allocate import Allocation
 from .nftables import service_match  # shared entry→match rendering
 
 
 def bridge_name(network: str) -> str:
     """The range-netns bridge device for a network (shared convention with the realization glue)."""
-    return f"br-{network}"[:15]
+    return derive_device("br-", network)
 
 
 def render_egress_nftables(
@@ -41,7 +41,12 @@ def render_egress_nftables(
     elif spec.attacker.egress == "open":
         rules.append(f'{attacker_match} oifname "{uplink}" accept')
     else:
+        # The scoped policy is "exactly what may leave, nothing else": its
+        # accepts are followed by a trailing attacker drop, so attacker flows
+        # that miss the attacker's own allowlist can never fall through to a
+        # network allowlist below.
         rules += _entry_rules(spec.attacker.egress, attacker_match, uplink)
+        rules.append(f'{attacker_match} oifname "{uplink}" drop')
 
     nat_subnets: list[str] = []
     for network in spec.networks:

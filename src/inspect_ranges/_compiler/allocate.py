@@ -7,11 +7,22 @@ Address policy per network: explicit `ip:` values are claimed first (cross-valid
 
 import hashlib
 from ipaddress import IPv4Address, IPv4Network
+from itertools import chain
 from typing import Literal
 
 from pydantic import BaseModel
 
-from ..types import Interface, RangeSpec
+from .._diagnostics import Issue, IssueError
+from ..types import Interface, RangeSpec, derive_device
+
+
+class SubnetExhaustedError(ValueError):
+    """A subnet has no free address for the requested reservation (internal; `allocate` translates it into a positioned `IssueError`)."""
+
+    def __init__(self, subnet: IPv4Network) -> None:
+        self.subnet = subnet
+        super().__init__(f"subnet {subnet} is exhausted")
+
 
 GuestKind = Literal["host", "router", "attacker"]
 
@@ -108,7 +119,8 @@ def allocate(
         Addresses, MACs, and CIDs for every guest, plus hypervisor and probe reservations.
 
     Raises:
-        ValueError: The spec contains IPv6 values (which validation gates), a subnet is exhausted, or a probe network is not declared.
+        IssueError: A subnet has no free address for a guest, hypervisor, or probe reservation (`subnet-exhausted`, positioned at the network).
+        ValueError: The spec contains IPv6 values (which validation gates) or a probe network is not declared.
     """
     if cid_base < 3:
         raise ValueError(
@@ -116,6 +128,20 @@ def allocate(
         )
     subnets: dict[str, IPv4Network] = {}
     claimed: dict[str, set[IPv4Address]] = {}
+    network_index = {network.name: i for i, network in enumerate(spec.networks)}
+
+    def _exhausted(network_name: str, consumer: str) -> IssueError:
+        return IssueError(
+            [
+                Issue(
+                    code="subnet-exhausted",
+                    path=("networks", network_index[network_name], "cidr"),
+                    message=f"network {network_name!r} ({subnets[network_name]}) has no free address for {consumer}",
+                    hint="widen the cidr or reduce what this network must hold",
+                )
+            ]
+        )
+
     for network in spec.networks:
         if not isinstance(network.cidr, IPv4Network):
             raise ValueError(f"network {network.name!r} is IPv6 (gated upstream)")
@@ -153,7 +179,10 @@ def allocate(
             network.dns is not None and network.dns.records is not None
         )
         if needs_gateway or needs_service:
-            address = _next_free(subnets[network.name], 1, claimed[network.name])
+            try:
+                address = _next_free(subnets[network.name], 1, claimed[network.name])
+            except SubnetExhaustedError:
+                raise _exhausted(network.name, "the hypervisor address") from None
             claimed[network.name].add(address)
             hypervisor_addresses[network.name] = address
 
@@ -165,11 +194,14 @@ def allocate(
         raise ValueError(f"probe networks not declared: {sorted(unknown)}")
     probe_endpoints: dict[str, ProbeEndpoint] = {}
     for index, name in enumerate(sorted(probe_networks)):
-        address = _next_free_descending(subnets[name], claimed[name])
+        try:
+            address = _next_free_descending(subnets[name], claimed[name])
+        except SubnetExhaustedError:
+            raise _exhausted(name, "the probe endpoint") from None
         claimed[name].add(address)
         probe_endpoints[name] = ProbeEndpoint(
-            device=f"pr-{name}"[:15],
-            peer=f"prb-{name}"[:15],
+            device=derive_device("pr-", name),
+            peer=derive_device("prb-", name),
             ip=address,
             mac=f"02:50:00:00:00:{index:02x}",
         )
@@ -192,7 +224,10 @@ def allocate(
                 ip = interface.ip
             else:
                 start = 10 if kind == "host" and subnet.num_addresses >= 16 else 1
-                ip = _next_free(subnet, start, claimed[interface.network])
+                try:
+                    ip = _next_free(subnet, start, claimed[interface.network])
+                except SubnetExhaustedError:
+                    raise _exhausted(interface.network, f"guest {name!r}") from None
                 claimed[interface.network].add(ip)
             allocations.append(
                 InterfaceAllocation(
@@ -217,11 +252,18 @@ def allocate(
 def _next_free(
     subnet: IPv4Network, start_offset: int, used: set[IPv4Address]
 ) -> IPv4Address:
-    for offset in range(start_offset, subnet.num_addresses - 1):
+    # The preferred region first (hosts start at offset 10 on roomy subnets),
+    # then fall back to the free addresses below it, per the module policy:
+    # small or crowded subnets use the next free address rather than refusing
+    # while capacity remains.
+    offsets = chain(
+        range(start_offset, subnet.num_addresses - 1), range(1, start_offset)
+    )
+    for offset in offsets:
         candidate = subnet.network_address + offset
         if candidate not in used:
             return candidate
-    raise ValueError(f"subnet {subnet} is exhausted")
+    raise SubnetExhaustedError(subnet)
 
 
 def _next_free_descending(subnet: IPv4Network, used: set[IPv4Address]) -> IPv4Address:
@@ -229,7 +271,7 @@ def _next_free_descending(subnet: IPv4Network, used: set[IPv4Address]) -> IPv4Ad
         candidate = subnet.network_address + offset
         if candidate not in used:
             return candidate
-    raise ValueError(f"subnet {subnet} is exhausted")
+    raise SubnetExhaustedError(subnet)
 
 
 def _mac(range_name: str, guest: str, network: str) -> str:
