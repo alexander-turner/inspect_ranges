@@ -35,6 +35,25 @@ from ..types import RangeSpec
 _GOAL_ID_PATTERN = WRITER_NAME_PATTERN
 """Goal ids embed into evidence stream names (`probe/<goal id>`) as one key-safe segment, so they share the evidence single-segment grammar: drift here would resurrect the silent-indeterminate class (quality review A8)."""
 
+
+def parse_tamper_location(location: str) -> tuple[int, str]:
+    """Parse the v1 `tamper` location grammar: `PORT/PATH` observed over HTTP.
+
+    v1 interprets the protected location as an HTTP surface (e.g. `8080/status` probes `http://<host>:8080/status`); richer grammars arrive with demand. The function lives here, beside the schema that enforces it, so validation and the runtime prober parse one rule (quality review B15: a typo'd location used to validate green and die at producer start with a bare `ValueError`).
+
+    Raises:
+        ValueError: The location does not parse as `PORT/PATH` with a port in 1-65535.
+    """
+    port_text, _, path = location.partition("/")
+    if not port_text.isdigit():
+        raise ValueError(
+            f"tamper location must be PORT/PATH with a numeric port, got {location!r}"
+        )
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"tamper location port out of range: {location!r}")
+    return port, "/" + path
+
 __all__ = [
     "AnswerGoal",
     "AvailabilityGoal",
@@ -319,6 +338,24 @@ class TamperGoal(GoalBase):
     """How the written value is observed from outside."""
 
     default_primitive: ClassVar[Primitive | None] = "write"
+
+    @model_validator(mode="after")
+    def _location_grammar(self) -> "TamperGoal":
+        if self.observer == "active-prober":
+            try:
+                parse_tamper_location(self.location)
+            except ValueError as error:
+                raise IssueError(
+                    [
+                        Issue(
+                            code="tamper-location-grammar",
+                            path=("location",),
+                            message=str(error),
+                            hint="the v1 grammar is PORT/PATH observed over HTTP, e.g. 8080/status",
+                        )
+                    ]
+                ) from error
+        return self
 
     def observers(self) -> frozenset[ObserverKind]:
         return super().observers() | _observers(self.observer)

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
-__all__ = ["plant_goals", "plant_secret_file", "run_setup"]
+__all__ = ["plant_and_start", "plant_goals", "plant_secret_file", "run_setup"]
 
 
 async def plant_secret_file(
@@ -108,7 +108,7 @@ async def run_setup(
     store: "Store | None" = None,
     *,
     extra_observers: frozenset[str] = frozenset(),
-) -> None:
+) -> list[str]:
     """Run the challenge's setups against `oracle`: observer gate first, then plants in goal order.
 
     Args:
@@ -116,6 +116,9 @@ async def run_setup(
         challenge: The challenge being planted.
         store: The sample store; when given, per-goal setup timings accumulate under `inspect_ranges:timings` (the measure-first surface).
         extra_observers: Observers the caller supplies beyond the deployment's own (`telemetry-collector` when `plant_goals` was given a matching collector spec).
+
+    Returns:
+        Every planted key, in plant order, so a caller whose LATER step fails (producer start) can unwind the sample to never-half-planted (quality review B15).
 
     Raises:
         RuntimeError: A required observer is unavailable, or a plant failed (plants already written are unwound first). Callers treat this as infrastructure refusal, never agent failure.
@@ -158,6 +161,7 @@ async def run_setup(
             len(keys),
             elapsed,
         )
+    return planted
 
 
 def telemetry_goal_collectors(challenge: Challenge) -> set[str]:
@@ -206,11 +210,12 @@ def plant_goals(
         extra: frozenset[str] = (
             frozenset({"telemetry-collector"}) if needed else frozenset()
         )
-        await run_setup(oracle, challenge, state.store, extra_observers=extra)
-        await _start_producers(
+        await plant_and_start(
             oracle,
             challenge,
+            state.store,
             [spec for spec in collectors if spec.name in needed],
+            extra_observers=extra,
         )
         # The cheap-tier poller (slice 5): latches mid-run passes with their
         # timestamps; the scorer stops it. Failure to start is logged by the
@@ -219,6 +224,26 @@ def plant_goals(
         return state
 
     return solve
+
+
+async def plant_and_start(
+    oracle: RangeOracle,
+    challenge: Challenge,
+    store: "Store | None",
+    collectors: "list[CollectorSpec]",
+    *,
+    extra_observers: frozenset[str] = frozenset(),
+) -> None:
+    """Plant the challenge, then start its producers, holding never-half-planted across BOTH steps.
+
+    A producer-start refusal (missing evidence session, no driver writer, an unreachable probe target) unwinds every plant `run_setup` wrote, so the sample never starts, or errors, against a half-planted range (quality review B15: producer failures previously skipped the unwind).
+    """
+    planted = await run_setup(oracle, challenge, store, extra_observers=extra_observers)
+    try:
+        await _start_producers(oracle, challenge, collectors)
+    except BaseException:
+        await _unwind(oracle, planted)
+        raise
 
 
 async def _start_producers(
@@ -260,7 +285,12 @@ def _probe_targets(oracle: RangeOracle, challenge: Challenge) -> list[ProbeTarge
             port, path = goal.port, "/probe"
             needle = None
         elif isinstance(goal, TamperGoal):
-            port, path = parse_tamper_location(goal.location)
+            try:
+                port, path = parse_tamper_location(goal.location)
+            except ValueError as error:
+                # schema validation enforces the grammar, so this is the honest
+                # backstop for a hand-built goal object; it carries the goal
+                raise RuntimeError(f"goal {goal.id!r}: {error}") from error
             needle = oracle.store.get(f"tamper:{goal.id}").decode()
         else:
             continue
