@@ -264,6 +264,13 @@ namespace VsockD
                 try
                 {
                     listener = new Socket((AddressFamily)VSockEndPoint.AF_VSOCK, SocketType.Stream, ProtocolType.Unspecified);
+                    // quality-review A1: .NET Framework creates socket handles
+                    // inheritable (WSASocketW without NO_HANDLE_INHERIT), and
+                    // Exec launches children with bInheritHandles=true, so an
+                    // exec'd child could otherwise accept() driver connections
+                    // on the inherited listener. Un-inherit, mirroring the
+                    // pipe-end handling in Exec.cs.
+                    Native.SetHandleInformation(listener.Handle, Native.HANDLE_FLAG_INHERIT, 0);
                     listener.Bind(new VSockEndPoint(VSockEndPoint.VMADDR_CID_ANY, PORT));
                     listener.Listen(64);
                 }
@@ -336,6 +343,11 @@ namespace VsockD
                 consecutiveFailures = 0;
                 wedgeSignals = 0;
 
+                // quality-review A1: un-inherit each accepted connection so a
+                // child spawned mid-request cannot hold the stream open past
+                // our close (stranding the host's residual read) or write
+                // forged bytes into it
+                try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
                 try { conn.Blocking = true; } catch (Exception) { }
                 try { conn.SendBufferSize = 4 << 20; conn.ReceiveBufferSize = 4 << 20; } catch (Exception) { }
                 VSockEndPoint peer = null;
