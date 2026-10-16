@@ -224,16 +224,14 @@ class Applier:
             # still be running, and a `complete` seal here would make a
             # capture cutoff indistinguishable from a record that ran to
             # teardown. The record stays unsealed with an explicit shutdown
-            # gap; the reaper's reap-seal closes it honestly (the recorded
-            # restart limitation).
-            try:
-                async with asyncio.timeout(5.0):
-                    await self._stop_evidence(lease_id, seal=False)
-            except TimeoutError:
-                logger.warning(
-                    "evidence capture for lease=%s not flushed at shutdown",
-                    lease_id,
-                )
+            # gap; a reap-seal closes it honestly (the recorded restart
+            # limitation). _stop_evidence is internally bounded exactly like
+            # the teardown arm; no outer timeout, which would cancel its own
+            # gap-recording handlers mid-write (review finding on A6; the
+            # round-2 review found this arm's 5 s outer bound was smaller than
+            # the stop phase it wrapped, so a slow real harvest lost the
+            # promised applier-shutdown gaps and checkpoint unmarked).
+            await self._stop_evidence(lease_id, seal=False)
         for task in list(self._tasks):
             task.cancel()
 

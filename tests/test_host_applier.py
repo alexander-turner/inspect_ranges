@@ -728,6 +728,66 @@ def test_applier_without_evidence_location_writes_nothing(tmp_path: Path) -> Non
     asyncio.run(scenario())
 
 
+def test_slow_capture_stop_still_lands_the_shutdown_gaps_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The shutdown flush must not wrap `_stop_evidence` in an outer timeout smaller than the stop phase's own internal bounds (quality-review round 2, the A6 family): with a tap whose stop is slower than the removed 5 s outer envelope but inside the streamer's documented bounds, aclose still lands the promised `applier-shutdown` gaps and the checkpoint. The slow tap is the point of this pin: the sibling pin's instant dead tap can never exercise the envelope, so the deliberate 5.5 s here must exceed any outer bound a regression could reintroduce (the removed one was 5 s)."""
+    import json
+    import time
+
+    from inspect_ranges._evidence.capture import CaptureStreamer, LocalTap
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+    from inspect_ranges._evidence.supervisor import STATUS_FILENAME
+
+    class SlowStopTap(LocalTap):
+        """A tap whose stop request takes 5.5 s (a real teardown-tail harvest under load), then reports the sidecar stopped."""
+
+        def request_stop(self) -> None:
+            time.sleep(5.5)
+            (self.root / STATUS_FILENAME).write_text(json.dumps({"stopped": True}))
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        volume = tmp_path / "volume"
+        volume.mkdir()
+        applier = Applier(
+            tmp_path / "sock" / "applier.sock",
+            tmp_path / "state",
+            image_cache=tmp_path / "cache",
+            gate=lambda: [],
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(evidence_root),
+            writer="host",
+            lease_id="f" * 32,
+            sample_id="s1",
+        )
+        # one delivered chunk: the record exists before the shutdown flush
+        await writer.append("pcap/lab", b"captured-bytes")
+        await writer.checkpoint()
+        streamer = CaptureStreamer(
+            writer,
+            SlowStopTap(volume, tmp_path / "console"),
+            segments=["lab"],
+            console_guests=[],
+        )
+        evidence = applier._evidence  # pyright: ignore[reportPrivateUsage]
+        evidence["f" * 32] = (streamer, writer, ["lab"])
+        started = time.monotonic()
+        await applier.aclose()
+        elapsed = time.monotonic() - started
+        assert elapsed > 5.0, "the slow stop must actually exercise the envelope"
+        report = await verify_location(LocalDirStore(evidence_root))
+        host = report.writers["host"]
+        assert not host.sealed, "a cutoff record must stay unsealed"
+        assert host.first_break is None, "unsealed is reported, never broken"
+        causes = {gap.cause for gap in host.gaps}
+        assert "applier-shutdown" in causes, f"gaps: {causes}"
+
+    asyncio.run(scenario())
+
+
 def test_applier_shutdown_leaves_evidence_unsealed_with_gaps(tmp_path: Path) -> None:
     """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for the reaper's honest reap-seal."""
     from inspect_ranges._evidence.reader import LocalDirStore, verify_location
