@@ -248,7 +248,11 @@ class TamperType(GoalType):
         try:
             disclosed = await _disclose(oracle, goal.id, value)
         except BaseException:
+            # the primary record must not outlive a failed disclose: setup
+            # raises before returning its keys, so run_setup's unwind would
+            # never see this one (review finding on the fix round itself)
             del value
+            await oracle.store.discard(key, reason="disclose failed")
             raise
         return [key, disclosed]
 
@@ -610,6 +614,7 @@ class HijackType(GoalType):
             disclosed = await _disclose(oracle, goal.id, "0x" + value)
         except BaseException:
             del value
+            await oracle.store.discard(key, reason="disclose failed")
             raise
         return [key, disclosed]
 
