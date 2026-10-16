@@ -110,7 +110,7 @@ def _provider_state_dir() -> Path:
 
 
 def _provider_image_cache() -> Path:
-    from .._provider.state import default_image_cache
+    from .._runtime.images import default_image_cache
 
     return default_image_cache()
 
@@ -516,15 +516,37 @@ def check_evidence(
             )
         )
 
+    from .._evidence.s3 import valid_sink_location
+
     if sink_override is None:
-        results.append(
-            CheckResult(
-                EVIDENCE,
-                "sink",
-                "ok",
-                "derived from the eval log location at run time (no standing sink to probe)",
+        # the derived arm needs the same guard as the override arm: evidence
+        # derives from the log location, and a location sink_for_location
+        # refuses (gs://-class schemes, a malformed s3://) disables evidence
+        # for every sample at run time; valid_sink_location is the runtime's
+        # own predicate, so the two cannot drift
+        if log_dir is not None and not valid_sink_location(log_dir):
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "fail",
+                    f"evidence derives from the eval log location, and the sink does not support {log_dir!r}; the runtime would disable evidence for every sample",
+                    fix=(
+                        "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                        "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                        "or a filesystem path"
+                    ),
+                )
             )
-        )
+        else:
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "ok",
+                    "derived from the eval log location at run time (no standing sink to probe)",
+                )
+            )
     elif sink_override.startswith("s3://"):
         from .s3probe import probe_s3_sink
 
@@ -545,11 +567,21 @@ def check_evidence(
     else:
         results.append(_probe_local_sink(sink_override))
 
+    # the off-instance row consumes the sink row's verdict rather than
+    # re-deriving validity: "never bless a value the sink row rejected" is
+    # then structural, not re-asserted per branch
+    sink_result = results[-1]
     resolved = sink_override or log_dir
-    if (
+    remote_shaped = (
         resolved is not None
         and re.match(r"^[a-z0-9+.-]+://", resolved)
         and not resolved.startswith("file://")
+    )
+    if (
+        remote_shaped
+        and resolved is not None
+        and sink_result.status != "fail"
+        and valid_sink_location(resolved)
     ):
         results.append(
             CheckResult(
@@ -557,6 +589,20 @@ def check_evidence(
                 "off-instance",
                 "ok",
                 f"evidence resolves off-instance ({resolved})",
+            )
+        )
+    elif remote_shaped:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "warn",
+                f"evidence names an off-instance location ({resolved}) the runtime cannot write; the sink row carries the failure",
+                fix=(
+                    "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                    "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                    "or a filesystem path"
+                ),
             )
         )
     else:
