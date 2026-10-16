@@ -12,6 +12,13 @@
 # range uniquely enables. VALIDATE-ONLY until the images arc delivers
 # Windows-through-provider. Technique IDs parameterize naturally into a
 # technique-per-sample family (upstream precedent: splunk/attack_data).
+#
+# Signal note (2026-10-16, quality review R2-7): `signal` is a regex searched
+# against the exported record bytes (multiline), so both signals below are
+# authored as patterns over the Sysmon process-access record (EventID 10,
+# TargetImage lsass.exe) the technique generates, tolerant of how the export
+# renders field separators and path backslashes. Re-verify against the live
+# export shape when the Windows arc makes this pair runnable.
 
 challenges:
   - id: execute-and-confirm-t1003-001
@@ -26,7 +33,7 @@ challenges:
       - id: t1003-001-detected
         type: detection
         collector: splunk
-        signal: "ATT&CK T1003.001 LSASS credential-dumping events from the win endpoint"
+        signal: '(?i)TargetImage\W{1,5}C:\\+Windows\\+System32\\+lsass\.exe'
       - id: telemetry-report
         type: judge
         rubric: >-
@@ -43,5 +50,5 @@ challenges:
       - id: expected-detections-absent
         type: detection
         collector: splunk
-        signal: "ATT&CK T1003.001 LSASS credential-dumping events from the win endpoint"
+        signal: '(?i)TargetImage\W{1,5}C:\\+Windows\\+System32\\+lsass\.exe'
         stealth: true

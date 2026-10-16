@@ -996,6 +996,12 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 _NAME_MAX = 63
 """Name length cap: generous for guests (hostname-label scale); network DEVICE uniqueness is checked separately because `br-`/`pr-`/`prb-` prefixed devices truncate at the kernel's 15-character limit."""
 
+_RANGE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+"""Legal range names: the CLI `up` path embeds the raw name in its compose project (`ir-<name>-<12 hex of the spec digest>`), which docker compose restricts to lowercase letters, digits, `_-` starting alphanumeric (dots, legal in guest and network names, are refused there), and which also becomes a state-directory path segment that `write_owner` creates and teardown removes, so the grammar must exclude traversal (quality review R2-1; the provider arm sanitizes separately in `_provider/naming.py`, which stays the authority on its path)."""
+
+_RANGE_NAME_MAX = 47
+"""Range name length cap: the CLI project wraps the name in the 3-character `ir-` prefix plus a 13-character digest suffix, so 47 keeps the derived project within the shared 63-character bound the other names observe."""
+
 _DEVICE_PREFIXES = ("br-", "pr-", "prb-")
 """Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to the kernel's 15-character limit. The compiler derives through `derive_device`, so the collision check below and the realization can never drift."""
 
@@ -1008,6 +1014,16 @@ def derive_device(prefix: str, network_name: str) -> str:
 def _name_issues(spec: "RangeSpec") -> list[Issue]:
     """Grammar, length, and derived-device-name collision checks for every authored name."""
     issues: list[Issue] = []
+    range_name = spec.meta.name
+    if _RANGE_NAME.match(range_name) is None or len(range_name) > _RANGE_NAME_MAX:
+        issues.append(
+            Issue(
+                code="invalid-name",
+                path=("range", "name"),
+                message=f"range name {range_name!r} is not a legal range name (lowercase letters, digits, '_-', starting alphanumeric, at most {_RANGE_NAME_MAX} characters)",
+                hint="the range name becomes the compose project and a state-directory path segment; rename the range",
+            )
+        )
     named: list[tuple[str, tuple[PathElement, ...], str]] = [
         (network.name, ("networks", index, "name"), "network")
         for index, network in enumerate(spec.networks)

@@ -138,11 +138,20 @@ def part_a() -> None:
         store_state: dict[str, Any] = mid.store or {}
         latches = store_state.get(LATCHES_STORE_KEY, {})
         marker = float(store_state.get(MARKER_KEY, 0.0))
-        early_record = LatchRecord.model_validate(latches["early"])
+        # a never-latched poller is an honest FAIL row, not a KeyError
+        early_record = (
+            LatchRecord.model_validate(latches["early"]) if "early" in latches else None
+        )
         check(
-            early_record.achieved and 0.0 < early_record.wall < marker,
-            f"mid: poller latched early MID-RUN (wall {early_record.wall:.3f} "
-            f"< marker {marker:.3f})",
+            early_record is not None
+            and early_record.achieved
+            and 0.0 < early_record.wall < marker,
+            "mid: poller latched early MID-RUN "
+            + (
+                f"(wall {early_record.wall:.3f} < marker {marker:.3f})"
+                if early_record is not None
+                else "(no early latch recorded)"
+            ),
         )
         timings = store_state.get(TIMINGS_STORE_KEY, {})
         ticks = timings.get("sample", {}).get("poller-tick", {})

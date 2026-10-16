@@ -67,14 +67,20 @@ fi
 uv run python "$SPIKE/seam_eval_check.py" "$EVAL_LOGS" \
   | tee -a "$SPIKE/tmp/logs/seam.txt" || CODE=1
 
-echo "=== residue: containers, state, S3 ==="
-$IR down --all >/dev/null 2>&1 || true
-LEFT=$(docker ps -a --format '{{.Names}}' | grep -c "^ir-evidence-v1" || true)
-if [[ "$LEFT" -eq 0 ]]; then
-  echo "PASS  zero container residue"
+echo "=== residue: containers, state, S3 (counted before the sweep) ==="
+# residue counted BEFORE the sweep: the zero-residue row must verify the
+# battery left nothing behind, not that the sweep below works (round 2)
+if NAMES=$(docker ps -a --format '{{.Names}}'); then
+  LEFT=$(grep -c "^ir-evidence-v1" <<<"$NAMES" || true)
+  if [[ "$LEFT" -eq 0 ]]; then
+    echo "PASS  zero container residue"
+  else
+    echo "FAIL  residue: $LEFT containers"; CODE=1
+  fi
 else
-  echo "FAIL  residue: $LEFT containers"; CODE=1
+  echo "FAIL  residue: docker ps failed"; CODE=1
 fi
+$IR down --all >/dev/null 2>&1 || true
 BUCKET_PATH="${SEAM_S3_PREFIX#s3://}"
 aws s3 rm --recursive "s3://${BUCKET_PATH}" >/dev/null 2>&1 || true
 REMAINING=$(aws s3 ls "s3://${BUCKET_PATH}/" --recursive 2>/dev/null | wc -l)

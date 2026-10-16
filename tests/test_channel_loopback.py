@@ -128,7 +128,11 @@ def test_evicted_unacked_result_tombstones_never_rerun(
     async def scenario() -> None:
         rid = request_id()
         guest = fleet.guest("web")
-        # deliver and execute, with the reply dropped in flight
+        # the direct handle() call executes the command with no client reading
+        # the reply (delivered and executed, result never acknowledged); the
+        # transport-level drop_next_reply cannot fire on a direct call, so it
+        # stays armed and drops the RESEND's reply below, pushing that leg
+        # through the poll-after-lost-reply path
         guest.drop_next_reply = True
         first = await guest.handle(ExecRequest(id=rid, cmd=["echo", "once"]), None)
         assert first.message.kind == "exec_result"

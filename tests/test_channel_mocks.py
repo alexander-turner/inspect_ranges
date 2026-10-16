@@ -5,6 +5,7 @@ Hostile replies must surface as typed failures (tamper, never a parse fallback),
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable, Coroutine
 from typing import Literal, cast
@@ -104,6 +105,11 @@ async def _drive(channel: MessageChannel, operation: str) -> None:
         await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
     elif operation == "write_file":
         await channel.write_file("web", "/tmp/x", b"payload")
+    elif operation == "ping":
+        # the declared operation matters: a schema-valid sessionless pong is
+        # wrong-kind tamper on any other path, so only ping pins the session
+        # requirement itself
+        await channel.ping("web")
     else:
         await channel.read_file("web", "/etc/shadow", cap=1024)
 
@@ -156,17 +162,18 @@ def test_hostile_failure_dumps_the_trace_tail(
 def test_hostile_wrong_id_names_both_ids() -> None:
     channel = MessageChannel(HostileTransport("wrong-id"))
 
-    async def scenario_run() -> tuple[str, str, int | None]:
-        request = request_id()
+    async def scenario_run() -> tuple[str, int | None]:
         try:
             await channel.read_file("web", "/x")
         except TamperError as failure:
-            return request, str(failure), failure.attempts
+            return str(failure), failure.attempts
         raise AssertionError("wrong-id reply was accepted")
 
-    _, message, attempts = asyncio.run(scenario_run())
+    message, attempts = asyncio.run(scenario_run())
     assert "f" * 32 in message, "the tamper error must name the forged id"
-    assert "request was id" in message, "the tamper error must name the request id"
+    named = re.search(r"request was id ([0-9a-f]{32})", message)
+    assert named is not None, "the tamper error must name the request id"
+    assert named.group(1) != "f" * 32, "the named request id must be the honest one"
     assert attempts == 1, "a post-delivery tamper verdict carries the honest count"
 
 
@@ -562,11 +569,6 @@ class SilentAfterNConnects:
         client_side, _server = stream_pair()
         return client_side
 
-    # a liveness check needs the pending path: expose the fleet for setup
-    @property
-    def fleet(self) -> LoopbackTransport:
-        return self._inner
-
 
 def test_stale_liveness_does_not_blame_the_command_layer() -> None:
     """One early pending then silence: the deadline verdict is channel, not command (review finding)."""
@@ -699,15 +701,28 @@ class SlowGapApplierTransport:
         await stream.aclose()
 
 
-def test_realize_verify_allowance_covers_sequential_readiness() -> None:
-    """The verify -> ready gap carries no intermediate report; the plan-derived allowance keeps a legitimate slow readiness from starving the per-report budget (quality-review A10)."""
-    transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
-    channel = MessageChannel(transport, label="slow-readiness", channel_budget_s=0.1)
+@pytest.mark.parametrize(
+    ("before_stage", "gap"),
+    [
+        ("fetch", None),  # first-use range-image build, before any report
+        ("boot", "construct"),  # compose up --wait
+        ("verify", "boot"),  # the guest-boot exec
+        ("ready", "verify"),  # the sequential readiness pass
+    ],
+)
+def test_realize_gap_allowance_covers_each_occupied_gap(
+    before_stage: str, gap: str | None
+) -> None:
+    """Each report gap with a legitimate silent occupant is excused by its own caller-supplied allowance, so a legally slow occupant never starves the per-report budget (quality-review A10, R2-3)."""
+    transport = SlowGapApplierTransport(before_stage=before_stage, delay_s=0.4)
+    channel = MessageChannel(transport, label="slow-gap", channel_budget_s=0.1)
 
     async def scenario_run() -> list[str]:
         return [
             report.stage
-            async for report in channel.realize("ab" * 32, [], verify_allowance_s=2.0)
+            async for report in channel.realize(
+                "ab" * 32, [], gap_allowances={gap: 2.0}
+            )
         ]
 
     assert asyncio.run(scenario_run()) == [
@@ -719,8 +734,8 @@ def test_realize_verify_allowance_covers_sequential_readiness() -> None:
     ]
 
 
-def test_realize_without_verify_allowance_still_budgets_the_gap() -> None:
-    """Without the caller-supplied envelope the old behavior stands: the channel allowance bounds the gap (the regression A10 fixed through the uds seams)."""
+def test_realize_without_gap_allowances_still_budgets_every_gap() -> None:
+    """Without caller-supplied envelopes the old behavior stands: the channel allowance bounds each gap (the regression A10 fixed through the uds seams)."""
     transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
     channel = MessageChannel(transport, label="starved", channel_budget_s=0.1)
 
@@ -733,14 +748,41 @@ def test_realize_without_verify_allowance_still_budgets_the_gap() -> None:
     asyncio.run(scenario_run())
 
 
-def test_realize_verify_allowance_applies_only_to_the_verify_gap() -> None:
-    """A slow fetch -> construct gap is NOT excused by the readiness envelope: stall detection for every other gap keeps the channel allowance."""
+def test_realize_gap_allowances_do_not_excuse_unlisted_gaps() -> None:
+    """A slow fetch -> construct gap (no legitimate occupant, so the driver lists no allowance for it) keeps the channel allowance: stall detection survives the widened gaps."""
     transport = SlowGapApplierTransport(before_stage="construct", delay_s=0.4)
     channel = MessageChannel(transport, label="early-stall", channel_budget_s=0.1)
 
     async def scenario_run() -> None:
         with pytest.raises(ChannelBudgetError):
-            async for _ in channel.realize("ab" * 32, [], verify_allowance_s=5.0):
+            async for _ in channel.realize(
+                "ab" * 32,
+                [],
+                gap_allowances={
+                    None: 5.0,
+                    "construct": 5.0,
+                    "boot": 5.0,
+                    "verify": 5.0,
+                },
+            ):
                 pass
+
+    asyncio.run(scenario_run())
+
+
+def test_realize_gap_allowance_still_bounds_a_true_stall() -> None:
+    """A genuinely silent applier still trips INSIDE a widened gap: the allowance is an envelope, not an escape from stall detection."""
+    transport = SlowGapApplierTransport(before_stage="fetch", delay_s=5.0)
+    channel = MessageChannel(transport, label="silent", channel_budget_s=0.1)
+
+    async def scenario_run() -> None:
+        start = time.monotonic()
+        with pytest.raises(ChannelBudgetError) as failure:
+            async for _ in channel.realize("ab" * 32, [], gap_allowances={None: 0.3}):
+                pass
+        assert failure.value.layer == "channel"
+        assert time.monotonic() - start < 3.0, (
+            "detection must come from the gap envelope, not the untimed bound"
+        )
 
     asyncio.run(scenario_run())

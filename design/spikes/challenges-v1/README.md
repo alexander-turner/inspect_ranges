@@ -2,6 +2,8 @@
 
 Live batteries for the challenges-v1 phase (`design/inspect-ranges/challenges-v1.md`). CID band 30600+ for the oracle section (the prober spike holds 30500); exclusive via the shared battery lock at `/tmp/inspect-ranges-battery.lock`. Artifacts under `tmp/` (gitignored).
 
+Round 2 (2026-10-16) reordered every wrapper's residue check to count containers BEFORE the sweep. The post-integration re-run (same day, on the integrated round-2 code) re-recorded zero residue under the new ordering on every wrapper: oracle 24/24 green (wall 74 s), engine 14/14 (wall 173 s; the eval's 3 samples now run in 161 s against the recorded 520 s, the A1 CLOEXEC fix live), poller 21/21 (wall 202 s), refchains 23/23 (wall 475 s against the recorded 785 s, same cause), evade 12/12 (wall 99 s). The observed wrapper's residue row also re-recorded zero on every run; its strengthened hijack row failed until the R2-25 fix, then went green 22/22 at d6ca496 (see the slice-4 section).
+
 ## Slice 2: oracle planting and the residue sweep (`./run_oracle.sh`)
 
 A two-segment range (the evidence-v1 shape: dmz and internal joined by a router, eight-capability floor, capture sidecar on) boots at CID 30600; a real `EvidenceSession` owns capture, and a `RangeOracle` over the raw vsock channel plants a flag-shaped value (`web:/root/crown-flag`, 600 root) and an owner-bound value (`db:/opt/owned-secret`, 600 daemon) through `run_setup`. The sweep then proves the residue rule on live guests:
@@ -12,11 +14,11 @@ A two-segment range (the evidence-v1 shape: dmz and internal joined by a router,
 - **evidence**: the `plants` stream carries both digests in order and zero value bytes.
 - **wire**: the live per-segment pcap (real cross-segment noise generated first, so the check is non-vacuous) contains no plant bytes; the control plane is vsock, not a network.
 
-The failure leg plants one goal then targets a nonexistent guest: setup refuses with the prior plant removed from the guest and discarded from the store (`planted`/`unwound` events in the stream). The record then seals and verifies offline.
+The failure leg plants one goal then targets a nonexistent guest: setup refuses with the prior plant removed from the guest (ENOENT on a root read) and discarded from the store; the stream check reads the `planted` events and digests, and the unwind is verified from guest and store state, not from the stream. The record then seals and verifies offline.
 
 ### Results
 
-22/22 green plus zero residue (2026-10-15, this devbox; re-run green after the review round, see the ledger):
+24/24 green plus zero residue (2026-10-16, this devbox, incl. the two quality-review A1 fd-hygiene checks below; the initial 22-check run 2026-10-15, re-run green after the review round, see the ledger; disk-sweep check strengthened in round 2 and re-run green 24/24 plus zero residue the same day after the round-2 check revisions, up 51.8 s, residue counted before the sweep):
 
 | Measure | Value |
 |---|---|
@@ -30,6 +32,13 @@ The failure leg plants one goal then targets a nonexistent guest: setup refuses 
 | plants stream | both digests in order, no values, record verifies offline |
 
 Two live-range findings drove oracle design during this battery (both now in the implementation and its CI pins): the daemon's file plane runs as the agent identity, so privileged plants ride the exec plane as root with the value on stdin (`PLANT_SCRIPT`: `umask 077 && cat`, chmod/chown by positional argument, remove-on-any-failure), and privileged reads likewise ride `cat` as the requested user because `read_file` cannot open another principal's 0600 file.
+
+### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
+
+These two checks live in `oracle_battery.py` (`./run_oracle.sh`); round 2 moved this subsection here from the slice-5 section, where it had drifted during the review round.
+
+- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
+- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding in the slice-6 section.
 
 ## Slice 3: the real inspect-eval gate (`./run_engine.sh`)
 
@@ -60,7 +69,7 @@ Two parts. Part A is a real `inspect eval` (two samples, `INSPECT_RANGES_POLL_S=
 
 ### Results
 
-21/21 green plus zero residue, twice (2026-10-15, this devbox; the second run post-review with all ten findings fixed):
+21/21 green plus zero residue, twice (2026-10-15, this devbox; the second run post-review with all ten findings fixed); re-run green 21/21 plus zero residue 2026-10-16 after the round-2 check revisions (honest FAIL rows; residue counted before the sweep), wall 202 s:
 
 | Measure | Value |
 |---|---|
@@ -81,11 +90,6 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 - Both scans (the type's `compare` and `corroborate`'s rescan) apply the identical probe-frame exclusion (`netident.py`), so they cannot disagree and manufacture a false contradiction.
 - Gaps never fail a passing sample: B3's score is byte-identical to a gapless pass; only the corroboration section differs.
 
-### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
-
-- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
-- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding below.
-
 ## Honest notes
 
 - Per-plant setup timings print from the `inspect_ranges.challenges` logger (the measure-first rows); the eval-log timing instrumentation is slice 5.
@@ -98,7 +102,7 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 
 ## Slice 4: probe endpoint, prober, and the observed goal types (`run_observed.sh`)
 
-22/22 green plus zero residue on the devbox, twice (2026-10-15, initial and post-review), CID 30620, up 50.6 s / 52.3 s with capture AND the dmz probe endpoint rendered (noise vs the ~50 s baseline: the endpoint costs nothing measurable). What the live run proved, in order: the clamped veth is up inside the range netns with the reserved `.254` address and the declared `02:50` MAC while the host netns carries no probe device; from the agent box the endpoint answers no ping and a closed port reads filtered (no RST); `availability` passes a live all-ok window; a canned responder on a second port reads `mumble` on every probe (a 200 without the fresh nonce's sha256 never counts: the nonce-binding negative); `tamper`'s disclosed value lands on the attacker foothold, is NOT observed before the write (the service reflects no input), and is observed from outside after the root write into `/srv/status.txt`; `degrade` achieves on a fully-down window after the service is killed; `hijack`'s disclosed address comes back in the real crash record end-to-end (crashsvc jumps to it; the kernel's segfault line carries it through the console stream and dmesg, corroborated), and a root-forged `/dev/kmsg` line on a second host ALSO passes, which is exactly the documented `guest-corroborated` floor, asserted as such; `detection` finds the emitted journal signal in the export and the stealth variant passes only over a complete, flowing window; the sealed record verifies offline with the binding.
+22/22 green plus zero residue on the devbox, twice (2026-10-15, initial and post-review), and re-run green 22/22 plus zero residue 2026-10-16 on the integrated round-2 code at d6ca496 after the round-2 check revisions (up 50.9 s, wall 112 s, residue counted before the sweep, the hijack row corroborated on the first score). History of the round-2 hijack finding (R2-25, fixed): the first post-integration re-runs came back 21/22 plus zero residue twice on the strengthened hijack row, which now also requires `corroborated is True`; a bounded 30 s corroboration window failed identically, and the evidence record showed the console conjunct absent (0 segfault/crashsvc lines in the web console chunk while dmesg carried the address throughout), because the default guest console loglevel, kernel.printk 4, keeps the kernel's INFO segfault line and WARN kmsg writes off the serial console, making `corroborated` structurally unattainable on default-configured guests; fixed by the setup-time loglevel raise (`dmesg -n 7` as root before any plant state, failing loudly). CID 30620, up 50.6 s / 52.3 s with capture AND the dmz probe endpoint rendered (noise vs the ~50 s baseline: the endpoint costs nothing measurable). What the live run proved, in order: the clamped veth is up inside the range netns with the reserved `.254` address and the declared `02:50` MAC while the host netns carries no probe device; from the agent box the endpoint answers no ping and a closed port reads filtered (no RST); `availability` passes a live all-ok window; a canned responder on a second port reads `mumble` on every probe (a 200 without the fresh nonce's sha256 never counts: the nonce-binding negative); `tamper`'s disclosed value lands on the attacker foothold, is NOT observed before the write (the service reflects no input), and is observed from outside after the root write into `/srv/status.txt`; `degrade` achieves on a fully-down window after the service is killed; `hijack`'s disclosed address comes back in the real crash record end-to-end (crashsvc jumps to it; the kernel's segfault line carries it through the console stream and dmesg, corroborated, real since the R2-25 setup-time loglevel raise; the 2026-10-15 check asserted `achieved` only), and a root-forged `/dev/kmsg` line on a second host ALSO passes, which is exactly the documented `guest-corroborated` floor, asserted as such; `detection` finds the emitted journal signal in the export and the stealth variant passes over a complete, flowing window (the battery runs the positive leg only; the negative, no stealth pass over an incomplete window, is CI-pinned in `tests/test_challenges_observed.py` and `tests/test_challenges_evade.py`); the sealed record verifies offline with the binding.
 
 Measure-first rows (check plus compare, per goal): availability 0.000-0.001 s, degrade 0.001 s, tamper 0.001 s, detection 0.001-0.002 s, hijack 0.016-0.018 s (console chunks plus a dmesg read). Nothing approaches minutes, let alone the fifteen-minute gate; scoring reads recorded evidence, so a dead service costs nothing at scoring time.
 

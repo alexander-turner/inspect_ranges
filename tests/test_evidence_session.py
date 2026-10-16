@@ -249,6 +249,118 @@ def test_wedged_producer_stop_cannot_starve_the_seal(
     asyncio.run(scenario())
 
 
+def test_wedged_producer_stop_cannot_starve_a_sibling_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer-stops share is one JOINT bound (quality-review round 2): a wedged earlier-registered stop (the telemetry poller's registration slot) must not starve a later producer's stop CALL, or the starved prober leaks and keeps running its probe client against the sealed record for the life of the driver process (adopted from the round-2 unit-2 probe A)."""
+    import inspect_ranges._provider.evidence as evidence_mod
+    from inspect_ranges._challenges.prober import Prober, ProbeTarget
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            project="ir-probe",
+            bundle=tmp_path / "bundle",
+            plan=plan,
+        )
+
+        async def wedged_stop() -> None:
+            # a telemetry stop whose in-flight poll holds the channel budget
+            await asyncio.sleep(5.0)
+
+        client_calls: list[float] = []
+
+        async def stub_client(argv: list[str]) -> bytes:
+            client_calls.append(asyncio.get_running_loop().time())
+            return b'{"status": "down"}'
+
+        prober = Prober(
+            session,
+            "ir-probe",
+            [ProbeTarget(goal_id="recon-1", ip="10.0.0.2", port=80)],
+            cadence_s=0.05,
+            client_runner=stub_client,
+        )
+        prober.start()
+        probe_tasks = list(prober._tasks.values())  # pyright: ignore[reportPrivateUsage]
+        try:
+            # registration order mirrors setup.py: poller (wedged) first,
+            # prober second
+            session.register_producer(wedged_stop)
+            session.register_producer(prober.stop)
+            monkeypatch.setattr(evidence_mod, "PRODUCER_STOPS_SHARE_S", 0.2)
+            await session.finalize()
+            # the seal guarantee holds (the round-1 pin's property)...
+            report = await verify_location(LocalDirStore(tmp_path))
+            assert report.writers["driver"].sealed
+            # ...and the sibling producer was genuinely stopped
+            assert all(task.done() for task in probe_tasks), (
+                "the prober's stop was never reached: its loops leak and keep "
+                "probing the sealed record"
+            )
+            calls_at_finalize = len(client_calls)
+            await asyncio.sleep(0.3)
+            assert len(client_calls) == calls_at_finalize, (
+                "no probe client may run after finalize"
+            )
+        finally:
+            await prober.stop(stop_timeout_s=1.0)  # test-harness cleanup only
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_finalize_is_not_latched_and_the_retry_seals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finalize cancelled mid-stops (the second-ctrl-C family during teardown) must not latch as finalized: the retried teardown re-enters finalize and the record still seals with a binding that carries the digest (quality-review round 2, adopted from the unit-2 probe B: pre-fix the retry was a no-op that wrote `seals={}` and then released the lease, leaving a permanently unsealed record with unreferenced chunks)."""
+    import inspect_ranges._provider.evidence as evidence_mod
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            project="ir-probe",
+            bundle=tmp_path / "bundle",
+            plan=plan,
+        )
+        await session.append_driver("session", b'{"event": "pinned"}\n')
+
+        started = asyncio.Event()
+
+        async def blocking_stop() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        session.register_producer(blocking_stop)
+        monkeypatch.setattr(evidence_mod, "PRODUCER_STOPS_SHARE_S", 0.2)
+        task = asyncio.create_task(session.finalize())
+        await started.wait()
+        task.cancel()  # the operator's second ctrl-C during teardown
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # task_cleanup retries _destroy: finalize again, then the binding
+        await session.finalize()
+        session.write_binding()
+        seals = cast(dict[str, str], session.binding()["seals"])
+        assert set(seals) == {"driver"}, "the retry re-enters finalize and seals"
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"driver": seals["driver"]}
+        )
+        driver = report.writers["driver"]
+        assert report.ok and driver.sealed and driver.binding_checked
+        assert driver.seal_status == "incomplete", (
+            "the blocking producer's tail was lost; the seal says so"
+        )
+        assert not report.unreferenced, (
+            "the delivered session chunk is referenced by the sealed record"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_hanging_sink_bounds_the_seal_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -276,6 +388,70 @@ def test_hanging_sink_bounds_the_seal_phase(
         assert time_mod.monotonic() - started < 5.0, "finalize stays bounded"
         session.write_binding()
         assert session.binding()["seals"] == {}
+
+    asyncio.run(scenario())
+
+
+def test_host_seal_miss_reap_seals_before_the_lease_release(tmp_path: Path) -> None:
+    """Applier restart with a surviving driver (quality-review round 2, adopted from the unit-3 probe): the restarted applier's teardown seals nothing, so the driver's host-seal miss path reap-seals the host record at the reaper's exact ordering point, after teardown and before the lease release that would delete the reaper's only pointer; the binding carries the reaped host seal, and the subsequent lease release plus an empty reaper sweep leave the record sealed."""
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+    from inspect_ranges._host.host import HostFacts
+    from inspect_ranges._host.leases import LeaseStore
+    from inspect_ranges._host.reaper import sweep
+    from inspect_ranges._runtime.down import DownResult
+
+    async def scenario() -> None:
+        # 1. the pre-restart applier's host writer delivered capture, never sealed
+        host_writer = EvidenceWriter(
+            LocalDirSink(tmp_path), writer="host", lease_id="a" * 32, sample_id="s1"
+        )
+        await host_writer.append("pcap/lab", b"pre-restart capture")
+        await host_writer.checkpoint()
+
+        # 2. the surviving driver's teardown tail: finalize (driver seal), the
+        # host-seal readback (the miss path), the binding
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="a" * 32, project="ir-p", bundle=tmp_path / "bundle", plan=plan
+        )
+        await session.finalize()
+        await session.read_host_seal()
+        session.write_binding()
+        seals = cast(dict[str, str], session.binding()["seals"])
+        assert set(seals) == {"driver", "host"}, (
+            "the miss path reap-seals and the binding carries the host digest"
+        )
+
+        # 3. _destroy then releases the host lease; the reaper has nothing to
+        # recover (the composition the pre-fix code left permanently unsealed)
+        state = tmp_path / "state"
+        store = LeaseStore(state)
+        lease = store.acquire(
+            project="ir-p",
+            task_name="t",
+            sample_id="s1",
+            isolation="shared",
+            origin="uds:/tmp/sock",
+            bundle_path=str(tmp_path),
+            bundle_digest="0" * 64,
+            staging=str(tmp_path / "staging"),
+            host_facts=HostFacts(arch="x86_64", hostname="h", host_class="test"),
+            ttl_s=600,
+            evidence_location=str(tmp_path),
+        )
+        store.release(lease.lease_id)
+
+        def never_down(project: str, state_dir: Path) -> DownResult:
+            raise AssertionError("no lease exists for the reaper to act on")
+
+        assert sweep(state, store=store, down_fn=never_down) == []
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"host": seals["host"]}
+        )
+        host = report.writers["host"]
+        assert report.ok and host.sealed and host.binding_checked
+        assert host.seal_status == "reaped", "the driver's reap-seal is honest"
 
     asyncio.run(scenario())
 

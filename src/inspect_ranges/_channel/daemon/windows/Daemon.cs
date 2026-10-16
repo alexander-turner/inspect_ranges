@@ -304,11 +304,14 @@ namespace VsockD
                 }
                 if (!readable) { wedgeSignals = 0; continue; }
 
-                Socket conn;
+                Socket conn = null;
+                int retrySleepMs = 0;
                 // Native.InheritLock closes the accept-to-uninherit window
                 // against a concurrent exec's bInheritHandles=true snapshot
                 // (review finding on A1); Accept here is non-blocking (Poll
-                // said readable), so the lock is held only across fast calls.
+                // said readable) and the error-path backoff sleeps run below,
+                // after the lock releases, so the lock is held only across
+                // fast calls.
                 lock (Native.InheritLock)
                 {
                 try { conn = listener.Accept(); }
@@ -328,28 +331,38 @@ namespace VsockD
                                 "readable but unacceptable x" + wedgeSignals);
                             return; // supervisor rebinds
                         }
-                        Thread.Sleep(2);
-                        continue;
+                        retrySleepMs = 2;
                     }
-                    consecutiveFailures++;
-                    Ring.Add("warn", "accept-failed", null, se.Message);
-                    if (consecutiveFailures >= 8) return; // supervisor rebinds
-                    Thread.Sleep(10);
-                    continue;
+                    else
+                    {
+                        consecutiveFailures++;
+                        Ring.Add("warn", "accept-failed", null, se.Message);
+                        if (consecutiveFailures >= 8) return; // supervisor rebinds
+                        retrySleepMs = 10;
+                    }
                 }
                 catch (Exception e)
                 {
                     consecutiveFailures++;
                     Ring.Add("warn", "accept-failed", null, e.Message);
                     if (consecutiveFailures >= 8) return;
-                    Thread.Sleep(10);
-                    continue;
+                    retrySleepMs = 10;
                 }
                 // quality-review A1: un-inherit each accepted connection so a
                 // child spawned mid-request cannot hold the stream open past
                 // our close (stranding the host's residual read) or write
                 // forged bytes into it
-                try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
+                if (conn != null)
+                {
+                    try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
+                }
+                }
+                if (conn == null)
+                {
+                    // accept failed: back off outside the lock so an error
+                    // storm here never serializes concurrent exec launches
+                    Thread.Sleep(retrySleepMs);
+                    continue;
                 }
                 consecutiveFailures = 0;
                 wedgeSignals = 0;

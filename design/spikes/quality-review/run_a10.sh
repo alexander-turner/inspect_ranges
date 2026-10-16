@@ -43,12 +43,20 @@ uv run python "$SPIKE/a10_readiness.py" "$INSPECT_RANGES_IMAGE_CACHE" 2>&1 \
   | tee "$SPIKE/tmp/logs/a10.txt"
 CODE=${PIPESTATUS[0]}
 
-echo "=== residue check ==="
-LEFT=$(docker ps -a --format '{{.Names}}' | grep -c '^ir-a10' || true)
-if [[ "$LEFT" != "0" ]]; then
-  echo "FAIL residue: $LEFT ir-a10 containers remain"
-  CODE=1
+# residue counted BEFORE the sweep, matching the other wrappers (round 2):
+# this wrapper already counted first; the sweep after the count is new
+echo "=== residue check (counted before the sweep) ==="
+if NAMES=$(docker ps -a --format '{{.Names}}'); then
+  LEFT=$(grep -c '^ir-a10' <<<"$NAMES" || true)
+  if [[ "$LEFT" != "0" ]]; then
+    echo "FAIL residue: $LEFT ir-a10 containers remain"
+    CODE=1
+  else
+    echo "PASS zero residue (no ir-a10 containers)"
+  fi
 else
-  echo "PASS zero residue (no ir-a10 containers)"
+  echo "FAIL residue: docker ps failed"
+  CODE=1
 fi
+$IR down --all >/dev/null 2>&1 || true
 exit "$CODE"

@@ -588,8 +588,11 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 if handle.evidence is not None:
                     # the range stays up, so seal what this process delivered
                     # (honest to the abandonment point) and surface the
-                    # binding; an applier-side writer keeps capturing and the
-                    # reaper reap-seals it after lease expiry
+                    # binding. Local topology: the same finalize() stops the
+                    # capture sidecar and seals the host writer in this
+                    # process, so nothing keeps capturing. Separated (uds:)
+                    # topology: the applier-side writer keeps capturing and
+                    # the reaper reap-seals it after lease expiry.
                     await handle.evidence.finalize()
                     handle.evidence.write_binding()
                     handle.evidence = None
