@@ -96,6 +96,13 @@ services:
     image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
     init: true
     network_mode: none
+    # bridges, taps and probe veths are created later in this netns and
+    # inherit `default`, so none gets an IPv6 address and no management address
+    # answers on any segment (agent-containment.md); guest IPv6 still crosses
+    # the bridges. Set here because /proc/sys is read-only in the container
+    # and a per-bridge key cannot be set before the bridge exists.
+    sysctls:
+      - net.ipv6.conf.default.disable_ipv6=1
     cap_drop: [ALL]
     cap_add: [__CAPS__]
     security_opt:
@@ -176,16 +183,20 @@ def _compose_with_probe(compose: str) -> str:
     return compose.replace(marker, "\n" + _COMPOSE_PROBE_SERVICE + marker, 1)
 
 
-_COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
-    "    network_mode: none\n",
-    """    # this range requests egress: the deployment supplies the uplink network
+_COMPOSE_UPLINK = (
+    _COMPOSE_ISOLATED.replace(
+        "    network_mode: none\n",
+        """    # this range requests egress: the deployment supplies the uplink network
     networks: [uplink]
-    sysctls:
-      - net.ipv4.ip_forward=1
 """,
-).replace(
-    "volumes:\n  scratch:\n",
-    """networks:
+    )
+    .replace(
+        "      - net.ipv6.conf.default.disable_ipv6=1\n",
+        "      - net.ipv6.conf.default.disable_ipv6=1\n      - net.ipv4.ip_forward=1\n",
+    )
+    .replace(
+        "volumes:\n  scratch:\n",
+        """networks:
   uplink:
     name: ${UPLINK_NETWORK:?this range requests egress; set UPLINK_NETWORK to the deployment-supplied uplink}
     external: true
@@ -193,6 +204,7 @@ _COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
 volumes:
   scratch:
 """,
+    )
 )
 
 
