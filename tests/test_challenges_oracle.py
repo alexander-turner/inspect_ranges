@@ -246,6 +246,35 @@ class TestOracleWriteFile:
         asyncio.run(scenario())
 
 
+class TestAnswerOracleRead:
+    def test_oracle_read_source_scores_the_live_fact(self, tmp_path: Path) -> None:
+        """The host+path answer source (coverage pass T4): the expected value is read from the live guest as root at check time."""
+        import time as _time
+
+        from inspect_ranges._challenges.goaltypes import AnswerType
+        from inspect_ranges._challenges.schema import AnswerGoal
+        from inspect_ranges._challenges.submission import Submission, Submissions
+
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.write_file("box", "/tmp/fact", b"a1b2c3\n")
+            goal = AnswerGoal(id="fact", host="box", path="/tmp/fact")
+            engine = AnswerType()
+            assert engine.assurance_for(goal) == "guest-corroborated"
+            right = Submissions(
+                [Submission(goal_id="fact", value="a1b2c3", wall=_time.time())]
+            )
+            observations = await engine.check(goal, oracle, right)
+            assert engine.compare(goal, observations, oracle.store).achieved
+            wrong = Submissions(
+                [Submission(goal_id="fact", value="zzz", wall=_time.time())]
+            )
+            observations = await engine.check(goal, oracle, wrong)
+            assert not engine.compare(goal, observations, oracle.store).achieved
+
+        asyncio.run(scenario())
+
+
 class TestPlantAndStart:
     def test_producer_start_failure_unwinds_plants(self, tmp_path: Path) -> None:
         """B15: the never-half-planted contract covers producer start, not only plants."""

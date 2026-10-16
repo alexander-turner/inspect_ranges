@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from inspect_ai.util import Store
 from inspect_ranges._challenges.engine import GoalResult, Observations
 from inspect_ranges._challenges.observedtypes import HijackType
@@ -301,6 +302,71 @@ class TestStoreFailureIsolation:
         assert value == 1.0
         goals = cast("dict[str, object]", metadata["goals"])
         assert cast("dict[str, object]", goals["f"])["achieved"] is True
+
+
+class HostileReadStore(Store):
+    """A store whose READS fail too; the latch read guard must hold (coverage pass T5)."""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        raise RuntimeError("store read refused")
+
+    def set(self, key: str, value: Any) -> None:
+        raise RuntimeError("store write refused")
+
+
+class TestScorerGuardPins:
+    """Coverage pass T5: the never-throw-into-scoring guards, pinned explicitly."""
+
+    @staticmethod
+    def _flag_scenario(
+        store: Store,
+    ) -> "tuple[Any, Any, Challenge, Submissions]":
+        challenge = Challenge.model_validate(
+            {
+                "id": "c",
+                "prompt": "p",
+                "goals": [{"id": "f", "type": "flag", "host": "box", "path": "/f"}],
+            }
+        )
+        subs = Submissions([Submission(goal_id="f", value="VAL-7b7b", wall=time.time())])
+        return store, None, challenge, subs
+
+    def test_score_survives_store_read_failures(self, tmp_path: Path) -> None:
+        async def scenario() -> float:
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.store.record(
+                "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
+            )
+            store, _, challenge, subs = self._flag_scenario(HostileReadStore())
+            value, _ = await score_challenge(oracle, store, challenge, subs)
+            return value
+
+        assert asyncio.run(scenario()) == 1.0
+
+    def test_score_survives_a_corroborate_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """corroborate() never raises by contract; a bug that breaks the contract still must not error the sample."""
+
+        async def crashing(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("corroborate bug")
+
+        import inspect_ranges._challenges.scorer as scorer_module
+
+        async def scenario() -> tuple[float, dict[str, object]]:
+            monkeypatch.setattr(scorer_module, "corroborate", crashing)
+            oracle, _, _ = make_oracle(tmp_path)
+            await oracle.store.record(
+                "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
+            )
+            store, _, challenge, subs = self._flag_scenario(Store())
+            return await score_challenge(oracle, store, challenge, subs)
+
+        value, metadata = asyncio.run(scenario())
+        assert value == 1.0
+        corroboration = cast("dict[str, object]", metadata["corroboration"])
+        assert corroboration["incomplete"] is True
+        assert metadata["validity"] == "valid"  # a crash flags, never invalidates
 
 
 class TestHijackFloor:
