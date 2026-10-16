@@ -277,9 +277,15 @@ _INCOMPLETE_OUTCOMES = {"error", "truncated", "cursor-missing"}
 """Per-poll outcomes that make a window incomplete (shared by `detection` and `evade`)."""
 
 
-async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observations:
-    """The exported-telemetry observation shape `detection` and `evade` share."""
-    meta, data, gapped = await oracle.telemetry_export(collector)
+def telemetry_observations_from(
+    meta: "list[SpannedRecord]",
+    data: "list[tuple[bytes, float | None, float | None]]",
+    gapped: bool,
+) -> Observations:
+    """Assemble the exported-telemetry observation shape `detection` and `evade` share.
+
+    One assembly for the production path AND the regression pins (a hand-copied transcript of this function is how the A4 class would hide again, the review's fixture-vs-production rule).
+    """
     return Observations(
         source="evidence",
         reads={
@@ -296,6 +302,11 @@ async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observ
         },
         chunk_reads={"data": [chunk for chunk, _, _ in data]},
     )
+
+
+async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observations:
+    meta, data, gapped = await oracle.telemetry_export(collector)
+    return telemetry_observations_from(meta, data, gapped)
 
 
 def _window_meta(
