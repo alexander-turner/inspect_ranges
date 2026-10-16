@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from .._diagnostics import Issue, IssueError
-from ..types import Interface, RangeSpec
+from ..types import Interface, RangeSpec, derive_device
 
 
 class SubnetExhaustedError(ValueError):
@@ -200,8 +200,8 @@ def allocate(
             raise _exhausted(name, "the probe endpoint") from None
         claimed[name].add(address)
         probe_endpoints[name] = ProbeEndpoint(
-            device=f"pr-{name}"[:15],
-            peer=f"prb-{name}"[:15],
+            device=derive_device("pr-", name),
+            peer=derive_device("prb-", name),
             ip=address,
             mac=f"02:50:00:00:00:{index:02x}",
         )
