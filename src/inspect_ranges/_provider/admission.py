@@ -107,7 +107,12 @@ class WeightedAdmission:
                 # already admitted: refund, then let successors through
                 self._refund(totals)
             else:
+                # removing an un-admitted waiter can expose a successor that
+                # fits ALREADY-free capacity (nothing was charged, so no
+                # release will ever wake it): re-serve the head or the queue
+                # wedges until an unrelated release (quality-review B5)
                 self._waiters.remove(entry)
+                self._serve_head()
             raise
 
     def _refund(self, totals: Totals) -> None:

@@ -73,6 +73,29 @@ def test_cancelled_waiter_leaves_the_queue_clean() -> None:
     asyncio.run(scenario())
 
 
+def test_cancelled_head_waiter_reserves_the_successor() -> None:
+    """Cancelling the HEAD waiter re-serves the queue: a successor that fits ALREADY-free capacity is admitted without waiting for an unrelated release (quality-review B5)."""
+
+    async def scenario() -> None:
+        gate = WeightedAdmission(HostCapacity(cpus=10, memory_mb=100_000))
+        await gate.acquire(totals(6, 10))  # S1 holds 6; free 4
+        a = asyncio.create_task(gate.acquire(totals(9, 10)))  # head, cannot fit
+        await asyncio.sleep(0.01)
+        b = asyncio.create_task(gate.acquire(totals(2, 10)))  # fits free 4, FIFO-blocked
+        await asyncio.sleep(0.01)
+        assert not a.done() and not b.done()
+        a.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await a
+        # the traced deadlock shape: S1's release is deferred (interrupted
+        # sample), so B must be admitted NOW or nothing ever wakes it
+        await asyncio.wait_for(b, timeout=1.0)
+        await gate.release(totals(2, 10))
+        await gate.release(totals(6, 10))
+
+    asyncio.run(scenario())
+
+
 def test_default_max_sandboxes_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INSPECT_RANGES_MAX_SANDBOXES", "5")
     assert default_max_sandboxes() == 5
