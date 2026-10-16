@@ -269,7 +269,14 @@ async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observ
         reads={
             "meta": _records_json(meta),
             "gapped": b"1" if gapped else b"0",
-            "data_spans": json.dumps([[start, end] for _, start, end in data]).encode(),
+            # a null span marks a delivered-but-uncommitted tail chunk (no
+            # manifest part yet): the newest data, included in every window
+            "data_spans": json.dumps(
+                [
+                    None if start is None or end is None else [start, end]
+                    for _, start, end in data
+                ]
+            ).encode(),
         },
         chunk_reads={"data": [chunk for chunk, _, _ in data]},
     )
@@ -305,19 +312,26 @@ def _window_flowing(in_window: list[dict[str, object]]) -> bool:
 
 
 def _in_window_chunks(obs: Observations, window_start: float) -> "list[bytes]":
-    """Data chunks whose span reaches the window (chunk-span granularity, the shared caveat)."""
+    """Data chunks whose span reaches the window (chunk-span granularity, the shared caveat).
+
+    A span-less chunk (a `null` entry: delivered but its manifest part not yet committed, routine for the newest ~15 s) is ALWAYS included: it is the newest data, inside any trailing window, and excluding it produced a definite quiet verdict over alerts the delivered record contained (quality review A4).
+    """
     spans = _window_spans(obs)
     kept: list[bytes] = []
     for position, chunk in enumerate(obs.chunk_reads["data"]):
-        span_end = float(spans[position][1]) if position < len(spans) else 0.0
-        if span_end >= window_start:
+        span = spans[position] if position < len(spans) else None
+        if span is None or float(span[1]) >= window_start:
             kept.append(chunk)
     return kept
 
 
-def _window_spans(obs: Observations) -> list[list[float]]:
+def _window_spans(obs: Observations) -> "list[list[float] | None]":
     raw_spans: object = json.loads(obs.reads["data_spans"].decode() or "[]")
-    return cast("list[list[float]]", raw_spans) if isinstance(raw_spans, list) else []
+    return (
+        cast("list[list[float] | None]", raw_spans)
+        if isinstance(raw_spans, list)
+        else []
+    )
 
 
 class DetectionType(GoalType):

@@ -300,13 +300,13 @@ class RangeOracle:
 
     async def telemetry_export(
         self, collector: str
-    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]":
-        """The collector's export for scoring: meta records, data chunks with spans, and the gap flag.
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]":
+        """The collector's export for scoring: meta records, data chunks with spans (`None` spans mark the delivered-but-uncommitted tail), and the gap flag.
 
         One manifest fetch serves both streams (the detection check runs per goal, possibly on a poller cadence, against a possibly remote store).
         """
         return cast(
-            "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]",
+            "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]",
             await self._memoized(
                 ("telemetry-export", collector),
                 lambda: self._telemetry_export_fetch(collector),
@@ -315,7 +315,7 @@ class RangeOracle:
 
     async def _telemetry_export_fetch(
         self, collector: str
-    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float, float]], bool]":
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]":
         store = self._evidence_store()
         manifest = await manifest_records(store, "driver")
         meta, meta_gapped = await stream_json_records(
