@@ -22,6 +22,7 @@ from .schema import (
     Challenge,
     DegradeGoal,
     DetectionGoal,
+    EvadeGoal,
     PatchGoal,
     TamperGoal,
     required_observers,
@@ -159,6 +160,15 @@ async def run_setup(
         )
 
 
+def telemetry_goal_collectors(challenge: Challenge) -> set[str]:
+    """The collectors the challenge's telemetry-reading goals (`detection`, `evade`) need wired."""
+    return {
+        goal.collector
+        for goal in challenge.goals
+        if isinstance(goal, (DetectionGoal, EvadeGoal))
+    }
+
+
 @solver
 def plant_goals(
     telemetry_collectors: "list[CollectorSpec] | None" = None,
@@ -167,7 +177,7 @@ def plant_goals(
 
     Prepend to the task's solver chain. Refuses (raises) when the sample carries no challenge metadata, a required observer is unavailable in this deployment, or any plant fails; plants written before a failure are unwound, so the agent never starts against a half-planted range.
 
-    Prober-based goals (`availability`, `degrade`, `tamper`) start the active prober after a successful setup, probing from the rendered probe endpoint on a cadence; `detection` goals start the telemetry export poller for their collector, which must have a matching entry in `telemetry_collectors` (poll mechanics are deployment knowledge the schema deliberately does not carry: the collector name binds the two). Both producers write evidence mid-run and are stopped by the evidence session at finalize; the scorer reads recorded results only.
+    Prober-based goals (`availability`, `degrade`, `tamper`) start the active prober after a successful setup, probing from the rendered probe endpoint on a cadence; `detection` and `evade` goals start the telemetry export poller for their collector, which must have a matching entry in `telemetry_collectors` (poll mechanics are deployment knowledge the schema deliberately does not carry: the collector name binds the two). Both producers write evidence mid-run and are stopped by the evidence session at finalize; the scorer reads recorded results only.
 
     Multi-goal challenges get the `submit_goal` tool added to `state.tools` (the dataset's appended prompt paragraph names it, so the harness guarantees it for generate-driven solvers). Agents that carry their own toolset, like `react(tools=...)`, must include `submit_goal()` themselves; single-goal challenges work without it through the completion fallback.
     """
@@ -185,15 +195,11 @@ def plant_goals(
             state.tools.append(submit_goal())
         oracle = range_oracle()
         supplied = frozenset(spec.name for spec in collectors)
-        needed = {
-            goal.collector
-            for goal in challenge.goals
-            if isinstance(goal, DetectionGoal)
-        }
+        needed = telemetry_goal_collectors(challenge)
         unmatched = needed - supplied
         if unmatched:
             raise RuntimeError(
-                f"challenge {challenge.id!r} declares detection collectors "
+                f"challenge {challenge.id!r} declares telemetry collectors "
                 f"with no telemetry spec supplied to plant_goals(): "
                 f"{sorted(unmatched)}"
             )
