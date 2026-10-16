@@ -637,17 +637,22 @@ class MessageChannel:
             else:
                 probe = request
                 send_frames = frames
+            connected = [False]
             try:
                 reply, bulk = await self._once(
-                    guest, probe, send_frames, window, bulk_cap=bulk_cap
+                    guest, probe, send_frames, window, bulk_cap=bulk_cap, connected=connected
                 )
                 if probe is request:
                     deliveries += 1
             except TimeoutError:
-                if probe is request:
-                    deliveries += 1  # sent; only the reply is missing
-                # no reply within the allowance: switch to liveness polling
-                polling = True
+                if connected[0]:
+                    if probe is request:
+                        deliveries += 1  # sent; only the reply is missing
+                    # no reply within the allowance: switch to liveness polling
+                    polling = True
+                # a window that expired still inside connect provably sent
+                # nothing: not a delivery, and the request itself is resent
+                # (same-id, at-most-once-safe) rather than polled for
                 if last_pending_at is None:
                     silent_windows += 1
                     if silent_windows >= _SILENT_WINDOW_LIMIT:
