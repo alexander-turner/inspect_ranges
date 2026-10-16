@@ -320,7 +320,7 @@ class TestScorerGuardPins:
     @staticmethod
     def _flag_scenario(
         store: Store,
-    ) -> "tuple[Any, Any, Challenge, Submissions]":
+    ) -> "tuple[Store, Challenge, Submissions]":
         challenge = Challenge.model_validate(
             {
                 "id": "c",
@@ -331,7 +331,7 @@ class TestScorerGuardPins:
         subs = Submissions(
             [Submission(goal_id="f", value="VAL-7b7b", wall=time.time())]
         )
-        return store, None, challenge, subs
+        return store, challenge, subs
 
     def test_score_survives_store_read_failures(self, tmp_path: Path) -> None:
         async def scenario() -> float:
@@ -339,7 +339,7 @@ class TestScorerGuardPins:
             await oracle.store.record(
                 "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
             )
-            store, _, challenge, subs = self._flag_scenario(HostileReadStore())
+            store, challenge, subs = self._flag_scenario(HostileReadStore())
             value, _ = await score_challenge(oracle, store, challenge, subs)
             return value
 
@@ -361,7 +361,7 @@ class TestScorerGuardPins:
             await oracle.store.record(
                 "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
             )
-            store, _, challenge, subs = self._flag_scenario(Store())
+            store, challenge, subs = self._flag_scenario(Store())
             return await score_challenge(oracle, store, challenge, subs)
 
         value, metadata = asyncio.run(scenario())
