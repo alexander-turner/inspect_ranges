@@ -1007,15 +1007,16 @@ class MessageChannel:
                                         HOST_APPLIER,
                                         "data after the terminal stage",
                                     )
-                        except TimeoutError:
+                        except (TimeoutError, ConnectionError) as drain_failure:
                             # the terminal report is already delivered; a stream
-                            # that never closes is logged, not a failure
+                            # that never closes, or resets instead of closing
+                            # (abnormal applier death), is logged, not a failure
                             self._log(
                                 logging.WARNING,
                                 "realize-no-close",
                                 rid=request.id,
                                 endpoint=HOST_APPLIER,
-                                detail="stream not closed after terminal stage",
+                                detail=f"stream not cleanly closed after terminal stage ({type(drain_failure).__name__})",
                             )
                         return
             finally:
