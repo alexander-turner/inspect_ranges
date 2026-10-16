@@ -223,7 +223,9 @@ def test_provider_lifecycle_over_the_uds_backend(tmp_path: Path) -> None:
                 envs = await Env.sample_init(
                     "task", small_spec(), {"__sample_id__": "u1"}
                 )
-                assert list(envs) == ["attacker", "web"]
+                assert list(envs) == ["attacker"], (
+                    "foothold-only registration holds over the uds backend too"
+                )
                 leases = lease_store(runtime).leases()
                 assert len(leases) == 1
                 assert leases[0].origin == f"uds:{tmp_path / 'sock' / 'applier.sock'}"
