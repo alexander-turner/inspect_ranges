@@ -653,17 +653,16 @@ class MessageChannel:
                 # a window that expired still inside connect provably sent
                 # nothing: not a delivery, and the request itself is resent
                 # (same-id, at-most-once-safe) rather than polled for
-                if last_pending_at is None:
-                    silent_windows += 1
-                    if silent_windows >= _SILENT_WINDOW_LIMIT:
-                        self._dump_trace(request, guest, "silent transport")
-                        raise stamped(
-                            ChannelBudgetError(
-                                "channel",
-                                f"exec id={request.id}: {silent_windows} allowance "
-                                "windows with zero liveness evidence",
-                            )
-                        ) from None
+                silent_windows += 1  # consecutive: any successful reply resets
+                if silent_windows >= _SILENT_WINDOW_LIMIT:
+                    self._dump_trace(request, guest, "silent transport")
+                    raise stamped(
+                        ChannelBudgetError(
+                            "channel",
+                            f"exec id={request.id}: {silent_windows} consecutive "
+                            "allowance windows with zero liveness evidence",
+                        )
+                    ) from None
                 continue
             except _ConnectFailure as failure:
                 losses += 1

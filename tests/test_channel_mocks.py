@@ -572,6 +572,37 @@ def test_stale_liveness_does_not_blame_the_command_layer() -> None:
     asyncio.run(scenario_run())
 
 
+def test_silent_window_detector_rearms_after_liveness() -> None:
+    """A stalled-but-accepting transport fails after three CONSECUTIVE silent windows even once liveness was seen, instead of riding the untimed bound."""
+    fleet = LoopbackTransport(["web"])
+    fleet.guest("web").ignore_command_budget = True
+    # connection 1: the exec (held); connection 2: one honest poll -> pending
+    # (liveness observed once, which previously disarmed the detector forever);
+    # connections 3+: accepted, never served
+    transport = SilentAfterNConnects(fleet, honest=2)
+    channel = MessageChannel(
+        transport,
+        label="silent-rearm",
+        channel_budget_s=0.15,
+        untimed_bound_s=5.0,
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec(
+                "web",
+                ExecRequest(id=request_id(), cmd=["sleep-ms", "30000"]),  # untimed
+            )
+        assert failure.value.layer == "channel", str(failure.value)
+        assert "consecutive" in str(failure.value)
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    assert time.monotonic() - start < 3.0, (
+        "detection must come from the window detector, not the untimed bound"
+    )
+
+
 # -- the chatty reference bug ----------------------------------------------------
 
 
