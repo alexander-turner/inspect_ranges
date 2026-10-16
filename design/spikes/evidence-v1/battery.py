@@ -289,7 +289,9 @@ async def main() -> int:
 
     print("=== down ===", flush=True)
     await asyncio.to_thread(down, project)
-    ok("down")
+    # not a counted check: down() raising would already fail the run, and the
+    # wrapper's pre-sweep residue count is the real leak check
+    print("down complete", flush=True)
     return 0 if FAIL == 0 else 1
 
 

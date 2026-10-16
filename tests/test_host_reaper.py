@@ -1,7 +1,6 @@
 """The independent reaper: on-disk-only sweeps, destroy-before-release, crash resume (range-host-v1 slice 2)."""
 
 import logging
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,16 +17,7 @@ from inspect_ranges._runtime.ownership import (
     write_owner,
 )
 
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime(2026, 1, 1, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += timedelta(seconds=seconds)
+from tests.test_host_leases import Clock
 
 
 class Rig:

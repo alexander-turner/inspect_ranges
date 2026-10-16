@@ -17,7 +17,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .._compiler.plan import ResolvedPlan
-from .._evidence.capture import CaptureStreamer, ComposeTap, StageRecorder, json_lines
+from .._evidence.capture import (
+    CAPTURE_HARVEST_TIMEOUT_S,
+    CAPTURE_STOP_TIMEOUT_S,
+    CaptureStreamer,
+    ComposeTap,
+    StageRecorder,
+    json_lines,
+)
 from .._evidence.location import (
     EVIDENCE_SINK_OVERRIDE_VAR,
     active_evidence_identity,
@@ -27,6 +34,7 @@ from .._evidence.location import (
 from .._evidence.manifest import Seal, SealStatus, clock_now, seal_digest, seal_key
 from .._evidence.reader import EvidenceStore
 from .._evidence.s3 import sink_for_location, store_for_location
+from .._evidence.sealer import seal_abandoned
 from .._evidence.sink import DEFAULT_BUFFER_CAP_BYTES, EvidenceWriter
 
 logger = logging.getLogger("inspect_ranges.provider")
@@ -44,7 +52,7 @@ SEAL_RESERVE_S = 10.0
 """The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
 
 PRODUCER_STOPS_SHARE_S = 6.0
-"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
+"""The producers' slice of the stops phase, one JOINT bound: every producer's `stop()` starts before any is awaited, so a wedged stop can consume the share but never starve a sibling's stop call (a never-stopped producer would keep running, and probing, against the sealed record for the remaining life of the driver process; quality-review round 2). The capture streamer's stop runs after it with its own internal bounds (`CAPTURE_STOP_TIMEOUT_S` per stop window, `CAPTURE_HARVEST_TIMEOUT_S` for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -106,6 +114,7 @@ class EvidenceSession:
         self._driver: EvidenceWriter | None = None
         self._host: EvidenceWriter | None = None
         self._streamer: CaptureStreamer | None = None
+        self._lease_id: str | None = None
         self._seals: dict[str, str] = {}
         self._chain_heads: dict[str, dict[str, str]] = {}
         self._finalized = False
@@ -136,6 +145,7 @@ class EvidenceSession:
         if self._disabled or self._driver is not None:
             return
         try:
+            self._lease_id = lease_id
             sink = sink_for_location(self.location)
             self._driver = EvidenceWriter(
                 sink,
@@ -237,51 +247,61 @@ class EvidenceSession:
         )
 
     async def finalize(self) -> None:
-        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises.
+        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises (cancellation excepted).
 
         Phase-split budgets (quality-review A6): the stops run under the budget minus the reserved seal share, and the seal phase ALWAYS runs, sealing `complete` after clean stops and `incomplete` after a stop timeout (producer tails were lost, which is what `incomplete` means). Only a sink that is itself unresponsive leaves the record unsealed, reported as such by verify; the reaper can reap-seal it only while the lease still exists, so the warning says so instead of promising recovery.
+
+        Cancellation (the second-ctrl-C family during teardown) propagates, and it is NOT completion: the idempotency latch resets so a retried teardown re-enters finalize and the seal still happens (quality-review round 2: a latched cancel made the retry a no-op that wrote `seals={}` and then released the lease, destroying the reap-seal anchor).
         """
         if self._finalized or self._driver is None:
             self._finalized = True
             return
         self._finalized = True
-        stops_clean = True
         try:
-            async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
-                for stop in self._producers:
-                    try:
-                        await stop()
-                    except Exception:
-                        logger.exception(
-                            "evidence producer stop failed (continuing): location=%s",
-                            self.location,
-                        )
-        except TimeoutError:
-            stops_clean = False
-            logger.warning(
-                "evidence producer stops exceeded their %.0fs share: "
-                "location=%s (sealing what was delivered; the seal reads "
-                "incomplete)",
-                PRODUCER_STOPS_SHARE_S,
-                self.location,
-            )
-        except Exception:
-            stops_clean = False
-            logger.exception(
-                "evidence producer stops failed (sealing what was delivered): "
-                "location=%s",
-                self.location,
-            )
+            await self._finalize_phases()
+        except asyncio.CancelledError:
+            self._finalized = False
+            raise
+
+    async def _finalize_phases(self) -> None:
+        """The finalize phases (producer stops, capture stop, drain and seal), each under its own share."""
+        assert self._driver is not None
+        stops_clean = True
+        if self._producers:
+            # every stop() starts before any is awaited: the share is one
+            # joint bound, and a wedged stop may consume it but must never
+            # starve a sibling's stop CALL (an unstopped producer keeps
+            # running against the sealed record; quality-review round 2).
+            # A timeout cancels the gather, which cancels the still-running
+            # stop tasks.
+            stops = [
+                asyncio.create_task(self._stop_producer(stop))
+                for stop in self._producers
+            ]
+            try:
+                async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
+                    await asyncio.gather(*stops)
+            except TimeoutError:
+                stops_clean = False
+                logger.warning(
+                    "evidence producer stops exceeded their %.0fs share: "
+                    "location=%s (sealing what was delivered; the seal reads "
+                    "incomplete)",
+                    PRODUCER_STOPS_SHARE_S,
+                    self.location,
+                )
         if self._streamer is not None:
             # stop() is internally bounded; no outer timeout, which would
             # cancel its own gap-recording handlers mid-write (review finding
-            # on A6). The harvest bound is sized for a REAL teardown tail (a
-            # flood's final chunks ship through compose cp to the sink; the
-            # first live run at 4 s cancelled mid-ship and left delivered
-            # chunks unreferenced), while the seal reserve stays protected:
-            # the worst case grows the nominal budget, never starves the seal.
+            # on A6). The phase budgets are single-sourced beside the streamer
+            # (their sizing rationale lives on the constants), and the seal
+            # reserve stays protected regardless: the worst case grows the
+            # nominal budget, never starves the seal.
             try:
-                await self._streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+                await self._streamer.stop(
+                    stop_timeout_s=CAPTURE_STOP_TIMEOUT_S,
+                    harvest_timeout_s=CAPTURE_HARVEST_TIMEOUT_S,
+                )
             except Exception:
                 stops_clean = False
                 logger.exception(
@@ -307,13 +327,25 @@ class EvidenceSession:
             logger.exception("evidence finalize failed: location=%s", self.location)
 
     async def read_host_seal(self) -> None:
-        """Best-effort post-teardown read of the applier-side `host` seal for the binding (separated topology); bounded, never raises."""
+        """Best-effort post-teardown read of the applier-side `host` seal for the binding (separated topology); bounded, never raises.
+
+        A missing seal means the applier never sealed (it restarted mid-sample and lost its writer map, or its seal failed). This driver sits at exactly the reaper's ordering point, after teardown and before the lease release that deletes the reaper's only pointer, so the miss path reap-seals HERE (`seal_abandoned`, which skips sealed writers, under the seal reserve) and reads the `reaped` seal back for the binding; left to the reaper, the record would stay unsealed forever (quality-review round 2).
+        """
         if "host" in self._seals or self._disabled:
             return
         try:
-            async with asyncio.timeout(HOST_SEAL_READ_BUDGET_S):
-                store: EvidenceStore = store_for_location(self.location)
-                raw = await store.get(seal_key("host"))
+            store: EvidenceStore = store_for_location(self.location)
+            try:
+                async with asyncio.timeout(HOST_SEAL_READ_BUDGET_S):
+                    raw = await store.get(seal_key("host"))
+            except FileNotFoundError:
+                async with asyncio.timeout(SEAL_RESERVE_S):
+                    await seal_abandoned(
+                        self.location,
+                        lease_id=self._lease_id,
+                        sample_id=self.sample_id,
+                    )
+                    raw = await store.get(seal_key("host"))
             seal = Seal.model_validate_json(raw)
             self._seals["host"] = seal_digest(seal)
             self._chain_heads["host"] = {
@@ -321,9 +353,9 @@ class EvidenceSession:
             }
         except FileNotFoundError:
             logger.warning(
-                "no host seal at %s after teardown (the applier's seal failed "
-                "or evidence was off host-side); binding carries the driver "
-                "seal only",
+                "no host seal at %s after teardown and nothing to reap-seal "
+                "(evidence was off host-side, or the record cannot be "
+                "replayed); binding carries the driver seal only",
                 self.location,
             )
         except Exception as error:
@@ -368,6 +400,16 @@ class EvidenceSession:
             )
 
     # -- internals ---------------------------------------------------------------
+
+    async def _stop_producer(self, stop: Callable[[], Awaitable[None]]) -> None:
+        """One producer stop under the joint share: its own failure is logged, never a sibling's problem."""
+        try:
+            await stop()
+        except Exception:
+            logger.exception(
+                "evidence producer stop failed (continuing): location=%s",
+                self.location,
+            )
 
     async def _drain_recorder(self) -> None:
         """Ship the recorder's buffered stage events through the driver writer (separated topology and finalize; the local streamer drains it instead)."""

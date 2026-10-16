@@ -40,6 +40,12 @@ CLAIMED_PENDING_LIMIT = 8
 WALL_JUMP_THRESHOLD_S = 0.5
 """A wall-vs-monotonic delta divergence beyond this is recorded as a `wall-jump` anomaly in the `clock` stream."""
 
+CAPTURE_STOP_TIMEOUT_S = 6.0
+"""The A6 phase budget for one capture stop window (the in-flight poll cycle await, then the sidecar stop wait). Both lifecycle call sites, the driver's `finalize evidence` and the applier's `_stop_evidence`, pass it to `CaptureStreamer.stop`, so the written budget composition has exactly one source (quality-review round 2: four unanchored literal copies let any call site silently invalidate the composition)."""
+
+CAPTURE_HARVEST_TIMEOUT_S = 10.0
+"""The A6 phase budget for the final harvest, sized for a REAL teardown tail: a flood's final chunks ship through `compose cp` to the sink, and the first live run at 4 s cancelled mid-ship and left delivered chunks unreferenced. Single-sourced like `CAPTURE_STOP_TIMEOUT_S`."""
+
 
 class CaptureTap(Protocol):
     """Synchronous access to one range's capture volume and console files.
@@ -301,7 +307,10 @@ class CaptureStreamer:
             self._task = asyncio.create_task(self._run(), name="evidence-capture")
 
     async def stop(
-        self, *, stop_timeout_s: float = 15.0, harvest_timeout_s: float = 10.0
+        self,
+        *,
+        stop_timeout_s: float = 15.0,
+        harvest_timeout_s: float = CAPTURE_HARVEST_TIMEOUT_S,
     ) -> None:
         """Stop the sidecar, harvest everything still on the volume, and end the loop.
 

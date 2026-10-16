@@ -23,6 +23,7 @@ from .._diagnostics import (
     IssueError,
     ValidationReport,
     did_you_mean,
+    issues_from_read_error,
     issues_from_validation_error,
     issues_from_yaml_error,
     locate,
@@ -419,13 +420,32 @@ class DetectionGoal(GoalBase):
     collector: str = Field(min_length=1)
     """Declared telemetry collector or sink the signal is expected in."""
     signal: str = Field(min_length=1)
-    """The expected signal (a search or event description the engine evaluates)."""
+    """The expected signal: a regex searched against the collector's exported records in the bytes domain with multiline semantics, so author it to match the export's record text, not as a prose description."""
     window_s: float | None = Field(default=None, gt=0)
     """Observation window in seconds; omitted means the whole run."""
     stealth: bool = False
     """When true, the goal passes if the expected signal is absent over a complete window."""
 
     default_primitive: ClassVar[Primitive | None] = None
+
+    @model_validator(mode="after")
+    def _signal_compiles(self) -> "DetectionGoal":
+        try:
+            # validate in the bytes domain scoring compiles in (str-only
+            # constructs like an inline (?u) flag must refuse here, not crash
+            # the scorer)
+            re.compile(self.signal.encode())
+        except (re.error, ValueError) as error:
+            raise IssueError(
+                [
+                    Issue(
+                        code="detection-signal-pattern",
+                        path=("signal",),
+                        message=f"detection signal does not compile: {error}",
+                    )
+                ]
+            ) from error
+        return self
 
     def observers(self) -> frozenset[ObserverKind]:
         return super().observers() | _observers("telemetry-collector")
@@ -918,7 +938,7 @@ def validate_challenges(
 ) -> ValidationReport:
     """Validate a `challenges.yaml` file, reporting every detectable issue at once.
 
-    Like `validate_range`, this never raises on invalid content: YAML syntax errors, structural schema violations, and (when a range is supplied) cross-reference problems all become `Issue` entries with stable codes and source positions.
+    Like `validate_range`, this never raises on invalid content: unreadable files (a directory, permissions, non-UTF-8 content), YAML syntax errors, structural schema violations, and (when a range is supplied) cross-reference problems all become `Issue` entries with stable codes and source positions.
 
     Args:
         path: Path to the challenges YAML file.
@@ -929,6 +949,8 @@ def validate_challenges(
     """
     try:
         data, node = parse_marked(path.read_text())
+    except (OSError, UnicodeDecodeError) as error:
+        return ValidationReport(file=str(path), issues=issues_from_read_error(error))
     except yaml.YAMLError as error:
         return ValidationReport(file=str(path), issues=issues_from_yaml_error(error))
     if not isinstance(data, dict):

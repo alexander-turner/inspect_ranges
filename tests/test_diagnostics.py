@@ -836,6 +836,28 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "networks[2].name",
             id="device-name-collision",
         ),
+        pytest.param(
+            # the range name becomes the compose project and a state-directory
+            # path segment the CLI mkdirs and rmtrees (quality review R2-1)
+            "range: { name: ../../../../escaped, description: traversal }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-traversal",
+        ),
+        pytest.param(
+            # dots are legal in guest and network names but compose refuses
+            # them in project names, so the range name grammar excludes them
+            "range: { name: zabbix.v3, description: dotted }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-dot",
+        ),
+        pytest.param(
+            f"range: {{ name: {'a' * 48}, description: long }}",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-too-long",
+        ),
     ],
 )
 def test_semantic_codes(
@@ -918,6 +940,16 @@ def test_yaml_syntax_error_has_position(tmp_path: Path) -> None:
     report = report_for("range:\n  name: [unclosed\n", tmp_path)
     assert codes(report) == ["yaml-syntax"]
     assert report.issues[0].line is not None
+
+
+def test_unreadable_file_reports_not_raises(tmp_path: Path) -> None:
+    """A directory or non-UTF-8 file becomes a `file-unreadable` issue, never a raise."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    for path in (tmp_path, binary):
+        report = validate_range(path)
+        assert not report.valid
+        assert codes(report) == ["file-unreadable"]
 
 
 def test_variables_substitute_defaults_before_validation(tmp_path: Path) -> None:

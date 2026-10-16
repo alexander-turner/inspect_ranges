@@ -15,7 +15,14 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Literal, NoReturn, Protocol
 
@@ -880,13 +887,13 @@ class MessageChannel:
         bundle_digest: Sha256Hex,
         grants: Sequence[str],
         *,
-        verify_allowance_s: float | None = None,
+        gap_allowances: Mapping[str | None, float] | None = None,
     ) -> AsyncIterator[StageReport]:
         """Stream stage reports until `ready` or `failed`.
 
         Hardened per the realize policy: every transport interaction (connect, send, each report read, the terminal drain, close) sits inside the layered budgets (per-report channel allowance, untimed outer total); reports are capped in count and must follow strictly increasing stage order; an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically); anything else is tamper.
 
-        `verify_allowance_s` widens the per-report allowance for exactly one gap: `verify` to the terminal report. The applier probes guest readiness sequentially there and emits nothing until every guest answers, so the caller supplies the plan-derived readiness envelope; every other gap keeps the channel allowance, and the gap stays bounded (a wedged readiness still fails at the envelope, not at the untimed total) (quality-review A10).
+        `gap_allowances` widens the per-report allowance per gap, keyed by the stage the gap follows (`None` keys the gap before the first report). The applier legally emits nothing while a gap's occupant runs (the first-use range-image build before any report, `compose up --wait` after `construct`, the guest-boot exec after `boot`, the sequential readiness pass after `verify`), so the caller supplies each occupied gap's plan-derived envelope; the channel allowance stays the floor, every unlisted gap keeps it, and each gap stays bounded (a wedged occupant still fails at its envelope, not at the untimed total) (quality-review A10, extended to the sibling gaps by R2-3).
 
         Stage-order leniency, deliberate: skipping stages is allowed (a cache-hitting applier legitimately jumps ahead) and `failed` is allowed anywhere including first (an honest fast failure); only `ready` as the very first report is tamper. A hostile applier can emit the honest sequence anyway, so tightening buys no security.
         """
@@ -949,14 +956,13 @@ class MessageChannel:
                             "untimed", f"realize id={request.id}: total bound expired"
                         )
                     allowance = self._channel_budget_s
-                    if (
-                        verify_allowance_s is not None
-                        and seen
-                        and seen[-1].stage == "verify"
-                    ):
-                        # the verify -> terminal gap carries the applier's whole
-                        # sequential readiness pass with no intermediate report
-                        allowance = max(allowance, verify_allowance_s)
+                    if gap_allowances is not None:
+                        # a gap is keyed by the stage it follows (None before
+                        # the first report); its legitimate occupant emits no
+                        # intermediate report while it runs
+                        widened = gap_allowances.get(seen[-1].stage if seen else None)
+                        if widened is not None:
+                            allowance = max(allowance, widened)
                     try:
                         async with asyncio.timeout(min(allowance, remaining)):
                             message, _ = await reader.next()
@@ -1283,7 +1289,7 @@ class _StoredReply:
 class FakeGuest:
     """A deterministic in-memory guest endpoint speaking protocol v3.
 
-    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
+    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): every durable kind (`exec`, `read_file`, `write_file`) deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), while `ack`, `poll`, `ping`, and `diag` are answered fresh without touching the durable store, exactly as both daemons dispatch; durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
     """
 
     exec_count: int
@@ -1329,7 +1335,7 @@ class FakeGuest:
     # -- daemon behavior ----------------------------------------------------
 
     async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-        """Produce the reply for one request; every kind dedupes on id."""
+        """Produce the reply for one request; durable kinds dedupe on id, control kinds answer fresh."""
         if isinstance(message, AckRequest):
             self._stored.pop(message.target_id, None)
             self._tombstones.pop(message.target_id, None)
@@ -1361,6 +1367,10 @@ class FakeGuest:
                 ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
                 None,
             )
+        if isinstance(message, (PingRequest, DiagRequest)):
+            # answered fresh, never charged to the durable store: both daemons
+            # dispatch ack/poll/ping/diag before the store acquire
+            return self._handle_fresh(message, bulk)
         if (stored := self._stored.get(message.id)) is not None:
             return stored
         if message.id in self._tombstones:

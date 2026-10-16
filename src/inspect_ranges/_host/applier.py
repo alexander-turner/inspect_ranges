@@ -6,7 +6,7 @@ Realize per the record: resolve the lease's bundle path, verify the requested di
 
 Guest endpoints relay as pure byte pumps (never parsed) through the injectable guest connector (`VsockTransport` dial in production), inheriting its pacing and backoff; guest names are lease-scoped, so concurrent samples with identical names cannot cross.
 
-Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery.
+Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery. The lost evidence writer map leaves the host record unsealed; a surviving driver reap-seals it on its host-seal miss path at teardown (before it releases the lease), and the reaper or `cli_cleanup` reap-seal when the driver is dead.
 """
 
 import asyncio
@@ -41,7 +41,13 @@ from .._channel.protocol import (
 from .._channel.uds import ROUTED_ACK, read_preamble
 from .._compiler.plan import ResolvedPlan, Totals
 from .._doctor.checks import readiness_failures
-from .._evidence.capture import CaptureStreamer, ComposeTap, StageRecorder
+from .._evidence.capture import (
+    CAPTURE_HARVEST_TIMEOUT_S,
+    CAPTURE_STOP_TIMEOUT_S,
+    CaptureStreamer,
+    ComposeTap,
+    StageRecorder,
+)
 from .._evidence.s3 import sink_for_location
 from .._evidence.sink import EvidenceWriter
 from .._provider.admission import AdmissionRefused, HostCapacity, WeightedAdmission
@@ -64,8 +70,6 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 """Post-ack budget for the host plane's single request frame to arrive."""
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
-_EVIDENCE_STOP_BUDGET_S = 30.0
-"""Bound on one lease's capture harvest at teardown or shutdown."""
 
 _EVIDENCE_SEAL_RESERVE_S = 10.0
 """The stop budget's reserved seal share: a wedged capture stop can never starve the seal (or the shutdown checkpoint) attempt (quality-review A6, mirroring the driver's finalize phases)."""
@@ -154,7 +158,7 @@ class Applier:
         self._evidence: dict[
             str, tuple[CaptureStreamer, EvidenceWriter, list[str]]
         ] = {}
-        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; the reaper reap-seals)."""
+        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; a surviving driver reap-seals on its host-seal miss at teardown, the reaper after lease expiry)."""
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -224,16 +228,14 @@ class Applier:
             # still be running, and a `complete` seal here would make a
             # capture cutoff indistinguishable from a record that ran to
             # teardown. The record stays unsealed with an explicit shutdown
-            # gap; the reaper's reap-seal closes it honestly (the recorded
-            # restart limitation).
-            try:
-                async with asyncio.timeout(5.0):
-                    await self._stop_evidence(lease_id, seal=False)
-            except TimeoutError:
-                logger.warning(
-                    "evidence capture for lease=%s not flushed at shutdown",
-                    lease_id,
-                )
+            # gap; a reap-seal closes it honestly (the recorded restart
+            # limitation). _stop_evidence is internally bounded exactly like
+            # the teardown arm; no outer timeout, which would cancel its own
+            # gap-recording handlers mid-write (review finding on A6; the
+            # round-2 review found this arm's 5 s outer bound was smaller than
+            # the stop phase it wrapped, so a slow real harvest lost the
+            # promised applier-shutdown gaps and checkpoint unmarked).
+            await self._stop_evidence(lease_id, seal=False)
         for task in list(self._tasks):
             task.cancel()
 
@@ -532,13 +534,28 @@ class Applier:
             plan = await asyncio.to_thread(self._load_plan, bundle)
         except (OSError, ValueError) as error:
             return ("EINVAL", f"lease bundle {bundle} has no readable plan: {error}")
+        totals = plan.totals
+        if lease.evidence_location is not None and plan.requirements.evidence_capture:
+            # the `host` evidence writer this realize will open is resident in
+            # THIS process: its buffer cap joins the memory charge exactly as
+            # the driver's resident writers join the sample's (`evidence-v1.md`
+            # accounting; quality-review round 2). A malformed buffer knob
+            # disables evidence at _start_evidence, so it charges nothing here
+            # either.
+            try:
+                buffer_mb = evidence_buffer_bytes() // (1024 * 1024)
+            except ValueError:
+                buffer_mb = 0
+            totals = totals.model_copy(
+                update={"memory_mb": totals.memory_mb + buffer_mb}
+            )
         try:
-            charged = self.admission.charge_now(plan.totals)
+            charged = self.admission.charge_now(totals)
         except AdmissionRefused as refusal:
             return ("ENOSPC", str(refusal))
         if not charged:
             return ("EAGAIN", "applier capacity is full now; respin when it frees")
-        self._charges[lease.lease_id] = plan.totals
+        self._charges[lease.lease_id] = totals
         self._plans[lease.lease_id] = plan
         self._guest_states[lease.lease_id] = dict.fromkeys(
             (guest.name for guest in plan.guests), "pending"
@@ -671,7 +688,7 @@ class Applier:
     async def _stop_evidence(self, lease_id: str, *, seal: bool = True) -> None:
         """Harvest one lease's capture before its containers die; bounded and never raises (a wedged tap must not stall the teardown reply).
 
-        With `seal` (the teardown path) the record closes `complete`. Without it (applier shutdown mid-sample) the record gets an explicit `applier-shutdown` gap per segment and stays UNSEALED for the reaper: sealing a cutoff `complete` would be the dishonesty the format exists to prevent.
+        With `seal` (the teardown path) the record closes `complete`. Without it (applier shutdown mid-sample) the record gets an explicit `applier-shutdown` gap per segment and stays UNSEALED for a reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry): sealing a cutoff `complete` would be the dishonesty the format exists to prevent.
         """
         entry = self._evidence.pop(lease_id, None)
         if entry is None:
@@ -681,9 +698,12 @@ class Applier:
         try:
             # stop() is internally bounded; no outer timeout, which would
             # cancel its own gap-recording handlers mid-write (review finding
-            # on A6). Harvest sized for a real teardown tail; the seal reserve
-            # below stays protected regardless.
-            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+            # on A6). The phase budgets are single-sourced beside the streamer;
+            # the seal reserve below stays protected regardless.
+            await streamer.stop(
+                stop_timeout_s=CAPTURE_STOP_TIMEOUT_S,
+                harvest_timeout_s=CAPTURE_HARVEST_TIMEOUT_S,
+            )
         except Exception:
             stops_clean = False
             logger.exception(
@@ -702,8 +722,9 @@ class Applier:
                     await writer.checkpoint()
                     logger.warning(
                         "evidence capture for lease=%s left UNSEALED at applier "
-                        "shutdown (explicit applier-shutdown gaps recorded; the "
-                        "reaper reap-seals after lease expiry)",
+                        "shutdown (explicit applier-shutdown gaps recorded; a "
+                        "surviving driver reap-seals at teardown, the reaper "
+                        "after lease expiry)",
                         lease_id,
                     )
                     return

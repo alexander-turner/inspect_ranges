@@ -23,6 +23,10 @@ fi
 grep -q vhost_vsock /proc/modules || { echo "need: sudo modprobe vhost_vsock"; exit 1; }
 [[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 
+# cleaned even on failure (round 2): sweep the compose stack on any exit,
+# matching the other wrappers; ./run.sh down remains for manual cleanup
+trap 'docker compose down -v >/dev/null 2>&1 || true' EXIT
+
 echo "=== validate + compile (production allocation + nat election + egress ruleset) ==="
 (cd ../../.. && uv run inspect-ranges validate design/spikes/egress/spec.yaml)
 (cd ../../.. && uv run python design/spikes/egress/compile.py)
@@ -74,4 +78,4 @@ $C $WS exec 'timeout 3 bash -c "echo > /dev/tcp/198.51.100.7/443" && echo PASS c
 echo "ES4 trailing attacker drop live in the netns ruleset:"
 docker compose exec -T range sh -c 'nft list chain inet rangehost forward | grep -qE "ip saddr 10.90.10.2 oifname .eth0. drop" && echo PASS trailing-drop-live'
 
-echo "OK. Tear down with: ./run.sh down"
+echo "OK. (the EXIT trap sweeps the compose stack; ./run.sh down for manual cleanup)"

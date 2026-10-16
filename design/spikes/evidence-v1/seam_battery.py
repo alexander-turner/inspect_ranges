@@ -235,7 +235,10 @@ async def s2_kill9_reaper() -> None:
     keys_before = await chunk_keys(location)
     os.kill(child.pid, signal.SIGKILL)
     child.wait(timeout=10)
-    check(pre_kill and committed, "kill -9 delivered AFTER evidence left the instance")
+    # not a counted check: pre_kill and committed are the two wait_for rows
+    # just recorded; this line only narrates the ordering for the log
+    if pre_kill and committed:
+        print("kill -9 delivered AFTER evidence left the instance", flush=True)
     await asyncio.sleep(25)  # lease TTL 20s: expire
     # sweep is sync by design (the reaper is a fresh process); from the
     # battery's loop it runs in a thread so the reap-seal's own event loop

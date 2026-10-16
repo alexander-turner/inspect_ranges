@@ -61,10 +61,11 @@ def bundle(tmp_path: Path, cache: Path) -> Path:
 
 
 class FakeDocker:
-    """Scriptable runner: records every argv; answers per command prefix."""
+    """Scriptable runner: records every argv (with its subprocess `timeout`, the B21 bound an injected runner must honor); answers per command prefix."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.timeouts: list[float | None] = []  # parallel to `calls`
         self.ps_output = ""
         self.ps_sequence: list[str] | None = None
         self.fail_prefix: tuple[str, ...] | None = None
@@ -79,6 +80,7 @@ class FakeDocker:
         timeout: float | None = None,
     ) -> "subprocess.CompletedProcess[str]":
         self.calls.append(argv)
+        self.timeouts.append(timeout)
         self.last_env = env
         self.last_input = input
         if (
@@ -235,6 +237,26 @@ def test_up_happy_path_env_and_stages(
     assert "--wait-timeout" in up_argv
     assert up_argv[up_argv.index("--wait-timeout") + 1] == "1"
 
+    # ...and every legitimately slow docker call carries a subprocess timeout,
+    # so a wedged daemon surfaces as a stage-named failure instead of hanging
+    # up() forever (quality-review B21, pinned by R2-10)
+    def timeout_of(call: list[str]) -> float | None:
+        return docker.timeouts[docker.calls.index(call)]
+
+    assert timeout_of(up_argv) == pytest.approx(61.0), (
+        "compose up bounded at readiness + 60"
+    )
+    boot_argv = next(c for c in docker.calls if "exec" in c and "bash" in c)
+    assert timeout_of(boot_argv) == pytest.approx(1.0), (
+        "guest-boot exec bounded at readiness"
+    )
+    image_calls = [
+        c for c in docker.calls if c[:2] in (["docker", "image"], ["docker", "build"])
+    ]
+    assert image_calls and all(timeout_of(c) is not None for c in image_calls), (
+        "the range-image inspect/build calls carry the image-build bound"
+    )
+
 
 def test_run_command_timeout_surfaces_as_rc_124() -> None:
     """A wedged subprocess returns rc 124 with the timeout named, feeding the normal stage-named failure path instead of hanging up() (quality-review B21)."""
@@ -318,6 +340,9 @@ def test_down_removes_by_label_and_is_idempotent(tmp_path: Path) -> None:
     assert result.containers == 2
     rm = docker.commands("docker", "rm", "-f")[0]
     assert rm[-2:] == ["c1", "c2"]
+    # every teardown call is bounded, so a wedged daemon surfaces as a
+    # DownError the retry machinery owns (quality-review B21, pinned by R2-10)
+    assert docker.timeouts and all(t is not None for t in docker.timeouts)
     docker2 = FakeDocker()
     again = down("ir-tiny-abc", state_dir=tmp_path / "state", runner=docker2)
     assert (again.containers, again.volumes, again.networks) == (0, 0, 0)
@@ -521,26 +546,10 @@ def test_boot_json_shape_is_enforced(bundle: Path) -> None:
             load_boot(bundle)
 
 
-def test_boot_script_shell_quotes_values(bundle: Path) -> None:
-    from inspect_ranges._runtime.up import BootGuest, BootPlan
-    from inspect_ranges._runtime.up import boot_script as script
-
-    plan = BootPlan(
-        parallel=True,
-        verify={},
-        guests=[
-            BootGuest(
-                name="we.b-1",
-                cid=3000,
-                image_file="img.qcow2",
-                image_digest=None,
-                overlay_gb=10,
-                readiness="cloud-init",
-            )
-        ],
-    )
-    text = script(plan)
-    assert "we.b-1" in text and ";" not in text.replace(";\n", "")
+# NOTE: no quoting pin for boot_script. BootGuest's name/image grammar
+# forecloses shell metacharacters (pinned above) and shlex.quote is the
+# identity on every legal name, so a quoting test cannot fail through the
+# public API; the quoting is defense in depth only (quality-review R2-24).
 
 
 def test_cloud_init_probe_command_behaves(

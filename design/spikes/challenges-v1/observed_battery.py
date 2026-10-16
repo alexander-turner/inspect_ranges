@@ -179,7 +179,9 @@ async def main() -> int:
             "attacker",
             "timeout 3 bash -c 'echo > /dev/tcp/10.95.10.254/80' 2>&1; echo rc=$?",
         )
-        check(b"rc=0" not in out, "clamp: no RST, closed port reads filtered")
+        # rc=124 is timeout(1) firing: the SYN was dropped (filtered); a
+        # refused RST would return promptly with rc=1
+        check(b"rc=124" in out, "clamp: no RST, closed port reads filtered")
 
         print("=== target services on web ===")
         for name, content in (
@@ -298,8 +300,13 @@ async def main() -> int:
         await prober3.stop()
         result, _ = await scored(oracle, canned_goal)
         records, _ = await oracle.probe_records("canned")
+        # non-vacuous: with zero records the all() is true and achieved is
+        # falsy via the indeterminate path, so the check needs the same
+        # non-empty/not-indeterminate guard as the tamper negative above
         check(
-            not result.achieved
+            bool(records)
+            and not result.achieved
+            and not result.indeterminate
             and all(r.record.get("status") == "mumble" for r in records),
             "canned 200s read mumble: a response without the fresh nonce digest never counts",
         )
@@ -335,8 +342,24 @@ async def main() -> int:
             f"s.sendall(b'{address}\\n'); s.close()\" || true",
         )
         await asyncio.sleep(3.0)
-        result, _ = await scored(oracle, hijack)
-        check(bool(result.achieved), "hijack: crash record carries the disclosed address")
+        # bounded corroboration wait (round 2): the dmesg conjunct lands with the
+        # next telemetry poll, but the console conjunct waits on console-chunk
+        # rotation and delivery, which the fixed 3 s sleep raced (21/22 twice on
+        # the post-integration re-run). Re-score until both conjuncts corroborate
+        # or the window closes; a real corroboration gap still fails here.
+        corroborate_deadline = time.monotonic() + 30.0
+        while True:
+            result, _ = await scored(oracle, hijack)
+            if bool(result.achieved) and result.corroborated is True:
+                break
+            if time.monotonic() > corroborate_deadline:
+                break
+            await asyncio.sleep(2.0)
+        check(
+            bool(result.achieved) and result.corroborated is True,
+            "hijack: crash record carries the disclosed address "
+            "(console and dmesg corroborated)",
+        )
         forged = HijackGoal(id="forged", host="db", service="crashsvc")
         await goal_type("hijack").setup(forged, oracle)
         forged_address = oracle.store.get("hijack:forged").decode()

@@ -89,7 +89,7 @@ def test_pages_have_examples(page: str) -> None:
     ],
 )
 def test_docs_examples_validate(classes: set[str], text: str, tmp_path: Path) -> None:
-    """Every complete example in the docs validates; classed blocks fail exactly as documented."""
+    """Every complete example in the docs validates; classed blocks fail exactly as documented, unmarked blocks plan cleanly."""
     if "fragment" in classes:
         pytest.skip("fragment, not a complete definition")
     path = tmp_path / "range.yaml"
@@ -99,10 +99,14 @@ def test_docs_examples_validate(classes: set[str], text: str, tmp_path: Path) ->
         assert not report.valid, "invalid-example block unexpectedly validates"
         return
     assert report.valid, [issue.message for issue in report.issues]
+    assert report.spec is not None
     if "plan-invalid" in classes:
-        assert report.spec is not None
         with pytest.raises(IssueError):
             resolve_plan(report.spec)
+    else:
+        # the inverse direction: an unmarked complete block must plan cleanly
+        # (planning with default options is image-cache independent)
+        resolve_plan(report.spec)
 
 
 @pytest.mark.parametrize(
@@ -115,7 +119,7 @@ def test_docs_examples_validate(classes: set[str], text: str, tmp_path: Path) ->
     ],
 )
 def test_docs_python_examples_construct(classes: set[str], text: str) -> None:
-    """Every Python tab constructs a valid spec; classed blocks gate exactly as documented."""
+    """Every Python tab constructs a valid spec; classed blocks gate exactly as documented, unmarked blocks plan cleanly."""
     if "fragment" in classes:
         pytest.skip("fragment, not a complete definition")
     spec = _construct(text)
@@ -123,6 +127,8 @@ def test_docs_python_examples_construct(classes: set[str], text: str) -> None:
     if "plan-invalid" in classes:
         with pytest.raises(IssueError):
             resolve_plan(spec)
+    else:
+        resolve_plan(spec)
 
 
 @pytest.mark.parametrize("page", DEFINITION_PAGES)

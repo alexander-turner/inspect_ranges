@@ -29,6 +29,19 @@ def test_validate_accepts_example_and_rejects_bad_file(tmp_path: Path) -> None:
     assert "unknown_section" in failed.output
 
 
+def test_validate_unreadable_path_is_a_clean_error(tmp_path: Path) -> None:
+    """A directory or binary argument renders a positioned issue and the run keeps going per-file, no traceback."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    result = CliRunner().invoke(
+        ranges, ["validate", str(tmp_path), str(binary), EXAMPLE]
+    )
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert result.output.count("cannot read file") == 2
+    assert "vulhub-zabbix" in result.output  # later files still report
+
+
 def test_validate_json_contract(tmp_path: Path) -> None:
     bad = tmp_path / "bad.yaml"
     bad.write_text("range: {}\nunknown_section: 1\n")

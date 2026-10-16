@@ -272,6 +272,22 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
         "tamper-location-grammar",
     ),
     (
+        "detection-signal-pattern",
+        challenge_with(
+            [
+                {
+                    "id": "alert",
+                    "type": "detection",
+                    "collector": "splunk",
+                    # prose that is not a legal regex: scoring compiles the
+                    # signal, so authoring must refuse it (quality review R2-7)
+                    "signal": "CPU usage > 100% (critical",
+                }
+            ]
+        ),
+        "detection-signal-pattern",
+    ),
+    (
         "goal-id-grammar-space",
         challenge_with([{"id": "recon 1", "type": "flag", "host": "w", "path": "/f"}]),
         "goal-id-grammar",
@@ -531,6 +547,16 @@ def test_invalid_range_file_reports_not_raises(tmp_path: Path) -> None:
     assert not report.valid
     assert {issue.code for issue in report.issues} == {"range-invalid"}
     assert not report.semantic_checked
+
+
+def test_unreadable_file_reports_not_raises(tmp_path: Path) -> None:
+    """A directory or non-UTF-8 challenges file becomes a `file-unreadable` issue, never a raise."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    for path in (tmp_path, binary):
+        report = validate_challenges(path)
+        assert not report.valid
+        assert {issue.code for issue in report.issues} == {"file-unreadable"}
 
 
 @pytest.mark.parametrize(
