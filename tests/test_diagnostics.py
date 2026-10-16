@@ -736,6 +736,17 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
         ),
         pytest.param(
             """
+            attacker:
+              interfaces: [{ network: lab }]
+              entry: external
+              egress: open
+            """,
+            "attacker-egress-requires-nat",
+            "attacker.egress",
+            id="attacker-egress-requires-nat",
+        ),
+        pytest.param(
+            """
             hosts:
               - name: ../../escape
                 os: { type: linux }

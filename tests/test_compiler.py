@@ -127,6 +127,39 @@ def test_egress_ruleset_scopes_exactly_the_allowlist() -> None:
     assert "policy drop" in ruleset
 
 
+def test_attacker_open_egress_renders_accept() -> None:
+    spec = nat_spec()
+    spec = spec.model_copy(
+        update={"attacker": spec.attacker.model_copy(update={"egress": "open"})}
+    )
+    ruleset = render_egress_nftables(spec, allocate(spec))
+    assert 'ip saddr 10.90.10.2 oifname "eth0" accept' in ruleset
+    assert 'ip saddr 10.90.10.2 oifname "eth0" drop' not in ruleset
+
+
+def test_attacker_scoped_egress_never_falls_through_to_the_network_allowlist() -> None:
+    # The U1-B1 composition: the attacker scoped to one destination must NOT
+    # inherit the network allowlist below; its accepts end in a trailing drop.
+    spec = nat_spec()
+    spec = spec.model_copy(
+        update={
+            "attacker": spec.attacker.model_copy(
+                update={"egress": EgressPolicy(allow=["203.0.113.9:tcp/8443"])}
+            )
+        }
+    )
+    ruleset = render_egress_nftables(spec, allocate(spec))
+    lines = [line.strip() for line in ruleset.splitlines()]
+    accept = lines.index(
+        'ip saddr 10.90.10.2 oifname "eth0" ip daddr 203.0.113.9/32 tcp dport 8443 accept'
+    )
+    drop = lines.index('ip saddr 10.90.10.2 oifname "eth0" drop')
+    network_rule = lines.index(
+        'iifname "br-corp" oifname "eth0" ip daddr 198.51.100.7/32 tcp dport 443 accept'
+    )
+    assert accept < drop < network_rule
+
+
 def test_no_egress_renders_invariants_only() -> None:
     spec = two_segment_spec()
     ruleset = render_egress_nftables(spec, allocate(spec))
