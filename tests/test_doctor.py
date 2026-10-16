@@ -611,11 +611,29 @@ def test_check_evidence_unwritable_local_sink_fails(tmp_path: Path) -> None:
 
 
 def test_check_evidence_off_instance_resolution() -> None:
-    """The override wins over the log dir; any non-file scheme counts as off-instance."""
+    """The override wins over the log dir; only a scheme the runtime supports counts as off-instance."""
     s3_log = _evidence_results(None, "s3://bucket/logs")
+    assert s3_log["sink"].status == "ok"
     assert s3_log["off-instance"].status == "ok"
     local_override = _evidence_results("/tmp/evidence-x", "s3://bucket/logs")
     assert local_override["off-instance"].status == "warn"
+
+
+def test_check_evidence_derived_unsupported_scheme_fails() -> None:
+    """A fsspec log store the runtime cannot write (gs://, az://) must fail the derived sink row: the runtime would disable evidence for every sample, and a green row here blesses the exact misconfiguration (the override arm was already hardened; this is its derived sibling)."""
+    for log_dir in ("gs://acme-evals/logs", "az://evals/logs", "file:///var/logs"):
+        results = _evidence_results(None, log_dir)
+        assert results["sink"].status == "fail", log_dir
+        assert "disable evidence for every sample" in results["sink"].detail
+        assert results["off-instance"].status != "ok", log_dir
+
+
+def test_check_evidence_off_instance_never_blesses_a_rejected_sink() -> None:
+    """When the sink row rejects a scheme, the off-instance row must not report ok for the same value."""
+    results = _evidence_results("gs://bucket/evidence", None)
+    assert results["sink"].status == "fail"
+    assert results["off-instance"].status == "warn"
+    assert "does not support" in results["off-instance"].detail
 
 
 def test_check_evidence_empty_override_is_unset(tmp_path: Path) -> None:
