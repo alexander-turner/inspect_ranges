@@ -714,6 +714,45 @@ def test_applier_owns_the_host_capture_writer(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_realize_admission_charges_the_resident_host_writer_buffer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The applier's admission mirrors the driver's (`evidence-v1.md` accounting, quality-review round 2): a lease whose realize opens the resident `host` evidence writer charges the writer's buffer cap on top of the plan totals, and a lease without evidence charges exactly the plan totals; teardown releases what was charged."""
+    from inspect_ranges._provider.evidence import EVIDENCE_BUFFER_MB_VAR
+
+    monkeypatch.setenv(EVIDENCE_BUFFER_MB_VAR, "16")
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            charges = rig.applier._charges  # pyright: ignore[reportPrivateUsage]
+
+            evidenced, digest = rig.lease(
+                tmp_path, "ir-charge-ev", evidence_location=str(tmp_path / "ev")
+            )
+            plan = Applier._load_plan(  # pyright: ignore[reportPrivateUsage]
+                Path(evidenced.bundle_path)
+            )
+            async for _ in rig.channel(evidenced).realize(digest, []):
+                pass
+            assert charges[evidenced.lease_id].memory_mb == (
+                plan.totals.memory_mb + 16
+            ), "the resident host-writer buffer joins the charge"
+
+            plain, digest2 = rig.lease(tmp_path, "ir-charge-noev")
+            async for _ in rig.channel(plain).realize(digest2, []):
+                pass
+            assert charges[plain.lease_id].memory_mb == plan.totals.memory_mb, (
+                "a lease without evidence charges the plan totals alone"
+            )
+
+            # teardown releases exactly what was charged (the stored totals)
+            await rig.channel(evidenced).teardown()
+            await rig.channel(plain).teardown()
+            assert charges == {}
+
+    asyncio.run(scenario())
+
+
 def test_applier_without_evidence_location_writes_nothing(tmp_path: Path) -> None:
     async def scenario() -> None:
         async with Rig(tmp_path) as rig:
