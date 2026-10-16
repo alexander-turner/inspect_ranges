@@ -272,6 +272,16 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
+        for field_name in ("hostname", "fqdn"):
+            if getattr(host, field_name) is not None:
+                issues.append(
+                    Issue(
+                        code="guest-config-not-realized",
+                        path=("hosts", index, field_name),
+                        message=f"host {host.name!r} declares {field_name}, which render v1 does not realize (the rendered in-guest hostname is the host's name)",
+                        hint=_GUEST_CONTENT_HINT,
+                    )
+                )
     for index, router in enumerate(spec.routers):
         if router.users:
             issues.append(
