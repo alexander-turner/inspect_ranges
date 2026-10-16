@@ -206,6 +206,88 @@ def test_remote_seams_install_at_runtime_construction(
     assert runtime.channel_factory.__module__ == "inspect_ranges._host.remote"
 
 
+@pytest.mark.parametrize(
+    "before_stage",
+    [
+        "fetch",  # the first-use range-image build sits before any report
+        "boot",  # compose up --wait sits after construct
+        "verify",  # the guest-boot exec sits after boot
+    ],
+)
+def test_uds_up_fn_gap_allowances_cover_the_silent_up_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_stage: str
+) -> None:
+    """The driver's realize survives every legally silent up phase (worst: a first-use image build before the first report) instead of tripping `ChannelBudgetError` at the flat per-report budget (quality-review R2-3)."""
+    from inspect_ranges._host import remote
+    from inspect_ranges._host.leases import HostLease
+    from inspect_ranges._runtime.up import UpOptions
+
+    from tests.test_channel_mocks import SlowGapApplierTransport
+
+    bundle = tmp_path / "bundle"
+    make_bundle(bundle)
+    state_dir = tmp_path / "state"
+    LeaseStore(state_dir).acquire(
+        project="ir-slow-phase",
+        task_name="t",
+        sample_id="s1",
+        isolation="shared",
+        origin="uds:unused",
+        bundle_path=str(bundle),
+        bundle_digest="ab" * 32,
+        staging=str(tmp_path / "staging"),
+        host_facts=facts(),
+        ttl_s=3600,
+    )
+
+    def tiny_budget_channel(
+        socket_path: Path, lease: HostLease, label: str
+    ) -> MessageChannel:
+        # a 0.1 s per-report budget makes any uncovered gap trip instantly;
+        # the 0.4 s delay stands in for the gap's legitimate slow occupant
+        return MessageChannel(
+            SlowGapApplierTransport(before_stage=before_stage, delay_s=0.4),
+            label=label,
+            channel_budget_s=0.1,
+        )
+
+    monkeypatch.setattr(remote, "_lease_channel", tiny_budget_channel)
+    up_fn, _down_fn, _factory = remote.remote_seams(
+        tmp_path / "applier.sock", state_dir
+    )
+    result = up_fn(
+        bundle, UpOptions(project="ir-slow-phase", image_cache=tmp_path / "cache"), None
+    )
+    assert all(guest.ready for guest in result.guests)
+
+
+def test_realize_gap_allowances_floor_at_each_occupants_bound(tmp_path: Path) -> None:
+    """The driver's per-gap envelopes dominate the up-side bounds that legally occupy them, floored at the applier's own defaults when the driver configures shorter (quality-review R2-3)."""
+    from inspect_ranges._compiler.plan import ResolvedPlan
+    from inspect_ranges._host.remote import realize_gap_allowances
+    from inspect_ranges._runtime.up import IMAGE_BUILD_TIMEOUT_S, UpOptions
+
+    bundle = tmp_path / "bundle"
+    make_bundle(bundle)
+    plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
+    short = UpOptions(
+        image_cache=tmp_path, readiness_timeout=1.0, readiness_min_window=0.2
+    )
+    allowances = realize_gap_allowances(plan, short)
+    # the applier probes with ITS defaults (300 s / 10 s); a driver configured
+    # shorter must not starve a legitimately slower applier pass
+    assert allowances[None] >= IMAGE_BUILD_TIMEOUT_S
+    assert allowances["construct"] >= 300.0 + 60.0
+    assert allowances["boot"] >= 300.0
+    assert allowances["verify"] >= 300.0 + len(plan.guests) * 10.0
+    assert "fetch" not in allowances, (
+        "the fetch -> construct gap has no legitimate occupant; the flat "
+        "allowance must keep catching a stall there"
+    )
+    long = UpOptions(image_cache=tmp_path, readiness_timeout=900.0)
+    assert realize_gap_allowances(plan, long)["construct"] >= 900.0 + 60.0
+
+
 def test_provider_lifecycle_over_the_uds_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

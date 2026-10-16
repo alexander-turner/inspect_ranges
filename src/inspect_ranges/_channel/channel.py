@@ -15,7 +15,14 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Literal, NoReturn, Protocol
 
@@ -880,13 +887,13 @@ class MessageChannel:
         bundle_digest: Sha256Hex,
         grants: Sequence[str],
         *,
-        verify_allowance_s: float | None = None,
+        gap_allowances: Mapping[str | None, float] | None = None,
     ) -> AsyncIterator[StageReport]:
         """Stream stage reports until `ready` or `failed`.
 
         Hardened per the realize policy: every transport interaction (connect, send, each report read, the terminal drain, close) sits inside the layered budgets (per-report channel allowance, untimed outer total); reports are capped in count and must follow strictly increasing stage order; an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically); anything else is tamper.
 
-        `verify_allowance_s` widens the per-report allowance for exactly one gap: `verify` to the terminal report. The applier probes guest readiness sequentially there and emits nothing until every guest answers, so the caller supplies the plan-derived readiness envelope; every other gap keeps the channel allowance, and the gap stays bounded (a wedged readiness still fails at the envelope, not at the untimed total) (quality-review A10).
+        `gap_allowances` widens the per-report allowance per gap, keyed by the stage the gap follows (`None` keys the gap before the first report). The applier legally emits nothing while a gap's occupant runs (the first-use range-image build before any report, `compose up --wait` after `construct`, the guest-boot exec after `boot`, the sequential readiness pass after `verify`), so the caller supplies each occupied gap's plan-derived envelope; the channel allowance stays the floor, every unlisted gap keeps it, and each gap stays bounded (a wedged occupant still fails at its envelope, not at the untimed total) (quality-review A10, extended to the sibling gaps by R2-3).
 
         Stage-order leniency, deliberate: skipping stages is allowed (a cache-hitting applier legitimately jumps ahead) and `failed` is allowed anywhere including first (an honest fast failure); only `ready` as the very first report is tamper. A hostile applier can emit the honest sequence anyway, so tightening buys no security.
         """
@@ -949,14 +956,13 @@ class MessageChannel:
                             "untimed", f"realize id={request.id}: total bound expired"
                         )
                     allowance = self._channel_budget_s
-                    if (
-                        verify_allowance_s is not None
-                        and seen
-                        and seen[-1].stage == "verify"
-                    ):
-                        # the verify -> terminal gap carries the applier's whole
-                        # sequential readiness pass with no intermediate report
-                        allowance = max(allowance, verify_allowance_s)
+                    if gap_allowances is not None:
+                        # a gap is keyed by the stage it follows (None before
+                        # the first report); its legitimate occupant emits no
+                        # intermediate report while it runs
+                        widened = gap_allowances.get(seen[-1].stage if seen else None)
+                        if widened is not None:
+                            allowance = max(allowance, widened)
                     try:
                         async with asyncio.timeout(min(allowance, remaining)):
                             message, _ = await reader.next()

@@ -19,6 +19,7 @@ from .._compiler.plan import ResolvedPlan
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
 from .._runtime.up import (
+    IMAGE_BUILD_TIMEOUT_S,
     GuestState,
     OnStage,
     UpError,
@@ -121,6 +122,27 @@ def _lease_channel(socket_path: Path, lease: HostLease, label: str) -> MessageCh
     return MessageChannel(UdsTransport(socket_path, lease.lease_id), label=label)
 
 
+def realize_gap_allowances(
+    plan: ResolvedPlan, options: UpOptions
+) -> dict[str | None, float]:
+    """Per-gap report allowances for `channel.realize`, keyed by the stage each gap follows (`None` keys the gap before the first report).
+
+    Each gap's allowance is the plan-derived bound of its legitimate occupant, which emits no intermediate report while it runs (quality-review A10, extended to the sibling gaps by R2-3): before the first report sits everything up to `up`'s stage-log creation, worst the first-use range-image build (`IMAGE_BUILD_TIMEOUT_S`); after `construct` sits `compose up --wait` (readiness timeout plus 60 s); after `boot` sits the guest-boot exec (readiness timeout); after `verify` sits the applier's whole sequential readiness pass (the readiness deadline plus every guest's minimum probe window). Gaps with no legitimate occupant (`fetch` to `construct`) are deliberately absent, so the flat channel allowance still catches a truly silent applier there.
+
+    The APPLIER runs `up` with its own `UpOptions` (`RealizeRequest` carries no readiness fields), so the readiness-derived envelopes are floored at the defaults the applier actually probes with: a driver configured with a SHORTER readiness timeout must not starve a legitimately slower applier pass (carrying readiness fields on the wire is the recorded growth path).
+    """
+    default_timeout = float(UpOptions.model_fields["readiness_timeout"].default)
+    default_window = float(UpOptions.model_fields["readiness_min_window"].default)
+    readiness_timeout = max(options.readiness_timeout, default_timeout)
+    probe_window = max(options.readiness_min_window, default_window)
+    return {
+        None: IMAGE_BUILD_TIMEOUT_S + 30.0,
+        "construct": readiness_timeout + 60.0 + 30.0,
+        "boot": readiness_timeout + 30.0,
+        "verify": readiness_timeout + len(plan.guests) * probe_window + 30.0,
+    }
+
+
 async def _drive_realize(
     socket_path: Path,
     lease: HostLease,
@@ -136,26 +158,10 @@ async def _drive_realize(
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
     channel = _lease_channel(socket_path, lease, project)
-    # the verify -> ready gap carries the applier's whole sequential readiness
-    # pass (no intermediate report exists in the seam vocabulary), so its
-    # allowance is the plan-derived envelope: the readiness deadline plus every
-    # guest's minimum probe window plus grace (quality-review A10). The APPLIER
-    # runs `up` with its own UpOptions (RealizeRequest carries no readiness
-    # fields), so the envelope is floored at the defaults the applier actually
-    # probes with: a driver configured with a SHORTER readiness_timeout must
-    # not starve a legitimately slower applier pass (review finding; carrying
-    # readiness fields on the wire is the recorded growth path)
-    default_timeout = float(UpOptions.model_fields["readiness_timeout"].default)
-    default_window = float(UpOptions.model_fields["readiness_min_window"].default)
-    verify_allowance_s = (
-        max(options.readiness_timeout, default_timeout)
-        + len(plan.guests) * max(options.readiness_min_window, default_window)
-        + 30.0
-    )
     started = time.monotonic()
     try:
         async for report in channel.realize(
-            digest, [], verify_allowance_s=verify_allowance_s
+            digest, [], gap_allowances=realize_gap_allowances(plan, options)
         ):
             if on_stage is not None:
                 # never let an observer failure alter the realize outcome
