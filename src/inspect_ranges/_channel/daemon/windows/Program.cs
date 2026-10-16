@@ -32,7 +32,7 @@ namespace VsockD
             }
             if (args.Length > 0 && args[0] == "-console")
             {
-                Daemon.Log("console mode start");
+                Daemon.Ring.Add("info", "console-mode", null, "start");
                 Daemon.ListenLoop();
                 return 0;
             }
