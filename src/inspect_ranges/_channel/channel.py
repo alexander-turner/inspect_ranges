@@ -372,7 +372,7 @@ class MessageChannel:
                 # when the frames went out: stamp the honest count
                 if connected[0]:
                     deliveries += 1
-                raise stamped(failure)
+                raise stamped(failure) from failure.__cause__
             except TimeoutError:
                 if connected[0]:
                     # the frames went out; only the reply is missing. A window
@@ -657,14 +657,19 @@ class MessageChannel:
             connected = [False]
             try:
                 reply, bulk = await self._once(
-                    guest, probe, send_frames, window, bulk_cap=bulk_cap, connected=connected
+                    guest,
+                    probe,
+                    send_frames,
+                    window,
+                    bulk_cap=bulk_cap,
+                    connected=connected,
                 )
                 if probe is request:
                     deliveries += 1
             except TamperError as failure:
                 if connected[0] and probe is request:
                     deliveries += 1  # post-delivery verdict: the frames went out
-                raise stamped(failure)
+                raise stamped(failure) from failure.__cause__
             except TimeoutError:
                 if connected[0]:
                     if probe is request:
