@@ -446,6 +446,68 @@ def test_provably_undelivered_exec_resends_exactly_once() -> None:
     asyncio.run(scenario_run())
 
 
+class HangConnects:
+    """The first N connect attempts hang past any window (expired inside connect: provably never sent), then honest. N<0 hangs forever."""
+
+    def __init__(self, inner: LoopbackTransport, hangs: int) -> None:
+        self._inner = inner
+        self.hangs = hangs
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        if self.hangs != 0:
+            self.hangs -= 1
+            await asyncio.Event().wait()  # never set; cancelled by the window
+        return await self._inner.connect(endpoint)
+
+
+def test_connect_timeout_exec_is_never_left_and_resends() -> None:
+    """A window that expires inside connect provably sent nothing: the exec resends and runs once."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=1), label="hang-once", channel_budget_s=0.15
+    )
+
+    async def scenario_run() -> None:
+        outcome = await channel.exec(
+            "web", ExecRequest(id=request_id(), cmd=["echo", "late"])
+        )
+        assert outcome.stdout == b"late\n"
+        assert fleet.guest("web").exec_count == 1
+
+    asyncio.run(scenario_run())
+
+
+def test_connect_timeout_exec_attempts_stay_zero() -> None:
+    """Every window expiring inside connect: the failure annotation must claim zero deliveries."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=-1), label="hang-always", channel_budget_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+        assert failure.value.attempts == 0, "nothing was ever sent"
+        assert fleet.guest("web").exec_count == 0
+
+    asyncio.run(scenario_run())
+
+
+def test_connect_timeout_exchange_attempts_stay_zero() -> None:
+    """The `_exchange` operations report the same never-left honesty on a hung connect."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=-1), label="hang-exchange", channel_budget_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.read_file("web", "/x")
+        assert failure.value.attempts == 0
+
+    asyncio.run(scenario_run())
+
+
 def test_silent_untimed_exec_fails_after_three_windows() -> None:
     """Zero liveness evidence across three allowance windows is a channel-layer failure, fast."""
     channel = MessageChannel(
