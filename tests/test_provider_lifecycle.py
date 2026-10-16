@@ -786,7 +786,7 @@ class TestFootholdOnlyRegistration:
 
         async def scenario() -> None:
             with sandbox_lifecycle_scope():
-                runtime, _ = rigged_runtime(tmp_path)
+                rigged_runtime(tmp_path)
                 with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
                     envs = await Env.sample_init(
                         "task", small_spec(), {"__sample_id__": "w1"}
