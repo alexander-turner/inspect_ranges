@@ -147,17 +147,18 @@ def test_hostile_failure_dumps_the_trace_tail(
 def test_hostile_wrong_id_names_both_ids() -> None:
     channel = MessageChannel(HostileTransport("wrong-id"))
 
-    async def scenario_run() -> tuple[str, str]:
+    async def scenario_run() -> tuple[str, str, int | None]:
         request = request_id()
         try:
             await channel.read_file("web", "/x")
         except TamperError as failure:
-            return request, str(failure)
+            return request, str(failure), failure.attempts
         raise AssertionError("wrong-id reply was accepted")
 
-    _, message = asyncio.run(scenario_run())
+    _, message, attempts = asyncio.run(scenario_run())
     assert "f" * 32 in message, "the tamper error must name the forged id"
     assert "request was id" in message, "the tamper error must name the request id"
+    assert attempts == 1, "a post-delivery tamper verdict carries the honest count"
 
 
 class PollForger:

@@ -30,6 +30,8 @@ from .codec import (
 from .protocol import (
     DAEMON_INBOUND_BULK_CAP,
     DEFAULT_BULK_CAP,
+    DEFAULT_CHANNEL_BUDGET_MS,
+    DEFAULT_UNTIMED_BOUND_MS,
     EXEC_OBSERVATION_GRACE_S,
     AckRequest,
     Budget,
@@ -227,8 +229,8 @@ class MessageChannel:
         transport: Transport,
         *,
         label: str = "channel",
-        channel_budget_s: float = 180.0,
-        untimed_bound_s: float = 14_400.0,
+        channel_budget_s: float = DEFAULT_CHANNEL_BUDGET_MS / 1000,
+        untimed_bound_s: float = DEFAULT_UNTIMED_BOUND_MS / 1000,
         grace_s: float = _CHANNEL_GRACE_S,
     ) -> None:
         self._transport = transport
@@ -284,10 +286,17 @@ class MessageChannel:
         endpoint: str,
         reason: str,
         cause: BaseException | None = None,
+        *,
+        attempts: int | None = None,
     ) -> NoReturn:
-        """Every tamper verdict goes through here: dump the trace tail, then raise."""
+        """Every tamper verdict goes through here: dump the trace tail, then raise.
+
+        `attempts` stamps the delivery count when the caller is on the counting path (a post-delivery tamper demonstrably had its frames sent); `None` means the counting path was never reached.
+        """
         self._dump_trace(request, endpoint, reason)
-        raise TamperError(f"{request.kind} id={request.id}: {reason}") from cause
+        error = TamperError(f"{request.kind} id={request.id}: {reason}")
+        error.attempts = attempts
+        raise error from cause
 
     # -- budgets -------------------------------------------------------------
 
@@ -358,6 +367,12 @@ class MessageChannel:
                     connected=connected,
                 )
                 deliveries += 1
+            except TamperError as failure:
+                # a tamper verdict from inside the exchange is post-delivery
+                # when the frames went out: stamp the honest count
+                if connected[0]:
+                    deliveries += 1
+                raise stamped(failure)
             except TimeoutError:
                 if connected[0]:
                     # the frames went out; only the reply is missing. A window
@@ -413,6 +428,7 @@ class MessageChannel:
                     request,
                     endpoint,
                     f"reply carries id {reply.id}, request was id {request.id}",
+                    attempts=deliveries,
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
@@ -439,9 +455,10 @@ class MessageChannel:
                 await self._ack(endpoint, request.id)
             return reply, reply_bulk, deliveries
         self._dump_trace(request, endpoint, last_failure)
+        verdict = "reply lost" if deliveries else "unreachable"
         raise stamped(
             TransportFailure(
-                f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
+                f"{request.kind} id={request.id}: {verdict} after {_RETRY_ATTEMPTS} attempts ({last_failure})"
             )
         )
 
@@ -644,6 +661,10 @@ class MessageChannel:
                 )
                 if probe is request:
                     deliveries += 1
+            except TamperError as failure:
+                if connected[0] and probe is request:
+                    deliveries += 1  # post-delivery verdict: the frames went out
+                raise stamped(failure)
             except TimeoutError:
                 if connected[0]:
                     if probe is request:
@@ -739,6 +760,7 @@ class MessageChannel:
                     request,
                     guest,
                     f"reply carries id {reply.id}, request was id {request.id}",
+                    attempts=deliveries,
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
