@@ -133,6 +133,36 @@ class TestClampRendering:
         assert render_probe_clamp_nftables(allocate(two_segment_spec())) == ""
 
 
+class TestProbeClientLifecycle:
+    def test_external_cancellation_kills_the_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B19: `stop()`'s cancel must not leak the `docker compose exec` child."""
+        from inspect_ranges._challenges.prober import _run_probe_client
+
+        async def scenario() -> None:
+            captured: dict[str, asyncio.subprocess.Process] = {}
+            real = asyncio.create_subprocess_exec
+
+            async def capturing(
+                *argv: Any, **kwargs: Any
+            ) -> asyncio.subprocess.Process:
+                process = await real(*argv, **kwargs)
+                captured["process"] = process
+                return process
+
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", capturing)
+            task = asyncio.create_task(_run_probe_client(["sleep", "30"]))
+            await asyncio.sleep(0.2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            rc = await asyncio.wait_for(captured["process"].wait(), 5)
+            assert rc == -9
+
+        asyncio.run(scenario())
+
+
 class TestProber:
     """Exercised through the public surface (start/stop plus the injectable client runner)."""
 
