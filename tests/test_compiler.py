@@ -1,5 +1,6 @@
 from ipaddress import IPv4Address
 
+import pytest
 from inspect_ranges._compiler import (
     allocate,
     elect_gateways,
@@ -8,6 +9,7 @@ from inspect_ranges._compiler import (
     render_router_nftables,
     resolvers_for,
 )
+from inspect_ranges._diagnostics import IssueError
 from inspect_ranges.types import (
     AclRule,
     Attacker,
@@ -158,6 +160,41 @@ def test_attacker_scoped_egress_never_falls_through_to_the_network_allowlist() -
         'iifname "br-corp" oifname "eth0" ip daddr 198.51.100.7/32 tcp dport 443 accept'
     )
     assert accept < drop < network_rule
+
+
+def small_subnet_spec(host_count: int) -> RangeSpec:
+    return RangeSpec(
+        meta=RangeMeta(name="small-net", description="small-subnet allocation"),
+        networks=[Network(name="net", cidr="10.80.10.0/28", mode="isolated")],
+        hosts=[
+            Host(
+                name=f"h{i}",
+                os=Os(type="linux"),
+                image="img",
+                interfaces=[Interface(network="net")],
+            )
+            for i in range(host_count)
+        ],
+        attacker=Attacker(interfaces=[Interface(network="net")], entry="external"),
+    )
+
+
+def test_small_subnet_falls_back_below_the_host_offset() -> None:
+    # A /28 (14 usable) with six implicit hosts: offsets 10-14 fill, then the
+    # allocator falls back to the free addresses below, per the module policy.
+    allocation = allocate(small_subnet_spec(6))
+    addresses = {guest.name: guest.interfaces[0].ip for guest in allocation.guests}
+    assert len(set(addresses.values())) == len(addresses)
+    assert addresses["h5"] == IPv4Address("10.80.10.2")
+
+
+def test_subnet_exhaustion_refuses_positioned() -> None:
+    with pytest.raises(IssueError) as excinfo:
+        allocate(small_subnet_spec(14))
+    issue = excinfo.value.issues[0]
+    assert issue.code == "subnet-exhausted"
+    assert issue.path == ("networks", 0, "cidr")
+    assert "no free address" in issue.message
 
 
 def test_no_egress_renders_invariants_only() -> None:
