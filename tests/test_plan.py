@@ -106,6 +106,18 @@ def test_guest_config_gates_at_planning() -> None:
     assert issue.path == ("hosts", 0, "services")
 
 
+def test_hostname_and_fqdn_gate_at_planning() -> None:
+    spec = two_segment_spec()
+    spec.hosts[0].hostname = "dc01-nyc"
+    spec.hosts[0].fqdn = "dc01-nyc.corp.local"
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    paths = {issue.path for issue in excinfo.value.issues}
+    codes = {issue.code for issue in excinfo.value.issues}
+    assert codes == {"guest-config-not-realized"}
+    assert ("hosts", 0, "hostname") in paths and ("hosts", 0, "fqdn") in paths
+
+
 def test_variables_gate_at_planning() -> None:
     from inspect_ranges.types import Variable
 
