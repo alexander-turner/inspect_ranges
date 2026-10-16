@@ -836,6 +836,28 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "networks[2].name",
             id="device-name-collision",
         ),
+        pytest.param(
+            # the range name becomes the compose project and a state-directory
+            # path segment the CLI mkdirs and rmtrees (quality review R2-1)
+            "range: { name: ../../../../escaped, description: traversal }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-traversal",
+        ),
+        pytest.param(
+            # dots are legal in guest and network names but compose refuses
+            # them in project names, so the range name grammar excludes them
+            "range: { name: zabbix.v3, description: dotted }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-dot",
+        ),
+        pytest.param(
+            f"range: {{ name: {'a' * 48}, description: long }}",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-too-long",
+        ),
     ],
 )
 def test_semantic_codes(
