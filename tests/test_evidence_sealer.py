@@ -61,6 +61,50 @@ def test_seal_abandoned_skips_sealed_writers_and_races(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_seal_abandoned_continues_past_a_lost_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost seal-put race on one writer never stops the sweep: the next writer still gets its reaped seal (quality-review C-list: reap-seal continuation)."""
+    import inspect_ranges._evidence.sealer as sealer_mod
+
+    async def scenario() -> None:
+        driver = EvidenceWriter(
+            LocalDirSink(tmp_path), part_interval_s=0, writer="driver", retry_wait_s=0
+        )
+        await driver.append("session", b"pinned")
+        await driver.checkpoint()
+        host = EvidenceWriter(
+            LocalDirSink(tmp_path), part_interval_s=0, writer="host", retry_wait_s=0
+        )
+        await host.append("pcap/dmz", b"frames")
+        await host.checkpoint()
+
+        real_sink_for_location = sealer_mod.sink_for_location
+
+        class RacingSink:
+            def __init__(self, inner: object) -> None:
+                self._inner = inner
+
+            async def put(self, key: str, data: bytes) -> None:
+                if key == seal_key("driver"):
+                    raise FileExistsError(key)  # another sealer won this one
+                await self._inner.put(key, data)  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(
+            sealer_mod,
+            "sink_for_location",
+            lambda location: RacingSink(real_sink_for_location(location)),
+        )
+        sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
+        assert set(sealed) == {"host"}, "the lost race skips, the sweep continues"
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"host": sealed["host"]}
+        )
+        assert report.writers["host"].seal_status == "reaped"
+
+    asyncio.run(scenario())
+
+
 def test_seal_abandoned_leaves_broken_records_unsealed(tmp_path: Path) -> None:
     async def scenario() -> None:
         await _abandoned_record(tmp_path)
