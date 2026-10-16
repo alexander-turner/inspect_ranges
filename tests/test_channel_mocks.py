@@ -7,18 +7,21 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from typing import Literal, cast
 
 import pytest
 from inspect_ranges._channel.channel import (
     ByteStream,
     ChannelBudgetError,
     LoopbackTransport,
+    MemoryStream,
     MessageChannel,
     TamperError,
     TransportFailure,
     request_id,
     stream_pair,
 )
+from inspect_ranges._channel.codec import MessageStreamReader, encode_message
 from inspect_ranges._channel.mocks import (
     HOSTILE_APPLIER_HANGS,
     HOSTILE_APPLIER_SCENARIOS,
@@ -29,7 +32,13 @@ from inspect_ranges._channel.mocks import (
     LatencyTransport,
     SilentTransport,
 )
-from inspect_ranges._channel.protocol import Budget, ExecRequest
+from inspect_ranges._channel.protocol import (
+    DEFAULT_BULK_CAP,
+    Budget,
+    ExecRequest,
+    Message,
+    StageReport,
+)
 
 from tests.channel_conformance import PortableChannelSuite
 
@@ -651,3 +660,87 @@ def test_latency_mock_catches_the_chatty_reference_bug() -> None:
     assert chatty > 4 * proper, (
         f"chatty ({chatty:.2f}s) must dwarf the single transfer ({proper:.2f}s)"
     )
+
+
+def applier_stage(request: Message, stage: str) -> bytes:
+    """One honest stage-report frame for the request (public pieces only)."""
+    report = StageReport(
+        id=request.id,
+        stage=cast(
+            'Literal["fetch", "construct", "boot", "verify", "ready", "failed"]',
+            stage,
+        ),
+    )
+    return b"".join(encode_message(report))
+
+
+class SlowGapApplierTransport:
+    """Honest applier that sleeps between two chosen stages (the sequential-readiness shape)."""
+
+    def __init__(self, *, before_stage: str, delay_s: float) -> None:
+        self.before_stage = before_stage
+        self.delay_s = delay_s
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        client_side, server_side = stream_pair()
+        task = asyncio.create_task(self._serve(server_side))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return client_side
+
+    async def _serve(self, stream: MemoryStream) -> None:
+        reader = MessageStreamReader(stream.receive, bulk_cap=DEFAULT_BULK_CAP)
+        request, _ = await reader.next()
+        for stage in ("fetch", "construct", "boot", "verify", "ready"):
+            if stage == self.before_stage:
+                await asyncio.sleep(self.delay_s)
+            await stream.send(applier_stage(request, stage))
+        await stream.aclose()
+
+
+def test_realize_verify_allowance_covers_sequential_readiness() -> None:
+    """The verify -> ready gap carries no intermediate report; the plan-derived allowance keeps a legitimate slow readiness from starving the per-report budget (quality-review A10)."""
+    transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
+    channel = MessageChannel(transport, label="slow-readiness", channel_budget_s=0.1)
+
+    async def scenario_run() -> list[str]:
+        return [
+            report.stage
+            async for report in channel.realize("ab" * 32, [], verify_allowance_s=2.0)
+        ]
+
+    assert asyncio.run(scenario_run()) == [
+        "fetch",
+        "construct",
+        "boot",
+        "verify",
+        "ready",
+    ]
+
+
+def test_realize_without_verify_allowance_still_budgets_the_gap() -> None:
+    """Without the caller-supplied envelope the old behavior stands: the channel allowance bounds the gap (the regression A10 fixed through the uds seams)."""
+    transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
+    channel = MessageChannel(transport, label="starved", channel_budget_s=0.1)
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            async for _ in channel.realize("ab" * 32, []):
+                pass
+        assert failure.value.layer == "channel"
+
+    asyncio.run(scenario_run())
+
+
+def test_realize_verify_allowance_applies_only_to_the_verify_gap() -> None:
+    """A slow fetch -> construct gap is NOT excused by the readiness envelope: stall detection for every other gap keeps the channel allowance."""
+    transport = SlowGapApplierTransport(before_stage="construct", delay_s=0.4)
+    channel = MessageChannel(transport, label="early-stall", channel_budget_s=0.1)
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError):
+            async for _ in channel.realize("ab" * 32, [], verify_allowance_s=5.0):
+                pass
+
+    asyncio.run(scenario_run())
