@@ -92,7 +92,7 @@ class RangeOracle:
     def available_observers(self) -> frozenset[str]:
         """The trusted observers this sample's deployment can supply right now.
 
-        `evidence-sink` exists when the evidence session is live; `segment-pcap` and `console` when capture was rendered into the range. The prober and telemetry-collector observers arrive with their engine slices; until then challenges requiring them refuse at planting.
+        `evidence-sink` exists when the evidence session is live; `segment-pcap` and `console` when capture was rendered into the range; `active-prober` when the plan carries rendered probe endpoints. `telemetry-collector` is deployment knowledge the oracle cannot see (which collector specs exist), so `plant_goals` supplies it as an extra observer to `run_setup` when a matching spec was passed; a challenge requiring an observer absent from the union refuses at planting.
         """
         available: set[str] = set()
         session = self._handle.evidence
@@ -228,8 +228,11 @@ class RangeOracle:
     def evidence_memo(self) -> "Generator[None]":
         """Memoize the evidence accessors for the duration of one scoring pass.
 
-        The evidence record is immutable once written, so within a pass every accessor returns the same bytes; without the memo, scoring cost scales with the number of agent-submitted candidates (each candidate's `check` refetches the capture), which hands the agent linear control over scoring cost through `submit_goal` calls. The memo is per-key (`pcap/<segment>`, `telemetry/<collector>`, ...), cleared on exit, and only `score_challenge` opens it: the poller never fetches evidence, and setup runs before any evidence exists.
+        The evidence record is immutable once written, so within a pass every accessor returns the same bytes; without the memo, scoring cost scales with the number of agent-submitted candidates (each candidate's `check` refetches the capture), which hands the agent linear control over scoring cost through `submit_goal` calls. The memo is per-key (`pcap/<segment>`, `telemetry/<collector>`, ...) and cleared when the outermost open exits. Reentrant: `challenge_scorer` opens one memo around the whole pass (so two goals on the same segment share one fetch), and `score_challenge`'s per-goal open nests inside it as a no-op; the poller never fetches evidence, setup runs before any evidence exists, and `corroborate()` deliberately bypasses the memo (its claim-scoped reads ride `stream_chunks` directly).
         """
+        if self._evidence_memo is not None:
+            yield
+            return
         self._evidence_memo = {}
         try:
             yield

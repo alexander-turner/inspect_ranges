@@ -254,9 +254,13 @@ def challenge_scorer() -> Scorer:
         await stop_goal_poller(state.store)
         challenge = Challenge.model_validate(raw)
         submissions = submissions_from(state, challenge=challenge)
-        value, metadata = await score_challenge(
-            range_oracle(), state.store, challenge, submissions
-        )
+        oracle = range_oracle()
+        # one memo for the whole pass: two goals on the same segment or
+        # collector share one evidence fetch (the per-goal opens nest)
+        with oracle.evidence_memo():
+            value, metadata = await score_challenge(
+                oracle, state.store, challenge, submissions
+            )
         achieved = metadata.get("achieved_count", 0)
         return Score(
             value=value,
