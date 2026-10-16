@@ -298,8 +298,13 @@ async def main() -> int:
         await prober3.stop()
         result, _ = await scored(oracle, canned_goal)
         records, _ = await oracle.probe_records("canned")
+        # non-vacuous: with zero records the all() is true and achieved is
+        # falsy via the indeterminate path, so the check needs the same
+        # non-empty/not-indeterminate guard as the tamper negative above
         check(
-            not result.achieved
+            bool(records)
+            and not result.achieved
+            and not result.indeterminate
             and all(r.record.get("status") == "mumble" for r in records),
             "canned 200s read mumble: a response without the fresh nonce digest never counts",
         )

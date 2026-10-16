@@ -4,7 +4,7 @@ The live battery for the evidence-v1 phase ([record](../../inspect-ranges/eviden
 
 ## Slice 2: capture in the range container (2026-10-15)
 
-Run on the metal devbox: **24/24 checks green plus zero residue**, `./run.sh`, CID base 30100, shared battery flock. Re-run green after the fresh-context review's fixes (51.0 s up), whose main change is the fail-safe ship rule: a chunk ships only when the supervisor's status proves it completed (strictly older than the declared active file, or a writer-less segment state), so a missing or stale status can delay shipping but can never truncate a chunk. The range is a static-IP two-segment topology (dmz / internal, router, attacker) rendered with `evidence_capture=True` at 1 MB chunks and `CAPTURE_MAX_RESTARTS=2`.
+Run on the metal devbox: **24/24 checks green plus zero residue**, `./run.sh`, CID base 30100, shared battery flock. (Round 2 removed the unconditional down row from the count; pending re-run.) Re-run green after the fresh-context review's fixes (51.0 s up), whose main change is the fail-safe ship rule: a chunk ships only when the supervisor's status proves it completed (strictly older than the declared active file, or a writer-less segment state), so a missing or stale status can delay shipping but can never truncate a chunk. The range is a static-IP two-segment topology (dmz / internal, router, attacker) rendered with `evidence_capture=True` at 1 MB chunks and `CAPTURE_MAX_RESTARTS=2`.
 
 What the run demonstrated, in order:
 
@@ -20,7 +20,7 @@ Files: `run.sh` (setup + battery + residue check), `battery.py` (the checks), `s
 
 ## Slice 4: in-guest telemetry export (2026-10-15)
 
-Run on the metal devbox: **18/18 checks green plus zero residue**, `./run_telemetry.sh`, CID base 30300, shared battery flock, range up 50.7 s. The range is the minimal telemetry shape (`spec-telemetry.yaml`: one segment, one target, the attacker); the driver-side `TelemetryPoller` polls two collectors on the target over vsock at 0.5 s cadence: a journald `command` source (`journalctl --after-cursor={cursor} --show-cursor`) and a file source (`/var/log/tele.log`, offset watermark), both into one `driver` evidence record.
+Run on the metal devbox: **18/18 checks green plus zero residue**, `./run_telemetry.sh`, CID base 30300, shared battery flock, range up 50.7 s. (Round 2 made the producer-started row a real log-content check; pending re-run.) The range is the minimal telemetry shape (`spec-telemetry.yaml`: one segment, one target, the attacker); the driver-side `TelemetryPoller` polls two collectors on the target over vsock at 0.5 s cadence: a journald `command` source (`journalctl --after-cursor={cursor} --show-cursor`) and a file source (`/var/log/tele.log`, offset watermark), both into one `driver` evidence record.
 
 What the run demonstrated, in order:
 
@@ -40,7 +40,7 @@ Files: `run_telemetry.sh`, `telemetry_battery.py`, `spec-telemetry.yaml`. Artifa
 
 ## Slice-5 section: the provider/host seam (run_seam.sh)
 
-Devbox, 2026-10-15: 39 checks green (32 in S1-S4 plus 7 eval-smoke checks), zero container residue, zero S3 residue, exit 0. The S3 leg ran against the chunk-3 scratch bucket under a per-run prefix, removed at the end.
+Devbox, 2026-10-15: 39 checks green (32 in S1-S4 plus 7 eval-smoke checks), zero container residue, zero S3 residue, exit 0. (Round 2 removed the kill-ordering conjunction row, a restatement of two recorded waits, from the count; pending re-run.) The S3 leg ran against the chunk-3 scratch bucket under a per-run prefix, removed at the end.
 
 | Measurement | Value |
 |---|---|
