@@ -8,7 +8,7 @@ import click
 
 from .._host.applier import Applier
 from .._host.local import HostNotReadyError
-from .._provider.state import default_image_cache
+from .._runtime.images import default_image_cache
 from .._runtime.ownership import default_state_dir
 
 
@@ -66,7 +66,17 @@ def applier(
         for signum in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(signum, request_stop)
         try:
-            await endpoint.start()
+            # expected startup refusals convert here, scoped to start():
+            # an OSError hours into serving is an unexpected bug and must
+            # keep its traceback, not a bind-failure message
+            try:
+                await endpoint.start()
+            except HostNotReadyError as error:
+                raise click.ClickException(str(error)) from error
+            except OSError as error:
+                raise click.ClickException(
+                    f"cannot serve on {socket_path}: {error}"
+                ) from error
             click.echo(f"applier serving on {socket_path}")
             await stop.wait()
         finally:
@@ -78,10 +88,3 @@ def applier(
     except KeyboardInterrupt:
         # only reachable in the sliver before the loop installs handlers
         click.echo("applier stopped (interrupted during startup)")
-    except HostNotReadyError as error:
-        # the documented refusal ("refuses to serve unhealthy") is an expected
-        # condition, not a traceback
-        raise click.ClickException(str(error)) from error
-    except OSError as error:
-        # bind failures (socket path in use, unwritable directory)
-        raise click.ClickException(f"cannot serve on {socket_path}: {error}") from error
