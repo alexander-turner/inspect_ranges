@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from ._diagnostics import (
     Issue,
     ValidationReport,
+    issues_from_read_error,
     issues_from_validation_error,
     issues_from_yaml_error,
     locate,
@@ -134,7 +135,7 @@ def substitute_variables(data: Any) -> tuple[Any, list[Issue]]:
 def validate_range(path: Path) -> ValidationReport:
     """Validate a `range.yaml` file, reporting every detectable issue at once.
 
-    Unlike `load_range`, this never raises on invalid content: YAML syntax errors, structural schema violations, and semantic cross-reference problems all become `Issue` entries with stable codes, source positions, and hints where available. Field-level structural errors suppress the cross-reference pass (reflected in `ValidationReport.semantic_checked`).
+    Unlike `load_range`, this never raises on invalid content: unreadable files (a directory, permissions, non-UTF-8 content), YAML syntax errors, structural schema violations, and semantic cross-reference problems all become `Issue` entries with stable codes, source positions, and hints where available. Field-level structural errors suppress the cross-reference pass (reflected in `ValidationReport.semantic_checked`).
 
     Args:
         path: Path to the YAML file.
@@ -144,6 +145,8 @@ def validate_range(path: Path) -> ValidationReport:
     """
     try:
         data, node = parse_marked(path.read_text())
+    except (OSError, UnicodeDecodeError) as error:
+        return ValidationReport(file=str(path), issues=issues_from_read_error(error))
     except yaml.YAMLError as error:
         return ValidationReport(file=str(path), issues=issues_from_yaml_error(error))
     if not isinstance(data, dict):
