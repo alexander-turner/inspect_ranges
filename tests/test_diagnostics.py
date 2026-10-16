@@ -734,6 +734,58 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "attacker",
             id="attacker-no-foothold",
         ),
+        pytest.param(
+            """
+            hosts:
+              - name: ../../escape
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+            """,
+            "invalid-name",
+            "hosts[0].name",
+            id="invalid-name-traversal",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: Corp, cidr: 10.0.0.0/24, mode: isolated }
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: Corp }]
+            attacker:
+              interfaces: [{ network: Corp }]
+              entry: external
+            """,
+            "invalid-name",
+            "networks[0].name",
+            id="invalid-name-uppercase",
+        ),
+        pytest.param(
+            f"""
+            hosts:
+              - name: {"a" * 64}
+                os: {{ type: linux }}
+                image: img
+                interfaces: [{{ network: lab }}]
+            """,
+            "invalid-name",
+            "hosts[0].name",
+            id="invalid-name-too-long",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: corp-internal-east, cidr: 10.0.1.0/24, mode: isolated }
+              - { name: corp-internal-west, cidr: 10.0.2.0/24, mode: isolated }
+            """,
+            "device-name-collision",
+            "networks[2].name",
+            id="device-name-collision",
+        ),
     ],
 )
 def test_semantic_codes(

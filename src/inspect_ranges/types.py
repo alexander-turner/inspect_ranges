@@ -990,6 +990,61 @@ def _ipv6_gate(
     )
 
 
+_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+"""Legal guest and network names: these flow into Linux device names, filesystem paths, domain XML, and evidence stream keys, so the grammar is the safe intersection (lowercase letters, digits, `._-`, starting alphanumeric)."""
+
+_NAME_MAX = 63
+"""Name length cap: generous for guests (hostname-label scale); network DEVICE uniqueness is checked separately because `br-`/`pr-`/`prb-` prefixed devices truncate at the kernel's 15-character limit."""
+
+_DEVICE_PREFIXES = ("br-", "pr-", "prb-")
+"""Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to 15 characters."""
+
+
+def _name_issues(spec: "RangeSpec") -> list[Issue]:
+    """Grammar, length, and derived-device-name collision checks for every authored name."""
+    issues: list[Issue] = []
+    named: list[tuple[str, tuple[PathElement, ...], str]] = [
+        (network.name, ("networks", index, "name"), "network")
+        for index, network in enumerate(spec.networks)
+    ]
+    named += [
+        (host.name, ("hosts", index, "name"), "host")
+        for index, host in enumerate(spec.hosts)
+    ]
+    named += [
+        (router.name, ("routers", index, "name"), "router")
+        for index, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        named.append((spec.attacker.name, ("attacker", "name"), "attacker"))
+    for name, path, kind in named:
+        if _NAME.match(name) is None or len(name) > _NAME_MAX:
+            issues.append(
+                Issue(
+                    code="invalid-name",
+                    path=path,
+                    message=f"{kind} name {name!r} is not a legal name (lowercase letters, digits, '._-', starting alphanumeric, at most {_NAME_MAX} characters)",
+                    hint="names become device names, filesystem paths, and XML identity; rename the declaration",
+                )
+            )
+    devices: dict[str, str] = {}
+    for index, network in enumerate(spec.networks):
+        for prefix in _DEVICE_PREFIXES:
+            device = f"{prefix}{network.name}"[:15]
+            prior = devices.setdefault(device, network.name)
+            if prior != network.name:
+                issues.append(
+                    Issue(
+                        code="device-name-collision",
+                        path=("networks", index, "name"),
+                        message=f"networks {prior!r} and {network.name!r} both derive device {device!r} (device names truncate at 15 characters), which would silently merge their segments onto one bridge",
+                        hint="network names must differ within their first 11 characters",
+                    )
+                )
+                break
+    return issues
+
+
 def semantic_issues(spec: RangeSpec) -> list[Issue]:
     """Run every cross-reference check on a structurally valid spec, collecting all findings.
 
@@ -1002,6 +1057,7 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         Every semantic issue found, each with a path into the spec (empty when the spec is consistent).
     """
     issues: list[Issue] = []
+    issues += _name_issues(spec)
     networks: dict[str, Network] = {}
     network_names = [network.name for network in spec.networks]
     for index, network in enumerate(spec.networks):
