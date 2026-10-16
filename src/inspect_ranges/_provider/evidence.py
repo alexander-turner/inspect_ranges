@@ -44,7 +44,7 @@ SEAL_RESERVE_S = 10.0
 """The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
 
 PRODUCER_STOPS_SHARE_S = 6.0
-"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (two stop windows plus one harvest window at 4 s each), so the phase total stays inside `FINALIZE_BUDGET_S - SEAL_RESERVE_S` without an outer timeout racing the streamer's own gap-recording handlers."""
+"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -273,12 +273,15 @@ class EvidenceSession:
                 self.location,
             )
         if self._streamer is not None:
-            # stop() is internally bounded; these shares keep its worst case
-            # (two stop windows plus one harvest window) inside the finalize
-            # budget WITHOUT an outer timeout that would cancel its own
-            # gap-recording handlers mid-write (review finding on A6)
+            # stop() is internally bounded; no outer timeout, which would
+            # cancel its own gap-recording handlers mid-write (review finding
+            # on A6). The harvest bound is sized for a REAL teardown tail (a
+            # flood's final chunks ship through compose cp to the sink; the
+            # first live run at 4 s cancelled mid-ship and left delivered
+            # chunks unreferenced), while the seal reserve stays protected:
+            # the worst case grows the nominal budget, never starves the seal.
             try:
-                await self._streamer.stop(stop_timeout_s=4.0, harvest_timeout_s=4.0)
+                await self._streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
             except Exception:
                 stops_clean = False
                 logger.exception(
