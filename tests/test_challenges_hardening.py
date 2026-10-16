@@ -414,6 +414,9 @@ class DiscloseFailOracle:
             foothold_guest="attacker",
         )
 
+    async def exec(self, *args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(rc=0)
+
     async def write_file(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("foothold write failed")
 
