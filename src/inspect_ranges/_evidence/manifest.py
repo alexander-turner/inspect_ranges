@@ -77,6 +77,8 @@ class GapRecord(EvidenceModel):
     """An explicit hole in a stream: data that existed but was not delivered.
 
     Gaps occupy a stream sequence slot and are chained like chunks, so they are inside the chain, not beside it. The forbidden behavior is losing data without one of these.
+
+    Ordering rule (B12): records commit in event order. The writer routes gaps through the same FIFO as pending chunks, so a gap's sequence number reflects when the loss happened relative to the chunks around it; the permanent record never inverts what happened.
     """
 
     kind: Literal["gap"] = "gap"
