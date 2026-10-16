@@ -679,11 +679,11 @@ class Applier:
         streamer, writer, segments = entry
         stops_clean = True
         try:
-            # stop() is internally bounded; these shares keep its worst case
-            # (two stop windows plus one harvest window) inside the stop
-            # budget's remainder, so no outer timeout can cancel its own
-            # gap-recording handlers mid-write (review finding on A6)
-            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=6.0)
+            # stop() is internally bounded; no outer timeout, which would
+            # cancel its own gap-recording handlers mid-write (review finding
+            # on A6). Harvest sized for a real teardown tail; the seal reserve
+            # below stays protected regardless.
+            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
         except Exception:
             stops_clean = False
             logger.exception(
