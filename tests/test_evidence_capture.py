@@ -285,6 +285,9 @@ def test_stop_bounds_a_wedged_final_harvest(tmp_path: Path) -> None:
         def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
             return self._backing.read_tail(relpath, offset)
 
+        def claim_file(self, relpath: str) -> None:
+            self._backing.claim_file(relpath)
+
         def remove_file(self, relpath: str) -> None:
             self._backing.remove_file(relpath)
 
