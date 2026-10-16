@@ -776,6 +776,34 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
 class TestFootholdOnlyRegistration:
     """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
 
+    def test_single_env_fallback_lands_on_the_foothold(self, tmp_path: Path) -> None:
+        """inspect_ai's single-environment fallback returns the registered env for ANY name, so the honest pin asserts `sandbox(<any name>)` IS the foothold env object (an earlier must-raise pin shipped with wrong semantics and only the live battery caught it; this guards fallback drift at CI cost zero)."""
+        from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
+            sandbox,
+            sandbox_default_context_var,
+            sandbox_environments_context_var,
+        )
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init(
+                    "task", small_spec(), {"__sample_id__": "wallpin"}
+                )
+                assert list(envs) == ["attacker"]
+                token = sandbox_environments_context_var.set(dict(envs))
+                default_token = sandbox_default_context_var.set(next(iter(envs)))
+                try:
+                    assert sandbox() is envs["attacker"]
+                    assert sandbox("web") is envs["attacker"]
+                    assert sandbox("absolutely-not-a-guest") is envs["attacker"]
+                finally:
+                    sandbox_default_context_var.reset(default_token)
+                    sandbox_environments_context_var.reset(token)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
+
     def test_opt_out_registers_all_guests_foothold_first(
         self,
         tmp_path: Path,

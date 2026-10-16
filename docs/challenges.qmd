@@ -157,6 +157,8 @@ register_exploit("zabbix-sqli", EXPLOIT_SCRIPT)
 
 Registration is driver-side and per-process; a name already registered with a different script refuses (one task cannot score against another's chain). The script runs from a per-pass random path with an explicit budget, and its outcome combines with the functional probe: the exploit must fail AND the service must still answer.
 
+One recorded tradeoff: the functional half checks the LAST recorded probe verdict, so a service that was down all run but restored before scoring still passes it. Pair the challenge with an `availability` goal over the window when uptime during the run is part of the ask.
+
 ## Performance
 
 Scoring is measured, not budgeted: every setup and scoring stage records wall-clock per goal into the eval log (store key `inspect_ranges:timings`). Recorded reality across the reference batteries: plants cost ~0.01 s each; check-plus-compare runs 0.000 to 0.018 s per goal across all thirteen types; corroboration scans megabytes of capture in milliseconds; sample wall time is dominated by range boot and teardown, not scoring. The one deliberate exception is `patch`, whose exploit re-run is a real chain execution (about a second against the battery's chains; minutes against real CVE chains when those arrive). The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
