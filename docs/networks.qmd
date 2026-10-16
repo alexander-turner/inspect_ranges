@@ -267,7 +267,7 @@ Networks with `records` hand their guests a derived search domain (`<network>.in
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: dns-ad
   description: An authoritative guest serves DNS, chaining to an upstream forwarder.
@@ -299,7 +299,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 dns_ad = RangeSpec(
     meta=RangeMeta(
         name="dns-ad",
@@ -336,6 +336,8 @@ dns_ad = RangeSpec(
 )
 ```
 :::
+
+The DC's `hostname` and `fqdn` are build-phase content: declaring either refuses at planning (`guest-config-not-realized`) until the build arc realizes them, as described under [Hosts](guests.qmd#hosts).
 
 ::: callout-warning
 ## `.local` zones

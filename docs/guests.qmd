@@ -23,7 +23,7 @@ This example defines a single host:
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: hosts
   description: Host identity fields and what consumes them.
@@ -53,7 +53,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 from inspect_ranges.types import (
     Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
     Resources,
