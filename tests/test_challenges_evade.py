@@ -4,6 +4,7 @@ Verdict tests feed `compare` the same record shapes the telemetry poller writes 
 """
 
 import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -112,7 +113,7 @@ class TestSpecRefusals:
         with pytest.raises(ValidationError, match="does not compile"):
             goal(match=r"([")
 
-    def test_unknown_collector_cross_validation(self, tmp_path: Any) -> None:
+    def test_unknown_collector_cross_validation(self, tmp_path: Path) -> None:
         range_yaml = tmp_path / "range.yaml"
         range_yaml.write_text(
             "range: {name: r, schema_version: '0.3', description: evade fixture}\n"
@@ -272,3 +273,52 @@ class TestQuietPass:
 
     def test_submission_blind(self) -> None:
         assert registered_goal_types()["evade"].uses_submissions is False
+
+
+class TestReviewPins:
+    def test_no_meta_with_recorded_alerts_never_a_succeed_pass(self) -> None:
+        loud = b"\n".join(
+            [json.dumps({"PRIORITY": "2"}, separators=(",", ":")).encode()] * 5
+        )
+        obs = evade_obs([], [loud])
+        result = EvadeType().compare(goal(on_sensor_tamper="succeed"), obs, EMPTY_STORE)
+        assert not result.achieved and "5 qualifying" in (result.reason or "")
+        assert EvadeType().compare(goal(), obs, EMPTY_STORE).indeterminate
+
+    def test_str_only_pattern_refuses_at_validation(self) -> None:
+        with pytest.raises(ValidationError, match="does not compile"):
+            SeverityFilter(pattern=r"(?u)severity=(\d)", floor=4)
+        with pytest.raises(ValidationError, match="does not compile"):
+            goal(match=r"(?u)alert")
+
+    def test_evade_counts_in_the_telemetry_wiring(self) -> None:
+        from inspect_ranges._challenges.schema import Challenge
+        from inspect_ranges._challenges.setup import telemetry_goal_collectors
+
+        challenge = Challenge.model_validate(
+            {
+                "id": "c",
+                "prompt": "stay quiet",
+                "goals": [
+                    {"id": "f", "type": "flag", "host": "web", "path": "/root/f"},
+                    {
+                        "id": "g",
+                        "type": "evade",
+                        "collector": "siem",
+                        "threshold": 1,
+                        "severity": {
+                            "pattern": '"PRIORITY":"(\\d)"',
+                            "floor": 4,
+                            "lower_is_more_severe": True,
+                        },
+                    },
+                    {
+                        "id": "d",
+                        "type": "detection",
+                        "collector": "ids",
+                        "signal": "ALERT",
+                    },
+                ],
+            }
+        )
+        assert telemetry_goal_collectors(challenge) == {"siem", "ids"}

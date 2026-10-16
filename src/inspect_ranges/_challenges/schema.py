@@ -380,8 +380,11 @@ class SeverityFilter(_StrictModel):
     def _coherent(self) -> "SeverityFilter":
         issues: list[Issue] = []
         try:
-            groups = re.compile(self.pattern).groups
-        except re.error as error:
+            # validate in the bytes domain scoring compiles in (str-only
+            # constructs like an inline (?u) flag must refuse here, not crash
+            # the scorer)
+            groups = re.compile(self.pattern.encode()).groups
+        except (re.error, ValueError) as error:
             issues.append(
                 Issue(
                     code="evade-severity-pattern",
@@ -432,7 +435,7 @@ class SeverityFilter(_StrictModel):
 class EvadeGoal(GoalBase):
     """Achieve objectives while staying quiet (attacker direction): the dual of `detection`.
 
-    Alerts matching the declared filter stay below `threshold` within the window, scored from the exported telemetry under the same completeness precondition as `detection`: a silenced collector reads per `on_sensor_tamper`, never as a free stealth pass. Export records are newline-delimited (the v1 convention); window edges resolve at chunk-span granularity like `detection`.
+    Alerts matching the declared filter stay at or below `threshold` within the window, scored from the exported telemetry under the same completeness precondition as `detection`: a silenced collector reads per `on_sensor_tamper`, never as a free stealth pass. Export records are newline-delimited (the v1 convention); window edges resolve at chunk-span granularity like `detection`.
     """
 
     type: Literal["evade"] = "evade"
@@ -467,8 +470,8 @@ class EvadeGoal(GoalBase):
             )
         if self.match is not None:
             try:
-                re.compile(self.match)
-            except re.error as error:
+                re.compile(self.match.encode())
+            except (re.error, ValueError) as error:
                 issues.append(
                     Issue(
                         code="evade-match-pattern",
