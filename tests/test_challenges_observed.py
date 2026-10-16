@@ -938,6 +938,28 @@ class TestDatasetProbeSegments:
         assert noprobe_meta is not None
         assert PROBE_SEGMENTS_METADATA_KEY not in noprobe_meta
 
+    def test_router_hosted_goal_requests_its_segment(self, tmp_path: Any) -> None:
+        """B16: routers are legal goal hosts, so the no-segment fallback must see them (a router-hosted prober goal used to refuse at plant time instead of requesting its endpoint here)."""
+        from inspect_ranges._challenges.dataset import challenge_dataset
+        from inspect_ranges._challenges.schema import Challenges
+        from inspect_ranges._provider.provider import PROBE_SEGMENTS_METADATA_KEY
+
+        challenges = Challenges(
+            challenges=[
+                Challenge(
+                    id="router-up",
+                    prompt="p",
+                    goals=[
+                        DegradeGoal(id="deny", host="router", port=80, window_s=30.0)
+                    ],
+                )
+            ]
+        )
+        dataset = challenge_dataset(challenges, range_spec=two_segment_spec())
+        sample = next(iter(dataset))
+        assert sample.metadata is not None
+        assert sample.metadata[PROBE_SEGMENTS_METADATA_KEY] == "dmz"
+
 
 class TestSegmentField:
     def test_unreachable_segment_refuses(self) -> None:
