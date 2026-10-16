@@ -126,9 +126,9 @@ CURSOR_TAIL_WINDOW = 4096
 
 
 def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
-    """Extract the last cursor from `data`'s tail window and strip ONLY its line.
+    """Extract the cursor from the FINAL non-empty line and strip only that line.
 
-    Returns the cursor (or `None` when the pattern matches nothing in the window) and the payload with exactly one line removed: the line the cursor was taken from (the tool's trailing banner). Nothing else is dropped, by design: event text routinely embeds attacker-controlled material, so a line that merely CONTAINS a pattern match must ship, or the evaluated agent could craft activity whose alert line embeds the pattern and silently suppress it from the exported record (quality-review finding A3). The backwards scan stops at the first match, so lines before the banner are never regex-tested; `CURSOR_TAIL_WINDOW` bounds the bytes tested over adversarial guest output, and lines outside the window ship untouched.
+    The banner trails the events by tool contract (`journalctl --show-cursor` prints it after every entry), so only the final non-empty line is regex-tested: if it matches, its group is the cursor and exactly that line is stripped; if it does not, the poll is cursor-missing and everything ships. Nothing earlier is ever tested or dropped, by design: event text routinely embeds attacker-controlled material, so a line that merely CONTAINS a pattern match must ship, or the evaluated agent could craft activity whose alert line embeds the pattern and silently suppress it from the exported record (quality-review finding A3). An adversary who suppresses the real banner can at worst get the single trailing event line mis-taken as the banner, and the poisoned cursor then surfaces on the NEXT poll as a command failure or re-bootstrap (visible in the meta stream), never as silent window-wide suppression. The line must sit within `CURSOR_TAIL_WINDOW` bytes of the end, bounding regex cost over adversarial output.
     """
     compiled = re.compile(pattern)
     lines = data.split(b"\n")
@@ -138,12 +138,15 @@ def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
         tested += len(line) + 1
         if tested > CURSOR_TAIL_WINDOW:
             break
+        if not line.strip():
+            continue  # trailing blank lines are not the banner
         match = compiled.search(line.decode("utf-8", errors="replace"))
-        if match is not None:
-            payload = b"\n".join(
-                part for position, part in enumerate(lines) if position != index
-            )
-            return match.group(1), payload
+        if match is None:
+            break  # the final non-empty line is not a banner: cursor-missing
+        payload = b"\n".join(
+            part for position, part in enumerate(lines) if position != index
+        )
+        return match.group(1), payload
     return None, data
 
 
@@ -355,11 +358,13 @@ class TelemetryPoller:
         state: _CollectorState,
         meta: dict[str, object],
     ) -> None:
-        if state.cursor is None:
+        cursor_before = state.cursor
+        bootstrap = cursor_before is None
+        if cursor_before is None:
             argv = list(source.bootstrap)
         else:
             argv = [
-                arg.replace(CURSOR_PLACEHOLDER, state.cursor) for arg in source.command
+                arg.replace(CURSOR_PLACEHOLDER, cursor_before) for arg in source.command
             ]
         outcome = await self._channel.exec(
             spec.guest,
@@ -384,15 +389,12 @@ class TelemetryPoller:
                 f"poll command rc={outcome.rc}: "
                 + outcome.stderr[:200].decode("utf-8", errors="replace")
             )
-        if state.replay_next and state.cursor is None:
-            # this bootstrap follows a reset (truncation or a missing cursor),
-            # so its window may re-ship entries already in the record; the
-            # flag makes the duplicate window decidable from the meta stream,
-            # so it is consumed only by a bootstrap that SUCCEEDED (B11: a
-            # failed bootstrap previously ate it, leaving the real replayed
-            # window unflagged)
-            meta["replay"] = True
-            state.replay_next = False
+        # replay semantics (B11, refined by the review): the flag marks the
+        # post-reset bootstrap window that actually SHIPS possibly-duplicate
+        # entries. A bootstrap that ships nothing keeps the flag (empty
+        # output: the real replay is still ahead) or clears it silently
+        # (banner-only: the window is provably empty, no duplicate exists).
+        replaying = bootstrap and state.replay_next
         # the per-poll cap is enforced driver-side: the `RangeChannel` seam
         # carries no per-call output cap (`MessageChannel.exec` offers
         # `bulk_cap`, but the poller stays on the protocol seam), so the
@@ -415,6 +417,8 @@ class TelemetryPoller:
             # record the loss explicitly, and re-bootstrap rather than
             # livelocking on the same window
             await self._writer.append(f"telemetry/{spec.name}", data, span=self._span())
+            if replaying:
+                meta["replay"] = True  # the shipped prefix may duplicate entries
             meta["bytes"] = len(data)
             meta["outcome"] = "truncated"
             meta["watermark"] = None
@@ -441,6 +445,8 @@ class TelemetryPoller:
                 await self._writer.append(
                     f"telemetry/{spec.name}", payload, span=self._span()
                 )
+                if replaying:
+                    meta["replay"] = True  # shipped entries may duplicate
             meta["outcome"] = "cursor-missing"
             meta["watermark"] = None
             meta["advanced"] = False
@@ -454,13 +460,20 @@ class TelemetryPoller:
         if not payload.strip():
             # cursor banner only (journalctl prints it even with no entries):
             # a quiet poll, never shipped, so stall-vs-quiet stays decidable
-            # and the data stream carries events only
+            # and the data stream carries events only. A pending replay flag
+            # clears WITHOUT marking: the post-reset window is provably empty,
+            # so no duplicate exists to flag.
+            if replaying:
+                state.replay_next = False
             meta["outcome"] = "quiet"
             meta["watermark"] = cursor
             meta["advanced"] = False
             state.cursor = cursor
             return
         await self._writer.append(f"telemetry/{spec.name}", payload, span=self._span())
+        if replaying:
+            meta["replay"] = True
+            state.replay_next = False
         meta["outcome"] = "ok"
         meta["watermark"] = cursor
         meta["advanced"] = cursor != state.cursor
