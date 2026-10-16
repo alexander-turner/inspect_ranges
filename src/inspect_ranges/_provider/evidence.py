@@ -47,19 +47,31 @@ STORE_BINDING_KEY = "inspect_ranges:evidence"
 """The Inspect sample-store key carrying the binding."""
 
 
+def _mb_env_bytes(var: str, default_bytes: int) -> int:
+    """One megabyte-valued knob, parsed and scaled; errors always name the variable.
+
+    Raises:
+        ValueError: The variable is set but not a positive integer.
+    """
+    raw = os.environ.get(var)
+    if raw is None:
+        return default_bytes
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{var} must be an integer, got {raw!r}") from None
+    if value < 1:
+        raise ValueError(f"{var} must be >= 1, got {raw!r}")
+    return value * 1024 * 1024
+
+
 def evidence_buffer_bytes() -> int:
     """`INSPECT_RANGES_EVIDENCE_BUFFER_MB` in bytes (default `DEFAULT_BUFFER_CAP_BYTES`).
 
     Raises:
         ValueError: The variable is set but not a positive integer.
     """
-    raw = os.environ.get(EVIDENCE_BUFFER_MB_VAR)
-    if raw is None:
-        return DEFAULT_BUFFER_CAP_BYTES
-    value = int(raw)
-    if value < 1:
-        raise ValueError(f"{EVIDENCE_BUFFER_MB_VAR} must be >= 1, got {raw!r}")
-    return value * 1024 * 1024
+    return _mb_env_bytes(EVIDENCE_BUFFER_MB_VAR, DEFAULT_BUFFER_CAP_BYTES)
 
 
 def evidence_max_bytes() -> int:
@@ -68,13 +80,7 @@ def evidence_max_bytes() -> int:
     Raises:
         ValueError: The variable is set but not a positive integer.
     """
-    raw = os.environ.get(EVIDENCE_MAX_MB_VAR)
-    if raw is None:
-        return DEFAULT_EVIDENCE_MAX_MB * 1024 * 1024
-    value = int(raw)
-    if value < 1:
-        raise ValueError(f"{EVIDENCE_MAX_MB_VAR} must be >= 1, got {raw!r}")
-    return value * 1024 * 1024
+    return _mb_env_bytes(EVIDENCE_MAX_MB_VAR, DEFAULT_EVIDENCE_MAX_MB * 1024 * 1024)
 
 
 class EvidenceSession:
