@@ -789,7 +789,7 @@ def test_slow_capture_stop_still_lands_the_shutdown_gaps_and_checkpoint(
 
 
 def test_applier_shutdown_leaves_evidence_unsealed_with_gaps(tmp_path: Path) -> None:
-    """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for the reaper's honest reap-seal."""
+    """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for an honest reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry)."""
     from inspect_ranges._evidence.reader import LocalDirStore, verify_location
 
     async def scenario() -> None:

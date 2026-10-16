@@ -27,6 +27,7 @@ from .._evidence.location import (
 from .._evidence.manifest import Seal, SealStatus, clock_now, seal_digest, seal_key
 from .._evidence.reader import EvidenceStore
 from .._evidence.s3 import sink_for_location, store_for_location
+from .._evidence.sealer import seal_abandoned
 from .._evidence.sink import DEFAULT_BUFFER_CAP_BYTES, EvidenceWriter
 
 logger = logging.getLogger("inspect_ranges.provider")
@@ -106,6 +107,7 @@ class EvidenceSession:
         self._driver: EvidenceWriter | None = None
         self._host: EvidenceWriter | None = None
         self._streamer: CaptureStreamer | None = None
+        self._lease_id: str | None = None
         self._seals: dict[str, str] = {}
         self._chain_heads: dict[str, dict[str, str]] = {}
         self._finalized = False
@@ -136,6 +138,7 @@ class EvidenceSession:
         if self._disabled or self._driver is not None:
             return
         try:
+            self._lease_id = lease_id
             sink = sink_for_location(self.location)
             self._driver = EvidenceWriter(
                 sink,
@@ -315,13 +318,25 @@ class EvidenceSession:
             logger.exception("evidence finalize failed: location=%s", self.location)
 
     async def read_host_seal(self) -> None:
-        """Best-effort post-teardown read of the applier-side `host` seal for the binding (separated topology); bounded, never raises."""
+        """Best-effort post-teardown read of the applier-side `host` seal for the binding (separated topology); bounded, never raises.
+
+        A missing seal means the applier never sealed (it restarted mid-sample and lost its writer map, or its seal failed). This driver sits at exactly the reaper's ordering point, after teardown and before the lease release that deletes the reaper's only pointer, so the miss path reap-seals HERE (`seal_abandoned`, which skips sealed writers, under the seal reserve) and reads the `reaped` seal back for the binding; left to the reaper, the record would stay unsealed forever (quality-review round 2).
+        """
         if "host" in self._seals or self._disabled:
             return
         try:
-            async with asyncio.timeout(HOST_SEAL_READ_BUDGET_S):
-                store: EvidenceStore = store_for_location(self.location)
-                raw = await store.get(seal_key("host"))
+            store: EvidenceStore = store_for_location(self.location)
+            try:
+                async with asyncio.timeout(HOST_SEAL_READ_BUDGET_S):
+                    raw = await store.get(seal_key("host"))
+            except FileNotFoundError:
+                async with asyncio.timeout(SEAL_RESERVE_S):
+                    await seal_abandoned(
+                        self.location,
+                        lease_id=self._lease_id,
+                        sample_id=self.sample_id,
+                    )
+                    raw = await store.get(seal_key("host"))
             seal = Seal.model_validate_json(raw)
             self._seals["host"] = seal_digest(seal)
             self._chain_heads["host"] = {
@@ -329,9 +344,9 @@ class EvidenceSession:
             }
         except FileNotFoundError:
             logger.warning(
-                "no host seal at %s after teardown (the applier's seal failed "
-                "or evidence was off host-side); binding carries the driver "
-                "seal only",
+                "no host seal at %s after teardown and nothing to reap-seal "
+                "(evidence was off host-side, or the record cannot be "
+                "replayed); binding carries the driver seal only",
                 self.location,
             )
         except Exception as error:

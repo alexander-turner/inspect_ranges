@@ -6,7 +6,7 @@ Realize per the record: resolve the lease's bundle path, verify the requested di
 
 Guest endpoints relay as pure byte pumps (never parsed) through the injectable guest connector (`VsockTransport` dial in production), inheriting its pacing and backoff; guest names are lease-scoped, so concurrent samples with identical names cannot cross.
 
-Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery.
+Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery. The lost evidence writer map leaves the host record unsealed; a surviving driver reap-seals it on its host-seal miss path at teardown (before it releases the lease), and the reaper or `cli_cleanup` reap-seal when the driver is dead.
 """
 
 import asyncio
@@ -154,7 +154,7 @@ class Applier:
         self._evidence: dict[
             str, tuple[CaptureStreamer, EvidenceWriter, list[str]]
         ] = {}
-        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; the reaper reap-seals)."""
+        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; a surviving driver reap-seals on its host-seal miss at teardown, the reaper after lease expiry)."""
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -669,7 +669,7 @@ class Applier:
     async def _stop_evidence(self, lease_id: str, *, seal: bool = True) -> None:
         """Harvest one lease's capture before its containers die; bounded and never raises (a wedged tap must not stall the teardown reply).
 
-        With `seal` (the teardown path) the record closes `complete`. Without it (applier shutdown mid-sample) the record gets an explicit `applier-shutdown` gap per segment and stays UNSEALED for the reaper: sealing a cutoff `complete` would be the dishonesty the format exists to prevent.
+        With `seal` (the teardown path) the record closes `complete`. Without it (applier shutdown mid-sample) the record gets an explicit `applier-shutdown` gap per segment and stays UNSEALED for a reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry): sealing a cutoff `complete` would be the dishonesty the format exists to prevent.
         """
         entry = self._evidence.pop(lease_id, None)
         if entry is None:
@@ -700,8 +700,9 @@ class Applier:
                     await writer.checkpoint()
                     logger.warning(
                         "evidence capture for lease=%s left UNSEALED at applier "
-                        "shutdown (explicit applier-shutdown gaps recorded; the "
-                        "reaper reap-seals after lease expiry)",
+                        "shutdown (explicit applier-shutdown gaps recorded; a "
+                        "surviving driver reap-seals at teardown, the reaper "
+                        "after lease expiry)",
                         lease_id,
                     )
                     return
