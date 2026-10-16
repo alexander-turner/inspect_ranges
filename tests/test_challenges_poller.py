@@ -180,6 +180,22 @@ class TestStartKnob:
 
         asyncio.run(scenario())
 
+    def test_malformed_cadence_falls_back_to_the_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """B20: a typo'd knob must not silently cost every mid-run latch (only explicit 0 disables)."""
+
+        async def scenario() -> None:
+            for raw in ("fast", "-5", "nan"):
+                monkeypatch.setenv(POLL_S_ENV, raw)
+                oracle, _, _ = make_oracle(tmp_path)
+                store = Store()
+                poller = start_goal_poller(oracle, flag_challenge(), store)
+                assert poller is not None, raw
+                await stop_goal_poller(store)
+
+        asyncio.run(scenario())
+
     def test_start_registers_and_stop_unregisters(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
