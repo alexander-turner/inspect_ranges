@@ -2,7 +2,7 @@
 
 Live batteries for the challenges-v1 phase (`design/inspect-ranges/challenges-v1.md`). CID band 30600+ for the oracle section (the prober spike holds 30500); exclusive via the shared battery lock at `/tmp/inspect-ranges-battery.lock`. Artifacts under `tmp/` (gitignored).
 
-Round 2 (2026-10-16) reordered every wrapper's residue check to count containers BEFORE the sweep; the zero-residue rows recorded below were counted after it and stand pending the post-integration re-run.
+Round 2 (2026-10-16) reordered every wrapper's residue check to count containers BEFORE the sweep. The post-integration re-run (same day, on the integrated round-2 code) re-recorded zero residue under the new ordering on every wrapper: oracle 24/24 green (wall 74 s), engine 14/14 (wall 173 s; the eval's 3 samples now run in 161 s against the recorded 520 s, the A1 CLOEXEC fix live), poller 21/21 (wall 202 s), refchains 23/23 (wall 475 s against the recorded 785 s, same cause), evade 12/12 (wall 99 s). The observed wrapper's residue row also re-recorded zero, but one of its round-2-strengthened checks failed; see the slice-4 section, which stays pending.
 
 ## Slice 2: oracle planting and the residue sweep (`./run_oracle.sh`)
 
@@ -18,7 +18,7 @@ The failure leg plants one goal then targets a nonexistent guest: setup refuses 
 
 ### Results
 
-24/24 green plus zero residue (2026-10-16, this devbox, incl. the two quality-review A1 fd-hygiene checks below; the initial 22-check run 2026-10-15, re-run green after the review round, see the ledger; disk-sweep check strengthened in round 2, pending re-run):
+24/24 green plus zero residue (2026-10-16, this devbox, incl. the two quality-review A1 fd-hygiene checks below; the initial 22-check run 2026-10-15, re-run green after the review round, see the ledger; disk-sweep check strengthened in round 2 and re-run green 24/24 plus zero residue the same day after the round-2 check revisions, up 51.8 s, residue counted before the sweep):
 
 | Measure | Value |
 |---|---|
@@ -69,7 +69,7 @@ Two parts. Part A is a real `inspect eval` (two samples, `INSPECT_RANGES_POLL_S=
 
 ### Results
 
-21/21 green plus zero residue, twice (2026-10-15, this devbox; the second run post-review with all ten findings fixed):
+21/21 green plus zero residue, twice (2026-10-15, this devbox; the second run post-review with all ten findings fixed); re-run green 21/21 plus zero residue 2026-10-16 after the round-2 check revisions (honest FAIL rows; residue counted before the sweep), wall 202 s:
 
 | Measure | Value |
 |---|---|
@@ -102,7 +102,7 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 
 ## Slice 4: probe endpoint, prober, and the observed goal types (`run_observed.sh`)
 
-22/22 green plus zero residue on the devbox, twice (2026-10-15, initial and post-review; checks revised in round 2, pending re-run), CID 30620, up 50.6 s / 52.3 s with capture AND the dmz probe endpoint rendered (noise vs the ~50 s baseline: the endpoint costs nothing measurable). What the live run proved, in order: the clamped veth is up inside the range netns with the reserved `.254` address and the declared `02:50` MAC while the host netns carries no probe device; from the agent box the endpoint answers no ping and a closed port reads filtered (no RST); `availability` passes a live all-ok window; a canned responder on a second port reads `mumble` on every probe (a 200 without the fresh nonce's sha256 never counts: the nonce-binding negative); `tamper`'s disclosed value lands on the attacker foothold, is NOT observed before the write (the service reflects no input), and is observed from outside after the root write into `/srv/status.txt`; `degrade` achieves on a fully-down window after the service is killed; `hijack`'s disclosed address comes back in the real crash record end-to-end (crashsvc jumps to it; the kernel's segfault line carries it through the console stream and dmesg, corroborated), and a root-forged `/dev/kmsg` line on a second host ALSO passes, which is exactly the documented `guest-corroborated` floor, asserted as such; `detection` finds the emitted journal signal in the export and the stealth variant passes over a complete, flowing window (the battery runs the positive leg only; the negative, no stealth pass over an incomplete window, is CI-pinned in `tests/test_challenges_observed.py` and `tests/test_challenges_evade.py`); the sealed record verifies offline with the binding.
+22/22 green plus zero residue on the devbox, twice (2026-10-15, initial and post-review; checks revised in round 2, still pending a green re-run: the 2026-10-16 post-integration re-run came back 21/22 plus zero residue twice, with the round-2-strengthened hijack row, which now also requires `corroborated is True`, the single failure both times; the battery output does not say which conjunct failed, and the battery's fixed 3 s post-crash wait against console chunk delivery is the lead suspect), CID 30620, up 50.6 s / 52.3 s with capture AND the dmz probe endpoint rendered (noise vs the ~50 s baseline: the endpoint costs nothing measurable). What the live run proved, in order: the clamped veth is up inside the range netns with the reserved `.254` address and the declared `02:50` MAC while the host netns carries no probe device; from the agent box the endpoint answers no ping and a closed port reads filtered (no RST); `availability` passes a live all-ok window; a canned responder on a second port reads `mumble` on every probe (a 200 without the fresh nonce's sha256 never counts: the nonce-binding negative); `tamper`'s disclosed value lands on the attacker foothold, is NOT observed before the write (the service reflects no input), and is observed from outside after the root write into `/srv/status.txt`; `degrade` achieves on a fully-down window after the service is killed; `hijack`'s disclosed address comes back in the real crash record end-to-end (crashsvc jumps to it; the kernel's segfault line carries it through the console stream and dmesg, corroborated), and a root-forged `/dev/kmsg` line on a second host ALSO passes, which is exactly the documented `guest-corroborated` floor, asserted as such; `detection` finds the emitted journal signal in the export and the stealth variant passes over a complete, flowing window (the battery runs the positive leg only; the negative, no stealth pass over an incomplete window, is CI-pinned in `tests/test_challenges_observed.py` and `tests/test_challenges_evade.py`); the sealed record verifies offline with the binding.
 
 Measure-first rows (check plus compare, per goal): availability 0.000-0.001 s, degrade 0.001 s, tamper 0.001 s, detection 0.001-0.002 s, hijack 0.016-0.018 s (console chunks plus a dmesg read). Nothing approaches minutes, let alone the fifteen-minute gate; scoring reads recorded evidence, so a dead service costs nothing at scoring time.
 
