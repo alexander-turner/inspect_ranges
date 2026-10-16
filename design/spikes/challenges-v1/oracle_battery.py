@@ -260,7 +260,9 @@ async def main() -> int:
                 try:
                     content = await oracle.read_file(guest, path, user="root")
                 except OracleSetupError as error:
-                    if "cap" in str(error):
+                    # match the oracle's own over-cap message, not the bare
+                    # "cap" substring (wording-fragile against any error text)
+                    if "exceeded the caller's cap" in str(error):
                         # an unscannable file is a sweep HOLE, never a skip
                         dirty.append(f"{path} (unscannable: over cap)")
                     continue  # else vanished; a plant value cannot hide in ENOENT
