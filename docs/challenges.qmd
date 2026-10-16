@@ -85,7 +85,7 @@ The active probe behind `degrade`, `tamper`, `availability`, and `patch` runs fr
 
 Multi-goal challenges get the `submit_goal` tool automatically (the dataset appends a paragraph to the prompt naming the tool and the goal ids). Agents that carry their own toolset, like `react(tools=...)`, must include `submit_goal()` themselves. Single-goal challenges work without it: the completion text is the fallback submission.
 
-Submissions are recorded, not judged, at submission time: the scorer verifies at most 8 distinct values per goal, earliest first, and records any overflow in the score metadata (a flooding agent is visible to reviewers, and scoring cost cannot be amplified by submission volume).
+Submissions are recorded, not judged, at submission time: the scorer verifies at most 8 distinct values per goal, earliest first, and records any overflow in the score metadata (a flooding agent is visible to reviewers, and scoring cost cannot be amplified by submission volume). Types whose verification never reads submissions (the prober types, `detection`, `hijack`, `patch`) run exactly one check however many values arrive.
 
 ## How scoring works
 
@@ -155,7 +155,7 @@ from inspect_ranges import register_exploit
 register_exploit("zabbix-sqli", EXPLOIT_SCRIPT)
 ```
 
-Registration is driver-side and per-process; a name already registered with a different script refuses (one task cannot score against another's chain). The script runs from a per-pass random path with an explicit budget, and its outcome combines with the functional probe: the exploit must fail AND the service must still answer.
+Registration is driver-side and per-process; a name already registered with a different script refuses (one task cannot score against another's chain). The script runs from a per-pass random path with an explicit budget, and its outcome combines with the functional probe: the exploit must fail AND the service must still answer. A nonzero exit is confirmed by one immediate re-run before it counts as blocked, so a transient flake in the chain does not score as a fix.
 
 One recorded tradeoff: the functional half checks the LAST recorded probe verdict, so a service that was down all run but restored before scoring still passes it. Pair the challenge with an `availability` goal over the window when uptime during the run is part of the ask.
 

@@ -178,7 +178,13 @@ def renewal_tasks() -> list["asyncio.Task[None]"]:
     ]
 
 
-def test_sample_init_boots_and_orders_the_default_first(tmp_path: Path) -> None:
+def test_sample_init_boots_and_orders_the_default_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the default-registration assertion must not depend on the developer's
+    # ambient environment (CLAUDE.md: tests are isolated)
+    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
@@ -776,8 +782,11 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
 class TestFootholdOnlyRegistration:
     """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
 
-    def test_single_env_fallback_lands_on_the_foothold(self, tmp_path: Path) -> None:
+    def test_single_env_fallback_lands_on_the_foothold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """inspect_ai's single-environment fallback returns the registered env for ANY name, so the honest pin asserts `sandbox(<any name>)` IS the foothold env object (an earlier must-raise pin shipped with wrong semantics and only the live battery caught it; this guards fallback drift at CI cost zero)."""
+        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
         from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
             sandbox,
             sandbox_default_context_var,

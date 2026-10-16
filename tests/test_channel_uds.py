@@ -206,8 +206,11 @@ def test_remote_seams_install_at_runtime_construction(
     assert runtime.channel_factory.__module__ == "inspect_ranges._host.remote"
 
 
-def test_provider_lifecycle_over_the_uds_backend(tmp_path: Path) -> None:
+def test_provider_lifecycle_over_the_uds_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`INSPECT_RANGES_HOST=uds:` end to end on CI: sample_init realizes through the applier, ops relay to guests, teardown goes through `channel.teardown`, and every lease is released."""
+    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
     from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
     from inspect_ranges._provider.provider import (
         LibvirtRangeSandboxEnvironment as Env,

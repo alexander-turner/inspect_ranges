@@ -910,6 +910,11 @@ class RangeSpec(_StrictModel):
     variables: dict[str, Variable] = {}
     """Per-instance randomized values, referenced as `{{name}}` in YAML scalars (defaults substitute at load)."""
 
+    @property
+    def foothold_guest(self) -> str:
+        """The agent's foothold guest name: the declared `attacker.host`, else the attack box itself. The one place the foothold-resolution rule lives; every consumer (registration, egress, disclosure, the patch re-run) reads it here."""
+        return self.attacker.host or self.attacker.name
+
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":
         errors = [issue for issue in semantic_issues(self) if issue.severity == "error"]
