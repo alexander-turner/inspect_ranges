@@ -300,10 +300,12 @@ class CaptureStreamer:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="evidence-capture")
 
-    async def stop(self, *, stop_timeout_s: float = 15.0) -> None:
+    async def stop(
+        self, *, stop_timeout_s: float = 15.0, harvest_timeout_s: float = 10.0
+    ) -> None:
         """Stop the sidecar, harvest everything still on the volume, and end the loop.
 
-        Returns with the writer flushed as far as the sink allowed; the caller seals. A sidecar that cannot be reached leaves `capture-unreachable` gaps on its segments rather than an error.
+        Returns with the writer flushed as far as the sink allowed; the caller seals. A sidecar that cannot be reached leaves `capture-unreachable` gaps on its segments rather than an error, and the final harvest is itself bounded (`harvest_timeout_s`): a wedged tap at teardown leaves `harvest-timeout` gaps instead of holding the caller's finalize budget hostage (quality-review A6).
         """
         self._stopping.set()
         if self._task is not None:
@@ -323,7 +325,20 @@ class CaptureStreamer:
                             f"pcap/{segment}", cause="capture-unreachable"
                         ),
                     )
-        await self._cycle(final=True, sidecar_stopped=stopped)
+        try:
+            async with asyncio.timeout(harvest_timeout_s):
+                await self._cycle(final=True, sidecar_stopped=stopped)
+        except TimeoutError:
+            logger.warning(
+                "capture final harvest exceeded its %.0fs bound: whatever was "
+                "not shipped is recorded as harvest-timeout gaps",
+                harvest_timeout_s,
+            )
+            for segment in self._segments:
+                await self._guard(
+                    "harvest-gap",
+                    self._writer.gap(f"pcap/{segment}", cause="harvest-timeout"),
+                )
         await self._guard("flush", self._writer.flush())
 
     async def poll_once(self) -> None:

@@ -210,6 +210,77 @@ def test_finalize_with_failing_sink_never_raises(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_wedged_producer_stop_cannot_starve_the_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The finalize phases (quality-review A6): a producer stop that outlives its share still yields a SEALED record (status incomplete), a binding carrying the seal digest, and a verifiable driver writer (adopted from the U7 probe, which demonstrated a permanently unsealed record with an empty binding)."""
+    import inspect_ranges._provider.evidence as evidence_mod
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            project="ir-probe",
+            bundle=tmp_path / "bundle",
+            plan=plan,
+        )
+        await session.append_driver("session", b'{"event": "pinned"}\n')
+
+        async def wedged_stop() -> None:
+            await asyncio.sleep(5.0)
+
+        session.register_producer(wedged_stop)
+        monkeypatch.setattr(evidence_mod, "FINALIZE_BUDGET_S", 0.6)
+        monkeypatch.setattr(evidence_mod, "SEAL_RESERVE_S", 0.4)
+        await session.finalize()
+        await session.finalize()  # idempotent, still no retry
+        seals = cast(dict[str, str], session.binding()["seals"])
+        assert set(seals) == {"driver"}, "the seal phase always gets its share"
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"driver": seals["driver"]}
+        )
+        driver = report.writers["driver"]
+        assert report.ok and driver.sealed and driver.binding_checked
+        assert driver.seal_status == "incomplete", (
+            "a stop timeout loses producer tails; the seal says so"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_hanging_sink_bounds_the_seal_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sink whose puts hang forever: finalize returns within its phase budgets with the record unsealed (the one remaining unsealed case, honestly logged), never raising and never holding teardown (quality-review A6 and coverage proposal T6)."""
+    import time as time_mod
+
+    import inspect_ranges._provider.evidence as evidence_mod
+
+    class HangingSink:
+        async def put(self, key: str, data: bytes) -> None:
+            await asyncio.Event().wait()  # never set
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(lease_id=None, project="p", bundle=tmp_path, plan=plan)
+        await session.record_session_pins({"web": "s"})
+        # the sink hangs from HERE: only finalize's phase budgets bound it
+        writer = session._driver  # pyright: ignore[reportPrivateUsage]
+        assert writer is not None
+        writer._sink = HangingSink()  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.setattr(evidence_mod, "FINALIZE_BUDGET_S", 0.6)
+        monkeypatch.setattr(evidence_mod, "SEAL_RESERVE_S", 0.3)
+        started = time_mod.monotonic()
+        await session.finalize()
+        assert time_mod.monotonic() - started < 5.0, "finalize stays bounded"
+        session.write_binding()
+        assert session.binding()["seals"] == {}
+
+    asyncio.run(scenario())
+
+
 def test_bad_knob_disables_evidence_not_the_sample(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
