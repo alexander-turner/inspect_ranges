@@ -311,11 +311,13 @@ def issues_from_validation_error(
         if len(raw_clean) == len(loc) + 1 and isinstance(raw_clean[-1], str):
             union_tags.setdefault(loc, []).append(str(raw_clean[-1]))
     collapsed = {loc: tags for loc, tags in union_tags.items() if len(tags) > 1}
+    if collapsed:
+        # field-level errors suppressed the root cross-reference pass
+        semantic_checked = False
     collapsed_emitted: set[tuple[PathElement, ...]] = set()
     for detail, loc in cleaned:
         carried = _carried_issues(detail)
         if carried is None and loc in collapsed:
-            semantic_checked = False
             if loc in collapsed_emitted:
                 continue
             collapsed_emitted.add(loc)

@@ -990,14 +990,19 @@ def _ipv6_gate(
     )
 
 
-_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-"""Legal guest and network names: these flow into Linux device names, filesystem paths, domain XML, and evidence stream keys, so the grammar is the safe intersection (lowercase letters, digits, `._-`, starting alphanumeric)."""
+_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+"""Legal guest and network names: these flow into Linux device names, filesystem paths, domain XML, and evidence stream keys, so the grammar is the safe intersection (lowercase letters, digits, `._-`, starting alphanumeric; `\\Z` so a trailing newline cannot ride through `$`). Underscores and dots are legal spec identifiers (recorded fixtures use them) even though RFC-1123 hostname labels exclude them: Linux accepts such hostnames, and DNS-grade conformance is the fqdn realization's concern when the images arc lands it."""
 
 _NAME_MAX = 63
 """Name length cap: generous for guests (hostname-label scale); network DEVICE uniqueness is checked separately because `br-`/`pr-`/`prb-` prefixed devices truncate at the kernel's 15-character limit."""
 
 _DEVICE_PREFIXES = ("br-", "pr-", "prb-")
-"""Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to 15 characters."""
+"""Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to the kernel's 15-character limit. The compiler derives through `derive_device`, so the collision check below and the realization can never drift."""
+
+
+def derive_device(prefix: str, network_name: str) -> str:
+    """The Linux device name for a network-derived interface, truncated to the kernel limit."""
+    return f"{prefix}{network_name}"[:15]
 
 
 def _name_issues(spec: "RangeSpec") -> list[Issue]:
@@ -1029,10 +1034,12 @@ def _name_issues(spec: "RangeSpec") -> list[Issue]:
             )
     devices: dict[str, str] = {}
     for index, network in enumerate(spec.networks):
+        reported: set[str] = set()
         for prefix in _DEVICE_PREFIXES:
-            device = f"{prefix}{network.name}"[:15]
+            device = derive_device(prefix, network.name)
             prior = devices.setdefault(device, network.name)
-            if prior != network.name:
+            if prior != network.name and prior not in reported:
+                reported.add(prior)
                 issues.append(
                     Issue(
                         code="device-name-collision",
@@ -1041,7 +1048,6 @@ def _name_issues(spec: "RangeSpec") -> list[Issue]:
                         hint="network names must differ within their first 11 characters",
                     )
                 )
-                break
     return issues
 
 

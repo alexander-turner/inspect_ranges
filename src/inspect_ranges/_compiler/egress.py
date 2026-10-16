@@ -9,14 +9,14 @@ Realization scope (networking-v0.2 §3): routerless `mode: nat`/`routed` network
 
 from ipaddress import IPv4Address
 
-from ..types import EgressPolicy, RangeSpec, parse_egress_entry
+from ..types import EgressPolicy, RangeSpec, derive_device, parse_egress_entry
 from .allocate import Allocation
 from .nftables import service_match  # shared entry→match rendering
 
 
 def bridge_name(network: str) -> str:
     """The range-netns bridge device for a network (shared convention with the realization glue)."""
-    return f"br-{network}"[:15]
+    return derive_device("br-", network)
 
 
 def render_egress_nftables(
