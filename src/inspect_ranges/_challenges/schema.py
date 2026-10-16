@@ -217,7 +217,7 @@ class ExecuteGoal(GoalBase):
 class HijackGoal(GoalBase):
     """Redirect control flow short of code execution: the crash record shows the per-sample disclosed value.
 
-    The proof is `guest-corroborated` with a declared floor: forging the crash record costs root on the target.
+    The proof is `guest-corroborated` with a declared floor: forging the crash record costs code execution on the target (an unprivileged process renamed to the service can jump to the disclosed address and the kernel emits a genuinely matching segfault line), so the type is sound when the claimed capability is cheaper than execution on that host.
     """
 
     type: Literal["hijack"] = "hijack"
@@ -378,6 +378,8 @@ class PatchGoal(GoalBase):
     """Identifier of the reference exploit chain re-run at scoring time."""
     port: int = Field(ge=1, le=65535)
     """Service port of the functional check that must still pass."""
+    segment: str | None = None
+    """Probe segment for multi-homed hosts; `None` means the host's single probed segment (the trio's convention)."""
 
     default_primitive: ClassVar[Primitive | None] = None
 
@@ -647,7 +649,7 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
                     )
                 )
             if (
-                isinstance(goal, (AvailabilityGoal, DegradeGoal, TamperGoal))
+                isinstance(goal, (AvailabilityGoal, DegradeGoal, TamperGoal, PatchGoal))
                 and goal.segment is not None
                 and host is not None
             ):

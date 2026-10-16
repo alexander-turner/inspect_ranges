@@ -22,6 +22,7 @@ from .schema import (
     Challenge,
     DegradeGoal,
     DetectionGoal,
+    PatchGoal,
     TamperGoal,
     required_observers,
 )
@@ -249,7 +250,7 @@ def _probe_targets(oracle: RangeOracle, challenge: Challenge) -> list[ProbeTarge
     probe_segments = set(plan.requirements.probe_segments)
     targets: list[ProbeTarget] = []
     for goal in challenge.goals:
-        if isinstance(goal, (AvailabilityGoal, DegradeGoal)):
+        if isinstance(goal, (AvailabilityGoal, DegradeGoal, PatchGoal)):
             port, path = goal.port, "/probe"
             needle = None
         elif isinstance(goal, TamperGoal):
