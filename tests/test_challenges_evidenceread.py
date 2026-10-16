@@ -12,7 +12,11 @@ from inspect_ranges._challenges.evidenceread import (
     stream_chunks_with_spans,
     stream_json_records,
 )
-from inspect_ranges._challenges.observedtypes import DetectionType, EvadeType
+from inspect_ranges._challenges.observedtypes import (
+    DetectionType,
+    EvadeType,
+    telemetry_observations_from,
+)
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import DetectionGoal, EvadeGoal, SeverityFilter
 from inspect_ranges._evidence.manifest import ClockSpan, ClockStamp
@@ -58,7 +62,7 @@ async def _write_tail_state(root: Path) -> None:
 
 
 async def _observations(root: Path) -> Observations:
-    """Exactly `RangeOracle._telemetry_export_fetch` + `_telemetry_observations`."""
+    """The production readers plus the production assembly (never a transcript of either)."""
     store = store_for_location(str(root))
     meta, meta_gapped = await stream_json_records(
         store, "driver", "telemetry-meta/siem"
@@ -66,22 +70,7 @@ async def _observations(root: Path) -> Observations:
     data, data_gapped = await stream_chunks_with_spans(
         store, "driver", "telemetry/siem"
     )
-    return Observations(
-        source="evidence",
-        reads={
-            "meta": json.dumps(
-                [entry.record | {"_wall": entry.wall()} for entry in meta]
-            ).encode(),
-            "gapped": b"1" if (meta_gapped or data_gapped) else b"0",
-            "data_spans": json.dumps(
-                [
-                    None if start is None or end is None else [start, end]
-                    for _, start, end in data
-                ]
-            ).encode(),
-        },
-        chunk_reads={"data": [chunk for chunk, _, _ in data]},
-    )
+    return telemetry_observations_from(meta, data, meta_gapped or data_gapped)
 
 
 def _severity() -> SeverityFilter:
