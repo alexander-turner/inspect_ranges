@@ -649,6 +649,17 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 	select {
 	case <-done:
 	case <-budget:
+		// a command that already EXITED within its budget is not timed out,
+		// even when a pipe-holding descendant is delaying cmd.Wait (bounded
+		// by WaitDelay): converting its honest rc into ETIME corrupts the
+		// durable stored result (quality-review finding B6). Peek without
+		// reaping; the Wait goroutine owns the reap. At the boundary a
+		// process exiting between the timer and the peek still reads as
+		// timed out, which is the pre-existing budget-edge semantics.
+		if processExited(cmd.Process.Pid) {
+			<-done
+			break
+		}
 		timedOut = true
 		// kill-grace: TERM the tree, then KILL after the grace window
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
@@ -694,6 +705,27 @@ func (d *Daemon) runCommand(request *Message, stdin []byte) *storedReply {
 		bulk = payload
 	}
 	return &storedReply{message: message, bulk: bulk}
+}
+
+// processExited reports whether the direct child has terminated, WITHOUT
+// reaping it (WNOWAIT leaves the zombie for the Wait goroutine, which owns
+// the reap). ECHILD means the Wait goroutine already reaped it, which also
+// proves exit: we started this pid, and nothing else waits on it. On a state
+// change waitid fills si_signo with SIGCHLD; x/sys exposes no portable
+// si_pid, so the zeroed-struct Signo check is the still-running signal.
+func processExited(pid int) bool {
+	var info unix.Siginfo
+	for {
+		err := unix.Waitid(unix.P_PID, pid, &info,
+			unix.WEXITED|unix.WNOWAIT|unix.WNOHANG, nil)
+		if err == unix.EINTR {
+			continue
+		}
+		if err == unix.ECHILD {
+			return true
+		}
+		return err == nil && info.Signo != 0
+	}
 }
 
 // runuserSignatureBound caps how much stderr runuserExecFailureRc inspects:

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func execMessage(id string, argv ...string) *Message {
@@ -309,5 +311,32 @@ func TestReadFileBoundedForHugeSources(t *testing.T) {
 	if *reply.message.Size != limit || !*reply.message.Truncated {
 		t.Fatalf("expected truncated read at %d, got size=%d truncated=%v",
 			limit, *reply.message.Size, *reply.message.Truncated)
+	}
+}
+
+// TestCompletedCommandWithPipeHoldingChildIsNotEtime pins quality-review
+// finding B6: a command that exits within its budget reports its honest rc
+// even when a background descendant holds the stdout pipe and delays
+// cmd.Wait past the budget (bounded by WaitDelay). Before the fix this
+// returned ETIME, durably storing a budget error for a completed command.
+func TestCompletedCommandWithPipeHoldingChildIsNotEtime(t *testing.T) {
+	daemon := NewDaemon()
+	message := execMessage(rid(6401), "sh", "-c", "sleep 2 & echo done")
+	budget := int64(900)
+	message.Budget = &Budget{CommandMs: &budget}
+	start := time.Now()
+	reply := daemon.dispatch(message, nil)
+	if reply.message.Kind != "exec_result" {
+		t.Fatalf("got %s/%v (%v): completed command misread as budget expiry",
+			reply.message.Kind, reply.message.Errno, reply.message.Message)
+	}
+	if reply.message.Rc == nil || *reply.message.Rc != 0 {
+		t.Fatalf("rc = %v, want 0", reply.message.Rc)
+	}
+	if !bytes.Contains(reply.bulk, []byte("done")) {
+		t.Fatalf("stdout should carry the completed output, got %q", reply.bulk)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("returned in %v, before the budget fired: the pin never exercised the peek", elapsed)
 	}
 }
