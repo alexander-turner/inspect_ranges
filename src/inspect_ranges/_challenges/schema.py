@@ -28,8 +28,32 @@ from .._diagnostics import (
     locate,
     parse_marked,
 )
+from .._evidence.manifest import WRITER_NAME_PATTERN
 from ..schema import validate_range
 from ..types import RangeSpec
+
+_GOAL_ID_PATTERN = WRITER_NAME_PATTERN
+"""Goal ids embed into evidence stream names (`probe/<goal id>`) as one key-safe segment, so they share the evidence single-segment grammar: drift here would resurrect the silent-indeterminate class (quality review A8)."""
+
+
+def parse_tamper_location(location: str) -> tuple[int, str]:
+    """Parse the v1 `tamper` location grammar: `PORT/PATH` observed over HTTP.
+
+    v1 interprets the protected location as an HTTP surface (e.g. `8080/status` probes `http://<host>:8080/status`); richer grammars arrive with demand. The function lives here, beside the schema that enforces it, so validation and the runtime prober parse one rule (quality review B15: a typo'd location used to validate green and die at producer start with a bare `ValueError`).
+
+    Raises:
+        ValueError: The location does not parse as `PORT/PATH` with a port in 1-65535.
+    """
+    port_text, _, path = location.partition("/")
+    if not port_text.isdigit():
+        raise ValueError(
+            f"tamper location must be PORT/PATH with a numeric port, got {location!r}"
+        )
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"tamper location port out of range: {location!r}")
+    return port, "/" + path
+
 
 __all__ = [
     "AnswerGoal",
@@ -108,6 +132,34 @@ class GoalBase(_StrictModel):
     def primitive_label(self) -> Primitive | None:
         """The effective capability label: the authored override, else the type default."""
         return self.primitive if self.primitive is not None else self.default_primitive
+
+    @model_validator(mode="after")
+    def _id_grammar(self) -> "GoalBase":
+        # Goal ids feed evidence stream names (`probe/<goal id>`), whose
+        # grammar is key-safe lowercase. An id outside it validated green,
+        # then every probe-record append failed inside the never-raise
+        # evidence layer and the goal scored indeterminate: an
+        # infrastructure-shaped misattribution of an authoring slip (quality
+        # review A8). The check lives ON THE MODEL so directly constructed
+        # goals validate too, not only Challenge-wrapped ones (review fix).
+        if re.fullmatch(_GOAL_ID_PATTERN, self.id) is None:
+            raise IssueError(
+                [
+                    Issue(
+                        code="goal-id-grammar",
+                        path=("id",),
+                        message=(
+                            f"goal id {self.id!r} must be lowercase key-safe "
+                            "(letters, digits, '.', '_', '-', starting with a "
+                            "letter or digit): ids name evidence streams"
+                        ),
+                        hint=f"try {self.id.lower()!r}"
+                        if re.fullmatch(_GOAL_ID_PATTERN, self.id.lower())
+                        else None,
+                    )
+                ]
+            )
+        return self
 
     def observers(self) -> frozenset[ObserverKind]:
         """The trusted observers this goal requires; every goal's plant record needs the sink."""
@@ -315,6 +367,24 @@ class TamperGoal(GoalBase):
     """How the written value is observed from outside."""
 
     default_primitive: ClassVar[Primitive | None] = "write"
+
+    @model_validator(mode="after")
+    def _location_grammar(self) -> "TamperGoal":
+        if self.observer == "active-prober":
+            try:
+                parse_tamper_location(self.location)
+            except ValueError as error:
+                raise IssueError(
+                    [
+                        Issue(
+                            code="tamper-location-grammar",
+                            path=("location",),
+                            message=str(error),
+                            hint="the v1 grammar is PORT/PATH observed over HTTP, e.g. 8080/status",
+                        )
+                    ]
+                ) from error
+        return self
 
     def observers(self) -> frozenset[ObserverKind]:
         return super().observers() | _observers(self.observer)

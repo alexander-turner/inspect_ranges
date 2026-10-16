@@ -76,6 +76,7 @@ class FakeDocker:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "subprocess.CompletedProcess[str]":
         self.calls.append(argv)
         self.last_env = env
@@ -228,6 +229,18 @@ def test_up_happy_path_env_and_stages(
         "range-container",
     ]
     assert stages[-1] == "ready"
+    # up() is internally bounded (quality-review B21): compose up carries a
+    # --wait-timeout aligned to the readiness envelope
+    up_argv = next(call for call in docker.calls if "up" in call and "--wait" in call)
+    assert "--wait-timeout" in up_argv
+    assert up_argv[up_argv.index("--wait-timeout") + 1] == "1"
+
+
+def test_run_command_timeout_surfaces_as_rc_124() -> None:
+    """A wedged subprocess returns rc 124 with the timeout named, feeding the normal stage-named failure path instead of hanging up() (quality-review B21)."""
+    result = up_module().run_command(["sleep", "5"], timeout=0.2)
+    assert result.returncode == 124
+    assert "timed out after" in result.stderr
 
 
 def test_up_refuses_duplicate_project_naming_down_command(
@@ -319,6 +332,7 @@ def test_down_all_sweeps_ir_only(tmp_path: Path) -> None:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "subprocess.CompletedProcess[str]":
         docker.calls.append(argv)
         if argv[:3] == ["docker", "ps", "-a"] and "--format" in argv:
@@ -434,6 +448,7 @@ def test_down_all_continues_past_a_failing_project(tmp_path: Path) -> None:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "sp.CompletedProcess[str]":
         calls.append(argv)
         joined = " ".join(argv)

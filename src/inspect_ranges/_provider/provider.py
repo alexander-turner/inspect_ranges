@@ -1,8 +1,6 @@
 """`LibvirtRangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
 
-Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), the FOOTHOLD alone registered as the sample's sandbox by default (the agent/target wall from challenges-overview.qmd: targets are reachable only through the range network and the scoring oracle; `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out that registers every guest, attacker first), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages.
-
-The op surface (`exec`, `read_file`, `write_file`) lands in slice 3 of the phase; until then the methods raise `NotImplementedError`.
+Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), the FOOTHOLD alone registered as the sample's sandbox by default (the agent/target wall from challenges-overview.qmd: targets are reachable only through the range network and the scoring oracle; `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out that registers every guest, attacker first), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages. The op surface (`exec`, `read_file`, `write_file`) rides the raw channel through `_provider/ops.py` with the layered retry and session-confirmation contract documented there.
 """
 
 import asyncio
@@ -25,6 +23,7 @@ from typing_extensions import override
 
 from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
+from .._evidence.sealer import seal_abandoned
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
 from .._metadata import (
@@ -599,15 +598,35 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # LEAVE the lease, so the independent reaper reclaims the
                     # range after the lease expires
                     await runtime.host_provider.abandon(handle.host)
-                logger.warning(
-                    "range %s left up (--no-sandbox-cleanup); its host lease is "
-                    "no longer renewed, so 'inspect-ranges reaper' reclaims it "
-                    "after expiry; remove it sooner with: inspect-ranges down %s  "
-                    "(or: inspect sandbox cleanup libvirt_range %s)",
-                    handle.project,
-                    handle.project,
-                    handle.project,
-                )
+                if runtime.host_backend.startswith("uds:"):
+                    # a direct `inspect-ranges down` bypasses the applier and
+                    # leaks its admission charge and relay map (the recorded
+                    # direct-down hazard); the recovery advice must not
+                    # recommend it on this topology (quality-review B18)
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host lease "
+                        "is no longer renewed, so 'inspect-ranges reaper' "
+                        "reclaims it through the applier after expiry; remove "
+                        "it sooner with: INSPECT_RANGES_HOST=%s "
+                        "inspect sandbox cleanup libvirt_range %s  (the env "
+                        "prefix is what routes the teardown THROUGH the "
+                        "applier; without it the cleanup is a direct down and "
+                        "leaks the applier's admission charge)",
+                        handle.project,
+                        runtime.host_backend,
+                        handle.project,
+                    )
+                else:
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host "
+                        "lease is no longer renewed, so 'inspect-ranges "
+                        "reaper' reclaims it after expiry; remove it sooner "
+                        "with: inspect-ranges down %s  (or: inspect sandbox "
+                        "cleanup libvirt_range %s)",
+                        handle.project,
+                        handle.project,
+                        handle.project,
+                    )
             return
         failures: list[str] = []
         for handle in remaining:
@@ -651,6 +670,27 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             await asyncio.to_thread(runtime.allocator.release, project)
             for lease in host_leases:
                 if lease.project == project:
+                    if lease.evidence_location is not None:
+                        # the reaper's rule applies here too: after teardown,
+                        # before release, a record the dead driver never sealed
+                        # gets its reaped seal; releasing the lease first would
+                        # delete the only pointer to it (quality-review A7).
+                        # Best-effort like the reaper: evidence trouble never
+                        # blocks reclamation.
+                        try:
+                            await seal_abandoned(
+                                lease.evidence_location,
+                                lease_id=lease.lease_id,
+                                sample_id=lease.sample_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "cli_cleanup reap-seal failed for %s at %s "
+                                "(record stays unsealed, reported as such by "
+                                "verify)",
+                                project,
+                                lease.evidence_location,
+                            )
                     await asyncio.to_thread(lease_store.release, lease.lease_id)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)

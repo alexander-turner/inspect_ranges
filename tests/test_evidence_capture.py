@@ -260,6 +260,67 @@ def test_streamer_records_wall_jump(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_stop_bounds_a_wedged_final_harvest(tmp_path: Path) -> None:
+    """A tap that wedges at the final harvest: stop() returns within its harvest bound with explicit harvest-timeout gaps instead of holding the caller's finalize budget hostage (quality-review A6)."""
+    import threading
+    import time as time_mod
+
+    release = threading.Event()  # interruptible: set in finally so the
+    # executor worker exits promptly and asyncio.run's shutdown never waits
+
+    class WedgedHarvestTap:
+        def __init__(self, backing: LocalTap) -> None:
+            self._backing = backing
+
+        def read_status(self) -> bytes:
+            return self._backing.read_status()
+
+        def list_segment_files(self, segment: str) -> list[str]:
+            release.wait(30.0)  # the wedged docker compose cp shape
+            return []
+
+        def read_file(self, relpath: str) -> bytes:
+            return self._backing.read_file(relpath)
+
+        def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+            return self._backing.read_tail(relpath, offset)
+
+        def claim_file(self, relpath: str) -> None:
+            self._backing.claim_file(relpath)
+
+        def remove_file(self, relpath: str) -> None:
+            self._backing.remove_file(relpath)
+
+        def request_stop(self) -> None:
+            self._backing.request_stop()
+
+        def read_console(self, guest: str, offset: int) -> tuple[int, bytes]:
+            return self._backing.read_console(guest, offset)
+
+    async def scenario() -> None:
+        location, capture, writer, backing = harness(tmp_path)
+        # a stopped sidecar with a trustworthy status: the harvest proceeds to
+        # the (wedged) listing instead of being skipped by the ship bound
+        write_status(
+            capture, {"dmz": {"active": None, "state": "stopped"}}, stopped=True
+        )
+        streamer = CaptureStreamer(
+            writer, WedgedHarvestTap(backing), segments=["dmz"], console_guests=[]
+        )
+        try:
+            started = time_mod.monotonic()
+            await streamer.stop(stop_timeout_s=0.5, harvest_timeout_s=0.3)
+            assert time_mod.monotonic() - started < 10.0, "stop stays bounded"
+            await writer.seal("incomplete")
+            report = await verify_location(LocalDirStore(location))
+            causes = {gap.cause for gap in report.writers["host"].gaps}
+            assert "harvest-timeout" in causes, f"gaps: {causes}"
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+
+
 def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
     class HostileTap:
         def read_status(self) -> bytes:
@@ -273,6 +334,9 @@ def test_streamer_survives_a_hostile_tap(tmp_path: Path) -> None:
 
         def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
             raise OSError("no tail")
+
+        def claim_file(self, relpath: str) -> None:
+            raise OSError("no claim")
 
         def remove_file(self, relpath: str) -> None:
             raise OSError("no removal")
@@ -326,6 +390,9 @@ def test_stop_never_raises_against_a_sealed_writer(tmp_path: Path) -> None:
             raise OSError("unreachable")
 
         def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
+            raise OSError("unreachable")
+
+        def claim_file(self, relpath: str) -> None:
             raise OSError("unreachable")
 
         def remove_file(self, relpath: str) -> None:
@@ -625,5 +692,141 @@ def test_supervisor_enforces_disk_cap(tmp_path: Path) -> None:
         assert final["segments"]["dmz"]["dropped_bytes"] == 1_800_000
         survivors = sorted(p.name for p in segment.glob("g0.pcap*"))
         assert survivors == ["g0.pcap3"]  # oldest deleted first
+    finally:
+        supervisor.finish()
+
+
+# -- B13: shipped bytes can never be reported as capture-cap loss ---------------
+
+
+def test_shipped_chunk_is_claimed_and_removal_retries_without_reship(
+    tmp_path: Path,
+) -> None:
+    """The streamer claims (renames) a completed chunk before shipping, so the sidecar's cap accounting can no longer see it; a failed removal retries next cycle without a second append."""
+
+    class RemoveOnceFailsTap(LocalTap):
+        def __init__(self, root: Path, console_dir: Path) -> None:
+            super().__init__(root, console_dir)
+            self.failures = 1
+
+        def remove_file(self, relpath: str) -> None:
+            if self.failures > 0:
+                self.failures -= 1
+                raise OSError("removal unavailable")
+            super().remove_file(relpath)
+
+    async def scenario() -> None:
+        location = tmp_path / "evidence"
+        capture = tmp_path / "capture"
+        consoles = tmp_path / "consoles"
+        capture.mkdir()
+        consoles.mkdir()
+        writer = EvidenceWriter(
+            LocalDirSink(location), part_interval_s=0, writer="host"
+        )
+        tap = RemoveOnceFailsTap(capture, consoles)
+        (capture / "dmz").mkdir()
+        (capture / "dmz" / "g0.pcap").write_bytes(b"completed-bytes")
+        (capture / "dmz" / "g0.pcap1").write_bytes(b"active")
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap1"}})
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+
+        await one_cycle(streamer)
+        # claimed out of the sidecar's PCAP_RE namespace, shipped, removal failed
+        assert not (capture / "dmz" / "g0.pcap").exists()
+        assert (capture / "dmz" / "g0.pcap.shipped").exists()
+
+        await one_cycle(streamer)  # removal retried; never re-appended
+        assert not (capture / "dmz" / "g0.pcap.shipped").exists()
+        await writer.seal()
+        report = await verify_location(LocalDirStore(location), location=str(location))
+        assert report.ok
+        stream = report.writers["host"].streams["pcap/dmz"]
+        assert stream.chunks == 1 and stream.gaps == 0
+
+    asyncio.run(scenario())
+
+
+def test_new_claims_pause_while_removals_fail(tmp_path: Path) -> None:
+    """Review finding on B13: cap-invisible claimed files stay bounded when removal fails persistently; the remainder stays unclaimed and cap-visible."""
+    from inspect_ranges._evidence.capture import CLAIMED_PENDING_LIMIT
+
+    class RemovalsDeadTap(LocalTap):
+        def remove_file(self, relpath: str) -> None:
+            raise OSError("removal dead")
+
+    async def scenario() -> None:
+        location = tmp_path / "evidence"
+        capture = tmp_path / "capture"
+        consoles = tmp_path / "consoles"
+        capture.mkdir()
+        consoles.mkdir()
+        writer = EvidenceWriter(
+            LocalDirSink(location), part_interval_s=0, writer="host"
+        )
+        tap = RemovalsDeadTap(capture, consoles)
+        (capture / "dmz").mkdir()
+        for index in range(CLAIMED_PENDING_LIMIT + 4):
+            (capture / "dmz" / f"g0.pcap{index if index else ''}").write_bytes(b"chunk")
+        (capture / "dmz" / "g0.pcap99").write_bytes(b"active")
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap99"}})
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)
+        await one_cycle(streamer)
+        claimed = list((capture / "dmz").glob("*.shipped"))
+        unclaimed = [
+            p
+            for p in (capture / "dmz").glob("g0.pcap*")
+            if not p.name.endswith(".shipped")
+        ]
+        assert len(claimed) == CLAIMED_PENDING_LIMIT
+        # the active file plus the 4 past-limit chunks stay cap-visible
+        assert len(unclaimed) == 5
+
+    asyncio.run(scenario())
+
+
+def test_claimed_file_from_a_dead_streamer_ships_without_a_status_claim(
+    tmp_path: Path,
+) -> None:
+    """A claim froze the file as completed, so crash recovery ships it even when the active file is unknown; unclaimed files still wait."""
+
+    async def scenario() -> None:
+        location, capture, writer, tap = harness(tmp_path)
+        (capture / "dmz").mkdir()
+        (capture / "dmz" / "g0.pcap.shipped").write_bytes(b"claimed-then-crashed")
+        (capture / "dmz" / "g0.pcap1").write_bytes(b"maybe-active")
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)  # no status.json at all
+        assert not (capture / "dmz" / "g0.pcap.shipped").exists()
+        assert (capture / "dmz" / "g0.pcap1").exists()
+        await writer.seal()
+        report = await verify_location(LocalDirStore(location), location=str(location))
+        assert report.ok
+        assert report.writers["host"].streams["pcap/dmz"].chunks == 1
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_cap_excludes_claimed_files(tmp_path: Path) -> None:
+    """B13's supervisor half: a claimed (`.shipped`) file is invisible to enforce_cap, so shipped bytes are never unlinked or counted as dropped."""
+    supervisor = Supervisor(tmp_path, env={"CAPTURE_CAP_MB": "1"})
+    segment = supervisor.capture / "dmz"
+    segment.mkdir()
+    claimed = segment / "g0.pcap.shipped"
+    claimed.write_bytes(b"x" * 600_000)
+    os.utime(claimed, (999.0, 999.0))  # oldest of all: first to go if visible
+    for index in range(1, 4):
+        path = segment / f"g0.pcap{index}"
+        path.write_bytes(b"x" * 600_000)
+        os.utime(path, (1000.0 + index, 1000.0 + index))
+    try:
+        supervisor.start()
+        final = supervisor.wait_for(
+            lambda s: s["segments"]["dmz"]["dropped_files"] >= 2
+        )
+        # 1.8 MB of UNCLAIMED chunks against a 1 MiB cap: two oldest unclaimed go
+        assert final["segments"]["dmz"]["dropped_bytes"] == 1_200_000
+        assert claimed.exists()
     finally:
         supervisor.finish()

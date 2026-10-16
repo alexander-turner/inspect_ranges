@@ -4,6 +4,8 @@ The sidecar is the evidence-capture answer from the evidence-capture spike: a se
 
 The program is a verbatim constant (`SUPERVISOR_SOURCE`), not a template: per-range facts arrive as data (`bridges.tsv`) and host tuning as environment, so the rendered artifact is identical across ranges and the bundle stays byte-deterministic. Rotated files are named per tcpdump generation (`g<restart>.pcap`, `g<restart>.pcap1`, ...) so a restarted capture never rewrites a path it already wrote: write-once discipline holds at the capture tier too.
 
+Chunk accounting deliberately excludes streamer-claimed files (B13): the host-side streamer renames a completed chunk to `<name>.shipped` before shipping it, which drops it out of `PCAP_RE` and therefore out of `enforce_cap`, so shipped bytes can never be unlinked here and reported as `capture-cap` loss. A claimed file is the streamer's to remove; its claim window is one streamer cycle, with removal retried on failure.
+
 On stop (the `stop` file, or SIGTERM at teardown) the supervisor terminates its captures, parses each tcpdump's exit summary for kernel-drop counts, writes a final `status.json` with `stopped: true`, and then idles so the container stays up for the streamer's final harvest; `docker compose down` ends it.
 """
 

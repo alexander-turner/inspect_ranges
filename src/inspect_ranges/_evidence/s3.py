@@ -191,6 +191,20 @@ def sink_for_location(location: str) -> EvidenceSink:
     return LocalDirSink(Path(location))
 
 
+def valid_sink_location(location: str) -> bool:
+    """Whether `sink_for_location` would accept `location`, without constructing a backend.
+
+    Doctor's lockstep predicate: the sink and off-instance rows must classify a location exactly as the runtime will, or doctor blesses configurations the runtime disables (or fails healthy ones).
+    """
+    if location.startswith("s3://"):
+        try:
+            parse_s3_location(location)
+        except ValueError:
+            return False
+        return True
+    return "://" not in location
+
+
 def store_for_location(location: str) -> EvidenceStore:
     """The read-side backend for an evidence location: `S3Store` for `s3://`, `LocalDirStore` otherwise."""
     if location.startswith("s3://"):

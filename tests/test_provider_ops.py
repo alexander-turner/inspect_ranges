@@ -1,6 +1,7 @@
 """Slice-3 battery: the op surface's mapping details, per-call limits, and the wrapper path."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from inspect_ai.util._sandbox.limits import (
     override_max_read_file_size,
 )
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
+    GuestError,
     LoopbackTransport,
     MessageChannel,
     TamperError,
@@ -247,6 +249,23 @@ def test_unavailable_after_retries_against_a_dead_endpoint(tmp_path: Path) -> No
             await env.exec(["echo", "hi"])
         with pytest.raises(SandboxUnavailableError):
             await env.read_file("x", text=False)
+        with pytest.raises(SandboxUnavailableError):
+            await env.write_file("x", b"data")
+
+    asyncio.run(scenario())
+
+
+def test_dead_daemon_at_confirm_time_still_maps_read_file(tmp_path: Path) -> None:
+    """With a PINNED session, the confirm ping hits the same dead daemon: its own failure must not replace the mapped SandboxUnavailableError (quality-review B4; exec and write_file already behaved)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        env._handle.sessions["box"] = "a" * 32  # pyright: ignore[reportPrivateUsage]
+        transport.guests = {}  # dead: op fails, and the confirm ping fails too
+        with pytest.raises(SandboxUnavailableError):
+            await env.read_file("x", text=False)
+        with pytest.raises(SandboxUnavailableError):
+            await env.exec(["echo", "hi"])
         with pytest.raises(SandboxUnavailableError):
             await env.write_file("x", b"data")
 
@@ -612,5 +631,26 @@ def test_uncertifiable_success_downgrades_to_unavailable(tmp_path: Path) -> None
         env = LibvirtRangeSandboxEnvironment("box", handle)
         with pytest.raises(SandboxUnavailableError):
             await env.exec(["echo", "hi"])
+
+    asyncio.run(scenario())
+
+
+def test_local_endpoint_mirrors_the_daemon_fifo_refusal(tmp_path: Path) -> None:
+    """The CI endpoint mirrors the daemons' B10 contract: file ops on a FIFO refuse EINVAL instead of wedging (quality-review integration: the Go/C# refusal landed without a mock mirror)."""
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = LocalEndpoint("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="fifo-refusal")
+        fifo = tmp_path / "tmp" / "wedge.fifo"
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(fifo)
+        with pytest.raises(GuestError) as read_error:
+            await channel.read_file("box", "/tmp/wedge.fifo")
+        assert read_error.value.errno == "EINVAL"
+        with pytest.raises(GuestError) as write_error:
+            await channel.write_file("box", "/tmp/wedge.fifo", b"x")
+        assert write_error.value.errno in ("EINVAL", "ENXIO")
 
     asyncio.run(scenario())

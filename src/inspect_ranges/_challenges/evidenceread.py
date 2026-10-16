@@ -39,8 +39,10 @@ async def stream_chunks_with_spans(
     stream: str,
     *,
     manifest: "list[ChunkRecord | GapRecord] | None" = None,
-) -> tuple[list[tuple[bytes, float, float]], bool]:
+) -> tuple[list[tuple[bytes, float | None, float | None]], bool]:
     """A stream's chunks with their wall-clock spans, plus whether the stream carries gaps.
+
+    A delivered chunk beyond the committed manifest parts (the writer batches parts on an interval, so the newest chunks routinely have no committed span yet) carries `None` spans. Consumers must treat a span-less chunk as the newest data, not as pre-window: excluding it from a trailing window hands a free quiet pass over alerts the record demonstrably contains (quality review A4).
 
     `manifest` lets callers reuse one `manifest_records` fetch across streams.
     """
@@ -57,17 +59,13 @@ async def stream_chunks_with_spans(
             gapped = True
     chunks = await stream_chunks(store, writer, stream)
     ordered_seqs = sorted(spans)
-    spanned = [
-        (
-            chunk,
-            *(
-                spans[ordered_seqs[position]]
-                if position < len(ordered_seqs)
-                else (0.0, 0.0)
-            ),
-        )
-        for position, chunk in enumerate(chunks)
-    ]
+    spanned: list[tuple[bytes, float | None, float | None]] = []
+    for position, chunk in enumerate(chunks):
+        if position < len(ordered_seqs):
+            start, end = spans[ordered_seqs[position]]
+            spanned.append((chunk, start, end))
+        else:
+            spanned.append((chunk, None, None))
     return spanned, gapped
 
 
@@ -98,6 +96,9 @@ async def stream_json_records(
     records: list[SpannedRecord] = []
     ordered_seqs = sorted(spans)
     for position, chunk in enumerate(chunks):
+        # A delivered-beyond-committed chunk has no span yet; records keep the
+        # (0.0, 0.0) placeholder because every JSON-record stream (meta, probe)
+        # stamps its own `wall`, which `SpannedRecord.wall()` prefers.
         wall_start, wall_end = (
             spans[ordered_seqs[position]]
             if position < len(ordered_seqs)

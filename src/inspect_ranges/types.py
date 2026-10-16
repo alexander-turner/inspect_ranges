@@ -729,7 +729,7 @@ class Attacker(_StrictModel):
     """Name of a declared host to use as the foothold instead of a dedicated box."""
 
     image: str | None = None
-    """Attack box image; omitted means the backend's standard attack image."""
+    """Attack box image; omitted means the backend's default guest image (shared with routers today; a dedicated attack image arrives with the images arc)."""
 
     resources: Resources | None = None
     """Attack box sizing."""
@@ -990,6 +990,67 @@ def _ipv6_gate(
     )
 
 
+_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+"""Legal guest and network names: these flow into Linux device names, filesystem paths, domain XML, and evidence stream keys, so the grammar is the safe intersection (lowercase letters, digits, `._-`, starting alphanumeric; `\\Z` so a trailing newline cannot ride through `$`). Underscores and dots are legal spec identifiers (recorded fixtures use them) even though RFC-1123 hostname labels exclude them: Linux accepts such hostnames, and DNS-grade conformance is the fqdn realization's concern when the images arc lands it."""
+
+_NAME_MAX = 63
+"""Name length cap: generous for guests (hostname-label scale); network DEVICE uniqueness is checked separately because `br-`/`pr-`/`prb-` prefixed devices truncate at the kernel's 15-character limit."""
+
+_DEVICE_PREFIXES = ("br-", "pr-", "prb-")
+"""Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to the kernel's 15-character limit. The compiler derives through `derive_device`, so the collision check below and the realization can never drift."""
+
+
+def derive_device(prefix: str, network_name: str) -> str:
+    """The Linux device name for a network-derived interface, truncated to the kernel limit."""
+    return f"{prefix}{network_name}"[:15]
+
+
+def _name_issues(spec: "RangeSpec") -> list[Issue]:
+    """Grammar, length, and derived-device-name collision checks for every authored name."""
+    issues: list[Issue] = []
+    named: list[tuple[str, tuple[PathElement, ...], str]] = [
+        (network.name, ("networks", index, "name"), "network")
+        for index, network in enumerate(spec.networks)
+    ]
+    named += [
+        (host.name, ("hosts", index, "name"), "host")
+        for index, host in enumerate(spec.hosts)
+    ]
+    named += [
+        (router.name, ("routers", index, "name"), "router")
+        for index, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        named.append((spec.attacker.name, ("attacker", "name"), "attacker"))
+    for name, path, kind in named:
+        if _NAME.match(name) is None or len(name) > _NAME_MAX:
+            issues.append(
+                Issue(
+                    code="invalid-name",
+                    path=path,
+                    message=f"{kind} name {name!r} is not a legal name (lowercase letters, digits, '._-', starting alphanumeric, at most {_NAME_MAX} characters)",
+                    hint="names become device names, filesystem paths, and XML identity; rename the declaration",
+                )
+            )
+    devices: dict[str, str] = {}
+    for index, network in enumerate(spec.networks):
+        reported: set[str] = set()
+        for prefix in _DEVICE_PREFIXES:
+            device = derive_device(prefix, network.name)
+            prior = devices.setdefault(device, network.name)
+            if prior != network.name and prior not in reported:
+                reported.add(prior)
+                issues.append(
+                    Issue(
+                        code="device-name-collision",
+                        path=("networks", index, "name"),
+                        message=f"networks {prior!r} and {network.name!r} both derive device {device!r} (device names truncate at 15 characters), which would silently merge their segments onto one bridge",
+                        hint="network names must differ within their first 11 characters",
+                    )
+                )
+    return issues
+
+
 def semantic_issues(spec: RangeSpec) -> list[Issue]:
     """Run every cross-reference check on a structurally valid spec, collecting all findings.
 
@@ -1002,6 +1063,7 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         Every semantic issue found, each with a path into the spec (empty when the spec is consistent).
     """
     issues: list[Issue] = []
+    issues += _name_issues(spec)
     networks: dict[str, Network] = {}
     network_names = [network.name for network in spec.networks]
     for index, network in enumerate(spec.networks):
@@ -1398,6 +1460,17 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # guest-content cross references
     for host_index, host in enumerate(spec.hosts):
         service_names = sorted(service.name for service in host.services)
+        seen_services: set[str] = set()
+        for service_index, service in enumerate(host.services):
+            if service.name in seen_services:
+                issues.append(
+                    Issue(
+                        code="duplicate-service-name",
+                        path=("hosts", host_index, "services", service_index, "name"),
+                        message=f"host {host.name!r} declares service {service.name!r} more than once (service names are unique on a host; vulnerabilities reference them)",
+                    )
+                )
+            seen_services.add(service.name)
         for vuln_index, vulnerability in enumerate(host.vulnerabilities):
             if (
                 vulnerability.service is not None
@@ -1457,8 +1530,6 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # placing a value. Braces naming nothing declared are left alone (they may
     # be legitimate scenario content, e.g. an SSTI payload in a planted file).
     if spec.variables:
-        import json
-
         reference = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
         def _scan(value: Any, path: tuple[PathElement, ...]) -> None:
@@ -1494,4 +1565,25 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 hint=did_you_mean(spec.attacker.host, host_names),
             )
         )
+    if spec.attacker.egress != "none":
+        foothold_interfaces = spec.attacker.interfaces or []
+        if spec.attacker.host is not None:
+            foothold_host = next(
+                (host for host in spec.hosts if host.name == spec.attacker.host), None
+            )
+            foothold_interfaces = foothold_host.interfaces if foothold_host else []
+        attached_modes = {
+            networks[interface.network].mode
+            for interface in foothold_interfaces
+            if interface.network in networks
+        }
+        if attached_modes and not attached_modes & {"nat", "routed"}:
+            issues.append(
+                Issue(
+                    code="attacker-egress-requires-nat",
+                    path=("attacker", "egress"),
+                    message="the attacker declares egress but no attached network is mode nat or routed, so no flow could ever leave (nothing masquerades or routes back)",
+                    hint="set an attached network's mode to nat (or routed), or declare egress: none",
+                )
+            )
     return issues

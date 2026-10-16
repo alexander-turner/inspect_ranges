@@ -29,6 +29,14 @@ STDERR_NAME = "stderr.log"
 
 _PCAP_NAME = re.compile(r"^g(\d+)\.pcap(\d*)$")
 
+CLAIMED_SUFFIX = ".shipped"
+"""Appended by `claim_file` before a chunk ships (B13): the supervisor's chunk regex anchors at `.pcap<N>$`, so a claimed file vanishes from its cap accounting and `enforce_cap` can never unlink shipped bytes and report them as `capture-cap` loss. Claimed files are the streamer's to remove; their claim window is one cycle (removal retried on failure)."""
+
+_CLAIMED_NAME = re.compile(r"^g(\d+)\.pcap(\d*)\.shipped$")
+
+CLAIMED_PENDING_LIMIT = 8
+"""New claims pause while this many claimed files await removal in a segment (review finding on B13): claimed files sit outside the sidecar's disk cap, so a persistently failing removal must not convert the whole volume into cap-invisible files; the bound caps the excess at a few chunks while removal retries, visible as tap errors in the heartbeat."""
+
 WALL_JUMP_THRESHOLD_S = 0.5
 """A wall-vs-monotonic delta divergence beyond this is recorded as a `wall-jump` anomaly in the `clock` stream."""
 
@@ -43,6 +51,7 @@ class CaptureTap(Protocol):
     def list_segment_files(self, segment: str) -> list[str]: ...
     def read_file(self, relpath: str) -> bytes: ...
     def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]: ...
+    def claim_file(self, relpath: str) -> None: ...
     def remove_file(self, relpath: str) -> None: ...
     def request_stop(self) -> None: ...
     def read_console(self, guest: str, offset: int) -> tuple[int, bytes]: ...
@@ -117,6 +126,11 @@ class ComposeTap:
     def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
         return self._tail("capture", f"/capture/{relpath}", offset)
 
+    def claim_file(self, relpath: str) -> None:
+        source = shlex.quote(f"/capture/{relpath}")
+        target = shlex.quote(f"/capture/{relpath}{CLAIMED_SUFFIX}")
+        self._exec("capture", f"mv -- {source} {target}")
+
     def remove_file(self, relpath: str) -> None:
         self._exec("capture", f"rm -f {shlex.quote(f'/capture/{relpath}')}")
 
@@ -144,7 +158,8 @@ class LocalTap:
         return [
             entry.name
             for entry in directory.iterdir()
-            if entry.is_file() and _PCAP_NAME.match(entry.name)
+            if entry.is_file()
+            and (_PCAP_NAME.match(entry.name) or _CLAIMED_NAME.match(entry.name))
         ]
 
     def read_file(self, relpath: str) -> bytes:
@@ -153,6 +168,10 @@ class LocalTap:
     def read_tail(self, relpath: str, offset: int) -> tuple[int, bytes]:
         data = (self.root / relpath).read_bytes()
         return len(data), data[offset:]
+
+    def claim_file(self, relpath: str) -> None:
+        source = self.root / relpath
+        source.rename(source.with_name(source.name + CLAIMED_SUFFIX))
 
     def remove_file(self, relpath: str) -> None:
         (self.root / relpath).unlink(missing_ok=True)
@@ -171,7 +190,8 @@ class StageRecorder:
     `on_stage` is called synchronously from `up()`'s thread; the deque is the thread boundary (append and popleft are atomic). Events land in the `stages` stream; `readiness` and `ready` events additionally land in `verify`. The emit clock on each event is one side of the clock-offset pairs (`evidence-v1.md`): a driver on another machine records its receive clock for the same stage report.
     """
 
-    VERIFY_STAGES = frozenset({"readiness", "ready"})
+    VERIFY_STAGES = frozenset({"readiness", "ready", "verify"})
+    """Stages mirrored into the `verify` stream: `readiness`/`ready` from `up()`'s vocabulary, `verify` from the seam vocabulary the uds driver's recorder observes (the stage reports fold through `_drive_realize` with seam names)."""
 
     def __init__(self, clock: Callable[[], ClockStamp] = clock_now) -> None:
         self._clock = clock
@@ -280,14 +300,34 @@ class CaptureStreamer:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="evidence-capture")
 
-    async def stop(self, *, stop_timeout_s: float = 15.0) -> None:
+    async def stop(
+        self, *, stop_timeout_s: float = 15.0, harvest_timeout_s: float = 10.0
+    ) -> None:
         """Stop the sidecar, harvest everything still on the volume, and end the loop.
 
-        Returns with the writer flushed as far as the sink allowed; the caller seals. A sidecar that cannot be reached leaves `capture-unreachable` gaps on its segments rather than an error.
+        Returns with the writer flushed as far as the sink allowed; the caller seals. Internally bounded end to end (quality-review A6 review round): the in-flight poll cycle is awaited for at most `stop_timeout_s` and then cancelled (a tap wedged mid-poll is the likeliest wedge), the sidecar stop wait gets `stop_timeout_s`, and the final harvest gets `harvest_timeout_s`, so the worst case is roughly two stop windows plus one harvest window and a caller can derive its own share from that. A sidecar that cannot be reached leaves `capture-unreachable` gaps; a timed-out harvest leaves `harvest-timeout` gaps on EVERY segment, deliberately conservative (we cannot know which segment's listing wedged; over-flagging can only withhold credit, never grant it).
         """
         self._stopping.set()
         if self._task is not None:
-            await self._task
+            try:
+                async with asyncio.timeout(stop_timeout_s):
+                    await self._task
+            except TimeoutError:
+                # a tap call wedged mid-cycle: cancel the poll task rather
+                # than letting the caller's whole budget die here
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    if not self._task.cancelled():
+                        raise  # stop() itself was cancelled: propagate honestly
+                except Exception:
+                    pass  # the loop's own failure; its steps are guarded anyway
+                logger.warning(
+                    "capture poll cycle did not finish within %.0fs at stop "
+                    "(cancelled; the harvest still runs under its own bound)",
+                    stop_timeout_s,
+                )
             self._task = None
         stopped = await self._request_and_await_stop(stop_timeout_s)
         if not stopped:
@@ -303,7 +343,21 @@ class CaptureStreamer:
                             f"pcap/{segment}", cause="capture-unreachable"
                         ),
                     )
-        await self._cycle(final=True, sidecar_stopped=stopped)
+        try:
+            async with asyncio.timeout(harvest_timeout_s):
+                await self._cycle(final=True, sidecar_stopped=stopped)
+        except TimeoutError:
+            logger.warning(
+                "capture final harvest exceeded its %.0fs bound: recording "
+                "harvest-timeout gaps on every segment (conservative: the "
+                "wedged listing hides which segments were actually complete)",
+                harvest_timeout_s,
+            )
+            for segment in self._segments:
+                await self._guard(
+                    "harvest-gap",
+                    self._writer.gap(f"pcap/{segment}", cause="harvest-timeout"),
+                )
         await self._guard("flush", self._writer.flush())
 
     async def poll_once(self) -> None:
@@ -401,41 +455,72 @@ class CaptureStreamer:
     async def _ship_pcap(
         self, status: dict[str, Any] | None, span: ClockSpan, *, ship_all: bool
     ) -> None:
+        """Claim, ship, and remove completed pcap chunks.
+
+        A completed chunk is CLAIMED (renamed with `CLAIMED_SUFFIX`) before it ships, which removes it from the sidecar's cap accounting, so `enforce_cap` can never unlink shipped bytes and report them as `capture-cap` loss (B13). A claim that fails means the sidecar won the race and the loss stays honestly the sidecar's to report. Claimed files found at startup (a streamer that died between claim and removal) are shipped or removed regardless of the status claim: the claim itself froze them as completed.
+        """
         segments = _status_segments(status)
         for segment, view in self._segments.items():
             entry = segments.get(segment)
             ship_bound = self._ship_bound(entry, ship_all=ship_all)
-            if ship_bound is None:
-                # without a trustworthy claim about which file is being
-                # written, nothing ships: shipping (and then removing) a
-                # half-written active chunk would be silent evidence loss
-                continue
             try:
                 names = await asyncio.to_thread(self._tap.list_segment_files, segment)
             except Exception as error:
                 self._tap_errors += 1
                 logger.debug("pcap listing failed for %s: %s", segment, error)
                 continue
-            ordered = [
-                (match.group(0), int(match.group(1)), int(match.group(2) or 0))
-                for match in (_PCAP_NAME.match(name) for name in names)
-                if match
-            ]
+            ordered: list[tuple[str, int, int, bool]] = []
+            for listed in names:
+                match = _PCAP_NAME.match(listed)
+                if match:
+                    ordered.append(
+                        (listed, int(match.group(1)), int(match.group(2) or 0), False)
+                    )
+                    continue
+                match = _CLAIMED_NAME.match(listed)
+                if match:
+                    ordered.append(
+                        (listed, int(match.group(1)), int(match.group(2) or 0), True)
+                    )
             ordered.sort(key=lambda item: (item[1], item[2]))
-            view.shipped &= {name for name, _, _ in ordered}
-            for name, generation, index in ordered:
+            view.shipped &= {name for name, _, _, _ in ordered}
+            claimed_pending = sum(1 for _, _, _, is_claimed in ordered if is_claimed)
+            for name, generation, index, claimed in ordered:
+                if not claimed:
+                    if ship_bound is None or (generation, index) >= ship_bound:
+                        # the declared active or newer (still being written), or
+                        # no trustworthy claim about which file is being written:
+                        # shipping a half-written chunk would be silent loss
+                        continue
+                    if claimed_pending >= CLAIMED_PENDING_LIMIT:
+                        # removals are failing: pause new claims so cap-invisible
+                        # files stay bounded; this cycle still retries removals
+                        continue
+                    try:
+                        await asyncio.to_thread(
+                            self._tap.claim_file, f"{segment}/{name}"
+                        )
+                    except Exception as error:
+                        # the sidecar's enforce_cap won the race: the drop will
+                        # surface honestly in its dropped counters
+                        self._tap_errors += 1
+                        logger.debug(
+                            "pcap claim failed for %s/%s: %s", segment, name, error
+                        )
+                        continue
+                    name = f"{name}{CLAIMED_SUFFIX}"
+                    claimed_pending += 1
                 relpath = f"{segment}/{name}"
                 if name in view.shipped:
-                    # shipped but the earlier remove failed: retry so cap
-                    # enforcement cannot later count these bytes as lost
+                    # shipped but the earlier remove failed: retry; the claim
+                    # keeps these bytes out of the sidecar's cap accounting
                     try:
                         await asyncio.to_thread(self._tap.remove_file, relpath)
                         view.shipped.discard(name)
+                        claimed_pending -= 1
                     except Exception:
                         self._tap_errors += 1
                     continue
-                if (generation, index) >= ship_bound:
-                    continue  # the declared active or newer: still being written
                 try:
                     data = await asyncio.to_thread(self._tap.read_file, relpath)
                 except Exception as error:
@@ -449,6 +534,7 @@ class CaptureStreamer:
                 try:
                     await asyncio.to_thread(self._tap.remove_file, relpath)
                     view.shipped.discard(name)
+                    claimed_pending -= 1
                 except Exception as error:
                     # shipped but not removed: the shipped set suppresses a
                     # double-ship; the next cycle retries the removal

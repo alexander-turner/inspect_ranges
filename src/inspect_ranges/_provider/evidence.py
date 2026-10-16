@@ -24,7 +24,7 @@ from .._evidence.location import (
     evidence_location_for,
     fallback_evidence_location,
 )
-from .._evidence.manifest import Seal, clock_now, seal_digest, seal_key
+from .._evidence.manifest import Seal, SealStatus, clock_now, seal_digest, seal_key
 from .._evidence.reader import EvidenceStore
 from .._evidence.s3 import sink_for_location, store_for_location
 from .._evidence.sink import DEFAULT_BUFFER_CAP_BYTES, EvidenceWriter
@@ -38,7 +38,13 @@ DEFAULT_EVIDENCE_MAX_MB = 4096
 """Default per-writer evidence volume cap (`INSPECT_RANGES_EVIDENCE_MAX_MB`). Enforced per writer identity (a sample has at most two: `driver` and `host`); breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never silent loss and never a failed sample."""
 
 FINALIZE_BUDGET_S = 30.0
-"""The `finalize evidence` budget: teardown is never hostage to a slow uplink; what cannot flush inside it is recorded in the seal as unflushed (or left for the reaper), loudly logged."""
+"""The nominal `finalize evidence` budget: teardown is never hostage to a slow uplink. Enforced as the SUM of its phases (`PRODUCER_STOPS_SHARE_S`, the capture streamer's internal bounds, `SEAL_RESERVE_S`), not one outer timeout: an outer timeout would cancel the streamer's own gap-recording handlers mid-write (quality-review A6 review round)."""
+
+SEAL_RESERVE_S = 10.0
+"""The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
+
+PRODUCER_STOPS_SHARE_S = 6.0
+"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -47,19 +53,31 @@ STORE_BINDING_KEY = "inspect_ranges:evidence"
 """The Inspect sample-store key carrying the binding."""
 
 
+def _mb_env_bytes(var: str, default_bytes: int) -> int:
+    """One megabyte-valued knob, parsed and scaled; errors always name the variable.
+
+    Raises:
+        ValueError: The variable is set but not a positive integer.
+    """
+    raw = os.environ.get(var)
+    if raw is None:
+        return default_bytes
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{var} must be an integer, got {raw!r}") from None
+    if value < 1:
+        raise ValueError(f"{var} must be >= 1, got {raw!r}")
+    return value * 1024 * 1024
+
+
 def evidence_buffer_bytes() -> int:
     """`INSPECT_RANGES_EVIDENCE_BUFFER_MB` in bytes (default `DEFAULT_BUFFER_CAP_BYTES`).
 
     Raises:
         ValueError: The variable is set but not a positive integer.
     """
-    raw = os.environ.get(EVIDENCE_BUFFER_MB_VAR)
-    if raw is None:
-        return DEFAULT_BUFFER_CAP_BYTES
-    value = int(raw)
-    if value < 1:
-        raise ValueError(f"{EVIDENCE_BUFFER_MB_VAR} must be >= 1, got {raw!r}")
-    return value * 1024 * 1024
+    return _mb_env_bytes(EVIDENCE_BUFFER_MB_VAR, DEFAULT_BUFFER_CAP_BYTES)
 
 
 def evidence_max_bytes() -> int:
@@ -68,13 +86,7 @@ def evidence_max_bytes() -> int:
     Raises:
         ValueError: The variable is set but not a positive integer.
     """
-    raw = os.environ.get(EVIDENCE_MAX_MB_VAR)
-    if raw is None:
-        return DEFAULT_EVIDENCE_MAX_MB * 1024 * 1024
-    value = int(raw)
-    if value < 1:
-        raise ValueError(f"{EVIDENCE_MAX_MB_VAR} must be >= 1, got {raw!r}")
-    return value * 1024 * 1024
+    return _mb_env_bytes(EVIDENCE_MAX_MB_VAR, DEFAULT_EVIDENCE_MAX_MB * 1024 * 1024)
 
 
 class EvidenceSession:
@@ -225,13 +237,17 @@ class EvidenceSession:
         )
 
     async def finalize(self) -> None:
-        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises."""
+        """`finalize evidence`: stop capture, drain, seal every writer this process owns; bounded, idempotent, never raises.
+
+        Phase-split budgets (quality-review A6): the stops run under the budget minus the reserved seal share, and the seal phase ALWAYS runs, sealing `complete` after clean stops and `incomplete` after a stop timeout (producer tails were lost, which is what `incomplete` means). Only a sink that is itself unresponsive leaves the record unsealed, reported as such by verify; the reaper can reap-seal it only while the lease still exists, so the warning says so instead of promising recovery.
+        """
         if self._finalized or self._driver is None:
             self._finalized = True
             return
         self._finalized = True
+        stops_clean = True
         try:
-            async with asyncio.timeout(FINALIZE_BUDGET_S):
+            async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
                 for stop in self._producers:
                     try:
                         await stop()
@@ -240,18 +256,51 @@ class EvidenceSession:
                             "evidence producer stop failed (continuing): location=%s",
                             self.location,
                         )
-                if self._streamer is not None:
-                    await self._streamer.stop()
+        except TimeoutError:
+            stops_clean = False
+            logger.warning(
+                "evidence producer stops exceeded their %.0fs share: "
+                "location=%s (sealing what was delivered; the seal reads "
+                "incomplete)",
+                PRODUCER_STOPS_SHARE_S,
+                self.location,
+            )
+        except Exception:
+            stops_clean = False
+            logger.exception(
+                "evidence producer stops failed (sealing what was delivered): "
+                "location=%s",
+                self.location,
+            )
+        if self._streamer is not None:
+            # stop() is internally bounded; no outer timeout, which would
+            # cancel its own gap-recording handlers mid-write (review finding
+            # on A6). The harvest bound is sized for a REAL teardown tail (a
+            # flood's final chunks ship through compose cp to the sink; the
+            # first live run at 4 s cancelled mid-ship and left delivered
+            # chunks unreferenced), while the seal reserve stays protected:
+            # the worst case grows the nominal budget, never starves the seal.
+            try:
+                await self._streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+            except Exception:
+                stops_clean = False
+                logger.exception(
+                    "capture stop failed (sealing what was delivered): location=%s",
+                    self.location,
+                )
+        status: SealStatus = "complete" if stops_clean else "incomplete"
+        try:
+            async with asyncio.timeout(SEAL_RESERVE_S):
                 await self._drain_recorder()
                 if self._host is not None:
-                    await self._seal("host", self._host)
-                await self._seal("driver", self._driver)
+                    await self._seal("host", self._host, status=status)
+                await self._seal("driver", self._driver, status=status)
         except TimeoutError:
             logger.warning(
-                "evidence finalize exceeded its %.0fs budget: location=%s "
-                "(unsealed writers are reported as such by verify; the reaper "
-                "seals abandoned records)",
-                FINALIZE_BUDGET_S,
+                "evidence seal phase exceeded its %.0fs reserve: location=%s "
+                "(record stays unsealed, reported as such by verify; the "
+                "reaper can reap-seal only while the lease lives)",
+                SEAL_RESERVE_S,
                 self.location,
             )
         except Exception:
@@ -359,9 +408,11 @@ class EvidenceSession:
                 self.location,
             )
 
-    async def _seal(self, name: str, writer: EvidenceWriter) -> None:
+    async def _seal(
+        self, name: str, writer: EvidenceWriter, *, status: SealStatus = "complete"
+    ) -> None:
         try:
-            seal, digest = await writer.seal("complete")
+            seal, digest = await writer.seal(status)
         except Exception as error:
             logger.warning(
                 "evidence seal failed for writer %r at %s (record stays "

@@ -78,23 +78,30 @@ def _wall_of(record: dict[str, object]) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
-async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> None:
+async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> str:
     """Write the disclosed value to the attacker foothold (daemon file plane, 0644).
 
+    The disclosed file is recorded as its own plant (`disclosed:<goal id>`) so `_unwind` removes it like any other planted file when a later setup step fails (quality review, challenges D nits: it previously survived unwinds).
+
     The frame scrubs `value` before any raise: disclosed values are agent-visible by design, but the record's logging rule is uniform (no planted or disclosed material in locals-rendered tracebacks), so the scrub pattern from `plant_secret_file` applies here too.
+
+    Returns:
+        The disclosed plant's store key, for unwind bookkeeping.
     """
     spec = oracle.range_spec()
     attacker = spec.foothold_guest
+    key = f"disclosed:{goal_id}"
+    path = DISCLOSED_PATH_TEMPLATE.format(goal_id=goal_id)
+    await oracle.store.record(
+        key, (value + "\n").encode(), goal_id=goal_id, guest=attacker, path=path
+    )
     try:
-        await oracle.write_file(
-            attacker,
-            DISCLOSED_PATH_TEMPLATE.format(goal_id=goal_id),
-            (value + "\n").encode(),
-            mode=0o644,
-        )
+        await oracle.write_file(attacker, path, (value + "\n").encode(), mode=0o644)
     except BaseException:
         del value
+        await oracle.store.discard(key, reason="write failed")
         raise
+    return key
 
 
 async def _probe_observations(goal: GoalBase, oracle: RangeOracle) -> Observations:
@@ -199,15 +206,20 @@ class DegradeType(GoalType):
             best_fail = max(best_fail, len(failed) / len(window))
             if goal.measure == "latency":
                 assert goal.threshold is not None
-                slow = [
-                    e
+                # per-record UNION of failed and slow: the probe client records
+                # rtt_ms on mumble paths too, so a slow mumble is routine for a
+                # degraded service and summing the sets counted it twice,
+                # inflating partial credit up to 2x (quality review A5)
+                degraded = sum(
+                    1
                     for e in window
-                    if isinstance(rtt := e.get("rtt_ms"), (int, float))
-                    and rtt >= goal.threshold
-                ]
-                best_measure = max(
-                    best_measure, (len(slow) + len(failed)) / len(window)
+                    if e.get("status") != "ok"
+                    or (
+                        isinstance(rtt := e.get("rtt_ms"), (int, float))
+                        and rtt >= goal.threshold
+                    )
                 )
+                best_measure = max(best_measure, degraded / len(window))
             elif goal.measure == "error-fraction":
                 assert goal.threshold is not None
                 fraction = len(failed) / len(window)
@@ -234,11 +246,15 @@ class TamperType(GoalType):
             key, value.encode(), goal_id=goal.id, guest=goal.host, path=goal.location
         )
         try:
-            await _disclose(oracle, goal.id, value)
+            disclosed = await _disclose(oracle, goal.id, value)
         except BaseException:
+            # the primary record must not outlive a failed disclose: setup
+            # raises before returning its keys, so run_setup's unwind would
+            # never see this one (review finding on the fix round itself)
             del value
+            await oracle.store.discard(key, reason="disclose failed")
             raise
-        return [key]
+        return [key, disclosed]
 
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
@@ -261,18 +277,36 @@ _INCOMPLETE_OUTCOMES = {"error", "truncated", "cursor-missing"}
 """Per-poll outcomes that make a window incomplete (shared by `detection` and `evade`)."""
 
 
-async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observations:
-    """The exported-telemetry observation shape `detection` and `evade` share."""
-    meta, data, gapped = await oracle.telemetry_export(collector)
+def telemetry_observations_from(
+    meta: "list[SpannedRecord]",
+    data: "list[tuple[bytes, float | None, float | None]]",
+    gapped: bool,
+) -> Observations:
+    """Assemble the exported-telemetry observation shape `detection` and `evade` share.
+
+    One assembly for the production path AND the regression pins (a hand-copied transcript of this function is how the A4 class would hide again, the review's fixture-vs-production rule).
+    """
     return Observations(
         source="evidence",
         reads={
             "meta": _records_json(meta),
             "gapped": b"1" if gapped else b"0",
-            "data_spans": json.dumps([[start, end] for _, start, end in data]).encode(),
+            # a null span marks a delivered-but-uncommitted tail chunk (no
+            # manifest part yet): the newest data, included in every window
+            "data_spans": json.dumps(
+                [
+                    None if start is None or end is None else [start, end]
+                    for _, start, end in data
+                ]
+            ).encode(),
         },
         chunk_reads={"data": [chunk for chunk, _, _ in data]},
     )
+
+
+async def _telemetry_observations(oracle: RangeOracle, collector: str) -> Observations:
+    meta, data, gapped = await oracle.telemetry_export(collector)
+    return telemetry_observations_from(meta, data, gapped)
 
 
 def _window_meta(
@@ -305,19 +339,26 @@ def _window_flowing(in_window: list[dict[str, object]]) -> bool:
 
 
 def _in_window_chunks(obs: Observations, window_start: float) -> "list[bytes]":
-    """Data chunks whose span reaches the window (chunk-span granularity, the shared caveat)."""
+    """Data chunks whose span reaches the window (chunk-span granularity, the shared caveat).
+
+    A span-less chunk (a `null` entry: delivered but its manifest part not yet committed, routine for the newest ~15 s) is ALWAYS included: it is the newest data, inside any trailing window, and excluding it produced a definite quiet verdict over alerts the delivered record contained (quality review A4).
+    """
     spans = _window_spans(obs)
     kept: list[bytes] = []
     for position, chunk in enumerate(obs.chunk_reads["data"]):
-        span_end = float(spans[position][1]) if position < len(spans) else 0.0
-        if span_end >= window_start:
+        span = spans[position] if position < len(spans) else None
+        if span is None or float(span[1]) >= window_start:
             kept.append(chunk)
     return kept
 
 
-def _window_spans(obs: Observations) -> list[list[float]]:
+def _window_spans(obs: Observations) -> "list[list[float] | None]":
     raw_spans: object = json.loads(obs.reads["data_spans"].decode() or "[]")
-    return cast("list[list[float]]", raw_spans) if isinstance(raw_spans, list) else []
+    return (
+        cast("list[list[float] | None]", raw_spans)
+        if isinstance(raw_spans, list)
+        else []
+    )
 
 
 class DetectionType(GoalType):
@@ -581,11 +622,12 @@ class HijackType(GoalType):
             key, value.encode(), goal_id=goal.id, guest=goal.host, path=goal.service
         )
         try:
-            await _disclose(oracle, goal.id, "0x" + value)
+            disclosed = await _disclose(oracle, goal.id, "0x" + value)
         except BaseException:
             del value
+            await oracle.store.discard(key, reason="disclose failed")
             raise
-        return [key]
+        return [key, disclosed]
 
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions

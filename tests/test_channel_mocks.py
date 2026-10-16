@@ -7,18 +7,21 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from typing import Literal, cast
 
 import pytest
 from inspect_ranges._channel.channel import (
     ByteStream,
     ChannelBudgetError,
     LoopbackTransport,
+    MemoryStream,
     MessageChannel,
     TamperError,
     TransportFailure,
     request_id,
     stream_pair,
 )
+from inspect_ranges._channel.codec import MessageStreamReader, encode_message
 from inspect_ranges._channel.mocks import (
     HOSTILE_APPLIER_HANGS,
     HOSTILE_APPLIER_SCENARIOS,
@@ -29,7 +32,13 @@ from inspect_ranges._channel.mocks import (
     LatencyTransport,
     SilentTransport,
 )
-from inspect_ranges._channel.protocol import Budget, ExecRequest
+from inspect_ranges._channel.protocol import (
+    DEFAULT_BULK_CAP,
+    Budget,
+    ExecRequest,
+    Message,
+    StageReport,
+)
 
 from tests.channel_conformance import PortableChannelSuite
 
@@ -147,17 +156,18 @@ def test_hostile_failure_dumps_the_trace_tail(
 def test_hostile_wrong_id_names_both_ids() -> None:
     channel = MessageChannel(HostileTransport("wrong-id"))
 
-    async def scenario_run() -> tuple[str, str]:
+    async def scenario_run() -> tuple[str, str, int | None]:
         request = request_id()
         try:
             await channel.read_file("web", "/x")
         except TamperError as failure:
-            return request, str(failure)
+            return request, str(failure), failure.attempts
         raise AssertionError("wrong-id reply was accepted")
 
-    _, message = asyncio.run(scenario_run())
+    _, message, attempts = asyncio.run(scenario_run())
     assert "f" * 32 in message, "the tamper error must name the forged id"
     assert "request was id" in message, "the tamper error must name the request id"
+    assert attempts == 1, "a post-delivery tamper verdict carries the honest count"
 
 
 class PollForger:
@@ -345,7 +355,7 @@ def test_overdue_exec_with_liveness_is_command_layer() -> None:
 
 @pytest.mark.parametrize("scenario", sorted(HOSTILE_APPLIER_HANGS))
 def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
-    """Every realize transport interaction is budget-bounded (the two probe-demonstrated hangs)."""
+    """Every realize transport interaction is budget-bounded, and post-terminal loss never fails a delivered realize (the three probe-demonstrated scenarios)."""
     channel = MessageChannel(
         HostileApplierTransport(scenario),
         label=f"hang-{scenario}",
@@ -368,7 +378,7 @@ def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
     start = time.monotonic()
     stages = asyncio.run(scenario_run())
     assert time.monotonic() - start < 3.0, "realize hung past its budgets"
-    if scenario == "no-close-after-ready":
+    if scenario in ("no-close-after-ready", "rst-after-ready"):
         assert stages[-1] == "ready", "the delivered terminal stage must be returned"
 
 
@@ -446,6 +456,81 @@ def test_provably_undelivered_exec_resends_exactly_once() -> None:
     asyncio.run(scenario_run())
 
 
+@pytest.mark.parametrize("scenario", ["wrong-id", "wrong-kind"])
+def test_exec_post_delivery_tamper_carries_attempts(scenario: str) -> None:
+    """Exec's post-delivery tamper verdicts carry the honest delivery count on both the wrong-id and the `_expect` wrong-kind paths."""
+    channel = MessageChannel(HostileTransport(scenario), label=f"exec-{scenario}")
+
+    async def scenario_run() -> int | None:
+        with pytest.raises(TamperError) as failure:
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+        return failure.value.attempts
+
+    assert asyncio.run(scenario_run()) == 1
+
+
+class HangConnects:
+    """The first N connect attempts hang past any window (expired inside connect: provably never sent), then honest. N<0 hangs forever."""
+
+    def __init__(self, inner: LoopbackTransport, hangs: int) -> None:
+        self._inner = inner
+        self.hangs = hangs
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        if self.hangs != 0:
+            self.hangs -= 1
+            await asyncio.Event().wait()  # never set; cancelled by the window
+        return await self._inner.connect(endpoint)
+
+
+def test_connect_timeout_exec_is_never_left_and_resends() -> None:
+    """A window that expires inside connect provably sent nothing: the exec resends and runs once."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=1), label="hang-once", channel_budget_s=0.15
+    )
+
+    async def scenario_run() -> None:
+        outcome = await channel.exec(
+            "web", ExecRequest(id=request_id(), cmd=["echo", "late"])
+        )
+        assert outcome.stdout == b"late\n"
+        assert fleet.guest("web").exec_count == 1
+
+    asyncio.run(scenario_run())
+
+
+def test_connect_timeout_exec_attempts_stay_zero() -> None:
+    """Every window expiring inside connect: the failure annotation must claim zero deliveries."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=-1), label="hang-always", channel_budget_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+        assert failure.value.attempts == 0, "nothing was ever sent"
+        assert fleet.guest("web").exec_count == 0
+
+    asyncio.run(scenario_run())
+
+
+def test_connect_timeout_exchange_attempts_stay_zero() -> None:
+    """The `_exchange` operations report the same never-left honesty on a hung connect."""
+    fleet = LoopbackTransport(["web"])
+    channel = MessageChannel(
+        HangConnects(fleet, hangs=-1), label="hang-exchange", channel_budget_s=0.1
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.read_file("web", "/x")
+        assert failure.value.attempts == 0
+
+    asyncio.run(scenario_run())
+
+
 def test_silent_untimed_exec_fails_after_three_windows() -> None:
     """Zero liveness evidence across three allowance windows is a channel-layer failure, fast."""
     channel = MessageChannel(
@@ -510,6 +595,37 @@ def test_stale_liveness_does_not_blame_the_command_layer() -> None:
     asyncio.run(scenario_run())
 
 
+def test_silent_window_detector_rearms_after_liveness() -> None:
+    """A stalled-but-accepting transport fails after three CONSECUTIVE silent windows even once liveness was seen, instead of riding the untimed bound."""
+    fleet = LoopbackTransport(["web"])
+    fleet.guest("web").ignore_command_budget = True
+    # connection 1: the exec (held); connection 2: one honest poll -> pending
+    # (liveness observed once, which previously disarmed the detector forever);
+    # connections 3+: accepted, never served
+    transport = SilentAfterNConnects(fleet, honest=2)
+    channel = MessageChannel(
+        transport,
+        label="silent-rearm",
+        channel_budget_s=0.15,
+        untimed_bound_s=5.0,
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            await channel.exec(
+                "web",
+                ExecRequest(id=request_id(), cmd=["sleep-ms", "30000"]),  # untimed
+            )
+        assert failure.value.layer == "channel", str(failure.value)
+        assert "consecutive" in str(failure.value)
+
+    start = time.monotonic()
+    asyncio.run(scenario_run())
+    assert time.monotonic() - start < 3.0, (
+        "detection must come from the window detector, not the untimed bound"
+    )
+
+
 # -- the chatty reference bug ----------------------------------------------------
 
 
@@ -544,3 +660,87 @@ def test_latency_mock_catches_the_chatty_reference_bug() -> None:
     assert chatty > 4 * proper, (
         f"chatty ({chatty:.2f}s) must dwarf the single transfer ({proper:.2f}s)"
     )
+
+
+def applier_stage(request: Message, stage: str) -> bytes:
+    """One honest stage-report frame for the request (public pieces only)."""
+    report = StageReport(
+        id=request.id,
+        stage=cast(
+            'Literal["fetch", "construct", "boot", "verify", "ready", "failed"]',
+            stage,
+        ),
+    )
+    return b"".join(encode_message(report))
+
+
+class SlowGapApplierTransport:
+    """Honest applier that sleeps between two chosen stages (the sequential-readiness shape)."""
+
+    def __init__(self, *, before_stage: str, delay_s: float) -> None:
+        self.before_stage = before_stage
+        self.delay_s = delay_s
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        client_side, server_side = stream_pair()
+        task = asyncio.create_task(self._serve(server_side))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return client_side
+
+    async def _serve(self, stream: MemoryStream) -> None:
+        reader = MessageStreamReader(stream.receive, bulk_cap=DEFAULT_BULK_CAP)
+        request, _ = await reader.next()
+        for stage in ("fetch", "construct", "boot", "verify", "ready"):
+            if stage == self.before_stage:
+                await asyncio.sleep(self.delay_s)
+            await stream.send(applier_stage(request, stage))
+        await stream.aclose()
+
+
+def test_realize_verify_allowance_covers_sequential_readiness() -> None:
+    """The verify -> ready gap carries no intermediate report; the plan-derived allowance keeps a legitimate slow readiness from starving the per-report budget (quality-review A10)."""
+    transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
+    channel = MessageChannel(transport, label="slow-readiness", channel_budget_s=0.1)
+
+    async def scenario_run() -> list[str]:
+        return [
+            report.stage
+            async for report in channel.realize("ab" * 32, [], verify_allowance_s=2.0)
+        ]
+
+    assert asyncio.run(scenario_run()) == [
+        "fetch",
+        "construct",
+        "boot",
+        "verify",
+        "ready",
+    ]
+
+
+def test_realize_without_verify_allowance_still_budgets_the_gap() -> None:
+    """Without the caller-supplied envelope the old behavior stands: the channel allowance bounds the gap (the regression A10 fixed through the uds seams)."""
+    transport = SlowGapApplierTransport(before_stage="ready", delay_s=0.4)
+    channel = MessageChannel(transport, label="starved", channel_budget_s=0.1)
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError) as failure:
+            async for _ in channel.realize("ab" * 32, []):
+                pass
+        assert failure.value.layer == "channel"
+
+    asyncio.run(scenario_run())
+
+
+def test_realize_verify_allowance_applies_only_to_the_verify_gap() -> None:
+    """A slow fetch -> construct gap is NOT excused by the readiness envelope: stall detection for every other gap keeps the channel allowance."""
+    transport = SlowGapApplierTransport(before_stage="construct", delay_s=0.4)
+    channel = MessageChannel(transport, label="early-stall", channel_budget_s=0.1)
+
+    async def scenario_run() -> None:
+        with pytest.raises(ChannelBudgetError):
+            async for _ in channel.realize("ab" * 32, [], verify_allowance_s=5.0):
+                pass
+
+    asyncio.run(scenario_run())
