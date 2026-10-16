@@ -306,7 +306,7 @@ HOSTILE_APPLIER_HANGS = ("hang-connect", "no-close-after-ready", "rst-after-read
 class HostileApplierTransport:
     """A `Transport` whose host-plane endpoint streams forged stage reports or hangs.
 
-    The hang scenarios pin that every realize transport interaction is budget-bounded and loss-tolerant after the terminal report: `hang-connect` never completes the connection; `no-close-after-ready` streams an honest report sequence and then never closes the stream; `rst-after-ready` streams it and then resets instead of closing (abnormal applier death).
+    The non-crafting scenarios pin that every realize transport interaction is budget-bounded and loss-tolerant after the terminal report: `hang-connect` never completes the connection (previously hung realize); `no-close-after-ready` streams an honest report sequence and then never closes the stream (previously hung the drain); `rst-after-ready` streams it and then resets instead of closing (previously escaped as a raw ConnectionResetError, failing a succeeded realize).
     """
 
     def __init__(self, scenario: str) -> None:
