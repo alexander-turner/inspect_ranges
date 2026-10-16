@@ -974,6 +974,14 @@ func errnoName(err error) string {
 			return "ENOSPC"
 		case syscall.EROFS:
 			return "EROFS"
+		case syscall.ENAMETOOLONG:
+			// parity: the C# daemon maps PathTooLongException here; the same
+			// caller mistake should triage identically on both platforms
+			return "ENAMETOOLONG"
+		case syscall.ENXIO:
+			// a reader-less FIFO write-open under O_NONBLOCK (finding B10):
+			// name it rather than flattening to EIO
+			return "ENXIO"
 		}
 	}
 	return "EIO"
