@@ -776,13 +776,14 @@ def github_token(devbox: Devbox) -> None:
     Use a fine-grained token limited to meridianlabs-ai/inspect_ranges. Reading it from stdin keeps it out of your shell history, the terminal, and process listings.
     """
     token = sys.stdin.read().strip()
+    # empty first: the prefix check otherwise shadows the more helpful message
+    if not token:
+        raise click.UsageError("No token on stdin; e.g. `pbpaste | ... github-token`.")
     # fine-grained tokens are github_pat_..., classic ones ghp_...; catch a wrong clipboard before sending it anywhere
     if not token.startswith(("github_pat_", "ghp_")) or any(c.isspace() for c in token):
         raise click.UsageError(
             "stdin doesn't look like a GitHub token (expected github_pat_...)."
         )
-    if not token:
-        raise click.UsageError("No token on stdin; e.g. `pbpaste | ... github-token`.")
     devbox.require_instance()
     # gh stores the token (0600, ~/.config/gh/hosts.yml) and serves it to git as a credential helper
     devbox.ssh(

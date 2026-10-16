@@ -34,6 +34,18 @@ logger = logging.getLogger(__name__)
 RECIPE_VERSION = "4"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
+
+def default_image_cache() -> Path:
+    """`INSPECT_RANGES_IMAGE_CACHE`, or `~/.cache/inspect-ranges/images`.
+
+    The one source of the image-cache default: the provider, doctor, applier, and every CLI command resolve through here, so the knob cannot drift per surface.
+    """
+    override = os.environ.get("INSPECT_RANGES_IMAGE_CACHE")
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "inspect-ranges" / "images"
+
+
 Runner = Callable[[list[str], Path], None]
 """Executes an external command (argv, cwd); raises `CalledProcessError` on failure."""
 

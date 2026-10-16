@@ -20,6 +20,11 @@ from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
 from .._host.host import HostProvider, RangeHost
 from .._runtime.down import DownResult, down
+
+# the canonical default lives in the (light) runtime layer so CLI commands
+# share it without importing the provider stack; re-exported here for the
+# provider-side consumers
+from .._runtime.images import default_image_cache as default_image_cache
 from .._runtime.ownership import default_state_dir
 from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..types import RangeSpec
@@ -39,14 +44,6 @@ UpFn = Callable[[Path, UpOptions, OnStage | None], UpResult]
 DownFn = Callable[[str, Path], DownResult]
 RenderFn = Callable[["RangeSpec", Path, PlanOptions | None], ResolvedPlan]
 ChannelFactory = Callable[[dict[str, int], str], MessageChannel]
-
-
-def default_image_cache() -> Path:
-    """`INSPECT_RANGES_IMAGE_CACHE`, or the CLI's `~/.cache/inspect-ranges/images` default."""
-    override = os.environ.get("INSPECT_RANGES_IMAGE_CACHE")
-    if override:
-        return Path(override)
-    return Path.home() / ".cache" / "inspect-ranges" / "images"
 
 
 def _default_channel_factory(cids: dict[str, int], label: str) -> MessageChannel:
