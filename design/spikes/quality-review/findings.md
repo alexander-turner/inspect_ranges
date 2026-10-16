@@ -71,3 +71,28 @@ R2 The close-out record carries all units' "considered and declined" lists.
 - Clusters intentionally share fixes: A8+A9 (one name-grammar discipline, two layers), A6+A7+B14 (sealing lifecycle completeness), A1+B6 (same daemon region, one battery).
 - One embedded decision needs your eye: B22's gate-now recommendation.
 - Systemic lessons for the close-out record: budgets summed across layers nobody owned; never-raise layers turning upstream gaps into silent scoring degradation; fixtures more permissive than production seams; the identifier namespace; OS-resource surfaces invisible to wire-level batteries.
+
+## Dispositions (phase 4, integrated branch)
+
+Provider-slice commit ids below are the ORIGINAL branch ids from its report; those commits were rebuilt (cherry-picked, new ids) on the integration branch to strip 605 MB of accidentally committed battery artifacts from `727c57d` (`design/spikes/quality-review/tmp/`, now gitignored). All other slices merged with their ids intact.
+
+**Group A, all fixed:**
+- A1 fixed (daemons `6479463`): Go `SOCK_CLOEXEC`/`Accept4`, C# `SetHandleInformation`. Live: budget-hold 180 s to 0.01 s; exec child inherits 0 daemon sockets (battery pin). C# compile- and vector-verified only; behavioral confirmation rides the recorded Windows-runner follow-up.
+- A2 fixed (compiler `e934be1`, battery `07355d8`): trailing attacker drop + `attacker-egress-requires-nat`; live ES1-ES4 green incl. the network-allowlist non-leak against a live listener.
+- A3 fixed (evidence `b40539c`; review `b189b1a` rescoped the residual honestly: at worst one mis-taken trailing-line cursor, loud next poll, never window-wide suppression).
+- A4 fixed (challenges `b7a6aee`): unknown-span chunks included end to end; pins written by a real `EvidenceWriter`.
+- A5 fixed (challenges `35ff873`): per-record union; mixed-status pin.
+- A6 fixed (provider `8c4ae53` + review + battery-driven harvest resize): finalize phase-split with a protected seal reserve; wedged stop seals `incomplete` with the binding carrying the digest.
+- A7 fixed (provider `dcd60e1`): cli_cleanup reap-seals before lease release, pinned end to end.
+- A8 fixed with deviation (challenges `6a0a8d5`): the grammar check landed on `GoalBase` (always-on, range-independent) rather than `challenge_issues`; `_FakeSession` now enforces the real stream grammar.
+- A9 fixed (compiler `91f7150`, review `103e111`): `[a-z0-9][a-z0-9._-]*`, max 63, plus derived-device uniqueness single-sourced in `types.derive_device`. Adjudicated: underscores/dots stay legal (recorded fixtures use them; the collision check covers the real hazard).
+- A10 fixed with deviation (provider `88859cc`): plan-derived verify allowance instead of keepalives (keepalives would violate the strictly-increasing stage rule; wire-carried readiness fields recorded as the growth path). Live 5/5: a 43.2 s verify gap reaches ready under a 20 s per-report allowance; the control starves exactly as U4 traced.
+- A11 fixed (ops `17fb223`, review `0c9eaf5`): both doctor arms and the runtime share one `valid_sink_location()` predicate; the off-instance row consumes the sink verdict.
+
+**Group B, all fixed:** B1 `92eda6f` (hung-connect exec now SUCCEEDS via the safe same-id resend), B2 `081a7a6`, B3 `0d62846`, B4 `777166e`, B5 `0ad161b`, B6 `65b9e70` fixed with correction (Go only; C# was never affected, correcting the U3 report), B7 `35da7f9`, B8 `f4627d4`, B9 `02ef40c` as adjudicated (idle timeouts only), B10 `ca73334` with recorded platform divergence (Go serves char/block devices per the pinned bounded-read contract; C# refuses non-disk), B11 `aba4e57`, B12 `67ddc95` (unified gap/chunk FIFO), B13 `4361dc5` (claim-rename; review bounded the claim window), B14 `61d1ddc` (shared `bounded_put`), B15 `438dc7d`, B16 `3bdf4af`, B17 `51f304f` (`default_image_cache` centralized in `_runtime/images.py`), B18 `b6a4570`, B19 `ea5de79`, B20 `ffbe28f`, B21 `2b861cc` (+ failure-path bounds from review), B22 `aaeb154` (gate, per the approved disposition), B23 `2bb3707`, B24 `7beefc7`, B25 `c5f9c8b`.
+
+**Group C:** C1 landed as CI proof-contract tests PLUS a live `data-db` exfiltrate row in the vulhub chain (no pcap claim: ssh keeps the wire ciphertext; content corroboration CI-pinned, stated in the YAML and README). C2 landed (mid-acquisition cancellation suite; exposed and fixed one real unguarded store read in the scorer's hints path). T8 and T10 were found already covered and not duplicated. **T7 (host-seal fallback to driver-only binding) did not land in any slice: the one open test proposal, carried to the close-out record as a residual.** All other proposals landed with their findings.
+
+**Group D:** all landed, one sweep commit per subsystem. **R1:** landed (daemons `ba544d2`).
+
+**Integration additions (`3ed9534`):** `WedgedHarvestTap` gained `claim_file` (B13's protocol growth vs the provider slice's A6 test, the one cross-merge break); `LocalEndpoint` now mirrors the daemons' FIFO refusal with a channel-level pin (resolving the daemons slice's cross-worker note).
