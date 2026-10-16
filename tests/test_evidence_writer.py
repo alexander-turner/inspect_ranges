@@ -554,3 +554,63 @@ def test_evidence_cap_gaps_and_flags_the_seal(tmp_path: Path) -> None:
         assert gap.cause == "evidence-cap" and gap.dropped == 8
 
     asyncio.run(scenario())
+
+
+def test_gap_commits_in_event_order_behind_pending_chunks(tmp_path: Path) -> None:
+    """B12: a gap recorded while earlier chunks await delivery takes a LATER chain slot than them, so the permanent record never inverts event order."""
+
+    async def run() -> None:
+        from inspect_ranges._evidence.reader import manifest_records
+
+        dead = DeadSink(LocalDirSink(tmp_path))
+        writer = EvidenceWriter(
+            dead, writer="driver", part_interval_s=0, put_attempts=1, retry_wait_s=0
+        )
+        await writer.append("s/a", b"first")
+        await writer.flush()  # chunk stays pending (sink down)
+        await writer.gap("s/a", cause="poll-truncated")  # the loss AFTER the chunk
+        dead.dead = False
+        await writer.flush()
+        await writer.seal("incomplete")
+
+        records = [
+            (r.seq, r.kind, getattr(r, "cause", None))
+            for r in await manifest_records(LocalDirStore(tmp_path), "driver")
+            if r.stream == "s/a"
+        ]
+        assert records == [(0, "chunk", None), (1, "gap", "poll-truncated")], records
+
+    asyncio.run(run())
+
+
+def test_buffer_cap_drop_takes_the_dropped_chunks_slot(tmp_path: Path) -> None:
+    """B12 companion: the drop-oldest gap still takes exactly the dropped chunk's FIFO position."""
+
+    async def run() -> None:
+        from inspect_ranges._evidence.reader import manifest_records
+
+        dead = DeadSink(LocalDirSink(tmp_path))
+        writer = EvidenceWriter(
+            dead,
+            writer="driver",
+            part_interval_s=0,
+            put_attempts=1,
+            retry_wait_s=0,
+            buffer_cap_bytes=8,
+        )
+        await writer.append("s/a", b"AAAAAA")  # 6 bytes, pending
+        await writer.append("s/a", b"BBBBBB")  # over cap: A is dropped in place
+        dead.dead = False
+        await writer.flush()
+        await writer.seal("incomplete")
+
+        records = [
+            (r.seq, r.kind, getattr(r, "cause", None), getattr(r, "dropped", None))
+            for r in await manifest_records(LocalDirStore(tmp_path), "driver")
+            if r.stream == "s/a"
+        ]
+        assert records == [(0, "gap", "buffer-cap", 6), (1, "chunk", None, None)], (
+            records
+        )
+
+    asyncio.run(run())

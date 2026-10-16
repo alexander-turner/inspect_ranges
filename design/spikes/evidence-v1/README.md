@@ -34,6 +34,8 @@ Re-run green (18/18, zero residue) after the fresh-context review's fixes, whose
 
 Two operational findings worth keeping: the production daemon reaps the exec's process group on return, so an in-guest background producer must `setsid` to survive its starting exec (the prototype-era "background processes survive" no longer holds unqualified); and live battery predicates must be delivery-lag immune (assert from the record's own poll counters, never from counts of delivered-so-far chunks, which lag appends by a flush).
 
+Quality-review fix round (2026-10-16): re-run green twice more (18/18 plus zero residue each), once after the finding fixes (A3 single-line cursor stripping, so an event line embedding the pattern can no longer be silently suppressed; B11 replay-flag survival past a failed bootstrap) and once after that round's own code-review refinements (cursor taken from the final non-empty line only, with a suppressed banner at worst mis-taking the single trailing line and surfacing loudly on the next poll; the replay flag kept by an empty-output bootstrap and cleared unmarked by a banner-only one, so it uniformly means this poll shipped possibly-duplicate entries).
+
 Files: `run_telemetry.sh`, `telemetry_battery.py`, `spec-telemetry.yaml`. Artifacts land under `tmp-telemetry/` (gitignored).
 
 ## Slice-5 section: the provider/host seam (run_seam.sh)
