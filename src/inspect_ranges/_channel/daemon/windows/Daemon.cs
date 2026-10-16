@@ -149,12 +149,12 @@ namespace VsockD
         public const int Bound = 256;
         private readonly object _lock = new object();
         private readonly List<Dictionary<string, object>> _entries = new List<Dictionary<string, object>>();
-        private readonly long _started = DateTime.UtcNow.Ticks;
+        private readonly long _started = Mono.NowMs();
 
         public void Add(string level, string eventName, string requestId, string detail)
         {
             Dictionary<string, object> entry = new Dictionary<string, object>();
-            entry["ts_ms"] = (DateTime.UtcNow.Ticks - _started) / TimeSpan.TicksPerMillisecond;
+            entry["ts_ms"] = Mono.NowMs() - _started; // monotonic: see Mono (B8)
             entry["level"] = level;
             entry["event"] = eventName;
             if (requestId != null) entry["request_id"] = requestId;
@@ -499,7 +499,7 @@ namespace VsockD
             {
                 Dictionary<string, object> pending = Base(id, "pending");
                 pending["target_id"] = target;
-                pending["elapsed_ms"] = (DateTime.UtcNow.Ticks - running.StartTicks) / TimeSpan.TicksPerMillisecond;
+                pending["elapsed_ms"] = Mono.NowMs() - running.StartMs;
                 return new StoredReply(pending, null);
             }
             return ErrorReply(id, "ENOENT", "no stored result", null);

@@ -366,15 +366,15 @@ namespace VsockD
             stdinWriter.IsBackground = true;
             stdinWriter.Start();
 
-            long deadlineTicks;
-            long now = DateTime.UtcNow.Ticks;
-            if (commandMs > (long.MaxValue - now) / TimeSpan.TicksPerMillisecond)
-                deadlineTicks = long.MaxValue; // clamp: huge budgets never wrap negative
+            long deadlineMs; // monotonic ms: see Mono (quality-review B8)
+            long now = Mono.NowMs();
+            if (commandMs > long.MaxValue - now)
+                deadlineMs = long.MaxValue; // clamp: huge budgets never wrap negative
             else
-                deadlineTicks = now + commandMs * TimeSpan.TicksPerMillisecond;
+                deadlineMs = now + commandMs;
 
             bool timedOut = false;
-            if (Native.WaitForSingleObject(pi.hProcess, RemainingMs(deadlineTicks)) == Native.WAIT_TIMEOUT)
+            if (Native.WaitForSingleObject(pi.hProcess, RemainingMs(deadlineMs)) == Native.WAIT_TIMEOUT)
                 timedOut = true;
             if (!timedOut)
             {
@@ -384,8 +384,7 @@ namespace VsockD
                 // a blocked anonymous-pipe read; the real guarantee is that
                 // the reply returns now, and a lingering reader is a bounded
                 // background thread that dies with the pipe's write handles.
-                long reapDeadline = DateTime.UtcNow.Ticks +
-                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                long reapDeadline = Mono.NowMs() + (long)Daemon.WaitDelayMs;
                 if (!outReader.Thread.Join(RemainingJoinMs(reapDeadline)))
                     outReader.ForceClose();
                 if (!errReader.Thread.Join(RemainingJoinMs(reapDeadline)))
@@ -404,8 +403,7 @@ namespace VsockD
                 // stdin join = 11 s, inside the host's 12 s observation grace.
                 Native.TerminateJobObject(job, 1);
                 Native.WaitForSingleObject(pi.hProcess, (uint)Daemon.KillGraceMs);
-                long killReapDeadline = DateTime.UtcNow.Ticks +
-                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                long killReapDeadline = Mono.NowMs() + (long)Daemon.WaitDelayMs;
                 outReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 errReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 outcome.TimedOut = true;
@@ -432,15 +430,15 @@ namespace VsockD
             return outcome;
         }
 
-        private static uint RemainingMs(long deadlineTicks)
+        private static uint RemainingMs(long deadlineMs)
         {
-            long ms = (deadlineTicks - DateTime.UtcNow.Ticks) / TimeSpan.TicksPerMillisecond;
+            long ms = deadlineMs - Mono.NowMs();
             return ms <= 0 ? 0 : (uint)Math.Min(ms, uint.MaxValue - 1);
         }
 
-        private static int RemainingJoinMs(long deadlineTicks)
+        private static int RemainingJoinMs(long deadlineMs)
         {
-            long ms = (deadlineTicks - DateTime.UtcNow.Ticks) / TimeSpan.TicksPerMillisecond;
+            long ms = deadlineMs - Mono.NowMs();
             return ms <= 0 ? 0 : (int)Math.Min(ms, int.MaxValue);
         }
 
