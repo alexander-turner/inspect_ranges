@@ -419,13 +419,32 @@ class DetectionGoal(GoalBase):
     collector: str = Field(min_length=1)
     """Declared telemetry collector or sink the signal is expected in."""
     signal: str = Field(min_length=1)
-    """The expected signal (a search or event description the engine evaluates)."""
+    """The expected signal: a regex searched against the collector's exported records in the bytes domain with multiline semantics, so author it to match the export's record text, not as a prose description."""
     window_s: float | None = Field(default=None, gt=0)
     """Observation window in seconds; omitted means the whole run."""
     stealth: bool = False
     """When true, the goal passes if the expected signal is absent over a complete window."""
 
     default_primitive: ClassVar[Primitive | None] = None
+
+    @model_validator(mode="after")
+    def _signal_compiles(self) -> "DetectionGoal":
+        try:
+            # validate in the bytes domain scoring compiles in (str-only
+            # constructs like an inline (?u) flag must refuse here, not crash
+            # the scorer)
+            re.compile(self.signal.encode())
+        except (re.error, ValueError) as error:
+            raise IssueError(
+                [
+                    Issue(
+                        code="detection-signal-pattern",
+                        path=("signal",),
+                        message=f"detection signal does not compile: {error}",
+                    )
+                ]
+            ) from error
+        return self
 
     def observers(self) -> frozenset[ObserverKind]:
         return super().observers() | _observers("telemetry-collector")
