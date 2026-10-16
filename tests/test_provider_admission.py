@@ -81,7 +81,9 @@ def test_cancelled_head_waiter_reserves_the_successor() -> None:
         await gate.acquire(totals(6, 10))  # S1 holds 6; free 4
         a = asyncio.create_task(gate.acquire(totals(9, 10)))  # head, cannot fit
         await asyncio.sleep(0.01)
-        b = asyncio.create_task(gate.acquire(totals(2, 10)))  # fits free 4, FIFO-blocked
+        b = asyncio.create_task(
+            gate.acquire(totals(2, 10))
+        )  # fits free 4, FIFO-blocked
         await asyncio.sleep(0.01)
         assert not a.done() and not b.done()
         a.cancel()

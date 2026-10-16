@@ -69,67 +69,17 @@ def down(
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
 
-    containers = _ids(
-        run,
-        [
-            "docker",
-            "ps",
-            "-a",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    container_query = [
-        "docker",
-        "ps",
-        "-a",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    label_filter = ["--filter", f"label=com.docker.compose.project={project}"]
+    container_query = ["docker", "ps", "-a", "-q", *label_filter]
+    containers = _ids(run, container_query)
     if containers:
         _remove(run, ["docker", "rm", "-f", *containers], container_query)
-    volumes = _ids(
-        run,
-        [
-            "docker",
-            "volume",
-            "ls",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    volume_query = [
-        "docker",
-        "volume",
-        "ls",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    volume_query = ["docker", "volume", "ls", "-q", *label_filter]
+    volumes = _ids(run, volume_query)
     if volumes:
         _remove(run, ["docker", "volume", "rm", "-f", *volumes], volume_query)
-    networks = _ids(
-        run,
-        [
-            "docker",
-            "network",
-            "ls",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    network_query = [
-        "docker",
-        "network",
-        "ls",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    network_query = ["docker", "network", "ls", "-q", *label_filter]
+    networks = _ids(run, network_query)
     if networks:
         _remove(run, ["docker", "network", "rm", *networks], network_query)
     if not keep_state:
