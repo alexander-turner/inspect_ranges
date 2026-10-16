@@ -25,6 +25,7 @@ from inspect_ranges._compiler.plan import (
     resolve_plan,
 )
 from inspect_ranges._host import (
+    HostFacts,
     HostLease,
     HostNotReadyError,
     LeaseLostError,
@@ -415,6 +416,60 @@ def test_cli_cleanup_recovers_from_on_disk_state(
         ]
         assert runtime.allocator.leased_projects() == []
         assert read_owner(runtime.state_dir, "ir-operator-run") is not None
+
+    asyncio.run(scenario())
+
+
+def test_cli_cleanup_reap_seals_evidence_before_releasing_the_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented kill-9 recovery path must not strand a permanently unsealed record: cli_cleanup reap-seals through the sealer BEFORE deleting the lease that holds the only pointer (quality-review A7)."""
+    import inspect_ranges._provider.state as state_module
+    from inspect_ranges._evidence.manifest import Seal
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+
+    monkeypatch.setattr(state_module, "_fallback_state", None)
+
+    async def scenario() -> None:
+        runtime = provider_runtime()
+        runtime.state_dir = tmp_path / "projects"
+        runtime.state_dir.mkdir(parents=True, exist_ok=True)
+        seams = FakeSeams(runtime)
+        runtime.down_fn = seams.down
+        evidence_root = tmp_path / "evidence"
+        # a dead driver's record: one delivered part, never sealed
+        writer = EvidenceWriter(
+            LocalDirSink(evidence_root),
+            writer="driver",
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            sample_id="s1",
+            part_interval_s=0,
+        )
+        await writer.append("session", b'{"event": "pinned"}\n')
+        await writer.checkpoint()
+        runtime.allocator.lease("ir-killed-9", 2)
+        store = lease_store(runtime)
+        lease = store.acquire(
+            project="ir-killed-9",
+            task_name="t",
+            sample_id="s1",
+            isolation="shared",
+            origin="local",
+            bundle_path=str(tmp_path),
+            bundle_digest="0" * 64,
+            staging=str(tmp_path / "staging"),
+            host_facts=HostFacts(arch="x86_64", hostname="h", host_class="test"),
+            ttl_s=600,
+            evidence_location=str(evidence_root),
+        )
+        await Env.cli_cleanup(None)
+        assert "ir-killed-9" in seams.down_calls
+        assert store.leases() == [], "the lease is released after the seal"
+        seal = Seal.model_validate_json(
+            (evidence_root / "manifests" / "driver" / "seal.json").read_bytes()
+        )
+        assert seal.status == "reaped"
+        assert seal.lease_id == lease.lease_id
 
     asyncio.run(scenario())
 
