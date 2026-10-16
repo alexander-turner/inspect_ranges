@@ -39,13 +39,35 @@ OnStage = Callable[[str, str, dict[str, Any]], None]
 """Mirrors every stage-log write as `(stage, status, fields)`; exceptions are logged and never alter `up`'s outcome. The mirror begins where the stage log does (after ownership registration); earlier failures surface as `UpError` only."""
 
 
+IMAGE_BUILD_TIMEOUT_S = 1800.0
+"""Bound on the one legitimately slow docker call (`ensure_range_image` builds the hypervisor image on first use); a wedged docker daemon surfaces as a stage-named `UpError` instead of hanging `up()` forever (quality-review B21)."""
+
+
 def run_command(
     argv: list[str],
     env: dict[str, str] | None = None,
     input: str | None = None,
+    timeout: float | None = None,
 ) -> "subprocess.CompletedProcess[str]":
-    """The default runner: captured text output, no check."""
-    return subprocess.run(argv, capture_output=True, text=True, env=env, input=input)
+    """The default runner: captured text output, no check.
+
+    A `timeout` expiry returns rc 124 with the timeout named in stderr (never raises), so call sites surface it through their normal stage-named failure paths: `up()` must be internally bounded, since the provider's cancellation drain awaits it to completion (quality-review B21).
+    """
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, env=env, input=input, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as expired:
+        detail = expired.stderr
+        stderr = (
+            detail.decode(errors="replace") if isinstance(detail, bytes) else detail
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=124,
+            stdout="",
+            stderr=f"timed out after {timeout:.0f}s: {stderr or ''}".strip(),
+        )
 
 
 class UpError(Exception):
@@ -415,7 +437,9 @@ def up(
                 )
 
     try:
-        range_image = ensure_range_image(lambda argv: run(argv))
+        range_image = ensure_range_image(
+            lambda argv: run(argv, timeout=IMAGE_BUILD_TIMEOUT_S)
+        )
     except Exception as error:
         raise UpError("range-image", str(error)) from error
 
@@ -462,7 +486,19 @@ def up(
         return UpError(stage, message, guest=guest)
 
     log.log("range-container", "start")
-    result = run(_compose_argv(project, bundle, "up", "-d", "--wait"), env=env)
+    result = run(
+        _compose_argv(
+            project,
+            bundle,
+            "up",
+            "-d",
+            "--wait",
+            "--wait-timeout",
+            str(int(options.readiness_timeout)),
+        ),
+        env=env,
+        timeout=options.readiness_timeout + 60.0,
+    )
     if result.returncode != 0:
         raise fail(
             "range-container", f"compose up failed: {result.stderr.strip()[-800:]}"
@@ -474,6 +510,7 @@ def up(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
         env=env,
         input=boot_script(boot),
+        timeout=options.readiness_timeout,
     )
     if boot_result.returncode != 0:
         raise fail(
