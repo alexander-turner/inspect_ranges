@@ -368,7 +368,7 @@ def test_realize_never_hangs_on_hostile_applier(scenario: str) -> None:
     start = time.monotonic()
     stages = asyncio.run(scenario_run())
     assert time.monotonic() - start < 3.0, "realize hung past its budgets"
-    if scenario == "no-close-after-ready":
+    if scenario in ("no-close-after-ready", "rst-after-ready"):
         assert stages[-1] == "ready", "the delivered terminal stage must be returned"
 
 
