@@ -164,7 +164,6 @@ namespace VsockD
                 _entries.Add(entry);
                 if (_entries.Count > Bound) _entries.RemoveAt(0);
             }
-            Daemon.Log(level + " " + eventName + " " + detail);
         }
 
         public List<object> Tail(long limit)
@@ -236,15 +235,12 @@ namespace VsockD
         // layer 2b)
         public static readonly string Session = Guid.NewGuid().ToString("N");
 
-        public static void Log(string msg)
-        {
-            try
-            {
-                File.AppendAllText(Path.Combine(BaseDir, "vsockd.log"),
-                    DateTime.UtcNow.ToString("o") + " " + msg + "\r\n");
-            }
-            catch (Exception) { }
-        }
+        // quality-review B7: diagnostics live ONLY in the in-memory ring
+        // (read over the channel via diag_result). The daemon used to also
+        // append every entry to C:\vsockd\vsockd.log, a file any in-guest
+        // reader could see, contradicting the recorded diag posture
+        // ("an in-guest ring buffer, never written anywhere the range can
+        // see"); nothing is written to disk now.
 
         // ---------------------------------------------------------- listener
 
@@ -394,7 +390,7 @@ namespace VsockD
                 }
                 Io.SendAll(conn, wire, 0, wire.Length);
             }
-            catch (Exception e) { Log("conn: " + e.GetType().Name + ": " + e.Message); }
+            catch (Exception e) { Ring.Add("warn", "conn-failed", null, e.GetType().Name + ": " + e.Message); }
             finally { try { conn.Close(); } catch (Exception) { } }
         }
 
