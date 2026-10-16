@@ -28,8 +28,12 @@ from .._diagnostics import (
     locate,
     parse_marked,
 )
+from .._evidence.manifest import WRITER_NAME_PATTERN
 from ..schema import validate_range
 from ..types import RangeSpec
+
+_GOAL_ID_PATTERN = WRITER_NAME_PATTERN
+"""Goal ids embed into evidence stream names (`probe/<goal id>`) as one key-safe segment, so they share the evidence single-segment grammar: drift here would resurrect the silent-indeterminate class (quality review A8)."""
 
 __all__ = [
     "AnswerGoal",
@@ -655,6 +659,28 @@ class Challenge(_StrictModel):
                 )
             else:
                 seen[goal.id] = index
+            # Goal ids feed evidence stream names (`probe/<goal id>`) whose
+            # grammar is key-safe lowercase. An id outside it validated green,
+            # then every probe-record append failed inside the never-raise
+            # evidence layer and the goal scored indeterminate: an
+            # infrastructure-shaped misattribution of an authoring slip
+            # (quality review A8; the compiler's `_evidence_name_issues`
+            # pattern, applied here).
+            if re.fullmatch(_GOAL_ID_PATTERN, goal.id) is None:
+                issues.append(
+                    Issue(
+                        code="goal-id-grammar",
+                        path=("goals", index, "id"),
+                        message=(
+                            f"goal id {goal.id!r} must be lowercase key-safe "
+                            "(letters, digits, '.', '_', '-', starting with a "
+                            "letter or digit): ids name evidence streams"
+                        ),
+                        hint=f"try {goal.id.lower()!r}"
+                        if re.fullmatch(_GOAL_ID_PATTERN, goal.id.lower())
+                        else None,
+                    )
+                )
         if issues:
             raise IssueError(issues)
         return self

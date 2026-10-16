@@ -260,6 +260,16 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
         "duplicate-goal-id",
     ),
     (
+        "goal-id-grammar",
+        challenge_with([{"id": "Recon-1", "type": "flag", "host": "w", "path": "/f"}]),
+        "goal-id-grammar",
+    ),
+    (
+        "goal-id-grammar-space",
+        challenge_with([{"id": "recon 1", "type": "flag", "host": "w", "path": "/f"}]),
+        "goal-id-grammar",
+    ),
+    (
         "scoring-mode-mismatch",
         challenge_with(
             [{"id": "g", "type": "judge", "rubric": "r"}],
