@@ -65,7 +65,7 @@ def challenge_dataset(
 
     Args:
         challenges: Path to a `challenges.yaml`, or an already validated `Challenges`.
-        range_spec: The range the challenges run against, for early cross-reference validation: a validated `RangeSpec` or a `range.yaml` path. Omitted means structural validation only (the planning gate re-checks at sample time).
+        range_spec: The range the challenges run against, for early cross-reference validation: a validated `RangeSpec` or a `range.yaml` path. Omitted means structural validation only; sample-time setup still refuses unavailable observers, unsupplied collector specs, and `answer` variables the range does not declare, while other cross-references (goal hosts, segments) surface only when their plant or probe fails against the live range.
 
     Returns:
         A dataset with one sample per challenge.
