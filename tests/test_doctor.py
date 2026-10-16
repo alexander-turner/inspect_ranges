@@ -629,11 +629,19 @@ def test_check_evidence_derived_unsupported_scheme_fails() -> None:
 
 
 def test_check_evidence_off_instance_never_blesses_a_rejected_sink() -> None:
-    """When the sink row rejects a scheme, the off-instance row must not report ok for the same value."""
-    results = _evidence_results("gs://bucket/evidence", None)
+    """When the sink row rejects a value, the off-instance row must not report ok for the same value: the row consumes the sink verdict, so this holds for every rejection shape, not just unsupported schemes."""
+    for override in ("gs://bucket/evidence", "s3://", "s3:///prefix"):
+        results = _evidence_results(override, None)
+        assert results["sink"].status == "fail", override
+        assert results["off-instance"].status == "warn", override
+        assert "sink row carries the failure" in results["off-instance"].detail
+
+
+def test_check_evidence_derived_malformed_s3_fails() -> None:
+    """A bucket-less s3:// log dir is the same silent-disable class one input left of gs://: the derived arm shares the runtime's own predicate, so it must refuse."""
+    results = _evidence_results(None, "s3://")
     assert results["sink"].status == "fail"
-    assert results["off-instance"].status == "warn"
-    assert "does not support" in results["off-instance"].detail
+    assert results["off-instance"].status != "ok"
 
 
 def test_check_evidence_empty_override_is_unset(tmp_path: Path) -> None:

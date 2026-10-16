@@ -32,6 +32,7 @@ from .._compiler.plan import image_file_name
 logger = logging.getLogger(__name__)
 
 RECIPE_VERSION = "4"
+"""Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 
 def default_image_cache() -> Path:
@@ -44,8 +45,6 @@ def default_image_cache() -> Path:
         return Path(override)
     return Path.home() / ".cache" / "inspect-ranges" / "images"
 
-
-"""Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 Runner = Callable[[list[str], Path], None]
 """Executes an external command (argv, cwd); raises `CalledProcessError` on failure."""
