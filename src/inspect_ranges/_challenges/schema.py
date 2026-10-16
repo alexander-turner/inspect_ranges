@@ -133,6 +133,34 @@ class GoalBase(_StrictModel):
         """The effective capability label: the authored override, else the type default."""
         return self.primitive if self.primitive is not None else self.default_primitive
 
+    @model_validator(mode="after")
+    def _id_grammar(self) -> "GoalBase":
+        # Goal ids feed evidence stream names (`probe/<goal id>`), whose
+        # grammar is key-safe lowercase. An id outside it validated green,
+        # then every probe-record append failed inside the never-raise
+        # evidence layer and the goal scored indeterminate: an
+        # infrastructure-shaped misattribution of an authoring slip (quality
+        # review A8). The check lives ON THE MODEL so directly constructed
+        # goals validate too, not only Challenge-wrapped ones (review fix).
+        if re.fullmatch(_GOAL_ID_PATTERN, self.id) is None:
+            raise IssueError(
+                [
+                    Issue(
+                        code="goal-id-grammar",
+                        path=("id",),
+                        message=(
+                            f"goal id {self.id!r} must be lowercase key-safe "
+                            "(letters, digits, '.', '_', '-', starting with a "
+                            "letter or digit): ids name evidence streams"
+                        ),
+                        hint=f"try {self.id.lower()!r}"
+                        if re.fullmatch(_GOAL_ID_PATTERN, self.id.lower())
+                        else None,
+                    )
+                ]
+            )
+        return self
+
     def observers(self) -> frozenset[ObserverKind]:
         """The trusted observers this goal requires; every goal's plant record needs the sink."""
         return _observers("evidence-sink")
@@ -697,28 +725,6 @@ class Challenge(_StrictModel):
                 )
             else:
                 seen[goal.id] = index
-            # Goal ids feed evidence stream names (`probe/<goal id>`) whose
-            # grammar is key-safe lowercase. An id outside it validated green,
-            # then every probe-record append failed inside the never-raise
-            # evidence layer and the goal scored indeterminate: an
-            # infrastructure-shaped misattribution of an authoring slip
-            # (quality review A8; the compiler's `_evidence_name_issues`
-            # pattern, applied here).
-            if re.fullmatch(_GOAL_ID_PATTERN, goal.id) is None:
-                issues.append(
-                    Issue(
-                        code="goal-id-grammar",
-                        path=("goals", index, "id"),
-                        message=(
-                            f"goal id {goal.id!r} must be lowercase key-safe "
-                            "(letters, digits, '.', '_', '-', starting with a "
-                            "letter or digit): ids name evidence streams"
-                        ),
-                        hint=f"try {goal.id.lower()!r}"
-                        if re.fullmatch(_GOAL_ID_PATTERN, goal.id.lower())
-                        else None,
-                    )
-                )
         if issues:
             raise IssueError(issues)
         return self
