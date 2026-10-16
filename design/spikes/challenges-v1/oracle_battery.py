@@ -141,6 +141,46 @@ async def main() -> int:
             "observers available: sink, pcap, console",
         )
 
+        print("=== daemon fd hygiene (quality-review A1) ===", flush=True)
+        # an exec'd child must inherit no daemon sockets: before the CLOEXEC
+        # fix, every child inherited the LISTENER (an unrooted process could
+        # accept driver connections) and any live connection fds
+        # the glob holds the shell's own /proc/self/fd dirfd, whose readlink
+        # fails once the dir is closed, so the loop's rc is useless; the
+        # verdict reads the listing (non-empty, proving the probe ran, and
+        # free of socket: links, proving no daemon fd leaked)
+        _, listing = await sh(
+            oracle,
+            "web",
+            'for f in /proc/self/fd/*; do readlink "$f" 2>/dev/null; done; true',
+        )
+        lines = [
+            line
+            for line in listing.decode(errors="replace").splitlines()
+            if line
+        ]
+        sockets = [line for line in lines if line.startswith("socket:")]
+        check(
+            bool(lines) and not sockets,
+            f"exec child inherits no daemon sockets ({len(sockets)} leaked across {len(lines)} fds)",
+        )
+
+        # budget-hold re-measure: a backgrounded child's inherited connection
+        # fd used to keep the stream open past the daemon's close, stranding
+        # the driver's residual read for its whole allowance window
+        # (recorded before the fix: ~180 s default, ~40 s at a 30 s budget)
+        started = time.monotonic()
+        rc, out = await sh(
+            oracle,
+            "web",
+            "setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed",
+        )
+        hold = time.monotonic() - started
+        check(
+            rc == 0 and b"armed" in out and hold <= 5.0,
+            f"backgrounded-child exec returns promptly ({hold:.2f}s; was ~180 s pre-A1)",
+        )
+
         print("=== marker, cross-segment noise, plants ===", flush=True)
         await oracle.write_file("web", "/tmp/residue-marker", b"m", owner=None)
         await oracle.write_file("db", "/tmp/residue-marker", b"m", owner=None)
