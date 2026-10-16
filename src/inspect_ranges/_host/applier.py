@@ -41,7 +41,13 @@ from .._channel.protocol import (
 from .._channel.uds import ROUTED_ACK, read_preamble
 from .._compiler.plan import ResolvedPlan, Totals
 from .._doctor.checks import readiness_failures
-from .._evidence.capture import CaptureStreamer, ComposeTap, StageRecorder
+from .._evidence.capture import (
+    CAPTURE_HARVEST_TIMEOUT_S,
+    CAPTURE_STOP_TIMEOUT_S,
+    CaptureStreamer,
+    ComposeTap,
+    StageRecorder,
+)
 from .._evidence.s3 import sink_for_location
 from .._evidence.sink import EvidenceWriter
 from .._provider.admission import AdmissionRefused, HostCapacity, WeightedAdmission
@@ -694,9 +700,12 @@ class Applier:
         try:
             # stop() is internally bounded; no outer timeout, which would
             # cancel its own gap-recording handlers mid-write (review finding
-            # on A6). Harvest sized for a real teardown tail; the seal reserve
-            # below stays protected regardless.
-            await streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+            # on A6). The phase budgets are single-sourced beside the streamer;
+            # the seal reserve below stays protected regardless.
+            await streamer.stop(
+                stop_timeout_s=CAPTURE_STOP_TIMEOUT_S,
+                harvest_timeout_s=CAPTURE_HARVEST_TIMEOUT_S,
+            )
         except Exception:
             stops_clean = False
             logger.exception(
