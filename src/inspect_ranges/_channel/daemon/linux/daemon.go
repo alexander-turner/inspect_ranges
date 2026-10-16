@@ -799,16 +799,20 @@ func (d *Daemon) readFile(request *Message) *storedReply {
 		return errorReply(request.ID, "EISDIR", "Is a directory", nil)
 	}
 	// incremental, bounded read: at most limit+1 bytes ever in memory, so a
-	// multi-GiB file or an endless device cannot OOM or wedge the daemon
+	// multi-GiB file or an endless device cannot OOM the daemon; O_NONBLOCK
+	// plus the type refusal below keep FIFOs from wedging it (finding B10)
 	limit := int64(DefaultBulkCap)
 	if request.MaxBytes != nil {
 		limit = *request.MaxBytes
 	}
-	handle, err := os.Open(request.Path)
+	handle, err := os.OpenFile(request.Path, os.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return fileError(request.ID, err)
 	}
 	defer handle.Close()
+	if reply := refuseWedgingType(request.ID, handle); reply != nil {
+		return reply
+	}
 	data := make([]byte, 0, min64(limit+1, 1<<20))
 	chunk := make([]byte, 1<<20)
 	for int64(len(data)) <= limit {
@@ -860,7 +864,23 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 		}
 	}
 	if request.Mode == nil {
-		if err := os.WriteFile(request.Path, data, 0o644); err != nil {
+		// os.WriteFile semantics (create 0644-through-umask, truncate keeps a
+		// pre-existing file's bits) with the finding-B10 guards: O_NONBLOCK
+		// so a reader-less FIFO refuses ENXIO at open instead of blocking a
+		// limiter slot forever, and the type refusal below for the rest
+		handle, err := os.OpenFile(request.Path,
+			os.O_WRONLY|os.O_CREATE|os.O_TRUNC|unix.O_NONBLOCK, 0o644)
+		if err != nil {
+			return fileError(request.ID, err)
+		}
+		defer handle.Close()
+		if reply := refuseWedgingType(request.ID, handle); reply != nil {
+			return reply
+		}
+		if _, err := handle.Write(data); err != nil {
+			return fileError(request.ID, err)
+		}
+		if err := handle.Close(); err != nil {
 			return fileError(request.ID, err)
 		}
 		return okReply(request.ID)
@@ -871,11 +891,14 @@ func (d *Daemon) writeFile(request *Message, data []byte) *storedReply {
 	// the fresh secret until a trailing chmod), so open without truncating,
 	// fchmod to the exact bits, then truncate and write
 	mode := fileModeFromWire(*request.Mode)
-	handle, err := os.OpenFile(request.Path, os.O_WRONLY|os.O_CREATE, mode)
+	handle, err := os.OpenFile(request.Path, os.O_WRONLY|os.O_CREATE|unix.O_NONBLOCK, mode)
 	if err != nil {
 		return fileError(request.ID, err)
 	}
 	defer handle.Close()
+	if reply := refuseWedgingType(request.ID, handle); reply != nil {
+		return reply
+	}
 	if err := handle.Chmod(mode); err != nil {
 		return fileError(request.ID, err)
 	}
@@ -905,6 +928,26 @@ func parentDir(path string) string {
 		}
 	}
 	return ""
+}
+
+// refuseWedgingType closes the finding-B10 hole: FIFOs (and sockets) wedge
+// the file planes: open(2) on a writer-less FIFO blocks forever, pinning a
+// limiter slot per same-id retry and surfacing driver-side as an
+// infrastructure-shaped failure an agent can manufacture by planting a FIFO
+// at a path scoring later reads. Both planes open O_NONBLOCK (a no-op for
+// the types that pass) and refuse these types outright. Character and block
+// devices stay served: their reads are already cap-bounded, and
+// TestReadFileBoundedForHugeSources pins that contract.
+func refuseWedgingType(id string, handle *os.File) *storedReply {
+	info, err := handle.Stat()
+	if err != nil {
+		return fileError(id, err)
+	}
+	if info.Mode().Type()&(fs.ModeNamedPipe|fs.ModeSocket) != 0 {
+		return errorReply(id, "EINVAL",
+			fmt.Sprintf("refusing %v: FIFOs and sockets wedge the file plane", info.Mode().Type()), nil)
+	}
+	return nil
 }
 
 func fileError(id string, err error) *storedReply {

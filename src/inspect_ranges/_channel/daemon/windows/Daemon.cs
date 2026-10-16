@@ -598,6 +598,10 @@ namespace VsockD
                 // incremental, bounded: at most limit+1 bytes ever in memory
                 using (FileStream fs = File.OpenRead(path))
                 {
+                    // finding B10: a named-pipe or device path wedges or
+                    // misbehaves under the bounded loop; disk files only
+                    if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
+                        return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
                     MemoryStream data = new MemoryStream();
                     byte[] chunk = new byte[1 << 20];
                     while (data.Length <= limit)
@@ -638,7 +642,14 @@ namespace VsockD
                 // "mode" is accepted by the codec for cross-codec parity but
                 // POSIX permission bits have no NTFS equivalent (ACLs), so
                 // the Windows daemon deliberately ignores it
-                File.WriteAllBytes(path, data);
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                {
+                    // finding B10: FileMode.Create on a \\.\pipe\ path
+                    // connects as a pipe client; disk files only
+                    if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
+                        return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
+                    fs.Write(data, 0, data.Length);
+                }
                 return OkReply(id);
             }
             catch (Exception e) { return FileError(id, e, path); }
