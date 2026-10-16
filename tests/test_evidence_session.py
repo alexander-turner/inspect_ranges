@@ -392,6 +392,70 @@ def test_hanging_sink_bounds_the_seal_phase(
     asyncio.run(scenario())
 
 
+def test_host_seal_miss_reap_seals_before_the_lease_release(tmp_path: Path) -> None:
+    """Applier restart with a surviving driver (quality-review round 2, adopted from the unit-3 probe): the restarted applier's teardown seals nothing, so the driver's host-seal miss path reap-seals the host record at the reaper's exact ordering point, after teardown and before the lease release that would delete the reaper's only pointer; the binding carries the reaped host seal, and the subsequent lease release plus an empty reaper sweep leave the record sealed."""
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+    from inspect_ranges._host.host import HostFacts
+    from inspect_ranges._host.leases import LeaseStore
+    from inspect_ranges._host.reaper import sweep
+    from inspect_ranges._runtime.down import DownResult
+
+    async def scenario() -> None:
+        # 1. the pre-restart applier's host writer delivered capture, never sealed
+        host_writer = EvidenceWriter(
+            LocalDirSink(tmp_path), writer="host", lease_id="a" * 32, sample_id="s1"
+        )
+        await host_writer.append("pcap/lab", b"pre-restart capture")
+        await host_writer.checkpoint()
+
+        # 2. the surviving driver's teardown tail: finalize (driver seal), the
+        # host-seal readback (the miss path), the binding
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="a" * 32, project="ir-p", bundle=tmp_path / "bundle", plan=plan
+        )
+        await session.finalize()
+        await session.read_host_seal()
+        session.write_binding()
+        seals = cast(dict[str, str], session.binding()["seals"])
+        assert set(seals) == {"driver", "host"}, (
+            "the miss path reap-seals and the binding carries the host digest"
+        )
+
+        # 3. _destroy then releases the host lease; the reaper has nothing to
+        # recover (the composition the pre-fix code left permanently unsealed)
+        state = tmp_path / "state"
+        store = LeaseStore(state)
+        lease = store.acquire(
+            project="ir-p",
+            task_name="t",
+            sample_id="s1",
+            isolation="shared",
+            origin="uds:/tmp/sock",
+            bundle_path=str(tmp_path),
+            bundle_digest="0" * 64,
+            staging=str(tmp_path / "staging"),
+            host_facts=HostFacts(arch="x86_64", hostname="h", host_class="test"),
+            ttl_s=600,
+            evidence_location=str(tmp_path),
+        )
+        store.release(lease.lease_id)
+
+        def never_down(project: str, state_dir: Path) -> DownResult:
+            raise AssertionError("no lease exists for the reaper to act on")
+
+        assert sweep(state, store=store, down_fn=never_down) == []
+        report = await verify_location(
+            LocalDirStore(tmp_path), expected_seals={"host": seals["host"]}
+        )
+        host = report.writers["host"]
+        assert report.ok and host.sealed and host.binding_checked
+        assert host.seal_status == "reaped", "the driver's reap-seal is honest"
+
+    asyncio.run(scenario())
+
+
 def test_bad_knob_disables_evidence_not_the_sample(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

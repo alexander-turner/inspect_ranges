@@ -87,7 +87,7 @@ def verify(
 ) -> None:
     """Replay the hash chains at LOCATION and name the first break.
 
-    LOCATION is a local directory or an `s3://bucket/prefix` evidence location (S3 credentials follow standard AWS resolution). Exits 0 when every writer replays cleanly, 1 on any break or when no manifests exist. An unsealed writer is reported loudly but is not itself a break unless a binding was supplied for it (the lifecycle seals on finalize and on reap; unsealed-at-rest means neither happened). With `--expect-seal` the writer's result carries the full detection claim; without it, internal consistency only.
+    LOCATION is a local directory or an `s3://bucket/prefix` evidence location (S3 credentials follow standard AWS resolution). Exits 0 when every writer replays cleanly, 1 on any break or when no manifests exist. An unsealed writer is reported loudly but is not itself a break unless a binding was supplied for it (the lifecycle seals on finalize and on reap, where reap-sealing is done by whichever party reaches the abandoned record: the surviving driver at teardown, or the reaper and `cli_cleanup` for a dead driver; unsealed-at-rest means none of them happened). With `--expect-seal` the writer's result carries the full detection claim; without it, internal consistency only.
     """
     expected: dict[str, str] = {}
     for item in expect_seal:
