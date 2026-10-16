@@ -31,7 +31,9 @@ from .observedtypes import (
     DetectionType,
     HijackType,
     JudgeType,
+    PatchType,
     TamperType,
+    register_exploit,
 )
 from .oracle import OracleSetupError, RangeOracle, range_oracle
 from .plants import Plant, PlantStore
@@ -87,6 +89,7 @@ __all__ = [
     "Hint",
     "JUDGE_WEIGHT_CAP",
     "JudgeType",
+    "PatchType",
     "LatchRecord",
     "ObserverKind",
     "Observations",
@@ -112,6 +115,7 @@ __all__ = [
     "plant_goals",
     "plant_secret_file",
     "range_oracle",
+    "register_exploit",
     "register_goal_type",
     "registered_goal_types",
     "required_observers",

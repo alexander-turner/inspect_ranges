@@ -6,8 +6,17 @@ except ImportError:
     __version__ = "unknown"
 
 from ._challenges import (
+    GoalResult,
+    GoalType,
+    Observations,
+    RangeOracle,
     challenge_dataset,
+    challenge_scorer,
     load_challenges,
+    plant_goals,
+    register_exploit,
+    register_goal_type,
+    submit_goal,
     validate_challenges,
 )
 from .schema import (
@@ -19,13 +28,22 @@ from .schema import (
 from .types import semantic_issues
 
 __all__ = [
+    "GoalResult",
+    "GoalType",
+    "Observations",
+    "RangeOracle",
     "__version__",
     "challenge_dataset",
+    "challenge_scorer",
     "load_challenges",
     "load_range",
+    "plant_goals",
     "range_json_schema",
+    "register_exploit",
+    "register_goal_type",
     "revalidate_range",
     "semantic_issues",
+    "submit_goal",
     "validate_challenges",
     "validate_range",
 ]
