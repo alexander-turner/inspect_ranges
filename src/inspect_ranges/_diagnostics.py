@@ -300,8 +300,37 @@ def issues_from_validation_error(
     carried_locs = {
         loc for detail, loc in cleaned if _carried_issues(detail) is not None
     }
+    # One authored mistake against a plain scalar union (str | int | bool)
+    # produces one pydantic error per member, each loc carrying a bare member
+    # tag the walk consumed; fold each such group into a single issue.
+    union_tags: dict[tuple[PathElement, ...], list[str]] = {}
+    for detail, loc in cleaned:
+        if _carried_issues(detail) is not None:
+            continue
+        raw_clean = _clean_loc(detail["loc"])
+        if len(raw_clean) == len(loc) + 1 and isinstance(raw_clean[-1], str):
+            union_tags.setdefault(loc, []).append(str(raw_clean[-1]))
+    collapsed = {loc: tags for loc, tags in union_tags.items() if len(tags) > 1}
+    collapsed_emitted: set[tuple[PathElement, ...]] = set()
     for detail, loc in cleaned:
         carried = _carried_issues(detail)
+        if carried is None and loc in collapsed:
+            semantic_checked = False
+            if loc in collapsed_emitted:
+                continue
+            collapsed_emitted.add(loc)
+            position = locate(node, loc)
+            value = detail.get("input")
+            issues.append(
+                Issue(
+                    code="invalid-type",
+                    path=loc,
+                    line=position[0] if position else None,
+                    col=position[1] if position else None,
+                    message=f"{value!r} matches none of the field's allowed types ({', '.join(collapsed[loc])})",
+                )
+            )
+            continue
         if (
             carried is None
             and detail["type"] == "literal_error"
@@ -446,6 +475,13 @@ def _model_at(
                 current = union[element]
                 continue
             return None
+        members = _plain_union_members(current)
+        if members is not None and element in members:
+            current = members[element]
+            continue
+        if get_origin(current) is dict:
+            current = _unwrap_annotation(get_args(current)[1])
+            continue  # mapping keys do not change the value type
         if not (isinstance(current, type) and issubclass(current, BaseModel)):
             return None
         field = None
@@ -471,6 +507,23 @@ def _unwrap_annotation(annotation: Any) -> Any:
         if len(args) == 1:
             return _unwrap_annotation(args[0])
     return annotation
+
+
+def _plain_union_members(annotation: Any) -> dict[str, Any] | None:
+    """Member types of a plain (non-discriminated) union, keyed by pydantic's loc tag.
+
+    Pydantic reports an error against `str | int | bool` once per member, with the member's name as an extra loc element; recognizing those tags lets the loc walk consume them so reported paths name only keys the author wrote.
+    """
+    if get_origin(annotation) not in (Union, UnionType):
+        return None
+    members: dict[str, Any] = {}
+    for arg in get_args(annotation):
+        if arg is type(None):
+            continue
+        name = getattr(arg, "__name__", None)
+        if isinstance(name, str):
+            members[name] = arg
+    return members or None
 
 
 def _discriminated_union(annotation: Any) -> dict[str, type[BaseModel]] | None:
@@ -528,6 +581,17 @@ def _reported_loc(
                 current = union[element]
                 continue
             current = None
+            kept.append(element)
+            continue
+        members = _plain_union_members(current) if current is not None else None
+        if members is not None and element in members:
+            # a bare scalar-union member tag ("str", "int", "bool"): machine
+            # noise, not an authored key
+            current = members[element]
+            continue
+        if current is not None and get_origin(current) is dict:
+            # a mapping key (e.g. variables.<name>): keep it, descend to values
+            current = _unwrap_annotation(get_args(current)[1])
             kept.append(element)
             continue
         if isinstance(current, type) and issubclass(current, BaseModel):

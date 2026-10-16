@@ -100,6 +100,30 @@ def test_dual_stack_union_error_collapses_to_one_issue(tmp_path: Path) -> None:
     assert "IPv4 or IPv6 network" in report.issues[0].message
 
 
+def test_scalar_union_error_collapses_with_authored_path(tmp_path: Path) -> None:
+    # One mistake against Variable.default (str | int | bool) must report ONE
+    # issue at the authored path, not one per union member with pydantic's
+    # machine tags in the path.
+    report = report_with(
+        "variables: { foo: { default: [1, 2] } }",
+        tmp_path,
+    )
+    union_issues = [i for i in report.issues if i.path_str.startswith("variables")]
+    assert [i.path_str for i in union_issues] == ["variables.foo.default"]
+    assert "matches none of the field's allowed types" in union_issues[0].message
+    assert "str" in union_issues[0].message
+
+
+def test_did_you_mean_inside_dict_valued_models(tmp_path: Path) -> None:
+    report = report_with(
+        "variables: { foo: { default: warm, mni: 1 } }",
+        tmp_path,
+    )
+    issue = next(i for i in report.issues if i.code == "unknown-key")
+    assert issue.path_str == "variables.foo.mni"
+    assert issue.hint is not None and "min" in issue.hint
+
+
 ACL_BASE = """
 networks:
   - {{ name: lab, cidr: 10.0.0.0/24, mode: isolated }}
