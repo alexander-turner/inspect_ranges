@@ -81,9 +81,20 @@ async def plant_secret_file(
 
 
 async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
-    """Best-effort removal of already-planted files, newest first; every plant is discarded from the record regardless."""
+    """Best-effort removal of already-planted files, newest first; every plant is discarded from the record regardless.
+
+    Only absolute paths name guest files; a record-only plant (`tamper`'s `PORT/PATH` location, `hijack`'s service name) carries placement facts, not a file, and running `rm` on it was wrong-shaped (quality review, challenges D nits). The disclosed foothold files are their own plants (`disclosed:<goal id>`), so they unwind here naturally.
+    """
     for key in reversed(keys):
         plant = oracle.store.plant(key)
+        if not plant.path.startswith("/"):
+            logger.debug(
+                "setup unwind: %s is a record-only plant (placement %r, no guest file)",
+                key,
+                plant.path,
+            )
+            await oracle.store.discard(key, reason="setup unwound")
+            continue
         try:
             removal = await oracle.exec(
                 plant.guest, ["rm", "-f", "--", plant.path], user="root"

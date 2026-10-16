@@ -78,23 +78,30 @@ def _wall_of(record: dict[str, object]) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
-async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> None:
+async def _disclose(oracle: RangeOracle, goal_id: str, value: str) -> str:
     """Write the disclosed value to the attacker foothold (daemon file plane, 0644).
 
+    The disclosed file is recorded as its own plant (`disclosed:<goal id>`) so `_unwind` removes it like any other planted file when a later setup step fails (quality review, challenges D nits: it previously survived unwinds).
+
     The frame scrubs `value` before any raise: disclosed values are agent-visible by design, but the record's logging rule is uniform (no planted or disclosed material in locals-rendered tracebacks), so the scrub pattern from `plant_secret_file` applies here too.
+
+    Returns:
+        The disclosed plant's store key, for unwind bookkeeping.
     """
     spec = oracle.range_spec()
     attacker = spec.foothold_guest
+    key = f"disclosed:{goal_id}"
+    path = DISCLOSED_PATH_TEMPLATE.format(goal_id=goal_id)
+    await oracle.store.record(
+        key, (value + "\n").encode(), goal_id=goal_id, guest=attacker, path=path
+    )
     try:
-        await oracle.write_file(
-            attacker,
-            DISCLOSED_PATH_TEMPLATE.format(goal_id=goal_id),
-            (value + "\n").encode(),
-            mode=0o644,
-        )
+        await oracle.write_file(attacker, path, (value + "\n").encode(), mode=0o644)
     except BaseException:
         del value
+        await oracle.store.discard(key, reason="write failed")
         raise
+    return key
 
 
 async def _probe_observations(goal: GoalBase, oracle: RangeOracle) -> Observations:
@@ -239,11 +246,11 @@ class TamperType(GoalType):
             key, value.encode(), goal_id=goal.id, guest=goal.host, path=goal.location
         )
         try:
-            await _disclose(oracle, goal.id, value)
+            disclosed = await _disclose(oracle, goal.id, value)
         except BaseException:
             del value
             raise
-        return [key]
+        return [key, disclosed]
 
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
@@ -600,11 +607,11 @@ class HijackType(GoalType):
             key, value.encode(), goal_id=goal.id, guest=goal.host, path=goal.service
         )
         try:
-            await _disclose(oracle, goal.id, "0x" + value)
+            disclosed = await _disclose(oracle, goal.id, "0x" + value)
         except BaseException:
             del value
             raise
-        return [key]
+        return [key, disclosed]
 
     async def check(
         self, goal: GoalBase, oracle: RangeOracle, submissions: Submissions
