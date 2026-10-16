@@ -66,6 +66,8 @@ def test_seal_abandoned_continues_past_a_lost_race(
 ) -> None:
     """A lost seal-put race on one writer never stops the sweep: the next writer still gets its reaped seal (quality-review C-list: reap-seal continuation)."""
     import inspect_ranges._evidence.sealer as sealer_mod
+    from inspect_ranges._evidence.s3 import sink_for_location
+    from inspect_ranges._evidence.sink import EvidenceSink
 
     async def scenario() -> None:
         driver = EvidenceWriter(
@@ -79,22 +81,19 @@ def test_seal_abandoned_continues_past_a_lost_race(
         await host.append("pcap/dmz", b"frames")
         await host.checkpoint()
 
-        real_sink_for_location = sealer_mod.sink_for_location
-
         class RacingSink:
-            def __init__(self, inner: object) -> None:
+            def __init__(self, inner: EvidenceSink) -> None:
                 self._inner = inner
 
             async def put(self, key: str, data: bytes) -> None:
                 if key == seal_key("driver"):
                     raise FileExistsError(key)  # another sealer won this one
-                await self._inner.put(key, data)  # type: ignore[attr-defined]
+                await self._inner.put(key, data)
 
-        monkeypatch.setattr(
-            sealer_mod,
-            "sink_for_location",
-            lambda location: RacingSink(real_sink_for_location(location)),
-        )
+        def racing(location: str) -> EvidenceSink:
+            return RacingSink(sink_for_location(location))
+
+        monkeypatch.setattr(sealer_mod, "sink_for_location", racing)
         sealed = await seal_abandoned(str(tmp_path), lease_id=None, sample_id=None)
         assert set(sealed) == {"host"}, "the lost race skips, the sweep continues"
         report = await verify_location(

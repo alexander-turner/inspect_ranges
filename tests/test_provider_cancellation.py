@@ -10,8 +10,7 @@ from pathlib import Path
 import pytest
 from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
 from inspect_ranges._compiler.plan import Totals
-from inspect_ranges._host import HostLease, HostProvider, LeasePlacement, SampleSpec
-from inspect_ranges._host.reaper import sweep
+from inspect_ranges._host import LeasePlacement, SampleSpec
 from inspect_ranges._provider.provider import (
     LibvirtRangeSandboxEnvironment as Env,
 )
@@ -79,9 +78,7 @@ def test_cancel_mid_boot_drains_and_unwinds_exactly_once(tmp_path: Path) -> None
             assert renewal_tasks() == []
             # admission fully refunded: the whole capacity is acquirable at once
             await asyncio.wait_for(
-                runtime.admission.acquire(
-                    Totals(guests=1, cpus=8, memory_mb=16_384)
-                ),
+                runtime.admission.acquire(Totals(guests=1, cpus=8, memory_mb=16_384)),
                 timeout=1.0,
             )
 
@@ -114,9 +111,7 @@ def test_second_cancellation_abandons_the_drain_and_unwinds_once(
             assert runtime.registry == {}
             assert runtime.allocator.leased_projects() == []
             await asyncio.wait_for(
-                runtime.admission.acquire(
-                    Totals(guests=1, cpus=8, memory_mb=16_384)
-                ),
+                runtime.admission.acquire(Totals(guests=1, cpus=8, memory_mb=16_384)),
                 timeout=1.0,
             )
             await runtime.admission.release(Totals(guests=1, cpus=8, memory_mb=16_384))
@@ -144,21 +139,21 @@ def test_second_cancellation_abandons_the_drain_and_unwinds_once(
     asyncio.run(scenario())
 
 
-def test_cancel_during_host_acquire_leaves_a_reaper_recoverable_lease(
-    tmp_path: Path,
-) -> None:
-    """The drained-but-never-received host lease: a cancelled acquire that already wrote the lease leaves it renewal-less, and the reaper reclaims it after expiry (the drain comment's recovery story, now pinned)."""
+def test_cancel_during_host_acquire_restores_every_balance(tmp_path: Path) -> None:
+    """A cancellation landing INSIDE the host acquire (before the lease write): the abandoned drain leaves no lease, no renewal task, and the CID/registry/admission balances restored. (The complementary never-received-lease window is a thread-timing race the public seam cannot pin deterministically; its recovery, an expired renewal-less lease swept by the reaper, is pinned in test_host_reaper.)"""
 
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
             inner = runtime.host_provider
             gate = asyncio.Event()
+            acquire_entered = asyncio.Event()
 
             class BlockingHostProvider:
                 async def acquire(
                     self, sample: SampleSpec, placement: LeasePlacement
                 ) -> object:
+                    acquire_entered.set()
                     await gate.wait()
                     return await inner.acquire(sample, placement)
 
@@ -172,34 +167,20 @@ def test_cancel_during_host_acquire_leaves_a_reaper_recoverable_lease(
             task = asyncio.create_task(
                 Env.sample_init("task", small_spec(), {"__sample_id__": "c3"})
             )
-            for _ in range(200):
-                if not gate.is_set() and len(seams.render_calls) > 0:
-                    break
-                await asyncio.sleep(0.01)
+            await acquire_entered.wait()
             task.cancel()
             await asyncio.sleep(0.05)
             task.cancel()  # abandon the drain while the host acquire pends
             with pytest.raises(asyncio.CancelledError):
                 await task
-            # let the cancelled-but-shielded acquire finish writing its lease
-            gate.set()
-            store = lease_store(runtime)
-            for _ in range(200):
-                if store.leases():
-                    break
-                await asyncio.sleep(0.01)
-            leases = store.leases()
-            if leases:
-                # nobody received the handle: no renewal task may exist
-                assert renewal_tasks() == []
-                # the reaper reclaims it once expired
-                store.mark_reaping(leases[0].lease_id)
-                outcomes = sweep(
-                    runtime.state_dir,
-                    store=store,
-                    down_fn=lambda project, state_dir: None,  # type: ignore[arg-type, return-value]
-                )
-                assert [outcome.outcome for outcome in outcomes] == ["reaped"]
-                assert store.leases() == []
+            assert len(seams.render_calls) == 1, "render was in flight and drained"
+            assert lease_store(runtime).leases() == []
+            assert renewal_tasks() == []
+            assert runtime.registry == {}
+            assert runtime.allocator.leased_projects() == []
+            await asyncio.wait_for(
+                runtime.admission.acquire(Totals(guests=1, cpus=8, memory_mb=16_384)),
+                timeout=1.0,
+            )
 
     asyncio.run(scenario())
