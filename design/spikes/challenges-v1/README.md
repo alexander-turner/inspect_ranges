@@ -81,6 +81,11 @@ Performance read (the measure-first gate): corroboration scans megabytes in mill
 - Both scans (the type's `compare` and `corroborate`'s rescan) apply the identical probe-frame exclusion (`netident.py`), so they cannot disagree and manufacture a false contradiction.
 - Gaps never fail a passing sample: B3's score is byte-identical to a gapless pass; only the corroboration section differs.
 
+### Daemon fd hygiene (quality-review A1, 2026-10-16 run: 24/24 plus zero residue)
+
+- An exec'd child inherits NO daemon sockets: 0 `socket:` links across the 3 fds the probe child saw (pre-fix, the listener and any live connection fds appeared here; the listener alone let an unrooted child accept driver connections).
+- The budget-hold re-measure: `setsid sleep 6 >/dev/null 2>&1 </dev/null & echo armed` returned in **0.01 s** against the recorded pre-fix hold of ~180 s at the default budget (~40 s at a 30 s arming budget). The hold was the child's inherited connection fd, never the in-guest budget; see the corrected operational finding below.
+
 ## Honest notes
 
 - Per-plant setup timings print from the `inspect_ranges.challenges` logger (the measure-first rows); the eval-log timing instrumentation is slice 5.
