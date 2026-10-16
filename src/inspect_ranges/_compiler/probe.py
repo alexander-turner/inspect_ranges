@@ -8,6 +8,7 @@ The containment cost is recorded in the phase record and stated here once: with 
 from ipaddress import IPv4Network
 
 from .allocate import Allocation
+from .egress import bridge_name
 
 __all__ = [
     "PROBECLIENT_FILENAME",
@@ -38,7 +39,7 @@ def render_probes_txt(allocation: Allocation, subnets: dict[str, IPv4Network]) -
     for segment in sorted(allocation.probe_endpoints):
         endpoint = allocation.probe_endpoints[segment]
         prefix = subnets[segment].prefixlen
-        bridge = f"br-{segment}"[:15]
+        bridge = bridge_name(segment)
         lines.append(
             f"{endpoint.device} {endpoint.peer} {bridge} "
             f"{endpoint.mac} {endpoint.ip}/{prefix}\n"

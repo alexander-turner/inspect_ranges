@@ -729,7 +729,7 @@ class Attacker(_StrictModel):
     """Name of a declared host to use as the foothold instead of a dedicated box."""
 
     image: str | None = None
-    """Attack box image; omitted means the backend's standard attack image."""
+    """Attack box image; omitted means the backend's default guest image (shared with routers today; a dedicated attack image arrives with the images arc)."""
 
     resources: Resources | None = None
     """Attack box sizing."""
@@ -1454,6 +1454,17 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # guest-content cross references
     for host_index, host in enumerate(spec.hosts):
         service_names = sorted(service.name for service in host.services)
+        seen_services: set[str] = set()
+        for service_index, service in enumerate(host.services):
+            if service.name in seen_services:
+                issues.append(
+                    Issue(
+                        code="duplicate-service-name",
+                        path=("hosts", host_index, "services", service_index, "name"),
+                        message=f"host {host.name!r} declares service {service.name!r} more than once (service names are unique on a host; vulnerabilities reference them)",
+                    )
+                )
+            seen_services.add(service.name)
         for vuln_index, vulnerability in enumerate(host.vulnerabilities):
             if (
                 vulnerability.service is not None
@@ -1513,8 +1524,6 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # placing a value. Braces naming nothing declared are left alone (they may
     # be legitimate scenario content, e.g. an SSTI payload in a planted file).
     if spec.variables:
-        import json
-
         reference = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
         def _scan(value: Any, path: tuple[PathElement, ...]) -> None:
