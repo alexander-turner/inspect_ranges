@@ -199,15 +199,20 @@ class DegradeType(GoalType):
             best_fail = max(best_fail, len(failed) / len(window))
             if goal.measure == "latency":
                 assert goal.threshold is not None
-                slow = [
-                    e
+                # per-record UNION of failed and slow: the probe client records
+                # rtt_ms on mumble paths too, so a slow mumble is routine for a
+                # degraded service and summing the sets counted it twice,
+                # inflating partial credit up to 2x (quality review A5)
+                degraded = sum(
+                    1
                     for e in window
-                    if isinstance(rtt := e.get("rtt_ms"), (int, float))
-                    and rtt >= goal.threshold
-                ]
-                best_measure = max(
-                    best_measure, (len(slow) + len(failed)) / len(window)
+                    if e.get("status") != "ok"
+                    or (
+                        isinstance(rtt := e.get("rtt_ms"), (int, float))
+                        and rtt >= goal.threshold
+                    )
                 )
+                best_measure = max(best_measure, degraded / len(window))
             elif goal.measure == "error-fraction":
                 assert goal.threshold is not None
                 fraction = len(failed) / len(window)

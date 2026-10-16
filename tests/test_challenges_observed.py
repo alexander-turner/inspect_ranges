@@ -293,6 +293,31 @@ class TestDegrade:
         result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
         assert not result.achieved and result.partial == pytest.approx(1 / 3)
 
+    def test_latency_failed_and_slow_records_count_once(self) -> None:
+        """A5: a slow MUMBLE is one degraded probe, not two (the client records rtt_ms on mumble paths)."""
+        goal = self.goal(measure="latency", threshold=100.0)
+        records = [
+            probe_record(1000.0, "ok", 10.0),
+            probe_record(1001.0, "mumble", 900.0),
+            probe_record(1002.0, "mumble", 900.0),
+            probe_record(1003.0, "ok", 10.0),
+        ]
+        result = DegradeType().compare(goal, observations(records), EMPTY_STORE)
+        assert not result.achieved
+        # pre-fix the sum of overlapping sets read 4/3, clamped to full credit
+        assert result.partial == pytest.approx(2 / 3)
+        # the same degradation expressed as slow-but-ok scores identically
+        control = [
+            probe_record(1000.0, "ok", 10.0),
+            probe_record(1001.0, "ok", 900.0),
+            probe_record(1002.0, "ok", 900.0),
+            probe_record(1003.0, "ok", 10.0),
+        ]
+        control_result = DegradeType().compare(
+            goal, observations(control), EMPTY_STORE
+        )
+        assert control_result.partial == result.partial
+
     def test_error_fraction_below_threshold_scores_zero(self) -> None:
         goal = self.goal(measure="error-fraction", threshold=0.8)
         records = [
