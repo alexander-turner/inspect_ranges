@@ -39,9 +39,7 @@ def _span(start: float, end: float) -> ClockSpan:
 
 async def _write_tail_state(root: Path) -> None:
     """Chunk 0 + meta committed in a part; chunk 1 (the alerts) delivered, part NOT cut."""
-    writer = EvidenceWriter(
-        LocalDirSink(root), writer="driver", part_interval_s=3600.0
-    )
+    writer = EvidenceWriter(LocalDirSink(root), writer="driver", part_interval_s=3600.0)
     meta = (
         json.dumps(
             {"wall": T0 + 50, "outcome": "ok", "advanced": True, "bytes": len(QUIET)}
@@ -62,8 +60,12 @@ async def _write_tail_state(root: Path) -> None:
 async def _observations(root: Path) -> Observations:
     """Exactly `RangeOracle._telemetry_export_fetch` + `_telemetry_observations`."""
     store = store_for_location(str(root))
-    meta, meta_gapped = await stream_json_records(store, "driver", "telemetry-meta/siem")
-    data, data_gapped = await stream_chunks_with_spans(store, "driver", "telemetry/siem")
+    meta, meta_gapped = await stream_json_records(
+        store, "driver", "telemetry-meta/siem"
+    )
+    data, data_gapped = await stream_chunks_with_spans(
+        store, "driver", "telemetry/siem"
+    )
     return Observations(
         source="evidence",
         reads={
@@ -107,9 +109,7 @@ class TestUncommittedTailSpans:
 
         asyncio.run(scenario())
 
-    def test_windowed_evade_counts_the_uncommitted_alerts(
-        self, tmp_path: Path
-    ) -> None:
+    def test_windowed_evade_counts_the_uncommitted_alerts(self, tmp_path: Path) -> None:
         """The A4 defect: a windowed evade goal read achieved=True over 3 delivered alerts."""
 
         async def scenario() -> None:

@@ -54,6 +54,7 @@ def parse_tamper_location(location: str) -> tuple[int, str]:
         raise ValueError(f"tamper location port out of range: {location!r}")
     return port, "/" + path
 
+
 __all__ = [
     "AnswerGoal",
     "AvailabilityGoal",

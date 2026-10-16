@@ -328,7 +328,9 @@ class TestScorerGuardPins:
                 "goals": [{"id": "f", "type": "flag", "host": "box", "path": "/f"}],
             }
         )
-        subs = Submissions([Submission(goal_id="f", value="VAL-7b7b", wall=time.time())])
+        subs = Submissions(
+            [Submission(goal_id="f", value="VAL-7b7b", wall=time.time())]
+        )
         return store, None, challenge, subs
 
     def test_score_survives_store_read_failures(self, tmp_path: Path) -> None:

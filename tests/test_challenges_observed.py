@@ -49,9 +49,9 @@ from inspect_ranges._challenges.schema import (
 )
 from inspect_ranges._challenges.submission import Submissions
 from inspect_ranges._compiler.allocate import allocate
-from inspect_ranges._evidence.manifest import STREAM_NAME_PATTERN, check_name
 from inspect_ranges._compiler.plan import PlanOptions, resolve_plan
 from inspect_ranges._compiler.probe import render_probe_clamp_nftables
+from inspect_ranges._evidence.manifest import STREAM_NAME_PATTERN, check_name
 from inspect_ranges.types import IssueError
 
 from tests.test_compiler import two_segment_spec
@@ -348,9 +348,7 @@ class TestDegrade:
             probe_record(1002.0, "ok", 900.0),
             probe_record(1003.0, "ok", 10.0),
         ]
-        control_result = DegradeType().compare(
-            goal, observations(control), EMPTY_STORE
-        )
+        control_result = DegradeType().compare(goal, observations(control), EMPTY_STORE)
         assert control_result.partial == result.partial
 
     def test_error_fraction_below_threshold_scores_zero(self) -> None:

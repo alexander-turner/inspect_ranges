@@ -13,8 +13,8 @@ import pytest
 from inspect_ai.util import Store
 from inspect_ranges._challenges.engine import (
     GoalResult,
-    Observations,
     LatchRecord,
+    Observations,
     aggregate,
     goal_type,
     latch,
@@ -23,14 +23,14 @@ from inspect_ranges._challenges.engine import (
     registered_goal_types,
 )
 from inspect_ranges._challenges.goaltypes import ExecuteType, ExfiltrateType, FlagType
-from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.pcapscan import source_bound_find
+from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import (
     AnswerGoal,
-    ExfiltrateGoal,
     Challenge,
     ControlGoal,
     ExecuteGoal,
+    ExfiltrateGoal,
     FlagGoal,
     Hint,
     Scoring,
