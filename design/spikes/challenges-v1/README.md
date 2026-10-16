@@ -2,6 +2,8 @@
 
 Live batteries for the challenges-v1 phase (`design/inspect-ranges/challenges-v1.md`). CID band 30600+ for the oracle section (the prober spike holds 30500); exclusive via the shared battery lock at `/tmp/inspect-ranges-battery.lock`. Artifacts under `tmp/` (gitignored).
 
+Round 2 (2026-10-16) reordered every wrapper's residue check to count containers BEFORE the sweep; the zero-residue rows recorded below were counted after it and stand pending the post-integration re-run.
+
 ## Slice 2: oracle planting and the residue sweep (`./run_oracle.sh`)
 
 A two-segment range (the evidence-v1 shape: dmz and internal joined by a router, eight-capability floor, capture sidecar on) boots at CID 30600; a real `EvidenceSession` owns capture, and a `RangeOracle` over the raw vsock channel plants a flag-shaped value (`web:/root/crown-flag`, 600 root) and an owner-bound value (`db:/opt/owned-secret`, 600 daemon) through `run_setup`. The sweep then proves the residue rule on live guests:

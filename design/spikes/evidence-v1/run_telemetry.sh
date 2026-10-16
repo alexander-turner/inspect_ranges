@@ -46,12 +46,18 @@ echo "=== battery ==="
 uv run python "$SPIKE/telemetry_battery.py" 2>&1 | tee "$SPIKE/tmp-telemetry/logs/battery.txt"
 CODE=${PIPESTATUS[0]}
 
-echo "=== residue check ==="
-$IR down --all >/dev/null 2>&1 || true
-LEFT=$(docker ps -a --format '{{.Names}}' | grep -c "^ir-evidence-v1-telemetry" || true)
-if [[ "$LEFT" -eq 0 ]]; then
-  echo "PASS  zero residue (no ir-evidence-v1-telemetry containers)"
+# residue counted BEFORE the sweep: the zero-residue row must verify the
+# battery left nothing behind, not that the sweep below works (round 2)
+echo "=== residue check (counted before the sweep) ==="
+if NAMES=$(docker ps -a --format '{{.Names}}'); then
+  LEFT=$(grep -c "^ir-evidence-v1-telemetry" <<<"$NAMES" || true)
+  if [[ "$LEFT" -eq 0 ]]; then
+    echo "PASS  zero residue (no ir-evidence-v1-telemetry containers)"
+  else
+    echo "FAIL  residue: $LEFT containers"; CODE=1
+  fi
 else
-  echo "FAIL  residue: $LEFT containers"; CODE=1
+  echo "FAIL  residue: docker ps failed"; CODE=1
 fi
+$IR down --all >/dev/null 2>&1 || true
 exit "$CODE"
