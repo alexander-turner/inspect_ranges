@@ -249,6 +249,68 @@ def test_wedged_producer_stop_cannot_starve_the_seal(
     asyncio.run(scenario())
 
 
+def test_wedged_producer_stop_cannot_starve_a_sibling_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer-stops share is one JOINT bound (quality-review round 2): a wedged earlier-registered stop (the telemetry poller's registration slot) must not starve a later producer's stop CALL, or the starved prober leaks and keeps running its probe client against the sealed record for the life of the driver process (adopted from the round-2 unit-2 probe A)."""
+    import inspect_ranges._provider.evidence as evidence_mod
+    from inspect_ranges._challenges.prober import Prober, ProbeTarget
+
+    async def scenario() -> None:
+        plan = resolve_plan(small_spec())
+        session = EvidenceSession(str(tmp_path), sample_id="s1", capture_local=False)
+        await session.open(
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            project="ir-probe",
+            bundle=tmp_path / "bundle",
+            plan=plan,
+        )
+
+        async def wedged_stop() -> None:
+            # a telemetry stop whose in-flight poll holds the channel budget
+            await asyncio.sleep(5.0)
+
+        client_calls: list[float] = []
+
+        async def stub_client(argv: list[str]) -> bytes:
+            client_calls.append(asyncio.get_running_loop().time())
+            return b'{"status": "down"}'
+
+        prober = Prober(
+            session,
+            "ir-probe",
+            [ProbeTarget(goal_id="recon-1", ip="10.0.0.2", port=80)],
+            cadence_s=0.05,
+            client_runner=stub_client,
+        )
+        prober.start()
+        probe_tasks = list(prober._tasks.values())  # pyright: ignore[reportPrivateUsage]
+        try:
+            # registration order mirrors setup.py: poller (wedged) first,
+            # prober second
+            session.register_producer(wedged_stop)
+            session.register_producer(prober.stop)
+            monkeypatch.setattr(evidence_mod, "PRODUCER_STOPS_SHARE_S", 0.2)
+            await session.finalize()
+            # the seal guarantee holds (the round-1 pin's property)...
+            report = await verify_location(LocalDirStore(tmp_path))
+            assert report.writers["driver"].sealed
+            # ...and the sibling producer was genuinely stopped
+            assert all(task.done() for task in probe_tasks), (
+                "the prober's stop was never reached: its loops leak and keep "
+                "probing the sealed record"
+            )
+            calls_at_finalize = len(client_calls)
+            await asyncio.sleep(0.3)
+            assert len(client_calls) == calls_at_finalize, (
+                "no probe client may run after finalize"
+            )
+        finally:
+            await prober.stop(stop_timeout_s=1.0)  # test-harness cleanup only
+
+    asyncio.run(scenario())
+
+
 def test_hanging_sink_bounds_the_seal_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -44,7 +44,7 @@ SEAL_RESERVE_S = 10.0
 """The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
 
 PRODUCER_STOPS_SHARE_S = 6.0
-"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
+"""The producers' slice of the stops phase, one JOINT bound: every producer's `stop()` starts before any is awaited, so a wedged stop can consume the share but never starve a sibling's stop call (a never-stopped producer would keep running, and probing, against the sealed record for the remaining life of the driver process; quality-review round 2). The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -246,32 +246,29 @@ class EvidenceSession:
             return
         self._finalized = True
         stops_clean = True
-        try:
-            async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
-                for stop in self._producers:
-                    try:
-                        await stop()
-                    except Exception:
-                        logger.exception(
-                            "evidence producer stop failed (continuing): location=%s",
-                            self.location,
-                        )
-        except TimeoutError:
-            stops_clean = False
-            logger.warning(
-                "evidence producer stops exceeded their %.0fs share: "
-                "location=%s (sealing what was delivered; the seal reads "
-                "incomplete)",
-                PRODUCER_STOPS_SHARE_S,
-                self.location,
-            )
-        except Exception:
-            stops_clean = False
-            logger.exception(
-                "evidence producer stops failed (sealing what was delivered): "
-                "location=%s",
-                self.location,
-            )
+        if self._producers:
+            # every stop() starts before any is awaited: the share is one
+            # joint bound, and a wedged stop may consume it but must never
+            # starve a sibling's stop CALL (an unstopped producer keeps
+            # running against the sealed record; quality-review round 2).
+            # A timeout cancels the gather, which cancels the still-running
+            # stop tasks.
+            stops = [
+                asyncio.create_task(self._stop_producer(stop))
+                for stop in self._producers
+            ]
+            try:
+                async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
+                    await asyncio.gather(*stops)
+            except TimeoutError:
+                stops_clean = False
+                logger.warning(
+                    "evidence producer stops exceeded their %.0fs share: "
+                    "location=%s (sealing what was delivered; the seal reads "
+                    "incomplete)",
+                    PRODUCER_STOPS_SHARE_S,
+                    self.location,
+                )
         if self._streamer is not None:
             # stop() is internally bounded; no outer timeout, which would
             # cancel its own gap-recording handlers mid-write (review finding
@@ -368,6 +365,16 @@ class EvidenceSession:
             )
 
     # -- internals ---------------------------------------------------------------
+
+    async def _stop_producer(self, stop: Callable[[], Awaitable[None]]) -> None:
+        """One producer stop under the joint share: its own failure is logged, never a sibling's problem."""
+        try:
+            await stop()
+        except Exception:
+            logger.exception(
+                "evidence producer stop failed (continuing): location=%s",
+                self.location,
+            )
 
     async def _drain_recorder(self) -> None:
         """Ship the recorder's buffered stage events through the driver writer (separated topology and finalize; the local streamer drains it instead)."""
