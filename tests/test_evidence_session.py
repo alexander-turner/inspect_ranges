@@ -231,7 +231,7 @@ def test_wedged_producer_stop_cannot_starve_the_seal(
             await asyncio.sleep(5.0)
 
         session.register_producer(wedged_stop)
-        monkeypatch.setattr(evidence_mod, "FINALIZE_BUDGET_S", 0.6)
+        monkeypatch.setattr(evidence_mod, "PRODUCER_STOPS_SHARE_S", 0.2)
         monkeypatch.setattr(evidence_mod, "SEAL_RESERVE_S", 0.4)
         await session.finalize()
         await session.finalize()  # idempotent, still no retry

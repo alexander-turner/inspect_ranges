@@ -262,7 +262,11 @@ def test_streamer_records_wall_jump(tmp_path: Path) -> None:
 
 def test_stop_bounds_a_wedged_final_harvest(tmp_path: Path) -> None:
     """A tap that wedges at the final harvest: stop() returns within its harvest bound with explicit harvest-timeout gaps instead of holding the caller's finalize budget hostage (quality-review A6)."""
+    import threading
     import time as time_mod
+
+    release = threading.Event()  # interruptible: set in finally so the
+    # executor worker exits promptly and asyncio.run's shutdown never waits
 
     class WedgedHarvestTap:
         def __init__(self, backing: LocalTap) -> None:
@@ -272,7 +276,7 @@ def test_stop_bounds_a_wedged_final_harvest(tmp_path: Path) -> None:
             return self._backing.read_status()
 
         def list_segment_files(self, segment: str) -> list[str]:
-            time_mod.sleep(30.0)  # the wedged docker compose cp shape
+            release.wait(30.0)  # the wedged docker compose cp shape
             return []
 
         def read_file(self, relpath: str) -> bytes:
@@ -300,13 +304,16 @@ def test_stop_bounds_a_wedged_final_harvest(tmp_path: Path) -> None:
         streamer = CaptureStreamer(
             writer, WedgedHarvestTap(backing), segments=["dmz"], console_guests=[]
         )
-        started = time_mod.monotonic()
-        await streamer.stop(stop_timeout_s=0.5, harvest_timeout_s=0.3)
-        assert time_mod.monotonic() - started < 10.0, "stop stays bounded"
-        await writer.seal("incomplete")
-        report = await verify_location(LocalDirStore(location))
-        causes = {gap.cause for gap in report.writers["host"].gaps}
-        assert "harvest-timeout" in causes, f"gaps: {causes}"
+        try:
+            started = time_mod.monotonic()
+            await streamer.stop(stop_timeout_s=0.5, harvest_timeout_s=0.3)
+            assert time_mod.monotonic() - started < 10.0, "stop stays bounded"
+            await writer.seal("incomplete")
+            report = await verify_location(LocalDirStore(location))
+            causes = {gap.cause for gap in report.writers["host"].gaps}
+            assert "harvest-timeout" in causes, f"gaps: {causes}"
+        finally:
+            release.set()
 
     asyncio.run(scenario())
 

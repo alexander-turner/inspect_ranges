@@ -38,10 +38,13 @@ DEFAULT_EVIDENCE_MAX_MB = 4096
 """Default per-writer evidence volume cap (`INSPECT_RANGES_EVIDENCE_MAX_MB`). Enforced per writer identity (a sample has at most two: `driver` and `host`); breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never silent loss and never a failed sample."""
 
 FINALIZE_BUDGET_S = 30.0
-"""The `finalize evidence` budget: teardown is never hostage to a slow uplink; what cannot flush inside it is recorded in the seal as unflushed (or left for the reaper), loudly logged."""
+"""The nominal `finalize evidence` budget: teardown is never hostage to a slow uplink. Enforced as the SUM of its phases (`PRODUCER_STOPS_SHARE_S`, the capture streamer's internal bounds, `SEAL_RESERVE_S`), not one outer timeout: an outer timeout would cancel the streamer's own gap-recording handlers mid-write (quality-review A6 review round)."""
 
 SEAL_RESERVE_S = 10.0
 """The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
+
+PRODUCER_STOPS_SHARE_S = 6.0
+"""The producers' slice of the stops phase. The capture streamer's stop runs after it with its own internal bounds (two stop windows plus one harvest window at 4 s each), so the phase total stays inside `FINALIZE_BUDGET_S - SEAL_RESERVE_S` without an outer timeout racing the streamer's own gap-recording handlers."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -244,7 +247,7 @@ class EvidenceSession:
         self._finalized = True
         stops_clean = True
         try:
-            async with asyncio.timeout(max(FINALIZE_BUDGET_S - SEAL_RESERVE_S, 1.0)):
+            async with asyncio.timeout(PRODUCER_STOPS_SHARE_S):
                 for stop in self._producers:
                     try:
                         await stop()
@@ -253,24 +256,35 @@ class EvidenceSession:
                             "evidence producer stop failed (continuing): location=%s",
                             self.location,
                         )
-                if self._streamer is not None:
-                    await self._streamer.stop()
         except TimeoutError:
             stops_clean = False
             logger.warning(
-                "evidence producer/capture stops exceeded their %.0fs share: "
+                "evidence producer stops exceeded their %.0fs share: "
                 "location=%s (sealing what was delivered; the seal reads "
                 "incomplete)",
-                FINALIZE_BUDGET_S - SEAL_RESERVE_S,
+                PRODUCER_STOPS_SHARE_S,
                 self.location,
             )
         except Exception:
             stops_clean = False
             logger.exception(
-                "evidence producer/capture stops failed (sealing what was "
-                "delivered): location=%s",
+                "evidence producer stops failed (sealing what was delivered): "
+                "location=%s",
                 self.location,
             )
+        if self._streamer is not None:
+            # stop() is internally bounded; these shares keep its worst case
+            # (two stop windows plus one harvest window) inside the finalize
+            # budget WITHOUT an outer timeout that would cancel its own
+            # gap-recording handlers mid-write (review finding on A6)
+            try:
+                await self._streamer.stop(stop_timeout_s=4.0, harvest_timeout_s=4.0)
+            except Exception:
+                stops_clean = False
+                logger.exception(
+                    "capture stop failed (sealing what was delivered): location=%s",
+                    self.location,
+                )
         status: SealStatus = "complete" if stops_clean else "incomplete"
         try:
             async with asyncio.timeout(SEAL_RESERVE_S):

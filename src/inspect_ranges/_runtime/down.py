@@ -20,15 +20,19 @@ class DownError(Exception):
     """Teardown failure: a docker query or removal did not succeed, so the project may still own resources (ownership state is kept so a retry can find them)."""
 
 
+DOCKER_CALL_TIMEOUT_S = 120.0
+"""Bound on every teardown docker call: a wedged daemon surfaces as a DownError the caller's retry machinery (reaper, cli_cleanup, task_cleanup) owns, instead of hanging teardown forever (quality-review B21 review round: the failure path must be as bounded as the boot path)."""
+
+
 def _ids(run: Runner, argv: list[str]) -> list[str]:
-    result = run(argv)
+    result = run(argv, timeout=DOCKER_CALL_TIMEOUT_S)
     if result.returncode != 0:
         raise DownError(f"{' '.join(argv[:3])} failed: {result.stderr.strip()[-400:]}")
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def _remove(run: Runner, argv: list[str], relist: list[str]) -> None:
-    result = run(argv)
+    result = run(argv, timeout=DOCKER_CALL_TIMEOUT_S)
     if result.returncode != 0:
         # a resource that vanished between the listing and the removal (an
         # auto-removed container, a parallel down) is success, not failure

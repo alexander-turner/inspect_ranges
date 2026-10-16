@@ -33,7 +33,7 @@ from .rangeimage import ensure_range_image
 logger = logging.getLogger("inspect_ranges.up")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
-"""Executes a command: `run(argv, env=None, input=None)`; injectable for tests."""
+"""Executes a command: `run(argv, env=None, input=None, timeout=None)`; injectable for tests. A runner must honor the timeout contract `run_command` sets: on expiry it returns rc 124 with the timeout named in stderr, never raises, so call sites surface the hang through their normal stage-named failure paths (an injected runner that ignores `timeout` silently reintroduces the unbounded hang the bound exists to prevent)."""
 
 OnStage = Callable[[str, str, dict[str, Any]], None]
 """Mirrors every stage-log write as `(stage, status, fields)`; exceptions are logged and never alter `up`'s outcome. The mirror begins where the stage log does (after ownership registration); earlier failures surface as `UpError` only."""
@@ -590,6 +590,7 @@ def _pull_consoles(
                 str(destination / f"{name}.log"),
             ),
             env=env,
+            timeout=60.0,  # best-effort against a possibly wedged daemon
         )
 
 

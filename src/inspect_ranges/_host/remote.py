@@ -139,10 +139,17 @@ async def _drive_realize(
     # the verify -> ready gap carries the applier's whole sequential readiness
     # pass (no intermediate report exists in the seam vocabulary), so its
     # allowance is the plan-derived envelope: the readiness deadline plus every
-    # guest's minimum probe window plus grace (quality-review A10)
+    # guest's minimum probe window plus grace (quality-review A10). The APPLIER
+    # runs `up` with its own UpOptions (RealizeRequest carries no readiness
+    # fields), so the envelope is floored at the defaults the applier actually
+    # probes with: a driver configured with a SHORTER readiness_timeout must
+    # not starve a legitimately slower applier pass (review finding; carrying
+    # readiness fields on the wire is the recorded growth path)
+    default_timeout = float(UpOptions.model_fields["readiness_timeout"].default)
+    default_window = float(UpOptions.model_fields["readiness_min_window"].default)
     verify_allowance_s = (
-        options.readiness_timeout
-        + len(plan.guests) * options.readiness_min_window
+        max(options.readiness_timeout, default_timeout)
+        + len(plan.guests) * max(options.readiness_min_window, default_window)
         + 30.0
     )
     started = time.monotonic()

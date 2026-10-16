@@ -607,9 +607,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         "range %s left up (--no-sandbox-cleanup); its host lease "
                         "is no longer renewed, so 'inspect-ranges reaper' "
                         "reclaims it through the applier after expiry; remove "
-                        "it sooner with: inspect sandbox cleanup "
-                        "libvirt_range %s",
+                        "it sooner with: INSPECT_RANGES_HOST=%s "
+                        "inspect sandbox cleanup libvirt_range %s  (the env "
+                        "prefix is what routes the teardown THROUGH the "
+                        "applier; without it the cleanup is a direct down and "
+                        "leaks the applier's admission charge)",
                         handle.project,
+                        runtime.host_backend,
                         handle.project,
                     )
                 else:
