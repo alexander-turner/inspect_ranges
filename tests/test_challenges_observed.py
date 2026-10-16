@@ -564,8 +564,20 @@ class TestHijack:
 class _PatchOracle:
     """Duck-typed oracle stub for the patch check flow."""
 
-    def __init__(self, exploit_rc: int) -> None:
+    def __init__(
+        self,
+        exploit_rc: int,
+        *,
+        gapped: bool = False,
+        no_records: bool = False,
+        exploit_raises: Exception | None = None,
+        cleanup_raises: Exception | None = None,
+    ) -> None:
         self.exploit_rc = exploit_rc
+        self.gapped = gapped
+        self.no_records = no_records
+        self.exploit_raises = exploit_raises
+        self.cleanup_raises = cleanup_raises
         self.writes: list[tuple[str, str, int, str | None]] = []
         self.execs: list[tuple[str, list[str], str | None]] = []
 
@@ -592,11 +604,22 @@ class _PatchOracle:
         timeout_s: float | None = None,
     ) -> Any:
         self.execs.append((guest, cmd, user))
-        rc = self.exploit_rc if cmd[0] == "sh" else 0
-        return SimpleNamespace(rc=rc)
+        if cmd[0] == "sh":
+            if self.exploit_raises is not None:
+                raise self.exploit_raises
+            return SimpleNamespace(rc=self.exploit_rc)
+        if cmd[0] == "rm" and self.cleanup_raises is not None:
+            raise self.cleanup_raises
+        return SimpleNamespace(rc=0)
 
     async def probe_records(self, goal_id: str) -> tuple[list[Any], bool]:
-        return ([], False)
+        if self.no_records:
+            return ([], self.gapped)
+        record = SimpleNamespace(
+            record={"goal": goal_id, "status": "ok", "wall": 1000.0},
+            wall=lambda: 1000.0,
+        )
+        return ([record], self.gapped)
 
 
 class TestPatch:
@@ -671,6 +694,84 @@ class TestPatch:
         assert run[1][0] == "sh" and run[2] == "root"
         assert cleanup[1][:2] == ["rm", "-f"] and cleanup[2] == "root"
         assert obs.reads["exploit_rc"] == b"1"
+
+    def test_random_suffix_defeats_path_precreation(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            paths: set[str] = set()
+            for _ in range(2):
+                oracle = _PatchOracle(exploit_rc=1)
+                asyncio.run(
+                    PatchType().check(
+                        self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                    )
+                )
+                paths.add(oracle.writes[0][1])
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert len(paths) == 2, (
+            "the script path must carry a per-pass random suffix: a "
+            "predictable path could be pre-created by an unprivileged agent"
+        )
+
+    def test_rc_zero_outranks_gapped_stream(self) -> None:
+        records = [probe_record(1000.0, "ok")]
+        result = self.compare(self.obs(records, exploit_rc=0, gapped=True))
+        assert not result.achieved and not result.indeterminate
+        assert "still succeeds" in (result.reason or "")
+
+    def test_check_skips_exploit_on_gapped_stream(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=1, gapped=True)
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert obs.reads["exploit_rc"] == b"skipped"
+        assert not oracle.execs, "the minutes-scale re-run must be skipped"
+        assert self.compare(obs).indeterminate
+
+    def test_cleanup_failure_never_masks_outcome(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=1, cleanup_raises=RuntimeError("boom"))
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert obs.reads["exploit_rc"] == b"1"
+        assert self.compare(obs).achieved
+
+    def test_exploit_error_becomes_deliberate_indeterminate(self) -> None:
+        register_exploit("chain", "exit 1\n")
+        try:
+            oracle = _PatchOracle(exploit_rc=1, exploit_raises=TimeoutError("budget"))
+            obs = asyncio.run(
+                PatchType().check(
+                    self.GOAL, cast(RangeOracle, oracle), cast(Submissions, None)
+                )
+            )
+        finally:
+            PATCH_EXPLOITS.pop("chain", None)
+        assert obs.reads["exploit_rc"] == b"error:TimeoutError"
+        result = self.compare(obs)
+        assert result.indeterminate and "did not complete" in (result.reason or "")
+
+    def test_register_exploit_duplicate_name_raises(self) -> None:
+        register_exploit("dup-chain", "exit 1\n")
+        try:
+            register_exploit("dup-chain", "exit 1\n")  # identical: idempotent
+            with pytest.raises(ValueError, match="different script"):
+                register_exploit("dup-chain", "exit 2\n")
+        finally:
+            PATCH_EXPLOITS.pop("dup-chain", None)
 
 
 class TestRenderedProbeArtifacts:

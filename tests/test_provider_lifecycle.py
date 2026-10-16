@@ -35,9 +35,6 @@ from inspect_ranges._host import (
 )
 from inspect_ranges._provider.admission import AdmissionRefused, HostCapacity
 from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as Env
-from inspect_ranges._provider.provider import (
-    _registered_guests,  # pyright: ignore[reportPrivateUsage]
-)
 from inspect_ranges._provider.state import ProviderRuntime, provider_runtime
 from inspect_ranges._runtime.down import DownResult
 from inspect_ranges._runtime.ownership import owner_record, read_owner, write_owner
@@ -777,32 +774,42 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
 
 
 class TestFootholdOnlyRegistration:
-    """The agent/target wall: only the foothold registers as an Inspect sandbox by default (`challenges-overview.qmd`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
-
-    def test_default_registers_foothold_alone(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
-        names = _registered_guests(small_spec(), ["attacker", "web"])
-        assert names == ["attacker"]
+    """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
 
     def test_opt_out_registers_all_guests_foothold_first(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.setenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", "1")
-        with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
-            names = _registered_guests(small_spec(), ["web", "attacker"])
-        assert names == ["attacker", "web"]
-        assert any("wall" in record.message for record in caplog.records)
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                runtime, _ = rigged_runtime(tmp_path)
+                with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
+                    envs = await Env.sample_init(
+                        "task", small_spec(), {"__sample_id__": "w1"}
+                    )
+                assert list(envs) == ["attacker", "web"]
+                assert any("wall" in record.message for record in caplog.records)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
 
     def test_foothold_on_existing_host_is_the_one_registered(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
         spec = small_spec().model_copy(
             update={"attacker": Attacker(host="web", entry="assumed-breach")}
         )
-        names = _registered_guests(spec, ["web"])
-        assert names == ["web"]
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init("task", spec, {"__sample_id__": "w2"})
+                assert list(envs) == ["web"]
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
