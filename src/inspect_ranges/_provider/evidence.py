@@ -17,7 +17,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .._compiler.plan import ResolvedPlan
-from .._evidence.capture import CaptureStreamer, ComposeTap, StageRecorder, json_lines
+from .._evidence.capture import (
+    CAPTURE_HARVEST_TIMEOUT_S,
+    CAPTURE_STOP_TIMEOUT_S,
+    CaptureStreamer,
+    ComposeTap,
+    StageRecorder,
+    json_lines,
+)
 from .._evidence.location import (
     EVIDENCE_SINK_OVERRIDE_VAR,
     active_evidence_identity,
@@ -45,7 +52,7 @@ SEAL_RESERVE_S = 10.0
 """The finalize budget's reserved seal share: producer and capture stops run under the remainder, so a wedged stop can never starve the seal attempt (quality-review A6; the probes/pollers alone could previously over-subscribe the whole budget, stranding a permanently unsealed record on a healthy teardown)."""
 
 PRODUCER_STOPS_SHARE_S = 6.0
-"""The producers' slice of the stops phase, one JOINT bound: every producer's `stop()` starts before any is awaited, so a wedged stop can consume the share but never starve a sibling's stop call (a never-stopped producer would keep running, and probing, against the sealed record for the remaining life of the driver process; quality-review round 2). The capture streamer's stop runs after it with its own internal bounds (6 s per stop window, 10 s for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
+"""The producers' slice of the stops phase, one JOINT bound: every producer's `stop()` starts before any is awaited, so a wedged stop can consume the share but never starve a sibling's stop call (a never-stopped producer would keep running, and probing, against the sealed record for the remaining life of the driver process; quality-review round 2). The capture streamer's stop runs after it with its own internal bounds (`CAPTURE_STOP_TIMEOUT_S` per stop window, `CAPTURE_HARVEST_TIMEOUT_S` for the real-teardown harvest tail), so the worst case can exceed the nominal `FINALIZE_BUDGET_S` by a bounded margin while the typical case sits far under it; what the phase split guarantees is only, and exactly, that the seal reserve is never starved."""
 
 HOST_SEAL_READ_BUDGET_S = 5.0
 """Post-teardown budget for reading the applier-side seal back for the binding (separated topology)."""
@@ -286,13 +293,15 @@ class EvidenceSession:
         if self._streamer is not None:
             # stop() is internally bounded; no outer timeout, which would
             # cancel its own gap-recording handlers mid-write (review finding
-            # on A6). The harvest bound is sized for a REAL teardown tail (a
-            # flood's final chunks ship through compose cp to the sink; the
-            # first live run at 4 s cancelled mid-ship and left delivered
-            # chunks unreferenced), while the seal reserve stays protected:
-            # the worst case grows the nominal budget, never starves the seal.
+            # on A6). The phase budgets are single-sourced beside the streamer
+            # (their sizing rationale lives on the constants), and the seal
+            # reserve stays protected regardless: the worst case grows the
+            # nominal budget, never starves the seal.
             try:
-                await self._streamer.stop(stop_timeout_s=6.0, harvest_timeout_s=10.0)
+                await self._streamer.stop(
+                    stop_timeout_s=CAPTURE_STOP_TIMEOUT_S,
+                    harvest_timeout_s=CAPTURE_HARVEST_TIMEOUT_S,
+                )
             except Exception:
                 stops_clean = False
                 logger.exception(
