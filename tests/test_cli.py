@@ -30,16 +30,36 @@ def test_validate_accepts_example_and_rejects_bad_file(tmp_path: Path) -> None:
 
 
 def test_validate_unreadable_path_is_a_clean_error(tmp_path: Path) -> None:
-    """A directory or binary argument renders a positioned issue and the run keeps going per-file, no traceback."""
+    """A binary argument renders a positioned issue and the run keeps going per-file, no traceback."""
     binary = tmp_path / "binary.yaml"
     binary.write_bytes(b"\xd8\x00\x00\x00")
-    result = CliRunner().invoke(
-        ranges, ["validate", str(tmp_path), str(binary), EXAMPLE]
-    )
+    result = CliRunner().invoke(ranges, ["validate", str(binary), EXAMPLE])
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert result.output.count("cannot read file") == 2
-    assert "vulhub-zabbix" in result.output  # later files still report
+
+
+def test_spec_verbs_accept_a_range_directory(tmp_path: Path) -> None:
+    """A directory argument means its range.yaml (Journey A); one without range.yaml is a usage error."""
+    range_dir = Path(EXAMPLE).parent
+    ok = CliRunner().invoke(ranges, ["validate", str(range_dir)])
+    assert ok.exit_code == 0 and "vulhub-zabbix" in ok.output
+    plan_result = CliRunner().invoke(ranges, ["plan", str(range_dir)])
+    assert plan_result.exit_code == 1
+    assert "has not yet realized" in plan_result.output  # planning gates, positioned
+    empty = CliRunner().invoke(ranges, ["validate", str(tmp_path)])
+    assert empty.exit_code == 2 and "range.yaml" in empty.output
+
+
+def test_validate_defaults_to_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "range.yaml").write_text(Path(EXAMPLE).read_text())
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(ranges, ["validate"])
+    assert result.exit_code == 0 and "vulhub-zabbix" in result.output
+    monkeypatch.chdir(tmp_path.parent)
+    bare = CliRunner().invoke(ranges, ["validate"])
+    assert bare.exit_code == 2 and "range.yaml" in bare.output
 
 
 def test_validate_json_contract(tmp_path: Path) -> None:

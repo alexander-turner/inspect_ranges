@@ -378,6 +378,7 @@ class RecipeError(RuntimeError):
         self.recipe = recipe
         self.guest = guest
         self.log_path = log_path
+        self.detail = message
         super().__init__(f"[{stage}] recipe {recipe!r} on guest {guest!r}: {message}")
 
 

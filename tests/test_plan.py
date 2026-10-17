@@ -106,6 +106,26 @@ def test_guest_config_gates_at_planning() -> None:
     assert issue.path == ("hosts", 0, "services")
 
 
+def test_realized_sections_exempt_exactly_their_gate() -> None:
+    from inspect_ranges.types import ProvisioningStep, Service
+
+    spec = two_segment_spec()
+    spec.hosts[0].provisioning = [ProvisioningStep(recipe="acme.web")]
+    build_options = PlanOptions(realized_sections=frozenset({"provisioning"}))
+    plan = resolve_plan(spec, build_options)
+    assert plan.range.name == spec.meta.name
+    # other sections stay gated even in build mode
+    spec.hosts[0].services = [Service(name="httpd", port=80)]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, build_options)
+    assert excinfo.value.issues[0].path == ("hosts", 0, "services")
+    # and the runtime path (no realized_sections) still gates provisioning
+    spec.hosts[0].services = []
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    assert excinfo.value.issues[0].path == ("hosts", 0, "provisioning")
+
+
 def test_hostname_and_fqdn_gate_at_planning() -> None:
     spec = two_segment_spec()
     spec.hosts[0].hostname = "dc01-nyc"

@@ -1,0 +1,24 @@
+# build-cmd battery fixture: a long-sleeping provisioning step, so the crash
+# matrix can kill the build mid-recipe and prove cleanup.
+range:
+  name: slowme
+  schema_version: "0.3"
+  description: Battery fixture for the kill-mid-recipe crash path.
+
+networks:
+  - name: lab
+    cidr: 10.93.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: build-guest
+    interfaces: [{ network: lab, ip: 10.93.10.10 }]
+    provisioning:
+      - { recipe: bc.sleep }
+
+attacker:
+  image: build-guest
+  interfaces: [{ network: lab }]
+  entry: external

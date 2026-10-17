@@ -1,0 +1,24 @@
+# build-cmd battery fixture: a provisioning step that exits nonzero, so the
+# build fails after boot, tears down, and names guest, recipe, and log.
+range:
+  name: failme
+  schema_version: "0.3"
+  description: Battery fixture for the recipe-failure path of the build verb.
+
+networks:
+  - name: lab
+    cidr: 10.92.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: build-guest
+    interfaces: [{ network: lab, ip: 10.92.10.10 }]
+    provisioning:
+      - { recipe: bc.fail }
+
+attacker:
+  image: build-guest
+  interfaces: [{ network: lab }]
+  entry: external
