@@ -17,15 +17,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .._diagnostics import PathElement
 from .._runtime.images import sha256_file
-from .._runtime.ownership import StageLog
 from ..types import Issue, IssueError
+
+
+class StageSink(Protocol):
+    """Anything accepting stage-log writes: `StageLog`, the build tee."""
+
+    def log(self, stage: str, status: str, **fields: Any) -> None: ...
 
 RECIPES_DIR_NAME = "recipes"
 """Directory inside a range that holds its local recipe bundles."""
@@ -401,7 +406,7 @@ def run_recipe(
     step_vars: Mapping[str, VarValue],
     target: RecipeTarget,
     log_dir: Path,
-    stage_log: StageLog | None = None,
+    stage_log: StageSink | None = None,
     budget_s: float = DEFAULT_RECIPE_BUDGET_S,
     exec_budget_ms: int = DEFAULT_EXEC_BUDGET_MS,
 ) -> RecipeRun:

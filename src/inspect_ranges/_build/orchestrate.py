@@ -2,26 +2,28 @@
 
 A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Capture of the provisioned disks and the build manifest arrive with slice 5; until then a build proves orchestration and realization, not persistence.
 
-The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and an external nameserver appended, router-attached and `routed` networks are left untouched (the goad-era question), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate.
+The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and the build nameserver appended (host-derived by default, because fleets that force DNS through a VPC resolver are the norm), router-attached and `routed` networks are left untouched (the goad-era question), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate. The staging bundle is per-run (a fresh temp dir) and removed after the build unless `keep` left the range running from it, so the egress-enabled bundle never lingers where a runtime verb could boot it.
 """
 
 import asyncio
 import logging
 import shutil
 import subprocess
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import VsockTransport
 from .._compiler.plan import PlanOptions, spec_sha256
 from .._compiler.render import render_bundle
+from .._diagnostics import issues_from_validation_error
 from .._runtime.down import down
 from .._runtime.images import default_image_cache
 from .._runtime.ownership import (
@@ -39,6 +41,7 @@ from .recipes import (
     RecipeRun,
     RecipeTarget,
     ResolvedRecipe,
+    StageSink,
     VarValue,
     default_recipe_cache,
     resolve_recipe,
@@ -51,6 +54,8 @@ logger = logging.getLogger(__name__)
 FALLBACK_BUILD_NAMESERVER = "1.1.1.1"
 """Build nameserver of last resort, when the host's own upstream resolver cannot be determined."""
 
+DEFAULT_UPLINK_NETWORK = "ir-uplink"
+"""Docker network the build range's egress masquerades onto; ensured to exist by default so a bare `inspect-ranges build` works."""
 
 _RESOLV_CONF_SEARCH = (
     Path("/run/systemd/resolve/resolv.conf"),
@@ -79,12 +84,40 @@ def default_build_nameserver(search: tuple[Path, ...] = _RESOLV_CONF_SEARCH) -> 
                     return str(address)
     return FALLBACK_BUILD_NAMESERVER
 
-DEFAULT_UPLINK_NETWORK = "ir-uplink"
-"""Docker network the build range's egress masquerades onto; ensured to exist by default so a bare `inspect-ranges build` works."""
 
-UpFn = Callable[..., UpResult]
-DownFn = Callable[..., Any]
-RecipeFn = Callable[..., RecipeRun]
+class UpFn(Protocol):
+    """The boot seam: `up`'s callable shape."""
+
+    def __call__(
+        self, bundle: Path, options: UpOptions, *, on_stage: OnStage | None = None
+    ) -> UpResult: ...
+
+
+class DownFn(Protocol):
+    """The teardown seam: `down`'s callable shape."""
+
+    def __call__(
+        self, project: str, *, state_dir: Path, keep_state: bool
+    ) -> object: ...
+
+
+class RecipeFn(Protocol):
+    """The executor seam: `run_recipe`'s callable shape."""
+
+    def __call__(
+        self,
+        recipe: ResolvedRecipe,
+        *,
+        step_vars: Mapping[str, VarValue],
+        target: RecipeTarget,
+        log_dir: Path,
+        stage_log: StageSink | None,
+        budget_s: float,
+    ) -> RecipeRun: ...
+
+
+SettleFn = Callable[[dict[str, int], str, str, float], float]
+"""The network-settle seam: `(cids, guest, probe, timeout_s) -> seconds waited`."""
 
 
 class BuildOptions(BaseModel):
@@ -142,7 +175,9 @@ class BuildError(Exception):
         self.log_path = log_path
         detail = f" guest {guest!r}" if guest else ""
         detail += f" recipe {recipe!r}" if recipe else ""
-        super().__init__(f"[{stage}]{detail}: {message}" if detail else f"[{stage}] {message}")
+        super().__init__(
+            f"[{stage}]{detail}: {message}" if detail else f"[{stage}] {message}"
+        )
 
 
 class BuildResult(BaseModel):
@@ -162,6 +197,9 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
     """The egress-enabled build variant of a spec: a deep copy, never a mutation of the runtime spec.
 
     Routerless networks flip to `mode: nat` with an allow-all v4 egress policy and the build nameserver (host-derived by default) appended to their resolvers; router-attached and `routed` networks are untouched. The copy re-validates, so the egress semantic gates still apply to what the build actually boots.
+
+    Raises:
+        IssueError: when the transformed spec fails re-validation (the semantic gates), as positioned issues where the validator carried them.
     """
     build = spec.model_copy(deep=True)
     router_networks = {
@@ -181,10 +219,25 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
             network.dns.nameservers = [nameserver]
         elif nameserver not in network.dns.nameservers:
             network.dns.nameservers.append(nameserver)
-    return revalidate_range(build)
+    try:
+        return revalidate_range(build)
+    except ValidationError as error:
+        issues, _ = issues_from_validation_error(error, RangeSpec, None)
+        if not issues:
+            first = str(error).strip().splitlines()[0]
+            issues = [
+                Issue(
+                    code="build-plan-invalid",
+                    message=f"the egress build variant failed validation: {first}",
+                    hint="the build transformation only touches routerless networks; check the spec's egress-adjacent declarations",
+                )
+            ]
+        raise IssueError(issues) from error
 
 
-class _ResolvedStep(BaseModel):
+class ResolvedStep(BaseModel):
+    """One provisioning step resolved to its recipe, pre-validated and ready to execute."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     guest: str
@@ -194,12 +247,12 @@ class _ResolvedStep(BaseModel):
 
 def resolve_provisioning(
     spec: RangeSpec, range_dir: Path, recipe_cache: Path
-) -> list[_ResolvedStep]:
+) -> list[ResolvedStep]:
     """Resolve and pre-validate every host's provisioning steps, failing fast before anything boots.
 
     All issues across all steps are collected into one refusal: unresolvable recipes, version-pin mismatches, var violations, and (for now) `offline` recipes.
     """
-    steps: list[_ResolvedStep] = []
+    steps: list[ResolvedStep] = []
     issues: list[Issue] = []
     for host_index, host in enumerate(spec.hosts):
         for step_index, step in enumerate(host.provisioning):
@@ -228,7 +281,7 @@ def resolve_provisioning(
                 issues.extend(error.issues)
                 continue
             steps.append(
-                _ResolvedStep(guest=host.name, recipe=recipe, vars=dict(step.vars))
+                ResolvedStep(guest=host.name, recipe=recipe, vars=dict(step.vars))
             )
     if issues:
         raise IssueError(issues)
@@ -245,21 +298,28 @@ def build_range(
     down_fn: DownFn = down,
     recipe_fn: RecipeFn = run_recipe,
     ensure_uplink: Callable[[str], None] | None = None,
-    settle_fn: Callable[..., float] | None = None,
+    settle_fn: SettleFn | None = None,
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
-    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project. On any failure after boot the range tears down (unless `keep`), and the failure names its stage, guest, and recipe with a log path.
+    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project, and each run renders into its own staging directory so concurrent attempts can never destroy each other's bundles. On any failure after boot the range tears down (unless `keep`), the failure names its stage, guest, and recipe with a log path, and a teardown error is appended to the diagnosed failure, never substituted for it.
 
     Raises:
-        IssueError: spec, recipe-resolution, or planning refusals (all collected, house codes).
+        IssueError: spec, recipe-resolution, build-variant, or planning refusals (all collected, house codes).
         UpError: boot-phase failures (stage-named; `up` handled its own teardown per `keep`).
-        BuildError: recipe-phase failures, after teardown.
+        BuildError: recipe-phase, settle, uplink, and teardown failures, stage-named.
     """
     options = options or BuildOptions()
-    state_dir = options.state_dir if options.state_dir is not None else default_state_dir()
+    state_dir = (
+        options.state_dir if options.state_dir is not None else default_state_dir()
+    )
     recipe_cache = (
-        options.recipe_cache if options.recipe_cache is not None else default_recipe_cache()
+        options.recipe_cache
+        if options.recipe_cache is not None
+        else default_recipe_cache()
+    )
+    image_cache = (
+        options.image_cache if options.image_cache is not None else default_image_cache()
     )
     started = time.monotonic()
 
@@ -267,80 +327,103 @@ def build_range(
     build_spec = egress_build_spec(spec, options.build_nameserver)
     project = f"{PROJECT_PREFIX}{build_spec.meta.name}-{spec_sha256(build_spec)[:12]}"
     tee = _BuildTee(StageLog(state_dir, project), on_stage)
-    tee.log("resolve", "ok", recipes=len(steps), guests=len(build_spec.hosts) + 1)
+    tee.log("resolve", "ok", recipes=len(steps))
 
-    staging = state_dir.parent / "staging" / project
-    if staging.exists():
-        shutil.rmtree(staging)
-    plan_options = PlanOptions(
-        image_cache=options.image_cache,
-        cid_base=options.cid_base,
-        realized_sections=frozenset({"provisioning"}),
-    )
+    staging_root = state_dir.parent / "staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=staging_root, prefix=f"{project}-"))
+    kept = False
     try:
-        render_bundle(build_spec, staging, plan_options)
-    except IssueError:
-        tee.log("render", "fail", error="planning refused (see issues)")
-        raise
-    tee.log("render", "ok", bundle=str(staging))
+        plan_options = PlanOptions(
+            image_cache=image_cache,
+            cid_base=options.cid_base,
+            realized_sections=frozenset({"provisioning"}),
+        )
+        try:
+            plan = render_bundle(build_spec, staging, plan_options)
+        except IssueError:
+            tee.log("render", "fail", error="planning refused (see issues)")
+            raise
+        tee.log("render", "ok", bundle=str(staging), guests=plan.totals.guests)
 
-    uplink = ensure_uplink if ensure_uplink is not None else _ensure_uplink_network
-    uplink(options.uplink_network)
+        uplink = ensure_uplink if ensure_uplink is not None else _ensure_uplink_network
+        uplink(options.uplink_network)
 
-    result = up_fn(
-        staging,
-        UpOptions(
-            project=project,
-            image_cache=_image_cache(options),
-            state_dir=state_dir,
-            readiness_timeout=options.readiness_timeout,
-            keep_on_failure=options.keep,
-            uplink_network=options.uplink_network,
-        ),
-        on_stage=on_stage,
-    )
+        result = up_fn(
+            staging,
+            UpOptions(
+                project=project,
+                image_cache=image_cache,
+                state_dir=state_dir,
+                readiness_timeout=options.readiness_timeout,
+                keep_on_failure=options.keep,
+                uplink_network=options.uplink_network,
+            ),
+            on_stage=on_stage,
+        )
+        kept = options.keep  # from here the range is running; keep governs staging too
 
-    cids = {guest.name: guest.cid for guest in result.guests}
-    log_dir = project_dir(state_dir, project) / "recipes"
-    runs: list[RecipeRun] = []
-    settle = settle_fn if settle_fn is not None else _settle_network
-    settled: set[str] = set()
-    try:
-        for step in steps:
-            if options.settle_probe is not None and step.guest not in settled:
-                seconds = settle(
-                    cids, step.guest, options.settle_probe, options.settle_timeout_s
+        cids = {guest.name: guest.cid for guest in result.guests}
+        log_dir = project_dir(state_dir, project) / "recipes"
+        runs: list[RecipeRun] = []
+        settle = settle_fn if settle_fn is not None else _settle_network
+        settled: set[str] = set()
+        try:
+            for step in steps:
+                if options.settle_probe is not None and step.guest not in settled:
+                    seconds = settle(
+                        cids, step.guest, options.settle_probe, options.settle_timeout_s
+                    )
+                    tee.log(
+                        "network-settle",
+                        "ok",
+                        guest=step.guest,
+                        seconds=round(seconds, 1),
+                    )
+                    settled.add(step.guest)
+                run = recipe_fn(
+                    step.recipe,
+                    step_vars=step.vars,
+                    target=RecipeTarget(guest=step.guest, cids=cids),
+                    log_dir=log_dir,
+                    stage_log=tee,
+                    budget_s=options.recipe_budget_s,
                 )
-                tee.log(
-                    "network-settle", "ok", guest=step.guest, seconds=round(seconds, 1)
-                )
-                settled.add(step.guest)
-            run = recipe_fn(
-                step.recipe,
-                step_vars=step.vars,
-                target=RecipeTarget(guest=step.guest, cids=cids),
-                log_dir=log_dir,
-                stage_log=tee,
-                budget_s=options.recipe_budget_s,
-            )
-            runs.append(run)
-    except RecipeError as error:
-        disposition = _dispose(options, project, down_fn, tee, state_dir)
-        raise BuildError(
-            "recipe",
-            f"{error.detail} ({disposition})",
-            guest=error.guest,
-            recipe=error.recipe,
-            log_path=error.log_path,
-        ) from error
-    except BuildError:
-        _dispose(options, project, down_fn, tee, state_dir)
-        raise
+                runs.append(run)
+        except RecipeError as error:
+            disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+            raise BuildError(
+                "recipe",
+                f"{error.detail} ({disposition})",
+                guest=error.guest,
+                recipe=error.recipe,
+                log_path=error.log_path,
+            ) from error
+        except BuildError as error:
+            disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+            raise BuildError(
+                error.stage,
+                f"{_strip_stage(error)} ({disposition})",
+                guest=error.guest,
+                recipe=error.recipe,
+                log_path=error.log_path,
+            ) from error
 
-    kept = options.keep
-    if not kept:
-        down_fn(project, state_dir=state_dir, keep_state=True)
-        tee.log("teardown", "ok", after="success")
+        if not options.keep:
+            try:
+                down_fn(project, state_dir=state_dir, keep_state=True)
+            except Exception as error:
+                tee.log("teardown", "fail", error=str(error))
+                raise BuildError(
+                    "teardown",
+                    f"range built and provisioned, but teardown failed: {error}; retry with: inspect-ranges down {project}",
+                ) from error
+            tee.log("teardown", "ok", after="success")
+            kept = False
+    finally:
+        if not kept:
+            shutil.rmtree(staging, ignore_errors=True)
+
     seconds = time.monotonic() - started
     tee.log("build", "ok", seconds=round(seconds, 1), recipes=len(runs), kept=kept)
     return BuildResult(
@@ -368,23 +451,35 @@ class _BuildTee:
                 logger.exception("on_stage callback failed (ignored)")
 
 
-def _image_cache(options: BuildOptions) -> Path:
-    return options.image_cache if options.image_cache is not None else default_image_cache()
-
-
 def _dispose(
     options: BuildOptions,
     project: str,
     down_fn: DownFn,
-    tee: "_BuildTee",
+    tee: _BuildTee,
     state_dir: Path,
-) -> str:
-    """Tear down a failed build's range (unless `keep`); returns the disposition clause for the error message."""
+) -> tuple[str, bool]:
+    """Tear down a failed build's range (unless `keep`); returns the disposition clause and whether the range (and so its staging bundle) survives.
+
+    A teardown error is appended to the clause, never substituted for the diagnosed failure (the `up` contract).
+    """
     if options.keep:
-        return f"range kept running: inspect-ranges down {project}"
-    down_fn(project, state_dir=state_dir, keep_state=True)
+        return f"range kept running: inspect-ranges down {project}", True
+    try:
+        down_fn(project, state_dir=state_dir, keep_state=True)
+    except Exception as error:
+        tee.log("teardown", "fail", error=str(error))
+        return (
+            f"teardown also failed, range left behind: {error}; retry with: inspect-ranges down {project}",
+            True,
+        )
     tee.log("teardown", "ok", after="build-failure")
-    return "range torn down"
+    return "range torn down", False
+
+
+def _strip_stage(error: BuildError) -> str:
+    """The message portion of a `BuildError` without its `[stage]`/context prefix (for re-wrapping)."""
+    text = str(error)
+    return text.split(": ", 1)[1] if ": " in text else text
 
 
 def _settle_network(
@@ -393,13 +488,14 @@ def _settle_network(
     """Block until the guest resolves `probe` (the build-egress DNS warm-up gate); returns the wait.
 
     Raises:
-        BuildError: stage `network-settle` when the guest cannot resolve within the bound; the build's egress promise would be a lie for its recipes.
+        BuildError: stage `network-settle` when the guest cannot resolve within the bound, carrying the last underlying cause; the build's egress promise would be a lie for its recipes.
     """
 
     async def wait() -> float:
         channel = MessageChannel(VsockTransport(cids), label="build-settle")
         started = time.monotonic()
         deadline = started + timeout_s
+        last_cause = "resolution never succeeded"
         while time.monotonic() < deadline:
             try:
                 outcome = await channel.exec(
@@ -412,12 +508,13 @@ def _settle_network(
                 )
                 if outcome.rc == 0:
                     return time.monotonic() - started
-            except Exception:  # transient channel noise during early boot
-                pass
+                last_cause = f"getent exited {outcome.rc}"
+            except Exception as error:  # transient channel noise during early boot
+                last_cause = f"{type(error).__name__}: {error}"
             await asyncio.sleep(2.0)
         raise BuildError(
             "network-settle",
-            f"guest cannot resolve {probe!r} within {timeout_s:.0f} s; build-time egress is not usable",
+            f"guest cannot resolve {probe!r} within {timeout_s:.0f} s (last cause: {last_cause}); build-time egress is not usable",
             guest=guest,
         )
 
@@ -425,17 +522,35 @@ def _settle_network(
 
 
 def _ensure_uplink_network(name: str) -> None:
-    """Create the uplink docker network when absent (idempotent; shared across builds, never removed)."""
-    probe = subprocess.run(
-        ["docker", "network", "inspect", name],
-        capture_output=True,
-        timeout=60,
-    )
-    if probe.returncode == 0:
-        return
-    subprocess.run(
-        ["docker", "network", "create", name],
-        capture_output=True,
-        timeout=60,
-        check=True,
-    )
+    """Create the uplink docker network when absent (idempotent; shared across builds, never removed).
+
+    Raises:
+        BuildError: stage `uplink` when docker is unavailable or the network cannot be created, carrying the stderr tail.
+    """
+    try:
+        probe = subprocess.run(
+            ["docker", "network", "inspect", name],
+            capture_output=True,
+            timeout=60,
+        )
+        if probe.returncode == 0:
+            return
+        create = subprocess.run(
+            ["docker", "network", "create", name],
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError as error:
+        raise BuildError(
+            "uplink", "docker is not installed or not on PATH"
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise BuildError(
+            "uplink", f"docker did not answer within 60 s while ensuring {name!r}"
+        ) from error
+    if create.returncode != 0:
+        stderr = create.stderr.decode(errors="replace").strip()[-300:]
+        raise BuildError(
+            "uplink",
+            f"docker network create {name!r} failed (rc {create.returncode}): {stderr or '(no stderr)'}",
+        )
