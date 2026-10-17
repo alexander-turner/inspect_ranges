@@ -419,6 +419,11 @@ def image_file_name(reference: str) -> str:
     return f"{normalized}.qcow2"
 
 
+def resolve_image_reference(reference: str, cache: Path | None) -> ImageRef:
+    """Resolve a logical image reference against the cache (the shared file-name rule plus a content digest when present); the build pipeline's public entry to the same resolution planning uses."""
+    return _resolve_image(reference, cache)
+
+
 def _resolve_image(reference: str, cache: Path | None) -> ImageRef:
     file = image_file_name(reference)
     digest: str | None = None

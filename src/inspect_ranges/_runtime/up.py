@@ -432,7 +432,9 @@ def up(
             if actual != guest.image_digest:
                 raise UpError(
                     "verify-images",
-                    f"image {guest.image_file} digest {actual} does not match the bundle's {guest.image_digest}",
+                    f"image {guest.image_file} digest {actual} does not match the bundle's {guest.image_digest}: "
+                    "the cache's copy changed since this bundle was rendered (an image re-derive, update, or build); "
+                    "re-render the bundle",
                     guest=guest.name,
                 )
 

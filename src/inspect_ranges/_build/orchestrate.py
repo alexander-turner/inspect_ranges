@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import VsockTransport
-from .._compiler.plan import PlanOptions, spec_sha256
+from .._compiler.plan import PlanOptions, resolve_image_reference, spec_sha256
 from .._compiler.render import render_bundle
 from .._diagnostics import issues_from_validation_error
 from .._runtime.down import down
@@ -33,7 +33,25 @@ from .._runtime.ownership import (
     project_dir,
 )
 from .._runtime.up import OnStage, UpOptions, UpResult, up
+from .._runtime.images import sha256_file
 from ..schema import revalidate_range
+from .capture import RealizedImageMeta, capture_guest, default_capture_runner, shutdown_guest, wait_shutoff
+from .errors import BuildError
+from .manifest import (
+    BuildManifest,
+    GuestRecord,
+    RecipeRecord,
+    VerificationRecord,
+    default_build_cache,
+    guest_build_key,
+    load_manifest,
+    manifest_matches_spec,
+    manifest_path,
+    now_iso,
+    realized_file_name,
+    save_manifest,
+    vars_hash,
+)
 from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
 from .recipes import (
     DEFAULT_RECIPE_BUDGET_S,
@@ -121,6 +139,45 @@ SettleFn = Callable[[dict[str, int], str, str, float], float]
 """The network-settle seam: `(cids, guest, probe, timeout_s) -> seconds waited`."""
 
 
+class CaptureFn(Protocol):
+    """The capture seam: clean shutdown plus overlay capture, returning the realized image's sha256."""
+
+    def __call__(
+        self,
+        project: str,
+        guest: str,
+        cids: dict[str, int],
+        *,
+        image_cache: Path,
+        golden_file: str,
+        realized_name: str,
+        meta: RealizedImageMeta,
+    ) -> str: ...
+
+
+def _capture_realized(
+    project: str,
+    guest: str,
+    cids: dict[str, int],
+    *,
+    image_cache: Path,
+    golden_file: str,
+    realized_name: str,
+    meta: RealizedImageMeta,
+) -> str:
+    shutdown_guest(cids, guest)
+    wait_shutoff(default_capture_runner, project, guest)
+    return capture_guest(
+        default_capture_runner,
+        project,
+        guest,
+        image_cache=image_cache,
+        golden_file=golden_file,
+        realized_name=realized_name,
+        meta=meta,
+    )
+
+
 class VerifyFn(Protocol):
     """The verification seam: `verify_range`'s callable shape."""
 
@@ -164,6 +221,12 @@ class BuildOptions(BaseModel):
     build_nameserver: str | None = None
     """Resolver handed to build guests; `None` derives it from the host (`default_build_nameserver`)."""
 
+    build_cache: Path | None = None
+    """Builds cache for manifests; defaults to the shared cache."""
+
+    reverify: bool = False
+    """Force the full boot-and-verify pass even when every build key matches the recorded manifest."""
+
     settle_probe: str | None = "archive.ubuntu.com"
     """Name whose in-guest resolution gates a guest's first recipe: guest readiness (cloud-init plus daemon) does not cover systemd-resolved having link DNS live, and the gap is seconds wide, exactly when recipes start. `None` disables the gate."""
 
@@ -171,27 +234,6 @@ class BuildOptions(BaseModel):
     """Per-guest bound on the network-settle gate."""
 
 
-class BuildError(Exception):
-    """Stage-named build failure; recipe failures carry guest, recipe, and log path."""
-
-    def __init__(
-        self,
-        stage: str,
-        message: str,
-        *,
-        guest: str | None = None,
-        recipe: str | None = None,
-        log_path: Path | None = None,
-    ) -> None:
-        self.stage = stage
-        self.guest = guest
-        self.recipe = recipe
-        self.log_path = log_path
-        detail = f" guest {guest!r}" if guest else ""
-        detail += f" recipe {recipe!r}" if recipe else ""
-        super().__init__(
-            f"[{stage}]{detail}: {message}" if detail else f"[{stage}] {message}"
-        )
 
 
 class BuildResult(BaseModel):
@@ -206,6 +248,15 @@ class BuildResult(BaseModel):
     seconds: float
     kept: bool
     """True when the range was left running (`keep`); tear down with `inspect-ranges down PROJECT`."""
+
+    cached: bool = False
+    """True when every build key matched the recorded manifest and nothing booted (verification reported from the record)."""
+
+    manifest_path: Path | None = None
+    """The build manifest, when one was produced (`keep` builds are diagnostic and produce none)."""
+
+    verified_at: str | None = None
+    """When the reported verification ran (now, or the recorded time on the cached path)."""
 
 
 def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> RangeSpec:
@@ -315,6 +366,7 @@ def build_range(
     ensure_uplink: Callable[[str], None] | None = None,
     settle_fn: SettleFn | None = None,
     verify_fn: VerifyFn = verify_range,
+    capture_fn: CaptureFn | None = None,
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
@@ -337,13 +389,113 @@ def build_range(
     image_cache = (
         options.image_cache if options.image_cache is not None else default_image_cache()
     )
+    build_cache = (
+        options.build_cache if options.build_cache is not None else default_build_cache()
+    )
     started = time.monotonic()
 
     steps = resolve_provisioning(spec, range_dir, recipe_cache)
+    steps_by_host: dict[str, list[ResolvedStep]] = {}
+    for step in steps:
+        steps_by_host.setdefault(step.guest, []).append(step)
+    content_hosts = [
+        host
+        for host in spec.hosts
+        if host.provisioning or host.services or host.vulnerabilities
+    ]
+    goldens: dict[str, Any] = {}
+    keys: dict[str, str] = {}
+    missing: list[Issue] = []
+    for index, host in enumerate(spec.hosts):
+        if host not in content_hosts:
+            continue
+        reference = resolve_image_reference(host.image, image_cache)
+        if reference.digest is None:
+            missing.append(
+                Issue(
+                    code="image-not-in-cache",
+                    path=("hosts", index, "image"),
+                    message=f"image {host.image!r} for guest {host.name!r} is not in the image cache, so its build key cannot resolve",
+                    hint="pull or derive the golden into the cache first",
+                )
+            )
+            continue
+        goldens[host.name] = reference
+        keys[host.name] = guest_build_key(
+            reference.digest,
+            host,
+            [(s.recipe, s.vars) for s in steps_by_host.get(host.name, [])],
+        )
+    if missing:
+        raise IssueError(missing)
+
+    spec_hash = spec_sha256(spec)
+    prior = load_manifest(build_cache, spec.meta.name)
+    reusable: dict[str, GuestRecord] = {}
+    if prior is not None:
+        for host in content_hosts:
+            record = prior.guest(host.name)
+            if record is None or record.build_key != keys[host.name]:
+                continue
+            realized = image_cache / record.realized_file
+            if realized.is_file() and sha256_file(realized) == record.realized_sha256:
+                reusable[host.name] = record
+
     build_spec = egress_build_spec(spec, options.build_nameserver)
-    project = f"{PROJECT_PREFIX}{build_spec.meta.name}-{spec_sha256(build_spec)[:12]}"
+
+    if (
+        prior is not None
+        and not options.reverify
+        and manifest_matches_spec(prior, spec_hash)
+        and all(host.name in reusable for host in content_hosts)
+    ):
+        # the no-op fast path: every key matches and the verification is
+        # recorded, so nothing boots (all-or-nothing caching, ratified)
+        project = f"{PROJECT_PREFIX}{spec.meta.name}-{spec_sha256(build_spec)[:12]}"
+        tee = _BuildTee(StageLog(state_dir, project), on_stage)
+        tee.log(
+            "build",
+            "ok",
+            cached=True,
+            verified_at=prior.verification.verified_at,
+            declarations=len(prior.verification.declarations),
+        )
+        return BuildResult(
+            project=project,
+            range_name=spec.meta.name,
+            recipes=(),
+            verifications=prior.verification.declarations,
+            seconds=time.monotonic() - started,
+            kept=False,
+            cached=True,
+            manifest_path=manifest_path(build_cache, spec.meta.name),
+            verified_at=prior.verification.verified_at,
+        )
+
+    for host in build_spec.hosts:
+        if host.name in reusable:
+            # unchanged guests boot from their captured realized image and
+            # skip their recipes; verification still covers them in full
+            host.image = reusable[host.name].realized_file
+    project = f"{PROJECT_PREFIX}{spec.meta.name}-{spec_sha256(build_spec)[:12]}"
     tee = _BuildTee(StageLog(state_dir, project), on_stage)
-    tee.log("resolve", "ok", recipes=len(steps))
+    run_steps = [step for step in steps if step.guest not in reusable]
+    tee.log(
+        "resolve",
+        "ok",
+        recipes=len(steps),
+        reused_guests=len(reusable),
+        rebuilt_guests=len(content_hosts) - len(reusable),
+    )
+    for step in steps:
+        if step.guest in reusable:
+            tee.log(
+                "recipe",
+                "ok",
+                recipe=step.recipe.name,
+                guest=step.guest,
+                skipped="unchanged",
+            )
 
     staging_root = state_dir.parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
@@ -387,7 +539,7 @@ def build_range(
         settle = settle_fn if settle_fn is not None else _settle_network
         settled: set[str] = set()
         try:
-            for step in steps:
+            for step in run_steps:
                 if options.settle_probe is not None and step.guest not in settled:
                     seconds = settle(
                         cids, step.guest, options.settle_probe, options.settle_timeout_s
@@ -430,8 +582,6 @@ def build_range(
         verify_dir = project_dir(state_dir, project) / "verify"
         try:
             verifications = verify_fn(spec, cids, log_dir=verify_dir, stage_log=tee)
-        except BuildError:
-            raise  # re-wrapped with disposition below via the outer handler
         except Exception as error:
             tee.log("verify", "fail", error=str(error))
             disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
@@ -449,6 +599,78 @@ def build_range(
             )
         if verifications:
             tee.log("verified", "ok", declarations=len(verifications))
+
+        saved_manifest: Path | None = None
+        verified_at: str | None = None
+        if options.keep:
+            tee.log("capture", "ok", skipped="--keep (diagnostic build; no manifest)")
+        else:
+            capture = capture_fn if capture_fn is not None else _capture_realized
+            guest_records: list[GuestRecord] = []
+            try:
+                for host in content_hosts:
+                    if host.name in reusable:
+                        guest_records.append(reusable[host.name])
+                        continue
+                    key = keys[host.name]
+                    realized_name = realized_file_name(spec.meta.name, host.name, key)
+                    golden = goldens[host.name]
+                    digest = capture(
+                        project,
+                        host.name,
+                        cids,
+                        image_cache=image_cache,
+                        golden_file=golden.file,
+                        realized_name=realized_name,
+                        meta=RealizedImageMeta(
+                            range_name=spec.meta.name,
+                            guest=host.name,
+                            build_key=key,
+                            golden_file=golden.file,
+                            sha256="",
+                            created=now_iso(),
+                        ),
+                    )
+                    tee.log("capture", "ok", guest=host.name, file=realized_name)
+                    guest_records.append(
+                        GuestRecord(
+                            name=host.name,
+                            golden_reference=host.image,
+                            golden_digest=golden.digest,
+                            realized_file=realized_name,
+                            realized_sha256=digest,
+                            build_key=key,
+                            recipes=tuple(
+                                RecipeRecord(
+                                    name=s.recipe.name,
+                                    version=s.recipe.version,
+                                    digest=s.recipe.digest,
+                                    vars_hash=vars_hash(s.vars),
+                                )
+                                for s in steps_by_host.get(host.name, [])
+                            ),
+                        )
+                    )
+            except BuildError as error:
+                disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+                raise BuildError(
+                    error.stage,
+                    f"{_strip_stage(error)} ({disposition})",
+                    guest=error.guest,
+                ) from error
+            verified_at = now_iso()
+            manifest = BuildManifest(
+                range_name=spec.meta.name,
+                schema_version=spec.meta.schema_version,
+                spec_sha256=spec_hash,
+                built_at=verified_at,
+                guests=tuple(guest_records),
+                verification=VerificationRecord(
+                    verified_at=verified_at, declarations=tuple(verifications)
+                ),
+            )
+            saved_manifest = save_manifest(manifest, build_cache)
+            tee.log("manifest", "ok", path=str(saved_manifest), guests=len(guest_records))
 
         if not options.keep:
             try:
@@ -474,6 +696,9 @@ def build_range(
         verifications=tuple(verifications),
         seconds=seconds,
         kept=kept,
+        cached=False,
+        manifest_path=saved_manifest,
+        verified_at=verified_at,
     )
 
 
