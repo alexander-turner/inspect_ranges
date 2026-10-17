@@ -9,9 +9,10 @@ from .._diagnostics import IssueError, ValidationReport, locate, parse_marked
 from .._runtime.images import default_image_cache
 from ..schema import validate_range
 from ..types import Issue, RangeSpec
+from .specpath import resolve_spec_path
 
 
-def _load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
+def load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
     report = validate_range(path)
     if not report.valid or report.spec is None:
         click.echo(report.render())
@@ -20,7 +21,7 @@ def _load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
     return report.spec
 
 
-def _planning_report(path: Path, error: IssueError) -> ValidationReport:
+def planning_report(path: Path, error: IssueError) -> ValidationReport:
     """Position planning issues against the source, through the same report machinery as validation."""
     try:
         _, node = parse_marked(path.read_text())
@@ -41,7 +42,7 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.argument("path", required=False, type=click.Path(exists=True, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="Emit the plan as JSON.")
 @click.option(
     "--image-cache",
@@ -61,17 +62,18 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 @click.pass_context
 def plan(
     ctx: click.Context,
-    path: Path,
+    path: Path | None,
     as_json: bool,
     image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
 ) -> None:
-    """Resolve a `range.yaml` into its immutable plan (allocations, requirements, totals).
+    """Resolve PATH (default `.`, a range directory or spec file) into its immutable plan.
 
     Unsupported constructs fail here, at planning, with the same diagnostics as `validate`.
     """
-    spec = _load_or_exit(ctx, path)
+    path = resolve_spec_path(path)
+    spec = load_or_exit(ctx, path)
     if image_cache is None:
         image_cache = default_image_cache()
     options = PlanOptions(
@@ -80,7 +82,7 @@ def plan(
     try:
         resolved = resolve_plan(spec, options)
     except IssueError as error:
-        click.echo(_planning_report(path, error).render())
+        click.echo(planning_report(path, error).render())
         ctx.exit(1)
     if as_json:
         click.echo(plan_json(resolved), nl=False)
@@ -110,7 +112,7 @@ def plan(
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.argument("path", required=False, type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--output",
     "-o",
@@ -143,15 +145,16 @@ def plan(
 @click.pass_context
 def render(
     ctx: click.Context,
-    path: Path,
+    path: Path | None,
     out: Path,
     image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
     evidence_capture: bool,
 ) -> None:
-    """Render a `range.yaml` into its realization bundle (plan + every artifact `apply` needs)."""
-    spec = _load_or_exit(ctx, path)
+    """Render PATH (default `.`, a range directory or spec file) into its realization bundle."""
+    path = resolve_spec_path(path)
+    spec = load_or_exit(ctx, path)
     if image_cache is None:
         image_cache = default_image_cache()
     options = PlanOptions(
@@ -163,7 +166,7 @@ def render(
     try:
         render_bundle(spec, out, options)
     except IssueError as error:
-        click.echo(_planning_report(path, error).render())
+        click.echo(planning_report(path, error).render())
         ctx.exit(1)
     manifest_bytes = (out / "manifest.json").read_bytes()
     manifest = json_module.loads(manifest_bytes)

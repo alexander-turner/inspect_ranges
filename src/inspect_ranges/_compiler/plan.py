@@ -49,6 +49,9 @@ class PlanOptions(BaseModel):
     probe_segments: tuple[str, ...] = ()
     """Networks that get a declared probe endpoint (the clamped veth of the challenge-prober spike) plus the zero-capability probe sidecar. A plan-time input for the same reason as `evidence_capture`; set by the provider from the challenge's `active-prober` requirements."""
 
+    realized_sections: frozenset[str] = frozenset()
+    """Host guest-config sections the caller realizes itself, exempted from the `guest-config-not-realized` gate. Set by the build pipeline (`provisioning` as of build-v1 slice 2); the runtime path never sets it, so unbuilt content stays honestly inert."""
+
 
 class ImageRef(BaseModel):
     """An image as the plan records it: the logical reference plus its cache-resolved digest."""
@@ -254,6 +257,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             "scheduled_activity",
         ]
         for field_name in fields:
+            if field_name in options.realized_sections:
+                continue
             if getattr(host, field_name):
                 issues.append(
                     Issue(
