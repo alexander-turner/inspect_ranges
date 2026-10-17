@@ -1,5 +1,6 @@
 """Recipe bundle resolution, digesting, vars validation, and the host-side executor, through the public `_build` surface with real fixture bundles and real subprocesses (no guest required)."""
 
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -280,6 +281,65 @@ def test_offline_mode_is_a_typed_refusal(tmp_path: Path) -> None:
     with pytest.raises(IssueError) as excinfo:
         run_recipe(recipe, step_vars={}, target=TARGET, log_dir=tmp_path / "logs")
     assert codes(excinfo.value) == ["recipe-mode-unsupported"]
+
+
+@pytest.mark.parametrize("reference", ["/tmp/abs", "../escape", "a/b", "..", "UPPER"])
+def test_traversal_shaped_references_refuse_before_any_join(
+    tmp_path: Path, reference: str
+) -> None:
+    with pytest.raises(IssueError) as excinfo:
+        resolve_recipe(reference, range_dir=tmp_path, cache=tmp_path / "cache")
+    assert codes(excinfo.value) == ["recipe-reference-invalid"]
+
+
+def test_launch_failure_is_a_staged_recipe_error(tmp_path: Path) -> None:
+    # executable bit set but no shebang and binary junk: execve fails with ENOEXEC
+    write_recipe(tmp_path, body="\x00\x01notascript")
+    recipe = resolve_recipe("acme.web", range_dir=tmp_path, cache=tmp_path / "cache")
+    log = StageLog(tmp_path / "state", "ir-test")
+    with pytest.raises(RecipeError) as excinfo:
+        run_recipe(
+            recipe,
+            step_vars={},
+            target=TARGET,
+            log_dir=tmp_path / "logs",
+            stage_log=log,
+        )
+    assert excinfo.value.stage == "launch"
+    assert excinfo.value.log_path.is_file()
+    assert log.events()[-1]["status"] == "fail"
+
+
+def test_zero_exit_survivors_are_swept(tmp_path: Path) -> None:
+    write_recipe(
+        tmp_path,
+        body='#!/bin/sh\nsleep 30 >/dev/null 2>&1 </dev/null &\necho $! > "$PWD/childpid"\nexit 0\n',
+    )
+    recipe = resolve_recipe("acme.web", range_dir=tmp_path, cache=tmp_path / "cache")
+    log = StageLog(tmp_path / "state", "ir-test")
+    run_recipe(
+        recipe, step_vars={}, target=TARGET, log_dir=tmp_path / "logs", stage_log=log
+    )
+    child = int((recipe.bundle_dir / "childpid").read_text())
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f"survivor {child} still alive after the sweep")
+    assert log.events()[-1]["survivors_killed"] is True
+
+
+def test_log_paths_are_per_run(tmp_path: Path) -> None:
+    write_recipe(tmp_path)
+    recipe = resolve_recipe("acme.web", range_dir=tmp_path, cache=tmp_path / "cache")
+    first = run_recipe(recipe, step_vars={}, target=TARGET, log_dir=tmp_path / "logs")
+    second = run_recipe(recipe, step_vars={}, target=TARGET, log_dir=tmp_path / "logs")
+    assert first.log_path != second.log_path
+    assert first.log_path.is_file() and second.log_path.is_file()
 
 
 def test_guesttool_contract_parsing() -> None:

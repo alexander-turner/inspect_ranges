@@ -165,7 +165,9 @@ def recipe_digest(bundle_dir: Path) -> str:
             continue
         files[relative] = {
             "sha256": sha256_file(path),
-            "exec": os.access(path, os.X_OK),
+            # a property of the file, not of who hashes it (os.access would
+            # make the digest a function of the calling user)
+            "exec": bool(path.stat().st_mode & 0o111),
         }
     if issues:
         raise IssueError(issues)
@@ -252,6 +254,17 @@ def resolve_recipe(
     Raises:
         IssueError: `recipe-not-resolved` when no bundle exists in either location; `recipe-bundle-invalid` when the resolved bundle lies about its name; `recipe-version-mismatch` on a failed version pin.
     """
+    if not _NAME_RE.match(name):
+        raise IssueError(
+            [
+                Issue(
+                    code="recipe-reference-invalid",
+                    path=path,
+                    message=f"recipe reference {name!r} is not a lowercase slug, so it cannot resolve (and must never leave the recipe roots)",
+                    hint="recipe names are lowercase slugs: letters, digits, `.`, `_`, `-`",
+                )
+            ]
+        )
     cache_dir = cache if cache is not None else default_recipe_cache()
     candidates: list[tuple[Literal["range", "cache"], Path]] = [
         ("range", range_dir / RECIPES_DIR_NAME / name),
@@ -354,7 +367,7 @@ class RecipeError(RuntimeError):
 
     def __init__(
         self,
-        stage: Literal["run", "budget"],
+        stage: Literal["launch", "run", "budget"],
         message: str,
         *,
         recipe: str,
@@ -411,7 +424,7 @@ def run_recipe(
         )
     env_vars = validate_vars(recipe, step_vars)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"recipe-{recipe.name}-{target.guest}.log"
+    log_path = _next_log_path(log_dir, recipe.name, target.guest)
     if stage_log is not None:
         stage_log.log(
             "recipe", "start", recipe=recipe.name, version=recipe.version, guest=target.guest
@@ -421,14 +434,24 @@ def run_recipe(
         contract = _contract_env(target, Path(scratch), recipe.name, exec_budget_ms)
         env = {**os.environ, **env_vars, **contract}
         with open(log_path, "wb") as log_file:
-            process = subprocess.Popen(
-                [str(recipe.entrypoint)],
-                cwd=recipe.bundle_dir,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
+            try:
+                process = subprocess.Popen(
+                    [str(recipe.entrypoint)],
+                    cwd=recipe.bundle_dir,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                message = f"could not launch entrypoint {recipe.spec.entrypoint!r}: {error}; log: {log_path}"
+                if stage_log is not None:
+                    stage_log.log(
+                        "recipe", "fail", recipe=recipe.name, guest=target.guest, error=message
+                    )
+                raise RecipeError(
+                    "launch", message, recipe=recipe.name, guest=target.guest, log_path=log_path
+                ) from error
             try:
                 rc = process.wait(timeout=budget_s)
             except subprocess.TimeoutExpired:
@@ -441,6 +464,7 @@ def run_recipe(
                 raise RecipeError(
                     "budget", message, recipe=recipe.name, guest=target.guest, log_path=log_path
                 ) from None
+    survivors_killed = _sweep_group(process)
     seconds = time.monotonic() - started
     if rc != 0:
         message = f"exited {rc}; log tail: {_log_tail(log_path)}; log: {log_path}"
@@ -459,6 +483,7 @@ def run_recipe(
             version=recipe.version,
             guest=target.guest,
             seconds=round(seconds, 3),
+            survivors_killed=survivors_killed,
         )
     return RecipeRun(
         name=recipe.name,
@@ -502,6 +527,31 @@ def _kill_group(process: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:  # pragma: no cover - the group died between wait and kill
         pass
     process.wait()
+
+
+def _sweep_group(process: subprocess.Popen[bytes]) -> bool:
+    """Kill host-side process-group members a 0-exiting entrypoint left behind; True when any existed.
+
+    A recipe must not leak host processes past its run; survivors are killed rather than tolerated, and the stage log records that it happened.
+    """
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:  # pragma: no cover - survivors exited in the gap
+        return False
+    return True
+
+
+def _next_log_path(log_dir: Path, name: str, guest: str) -> Path:
+    """A per-run log path: the same recipe may run again on the same guest, and no run's log is clobbered."""
+    for n in range(1, 10_000):
+        candidate = log_dir / f"recipe-{name}-{guest}-{n:03d}.log"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"no free log slot under {log_dir} for {name} on {guest}")
 
 
 def _log_tail(log_path: Path, limit: int = 400) -> str:

@@ -7,3 +7,7 @@ printf 'marker=%s guest=%s verbose=%s\n' "$marker" "$IR_GUEST" "$verbose" > "$pa
 "$IR_PUSH" "$payload" /etc/recipe.conf --mode 600
 rm -f "$payload"
 "$IR_EXEC" -- sh -c 'echo made-by-recipe > /opt/recipe-made'
+script="$(mktemp)"
+printf 'echo scripted > /opt/recipe-scripted\n' > "$script"
+"$IR_EXEC" --script "$script"
+rm -f "$script"

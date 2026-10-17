@@ -1,6 +1,6 @@
 """Guest connection helper handed to recipe entrypoints (`IR_EXEC` / `IR_PUSH`).
 
-Online recipes run on the host; this tool is their connection to the target guest, invoked through the generated wrappers the executor exports. The executor sets `IR_GUEST` (target name), `IR_GUEST_CIDS` (JSON name-to-CID map), and `IR_EXEC_BUDGET_MS` (default per-exec budget); `exec` runs an argv or an uploaded script in the guest as root by default with an explicit `command_ms` budget, and `push` writes a local file into the guest. Every exec carries a budget because an unbudgeted exec that leaves live background children holds the exec plane (the challenges-v1 lesson); recipes that launch services should still redirect fds and use short budgets.
+Online recipes run on the host; this tool is their connection to the target guest, invoked through the generated wrappers the executor exports. The executor sets `IR_GUEST` (target name), `IR_GUEST_CIDS` (JSON name-to-CID map), and `IR_EXEC_BUDGET_MS` (default per-exec budget); `exec` runs an argv or an uploaded script in the guest as root by default with an explicit `command_ms` budget, and `push` installs a local file into the guest, root-owned at the given mode (staged through `/tmp` because the daemon file plane acts as the agent user; recipes needing other ownership chown via `exec`). Every exec carries a budget because an unbudgeted exec that leaves live background children holds the exec plane (the challenges-v1 lesson); recipes that launch services should still redirect fds and use short budgets.
 
 Exit status: the in-guest rc passes through (signal deaths map to 128+signal); a budget expiry exits 124; any other channel failure exits 125 with the error on stderr.
 """
@@ -102,15 +102,15 @@ async def _run_push(args: argparse.Namespace) -> int:
     staging = f"/tmp/.ir-push-{request_id()}"
     await channel.write_file(guest, staging, data, mode=0o600)
     promote = (
-        f"install -D -m {mode:o} -- {shlex.quote(staging)} {shlex.quote(str(args.remote))}"
-        f" && rm -f -- {shlex.quote(staging)}"
+        f"rc=0; install -D -m {mode:o} -- {shlex.quote(staging)} {shlex.quote(str(args.remote))}"
+        f" || rc=$?; rm -f -- {shlex.quote(staging)}; exit $rc"
     )
     outcome = await channel.exec(
         guest,
         ExecRequest(
             id=request_id(),
             cmd=["sh", "-c", promote],
-            user=str(args.user),
+            user="root",
             budget=Budget(command_ms=60_000),
         ),
     )
@@ -135,7 +135,6 @@ def main(argv: list[str] | None = None) -> int:
     push.add_argument("local")
     push.add_argument("remote")
     push.add_argument("--mode", default="644", help="octal file mode, default 644")
-    push.add_argument("--user", default="root", help="owner of the installed file")
     args = parser.parse_args(argv)
     try:
         if args.verb == "exec":
