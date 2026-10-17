@@ -9,8 +9,11 @@ set -euo pipefail
 chown root:kvm /dev/kvm /dev/vhost-net /dev/vhost-vsock
 chmod 660 /dev/kvm /dev/vhost-net /dev/vhost-vsock
 
+# IPv6 is already off for new interfaces (compose sets
+# net.ipv6.conf.default.disable_ipv6=1); without multicast snooping a bridge
+# joins no router-discovery group, so it sends no IGMP report of its own
 while read -r name; do
-  ip link add "$name" type bridge
+  ip link add "$name" type bridge mcast_snooping 0
   ip link set "$name" up
 done < /render/netns/bridges.txt
 # no IPs on bridges except where the allocator reserved a hypervisor address

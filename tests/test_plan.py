@@ -10,6 +10,7 @@ from inspect_ranges._compiler import (
     render_bundle,
     resolve_plan,
 )
+from inspect_ranges._runtime.rangeimage import range_image_context
 from inspect_ranges.types import (
     Attacker,
     Host,
@@ -205,6 +206,13 @@ def test_range_netns_disables_ipv6_on_new_interfaces(
     compose = yaml.safe_load((out / "compose.yaml").read_text())
     sysctls = compose["services"]["range"]["sysctls"]
     assert "net.ipv6.conf.default.disable_ipv6=1" in sysctls
+
+
+def test_range_bridges_are_created_without_multicast_snooping() -> None:
+    # a snooping bridge joins 224.0.0.106 and sends an IGMP report from its own
+    # MAC when it comes up: a frame on the segment that belongs to no guest
+    entrypoint = (range_image_context() / "entrypoint.sh").read_text()
+    assert 'ip link add "$name" type bridge mcast_snooping 0' in entrypoint
 
 
 def test_render_refuses_nonempty_directory(cache: Path, tmp_path: Path) -> None:
