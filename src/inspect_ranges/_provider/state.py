@@ -16,6 +16,7 @@ from inspect_ai.util._sandbox.lifecycle import (
 )
 
 from .._channel.channel import MessageChannel
+from .._channel.vsock import HybridEndpoint
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
 from .._host.host import HostProvider, RangeHost
@@ -43,13 +44,18 @@ UpFn = Callable[[Path, UpOptions, OnStage | None], UpResult]
 """The boot seam. The third argument observes stage events (`evidence-v1.md`'s `stages`/`verify` streams and clock-offset pairs): the local backend passes it to `up(on_stage=...)` (host emit clocks), the uds backend invokes it per folded stage report (driver receive clocks). `None` when evidence is off."""
 DownFn = Callable[[str, Path], DownResult]
 RenderFn = Callable[["RangeSpec", Path, PlanOptions | None], ResolvedPlan]
-ChannelFactory = Callable[[dict[str, int], str], MessageChannel]
+ChannelFactory = Callable[
+    [dict[str, int], str, dict[str, HybridEndpoint]], MessageChannel
+]
+"""(guest CIDs, label, hybrid-vsock sockets of Cloud Hypervisor guests) -> channel."""
 
 
-def _default_channel_factory(cids: dict[str, int], label: str) -> MessageChannel:
+def _default_channel_factory(
+    cids: dict[str, int], label: str, hybrid_sockets: dict[str, HybridEndpoint]
+) -> MessageChannel:
     from .._channel.vsock import VsockTransport
 
-    transport: "Transport" = VsockTransport(cids)
+    transport: "Transport" = VsockTransport(cids, hybrid_sockets=hybrid_sockets)
     return MessageChannel(transport, label=label)
 
 
@@ -71,6 +77,10 @@ class SampleHandle:
     totals: Totals
     cid_base: int
     guest_cids: dict[str, int] = field(default_factory=dict[str, int])
+    guest_sockets: dict[str, HybridEndpoint] = field(
+        default_factory=dict[str, HybridEndpoint]
+    )
+    """Hybrid-vsock sockets of the Cloud Hypervisor guests (QEMU guests are reached by CID)."""
     channel: MessageChannel | None = None
     sessions: dict[str, str] = field(default_factory=dict[str, str])
     stats: RetryStats = field(default_factory=RetryStats)

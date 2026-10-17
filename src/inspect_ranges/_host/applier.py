@@ -14,7 +14,7 @@ import hashlib
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +39,7 @@ from .._channel.protocol import (
     TeardownRequest,
 )
 from .._channel.uds import ROUTED_ACK, read_preamble
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.plan import ResolvedPlan, Totals
 from .._doctor.checks import readiness_failures
 from .._evidence.capture import (
@@ -94,6 +95,28 @@ async def _default_guest_connect(cid: int) -> ByteStream:
     return await VsockTransport({"guest": cid}).connect("guest")
 
 
+def cloud_hypervisor_connector(
+    sockets: Mapping[int, HybridEndpoint],
+    fallback: GuestConnector = _default_guest_connect,
+) -> GuestConnector:
+    """A `GuestConnector` that reaches Cloud Hypervisor guests through their hybrid-vsock Unix sockets.
+
+    Args:
+        sockets: CID to hybrid-vsock endpoint (socket path and the VMM's uid, enforced with `SO_PEERCRED`) for the Cloud Hypervisor guests; read at dial time, so a live mapping sees guests realized later.
+        fallback: The connector for every other CID (QEMU guests, reached by `AF_VSOCK`).
+    """
+
+    async def connect(cid: int) -> ByteStream:
+        hybrid = sockets.get(cid)
+        if hybrid is None:
+            return await fallback(cid)
+        return await VsockTransport({}, hybrid_sockets={"guest": hybrid}).connect(
+            "guest"
+        )
+
+    return connect
+
+
 @dataclass
 class _RealizeRun:
     """One realize execution's translated report log plus the live-stream condition."""
@@ -138,7 +161,11 @@ class Applier:
         self._image_cache = image_cache
         self._up_fn = up_fn
         self._down_fn = down_fn
-        self._guest_connect = guest_connector or _default_guest_connect
+        # CID -> hybrid-vsock socket of every realized Cloud Hypervisor guest
+        self._ch_sockets: dict[int, HybridEndpoint] = {}
+        self._guest_connect = guest_connector or cloud_hypervisor_connector(
+            self._ch_sockets
+        )
         self._store = store if store is not None else LeaseStore(state_dir)
         self._capacity = capacity if capacity is not None else HostCapacity.measure()
         self._gate = gate if gate is not None else readiness_failures
@@ -429,7 +456,8 @@ class Applier:
         if charge is not None:
             await self.admission.release(charge)
         self._plans.pop(lease.lease_id, None)
-        self._relays.pop(lease.lease_id, None)
+        for cid in self._relays.pop(lease.lease_id, {}).values():
+            self._ch_sockets.pop(cid, None)
         self._guest_states.pop(lease.lease_id, None)
         self._lease_locks.pop(lease.lease_id, None)
         logger.info(
@@ -639,6 +667,9 @@ class Applier:
             self._relays[lease.lease_id] = {
                 guest.name: guest.cid for guest in result.guests
             }
+            for guest in result.guests:
+                if guest.hybrid_vsock is not None:
+                    self._ch_sockets[guest.cid] = guest.hybrid_vsock
             if evidence_on and plan is not None and recorder is not None:
                 await self._start_evidence(lease, plan, recorder)
         if failed:

@@ -18,6 +18,7 @@ from inspect_ranges._channel.channel import (
     TamperError,
 )
 from inspect_ranges._channel.mocks import HostileTransport
+from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler.plan import (
     PlanOptions,
     ResolvedPlan,
@@ -158,7 +159,7 @@ def rigged_runtime(tmp_path: Path) -> tuple[ProviderRuntime, FakeSeams]:
     runtime.up_fn = seams.up
     runtime.down_fn = seams.down
     runtime.render_fn = seams.render
-    runtime.channel_factory = lambda cids, label: MessageChannel(
+    runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
         LoopbackTransport(guests=tuple(cids)), label=label
     )
     # a REAL local host provider over a real lease store; only the doctor
@@ -545,7 +546,9 @@ def _rig_exhausted_transient_failures(
 
 
 def _rig_channel_factory_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
-    def broken(cids: dict[str, int], label: str) -> MessageChannel:
+    def broken(
+        cids: dict[str, int], label: str, hybrid_sockets: dict[str, HybridEndpoint]
+    ) -> MessageChannel:
         raise RuntimeError("no channel")
 
     runtime.channel_factory = broken
@@ -553,7 +556,7 @@ def _rig_channel_factory_failure(runtime: ProviderRuntime, seams: FakeSeams) -> 
 
 def _rig_ping_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
     # a channel whose transport knows no guests: the boot-confirmation ping fails
-    runtime.channel_factory = lambda cids, label: MessageChannel(
+    runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
         LoopbackTransport(guests=()), label=label
     )
 
@@ -823,7 +826,7 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
-            runtime.channel_factory = lambda cids, label: MessageChannel(
+            runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
                 HostileTransport("sessionless-pong"), label=label
             )
             with pytest.raises(TamperError) as info:

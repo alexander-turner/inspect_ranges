@@ -407,7 +407,14 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             handle.booted = True
             try:
                 handle.guest_cids = {state.name: state.cid for state in result.guests}
-                handle.channel = runtime.channel_factory(handle.guest_cids, project)
+                handle.guest_sockets = {
+                    state.name: state.hybrid_vsock
+                    for state in result.guests
+                    if state.hybrid_vsock is not None
+                }
+                handle.channel = runtime.channel_factory(
+                    handle.guest_cids, project, handle.guest_sockets
+                )
                 if handle.host is not None:
                     # the RangeHost contract: the local backend's channel is
                     # attached post-boot (None only between acquire and boot)

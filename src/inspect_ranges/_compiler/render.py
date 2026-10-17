@@ -26,6 +26,7 @@ from .egress import render_egress_nftables
 from .nftables import render_router_nftables
 from .plan import (
     PlannedGuest,
+    PlannedNetwork,
     PlanOptions,
     ResolvedPlan,
     guest_allocation,
@@ -256,6 +257,21 @@ def render_bundle(
         caps.append("NET_RAW")
     template = _COMPOSE_UPLINK if plan.requirements.egress_uplink else _COMPOSE_ISOLATED
     compose = template.replace("__CAPS__", ", ".join(caps))
+    if any(guest.vmm == "cloud-hypervisor" for guest in plan.guests):
+        # Cloud Hypervisor exposes guest vsock as a Unix socket per guest, not
+        # through the host kernel's vhost-vsock: the sockets land in a host
+        # directory the applier supplies, so host-side dialers can reach them
+        anchor = "      - .:/render:ro\n"
+        if compose.count(anchor) != 1:
+            raise RuntimeError(
+                f"compose template has {compose.count(anchor)} {anchor.strip()!r} mounts; "
+                "expected exactly one to anchor the cloud-hypervisor vsock mount"
+            )
+        compose = compose.replace(
+            anchor,
+            anchor
+            + "      - ${CH_VSOCK_DIR:?this range has cloud-hypervisor guests; set CH_VSOCK_DIR}:/run/ch-vsock\n",
+        )
     if plan.requirements.evidence_capture:
         compose = _compose_with_capture(compose)
         write(
@@ -305,17 +321,18 @@ def render_bundle(
             )
             for interface in guest.interfaces
         )
-        write(
-            f"guests/{guest.name}/domain.xml",
-            _DOMAIN_XML.format(
-                name=guest.name,
-                memory_mb=guest.memory_mb,
-                cpus=guest.cpus,
-                cpu=cpu,
-                cid=guest.cid,
-                interfaces=interfaces,
-            ),
-        )
+        if guest.vmm == "qemu":
+            write(
+                f"guests/{guest.name}/domain.xml",
+                _DOMAIN_XML.format(
+                    name=guest.name,
+                    memory_mb=guest.memory_mb,
+                    cpus=guest.cpus,
+                    cpu=cpu,
+                    cid=guest.cid,
+                    interfaces=interfaces,
+                ),
+            )
         write(
             f"guests/{guest.name}/seed/meta-data",
             f"instance-id: {plan.range.name}-{guest.name}\nlocal-hostname: {guest.name}\n",
@@ -337,17 +354,7 @@ def render_bundle(
         json.dumps(
             {
                 "parallel": True,
-                "guests": [
-                    {
-                        "name": guest.name,
-                        "cid": guest.cid,
-                        "image_file": guest.image.file,
-                        "image_digest": guest.image.digest,
-                        "overlay_gb": guest.disk_gb,
-                        "readiness": guest.readiness,
-                    }
-                    for guest in plan.guests
-                ],
+                "guests": [_boot_guest(guest, networks) for guest in plan.guests],
                 "verify": {"reserved": True},
             },
             sort_keys=True,
@@ -373,6 +380,29 @@ def render_bundle(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n"
     )
     return plan
+
+
+def _boot_guest(
+    guest: PlannedGuest, networks: dict[str, PlannedNetwork]
+) -> dict[str, Any]:
+    """One guest's `boot.json` entry; a Cloud Hypervisor guest also carries what its command line needs (it has no domain XML)."""
+    entry: dict[str, Any] = {
+        "name": guest.name,
+        "cid": guest.cid,
+        "image_file": guest.image.file,
+        "image_digest": guest.image.digest,
+        "overlay_gb": guest.disk_gb,
+        "readiness": guest.readiness,
+        "vmm": guest.vmm,
+    }
+    if guest.vmm == "cloud-hypervisor":
+        entry["cpus"] = guest.cpus
+        entry["memory_mb"] = guest.memory_mb
+        entry["interfaces"] = [
+            {"bridge": networks[interface.network].bridge, "mac": interface.mac}
+            for interface in guest.interfaces
+        ]
+    return entry
 
 
 def _require_cached_images(spec: RangeSpec, plan: ResolvedPlan) -> None:

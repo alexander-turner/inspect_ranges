@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler import PlanOptions, render_bundle, resolve_plan
 from inspect_ranges._compiler.plan import image_file_name
 from inspect_ranges._runtime import (
@@ -157,7 +158,9 @@ class FakeChannel:
 
 
 def use_channel(monkeypatch: pytest.MonkeyPatch, channel: FakeChannel) -> None:
-    def factory(cids: dict[str, int]) -> FakeChannel:
+    def factory(
+        cids: dict[str, int], hybrid_sockets: dict[str, HybridEndpoint] | None = None
+    ) -> FakeChannel:
         return channel
 
     monkeypatch.setattr(up_module(), "make_channel", factory)
