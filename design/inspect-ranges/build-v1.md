@@ -74,7 +74,7 @@ One scripted run on the devbox, under the battery flock: slice 1's fixture-recip
 
 | Slice | Status |
 |---|---|
-| 1 recipe bundles and executor | pending |
+| 1 recipe bundles and executor | done 2026-10-17: battery 13/13 ([build-v1](../spikes/build-v1/README.md)) on a live noble guest; the battery itself caught two bugs pre-review (relative bundle paths broke the executor's cwd change; `IR_PUSH` to root-owned paths hit EACCES against the agent-user file plane, fixed with stage-and-install); fresh-context review: 7 findings (2 blocking: recipe-reference traversal escaping the resolution roots, user-dependent digest via `os.access`; 5 non-blocking: per-run log clobber, unstaged launch failures, push `--user` contract, `--script` uncovered, zero-exit group survivors), all fixed and re-batteried 13/13; 31 unit tests |
 | 2 `build` verb | pending |
 | 3 xenial golden | pending |
 | 4 verification engine | pending |

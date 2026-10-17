@@ -69,10 +69,14 @@ MODE=$(C "stat -c %a /etc/recipe.conf" || true)
 [[ "$MODE" == "600" ]] && ok "B7 pushed file mode 600" || bad "B7 pushed file mode (got: $MODE)"
 MADE=$(C "cat /opt/recipe-made" || true)
 [[ "$MADE" == "made-by-recipe" ]] && ok "B8 root exec made its artifact" || bad "B8 root exec (got: $MADE)"
+SCRIPTED=$(C "cat /opt/recipe-scripted" || true)
+[[ "$SCRIPTED" == "scripted" ]] && ok "B9 --script upload exec made its artifact" || bad "B9 script exec (got: $SCRIPTED)"
+STAGED=$(C "ls /tmp/.ir-recipe-* /tmp/.ir-push-* 2>/dev/null | wc -l" || true)
+[[ "$STAGED" == "0" ]] && ok "B10 no staging files left in guest /tmp" || bad "B10 staging cleanup (left: $STAGED)"
 
-DRIVER fail boot   && ok "B9 nonzero exit fails naming rc and log" || bad "B9 nonzero exit"
-DRIVER budget boot && ok "B10 host budget kills the process group promptly" || bad "B10 budget"
-DRIVER bg boot     && ok "B11 background-child exec returns promptly" || bad "B11 background child"
+DRIVER fail boot   && ok "B11 nonzero exit fails naming rc and log" || bad "B11 nonzero exit"
+DRIVER budget boot && ok "B12 host budget kills the process group promptly" || bad "B12 budget"
+DRIVER bg boot     && ok "B13 background-child exec returns promptly" || bad "B13 background child"
 
 $IR down --all >/dev/null
 
