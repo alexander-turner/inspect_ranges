@@ -1,9 +1,9 @@
 ---
 type: decision
 title: "Build v1: guest content to a built, verified range, in seven slices"
-status: proposed
+status: accepted
 tags: [inspect-ranges, build, images, recipes, verification, manifest, decision]
-timestamp: 2026-10-17
+timestamp: 2026-10-17 (accepted 2026-10-17)
 ---
 
 # Build v1: guest content to a built, verified range, in seven slices
