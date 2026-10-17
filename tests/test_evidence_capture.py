@@ -517,9 +517,13 @@ def test_evidence_names_refuse_at_planning(tmp_path: Path) -> None:
 
 STUB_TCPDUMP = """\
 #!/usr/bin/env python3
-import os, signal, sys, time
+import json, os, signal, sys, time
 
 base = sys.argv[sys.argv.index("-w") + 1]
+if os.environ.get("STUB_ARGV"):
+    with open(os.environ["STUB_ARGV"] + ".tmp", "w") as handle:
+        json.dump(sys.argv[1:], handle)
+    os.replace(os.environ["STUB_ARGV"] + ".tmp", os.environ["STUB_ARGV"])
 
 
 def summary(signum=None, frame=None):
@@ -627,6 +631,24 @@ def test_supervisor_waits_starts_and_stops(tmp_path: Path) -> None:
     finally:
         supervisor.finish()
     assert supervisor.proc is not None and supervisor.proc.wait(timeout=10) == 0
+
+
+def test_supervisor_captures_packet_buffered(tmp_path: Path) -> None:
+    """The supervisor runs tcpdump with `-U`, so the active chunk is current mid-run and a killed capture loses no buffered tail."""
+    argv_path = tmp_path / "argv.json"
+    supervisor = Supervisor(tmp_path, env={"STUB_ARGV": str(argv_path)})
+    try:
+        supervisor.start()
+        (supervisor.netdev / "br-dmz").touch()
+        supervisor.wait_for(lambda s: s["segments"]["dmz"]["state"] == "running")
+        deadline = time.monotonic() + 10.0
+        while not argv_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        argv = json.loads(argv_path.read_text())
+        assert "-U" in argv
+        assert argv[argv.index("-i") + 1] == "br-dmz"
+    finally:
+        supervisor.finish()
 
 
 def test_supervisor_bounds_restarts(tmp_path: Path) -> None:
