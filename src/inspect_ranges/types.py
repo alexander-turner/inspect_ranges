@@ -391,6 +391,9 @@ class Service(_StrictModel):
     version: str | None = None
     """Expected version, when the scenario depends on it."""
 
+    package: str | None = None
+    """The dpkg package that embodies the service, for build-time version verification when the listening process cannot attribute it (e.g. a PHP frontend served by apache: `package: zabbix-frontend-php`)."""
+
     credentials: Credentials | None = None
     """Credentials the service accepts, when scenario-relevant."""
 

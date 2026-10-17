@@ -21,6 +21,19 @@ from .specpath import resolve_spec_path
 def _echo_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
     if status == "start":
         return
+    if stage == "verify":
+        # per-declaration lines in the Journey A shape
+        if status == "fail":
+            click.echo(
+                f"verify    [{fields.get('code', '')}] guest '{fields.get('guest', '')}': "
+                f"declared {fields.get('declared', '')}; observed {fields.get('observed', '')}"
+            )
+            click.echo(f"          log: {fields.get('log', '')}")
+        else:
+            click.echo(
+                f"verify    ok  {fields.get('kind', '')} {fields.get('guest', '')}/{fields.get('name', '')}"
+            )
+        return
     if status == "fail":
         click.echo(f"{stage:<9} FAILED  {fields.get('error', '')}")
         return
