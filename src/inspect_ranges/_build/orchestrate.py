@@ -1,6 +1,6 @@
 """The `build` orchestration (build-v1 slice 2): boot the egress build plan, run recipes, tear down.
 
-A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Capture of the provisioned disks and the build manifest arrive with slice 5; until then a build proves orchestration and realization, not persistence.
+A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, every `services`/`vulnerabilities` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Capture of the provisioned disks and the build manifest arrive with slice 5; until then a build proves orchestration, realization, and verification, not persistence.
 
 The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and the build nameserver appended (host-derived by default, because fleets that force DNS through a VPC resolver are the norm), router-attached and `routed` networks are left untouched (the goad-era question), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate. The staging bundle is per-run (a fresh temp dir) and removed after the build unless `keep` left the range running from it, so the egress-enabled bundle never lingers where a runtime verb could boot it.
 """
@@ -48,6 +48,7 @@ from .recipes import (
     run_recipe,
     validate_vars,
 )
+from .verify import DeclarationResult, verify_range
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,19 @@ SettleFn = Callable[[dict[str, int], str, str, float], float]
 """The network-settle seam: `(cids, guest, probe, timeout_s) -> seconds waited`."""
 
 
+class VerifyFn(Protocol):
+    """The verification seam: `verify_range`'s callable shape."""
+
+    def __call__(
+        self,
+        spec: RangeSpec,
+        cids: dict[str, int],
+        *,
+        log_dir: Path,
+        stage_log: StageSink | None,
+    ) -> list[DeclarationResult]: ...
+
+
 class BuildOptions(BaseModel):
     """Inputs to a build run (never per-instance probes; mirrors `UpOptions` where they overlap)."""
 
@@ -188,6 +202,7 @@ class BuildResult(BaseModel):
     project: str
     range_name: str
     recipes: tuple[RecipeRun, ...]
+    verifications: tuple[DeclarationResult, ...]
     seconds: float
     kept: bool
     """True when the range was left running (`keep`); tear down with `inspect-ranges down PROJECT`."""
@@ -299,6 +314,7 @@ def build_range(
     recipe_fn: RecipeFn = run_recipe,
     ensure_uplink: Callable[[str], None] | None = None,
     settle_fn: SettleFn | None = None,
+    verify_fn: VerifyFn = verify_range,
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
@@ -337,7 +353,9 @@ def build_range(
         plan_options = PlanOptions(
             image_cache=image_cache,
             cid_base=options.cid_base,
-            realized_sections=frozenset({"provisioning"}),
+            # the build realizes provisioning (slice 2) and verifies services
+            # and vulnerabilities (slice 4); the runtime path keeps its gates
+            realized_sections=frozenset({"provisioning", "services", "vulnerabilities"}),
         )
         try:
             plan = render_bundle(build_spec, staging, plan_options)
@@ -409,6 +427,19 @@ def build_range(
                 log_path=error.log_path,
             ) from error
 
+        verify_dir = project_dir(state_dir, project) / "verify"
+        verifications = verify_fn(spec, cids, log_dir=verify_dir, stage_log=tee)
+        failed = [result for result in verifications if result.status == "fail"]
+        if failed:
+            disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+            raise BuildError(
+                "verify",
+                f"{len(failed)} of {len(verifications)} declarations failed verification; logs: {verify_dir} ({disposition})",
+                guest=failed[0].guest,
+            )
+        if verifications:
+            tee.log("verified", "ok", declarations=len(verifications))
+
         if not options.keep:
             try:
                 down_fn(project, state_dir=state_dir, keep_state=True)
@@ -430,6 +461,7 @@ def build_range(
         project=project,
         range_name=build_spec.meta.name,
         recipes=tuple(runs),
+        verifications=tuple(verifications),
         seconds=seconds,
         kept=kept,
     )

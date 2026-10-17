@@ -27,6 +27,7 @@ from inspect_ranges.types import (
     ProvisioningStep,
     RangeMeta,
     RangeSpec,
+    Service,
 )
 
 from tests.test_build_recipes import write_recipe
@@ -329,6 +330,90 @@ def test_settle_failure_tears_down(tmp_path: Path, cache: Path) -> None:
         )
     assert excinfo.value.stage == "network-settle"
     assert len(fakes.down_calls) == 1 and fakes.recipe_calls == []
+
+
+def test_verify_runs_after_recipes_and_failures_tear_down(
+    tmp_path: Path, cache: Path
+) -> None:
+    from inspect_ranges._build.verify import DeclarationResult
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    spec.hosts[0].services = [Service(name="nginx", port=80, version="1.18")]
+    fakes = Fakes(["web", "db", "attacker"])
+    order: list[str] = []
+
+    def tracking_recipe(recipe: ResolvedRecipe, **kwargs: Any) -> RecipeRun:
+        order.append("recipe")
+        return fakes.recipe_fn(recipe, **kwargs)
+
+    def failing_verify(
+        spec: RangeSpec,
+        cids: dict[str, int],
+        *,
+        log_dir: Path,
+        stage_log: Any,
+    ) -> list[DeclarationResult]:
+        order.append("verify")
+        assert "web" in cids
+        return [
+            DeclarationResult(
+                kind="service",
+                guest="web",
+                name="nginx",
+                status="fail",
+                code="service-not-verified",
+                declared="nginx port 80 version 1.18",
+                observed="no tcp/udp socket on port 80",
+            )
+        ]
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=tracking_recipe,
+            ensure_uplink=fakes.ensure_uplink,
+            verify_fn=failing_verify,
+        )
+    assert excinfo.value.stage == "verify"
+    assert "1 of 1 declarations failed" in str(excinfo.value)
+    assert order and order[-1] == "verify" and order.count("recipe") == 3
+    assert len(fakes.down_calls) == 1
+
+
+def test_verifications_land_on_the_result(tmp_path: Path, cache: Path) -> None:
+    from inspect_ranges._build.verify import DeclarationResult
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    ok = DeclarationResult(
+        kind="service",
+        guest="web",
+        name="nginx",
+        status="ok",
+        code="",
+        declared="nginx port 80",
+        observed="tcp/80 by nginx",
+    )
+
+    def passing_verify(*args: Any, **kwargs: Any) -> list[DeclarationResult]:
+        return [ok]
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        verify_fn=passing_verify,
+    )
+    assert result.verifications == (ok,)
+    assert fakes.down_calls == [result.project]
 
 
 def test_resolution_fails_fast_before_boot(tmp_path: Path, cache: Path) -> None:

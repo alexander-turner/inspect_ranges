@@ -1,0 +1,26 @@
+# build-verify battery fixture: the Journey A scenario, a newer package than
+# declared. nginx installs at 1.18.x; the spec declares 1.19.
+range:
+  name: bvwrong
+  schema_version: "0.3"
+  description: Verification wrong-version fixture.
+
+networks:
+  - name: lab
+    cidr: 10.96.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.96.10.10 }]
+    provisioning:
+      - { recipe: bv.nginx }
+    services:
+      - { name: nginx, port: 80, version: "1.19" }
+
+attacker:
+  image: focal-guest
+  interfaces: [{ network: lab }]
+  entry: external

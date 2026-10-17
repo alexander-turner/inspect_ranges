@@ -15,6 +15,14 @@ from .orchestrate import (
     egress_build_spec,
     resolve_provisioning,
 )
+from .verify import (
+    DeclarationResult,
+    GuestFacts,
+    Listener,
+    evaluate_host,
+    verify_range,
+    version_matches,
+)
 from .recipes import (
     DEFAULT_EXEC_BUDGET_MS,
     DEFAULT_RECIPE_BUDGET_S,
@@ -43,6 +51,9 @@ __all__ = [
     "BuildError",
     "BuildOptions",
     "BuildResult",
+    "DeclarationResult",
+    "GuestFacts",
+    "Listener",
     "RecipeError",
     "RecipeInput",
     "RecipeRun",
@@ -55,10 +66,13 @@ __all__ = [
     "default_build_nameserver",
     "default_recipe_cache",
     "egress_build_spec",
+    "evaluate_host",
     "load_recipe",
     "recipe_digest",
     "resolve_provisioning",
     "resolve_recipe",
     "run_recipe",
     "validate_vars",
+    "verify_range",
+    "version_matches",
 ]
