@@ -3,9 +3,12 @@
 Teardown is keyed off recorded ownership, never live process state: `up` registers the project here before creating any resource (the cleanup-registry pattern from `docker-provider-reuse`), so a `down` run by any process, after any crash, can find and remove everything the project ever owned. The stage log is the debuggability contract from `realizer-v1`: one JSONL line per stage transition, each failure naming its stage and guest.
 """
 
+import hashlib
 import json
 import os
 import shutil
+import stat
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +47,40 @@ def default_state_dir() -> Path:
 def project_dir(state_dir: Path, project: str) -> Path:
     """The per-project state directory (owner record, stage log, pulled console logs)."""
     return state_dir / project
+
+
+def ch_vsock_dir(project: str) -> Path:
+    """The host directory holding a project's Cloud Hypervisor vsock sockets.
+
+    Not under the state dir: `AF_UNIX` paths cap at 108 bytes and provider project names are long, so the directory is a short per-user root plus a digest of the project name.
+    """
+    root = Path(tempfile.gettempdir()) / f"inspect-ranges-{os.getuid()}"
+    return root / hashlib.sha256(project.encode()).hexdigest()[:16]
+
+
+def prepare_ch_vsock_dir(project: str) -> Path:
+    """Create `ch_vsock_dir(project)` for the range container to bind-mount.
+
+    The per-user root is private (0700, owned by this user; anything else refuses, since it sits in a shared temp dir). The project directory is sticky and writable by all (1733) because the unprivileged VMM inside the container runs as a uid this host does not know; the private root is what keeps other host users out, and the sticky bit keeps this user able to remove the VMM's sockets.
+
+    Raises:
+        PermissionError: The per-user root exists but is not a private directory owned by this user.
+    """
+    directory = ch_vsock_dir(project)
+    root = directory.parent
+    root.mkdir(mode=0o700, exist_ok=True)
+    info = root.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise PermissionError(
+            f"{root} must be a directory owned by uid {os.getuid()} with mode 0700"
+        )
+    directory.mkdir(exist_ok=True)
+    directory.chmod(0o1733)
+    return directory
 
 
 def write_owner(state_dir: Path, record: OwnerRecord) -> None:

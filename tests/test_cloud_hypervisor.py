@@ -1,0 +1,385 @@
+"""`vmm: cloud-hypervisor` guests: the schema field, what render and the boot script emit, and reaching the guest through Cloud Hypervisor's hybrid-vsock Unix socket."""
+
+import asyncio
+import json
+import os
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from inspect_ranges._channel.channel import (
+    ByteStream,
+    FakeGuest,
+    MessageChannel,
+    TransportFailure,
+)
+from inspect_ranges._channel.vsock import (
+    HybridEndpoint,
+    PeerCredentialMismatch,
+    VsockTransport,
+)
+from inspect_ranges._compiler import PlanOptions, render_bundle, resolve_plan
+from inspect_ranges._host.applier import cloud_hypervisor_connector
+from inspect_ranges._runtime.ownership import ch_vsock_dir, prepare_ch_vsock_dir
+from inspect_ranges._runtime.up import BootGuest, boot_script, load_boot
+from inspect_ranges.types import Attacker, Host, Interface, IssueError, Os, RangeSpec
+from pydantic import ValidationError
+
+from tests.applier_fixture import serve_guest
+from tests.test_compiler import two_segment_spec
+
+
+@pytest.fixture()
+def cache(tmp_path: Path) -> Path:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "img.qcow2").write_bytes(b"fake golden")
+    (cache / "noble-range-guest.qcow2").write_bytes(b"fake router golden")
+    return cache
+
+
+@pytest.fixture()
+def short_dir() -> Iterator[Path]:
+    # AF_UNIX paths cap at 108 bytes; pytest's tmp_path can exceed that
+    with tempfile.TemporaryDirectory(prefix="ch", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+def ch_spec(*names: str) -> RangeSpec:
+    spec = two_segment_spec()
+    for host in spec.hosts:
+        if host.name in names:
+            host.vmm = "cloud-hypervisor"
+    return spec
+
+
+def render(spec: RangeSpec, cache: Path, out: Path) -> dict[str, Any]:
+    render_bundle(spec, out, PlanOptions(image_cache=cache, cid_base=3000))
+    boot = json.loads((out / "boot.json").read_text())
+    return {guest["name"]: guest for guest in boot["guests"]}
+
+
+@pytest.mark.parametrize(
+    ("vmm", "accepted"),
+    [(None, "qemu"), ("qemu", "qemu"), ("cloud-hypervisor", "cloud-hypervisor")],
+)
+def test_vmm_field_defaults_to_qemu(vmm: str | None, accepted: str) -> None:
+    extra = {} if vmm is None else {"vmm": vmm}
+    host = Host.model_validate(
+        {
+            "name": "web",
+            "os": {"type": "linux"},
+            "image": "img",
+            "interfaces": [{"network": "dmz"}],
+            **extra,
+        }
+    )
+    assert host.vmm == accepted
+
+
+def test_vmm_field_rejects_other_monitors() -> None:
+    with pytest.raises(ValidationError, match="vmm"):
+        Host(
+            name="web",
+            os=Os(type="linux"),
+            image="img",
+            interfaces=[Interface(network="dmz")],
+            vmm="firecracker",  # pyright: ignore[reportArgumentType]
+        )
+
+
+def test_render_gives_cloud_hypervisor_guests_boot_parameters_not_domain_xml(
+    cache: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "bundle"
+    guests = render(ch_spec("web"), cache, out)
+    assert not (out / "guests/web/domain.xml").exists()
+    assert (out / "guests/db/domain.xml").exists()
+    web = guests["web"]
+    assert web["vmm"] == "cloud-hypervisor"
+    assert (web["cpus"], web["memory_mb"]) == (1, 1024)
+    assert [nic["bridge"] for nic in web["interfaces"]] == ["br-dmz"]
+    assert guests["db"]["vmm"] == "qemu" and "interfaces" not in guests["db"]
+    compose = (out / "compose.yaml").read_text()
+    assert "${CH_VSOCK_DIR:?" in compose and ":/run/ch-vsock" in compose
+
+
+def test_render_without_cloud_hypervisor_guests_mounts_no_vsock_dir(
+    cache: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "bundle"
+    render(two_segment_spec(), cache, out)
+    assert "CH_VSOCK_DIR" not in (out / "compose.yaml").read_text()
+
+
+def test_boot_script_starts_cloud_hypervisor_unprivileged(
+    cache: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "bundle"
+    guests = render(ch_spec("web"), cache, out)
+    cid, mac = guests["web"]["cid"], guests["web"]["interfaces"][0]["mac"]
+    script = boot_script(load_boot(out))
+    uid = 1_000_000 + cid  # its own uid: no other VMM (or QEMU) shares it
+    assert f"ip tuntap add dev ch{cid}n0 mode tap user {uid} group kvm" in script
+    assert f"ip link set ch{cid}n0 master br-dmz" in script
+    # the tap carries libvirt's fe:-prefixed MAC before it joins the bridge
+    tap_mac = "fe" + mac[2:]
+    assert f"ip link set ch{cid}n0 address {tap_mac}" in script
+    assert script.index(f"address {tap_mac}") < script.index(f"ch{cid}n0 master")
+    assert (
+        f"setpriv --reuid={uid} --regid=kvm --clear-groups /usr/local/bin/cloud-hypervisor"
+        in script
+    )
+    assert f"--net tap=ch{cid}n0,mac={mac}" in script
+    assert f"--vsock cid={cid},socket=/run/ch-vsock/web.sock" in script
+    assert "path=/scratch/web.qcow2,image_type=qcow2,backing_files=on" in script
+    assert "--seccomp" not in script  # the default filter stays on
+    assert "--api-socket" not in script  # no VMM control surface nothing uses
+    assert "virsh -c qemu:///system start web" not in script
+    assert "virsh -c qemu:///system start db" in script
+    # the tap exists before the VMM that opens it, and the VMM's 0700 socket
+    # is opened to the host-side dialer only after the VMM created it
+    assert script.index(f"ip tuntap add dev ch{cid}n0") < script.index("setpriv")
+    assert script.index("setpriv") < script.index("chmod 0666 /run/ch-vsock/web.sock")
+
+
+def test_cloud_hypervisor_guests_refuse_a_pinned_cpu_model(cache: Path) -> None:
+    # CH has no CPU model setting: a pinned model would silently not apply
+    with pytest.raises(IssueError) as refused:
+        resolve_plan(
+            ch_spec("web"), PlanOptions(image_cache=cache, cpu_model="Skylake-Server")
+        )
+    assert [(issue.code, issue.path) for issue in refused.value.issues] == [
+        ("cloud-hypervisor-cpu-model", ("hosts", 0, "vmm"))
+    ]
+    resolve_plan(
+        two_segment_spec(), PlanOptions(image_cache=cache, cpu_model="Skylake-Server")
+    )
+
+
+@pytest.mark.parametrize(
+    ("fields", "refused"),
+    [
+        ({"host": "web", "vmm": "cloud-hypervisor"}, True),
+        ({"host": "web"}, False),
+        ({"interfaces": [{"network": "dmz"}], "vmm": "cloud-hypervisor"}, False),
+    ],
+)
+def test_attacker_vmm_is_refused_on_an_existing_host_foothold(
+    fields: dict[str, Any], refused: bool
+) -> None:
+    data = {"entry": "external", **fields}
+    if refused:
+        with pytest.raises(ValidationError, match="must not also declare vmm"):
+            Attacker.model_validate(data)
+    else:
+        Attacker.model_validate(data)
+
+
+_BOOT_BASE: dict[str, Any] = {
+    "name": "web",
+    "cid": 3000,
+    "image_file": "img.qcow2",
+    "overlay_gb": 10,
+    "readiness": "cloud-init",
+}
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"vmm": "cloud-hypervisor"},  # no sizing
+        {"vmm": "cloud-hypervisor", "cpus": 1},
+        {
+            "vmm": "cloud-hypervisor",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "interfaces": [{"bridge": "br-dmz; rm -rf /", "mac": "52:54:00:00:00:01"}],
+        },
+        {
+            "vmm": "cloud-hypervisor",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "interfaces": [{"bridge": "br-dmz", "mac": "not-a-mac"}],
+        },
+    ],
+)
+def test_boot_guest_refuses_malformed_vmm_entries(fields: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        BootGuest.model_validate({**_BOOT_BASE, **fields})
+
+
+class _SocketStream:
+    """The fake VMM's side of an accepted hybrid-vsock connection, as a `ByteStream`."""
+
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self._reader, self._writer = reader, writer
+
+    async def send(self, data: bytes) -> None:
+        self._writer.write(data)
+        await self._writer.drain()
+
+    async def receive(self) -> bytes:
+        return await self._reader.read(1 << 16)
+
+    async def aclose(self) -> None:
+        self._writer.close()
+
+
+class FakeHybridVsock:
+    """A Cloud Hypervisor hybrid-vsock socket in front of a `FakeGuest`: `CONNECT <port>` then `OK <n>`, or a bare close while nothing in the guest listens."""
+
+    def __init__(self, path: Path, *, listening: bool = True) -> None:
+        self.path = path
+        self.listening = listening
+        self.requests: list[bytes] = []
+        self.guest = FakeGuest("web")
+
+    async def _handle(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.requests.append(await reader.readline())
+        if not self.listening:
+            writer.close()
+            return
+        writer.write(b"OK 1073741824\n")
+        await writer.drain()
+        await serve_guest(self.guest, _SocketStream(reader, writer))
+
+    async def start(self) -> asyncio.Server:
+        return await asyncio.start_unix_server(self._handle, path=str(self.path))
+
+
+def test_hybrid_transport_pings_the_guest_through_the_socket(short_dir: Path) -> None:
+    vmm = FakeHybridVsock(short_dir / "web.sock")
+
+    async def scenario() -> str:
+        async with await vmm.start():
+            channel = MessageChannel(
+                VsockTransport(
+                    {}, hybrid_sockets={"web": HybridEndpoint(vmm.path, os.getuid())}
+                ),
+                label="test",
+            )
+            return (await channel.ping("web")).session
+
+    assert asyncio.run(scenario()) == vmm.guest.session
+    assert vmm.requests[0] == b"CONNECT 5000\n"
+
+
+def test_hybrid_transport_refuses_when_nothing_listens(short_dir: Path) -> None:
+    vmm = FakeHybridVsock(short_dir / "web.sock", listening=False)
+
+    async def scenario() -> None:
+        async with await vmm.start():
+            await VsockTransport(
+                {},
+                hybrid_sockets={"web": HybridEndpoint(vmm.path, os.getuid())},
+                pace_s=0.0,
+            ).connect("web")
+
+    with pytest.raises(ConnectionError, match="handshake refused"):
+        asyncio.run(scenario())
+    assert len(vmm.requests) == 5  # every retry attempt reached the VMM
+
+
+def test_hybrid_transport_accepts_a_socket_served_by_the_vmm_uid(
+    short_dir: Path,
+) -> None:
+    # the server runs as this test's uid, so expecting that uid is the
+    # "VMM's uid" case: the credential check passes and the handshake goes out
+    vmm = FakeHybridVsock(short_dir / "web.sock")
+
+    async def scenario() -> None:
+        async with await vmm.start():
+            stream = await VsockTransport(
+                {}, hybrid_sockets={"web": HybridEndpoint(vmm.path, os.getuid())}
+            ).connect("web")
+            await stream.aclose()
+
+    asyncio.run(scenario())
+    assert vmm.requests == [b"CONNECT 5000\n"]
+
+
+def test_hybrid_transport_refuses_a_foreign_peer_before_sending_anything(
+    short_dir: Path,
+) -> None:
+    # a real socket whose peer (this test's uid) is not the expected VMM uid
+    impostor = FakeHybridVsock(short_dir / "web.sock")
+    expected = os.getuid() + 1
+
+    async def scenario() -> None:
+        async with await impostor.start():
+            try:
+                await VsockTransport(
+                    {},
+                    hybrid_sockets={"web": HybridEndpoint(impostor.path, expected)},
+                    pace_s=0.0,
+                ).connect("web")
+            finally:
+                await asyncio.sleep(0.05)  # let the server read the closed socket
+
+    with pytest.raises(
+        PeerCredentialMismatch,
+        match=rf"served by uid {os.getuid()}, not the VMM's uid {expected}",
+    ):
+        asyncio.run(scenario())
+    # one connection, closed before a single byte (not even CONNECT) was sent
+    assert impostor.requests == [b""]
+
+
+class _ConnectorTransport:
+    """Adapts a CID-keyed `GuestConnector` to the channel's `Transport`."""
+
+    def __init__(self, connector: Any, cids: dict[str, int]) -> None:
+        self._connector, self._cids = connector, cids
+
+    async def connect(self, endpoint: str) -> ByteStream:
+        return await self._connector(self._cids[endpoint])
+
+
+def test_applier_connector_dials_cloud_hypervisor_cids_by_socket(
+    short_dir: Path,
+) -> None:
+    vmm = FakeHybridVsock(short_dir / "web.sock")
+    fallback_cids: list[int] = []
+
+    async def fallback(cid: int) -> ByteStream:
+        fallback_cids.append(cid)
+        raise ConnectionError(f"no AF_VSOCK guest at {cid}")
+
+    sockets: dict[int, HybridEndpoint] = {}
+    connector = cloud_hypervisor_connector(sockets, fallback)
+    channel = MessageChannel(
+        _ConnectorTransport(connector, {"web": 3000, "db": 3001}), label="test"
+    )
+
+    async def scenario() -> str:
+        async with await vmm.start():
+            # registered after construction: read live
+            sockets[3000] = HybridEndpoint(vmm.path, os.getuid())
+            session = (await channel.ping("web")).session
+            with pytest.raises(TransportFailure):
+                await channel.ping("db")
+            return session
+
+    assert asyncio.run(scenario()) == vmm.guest.session
+    assert set(fallback_cids) == {3001}
+
+
+def test_vsock_dir_is_private_sticky_and_refuses_a_foreign_root(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(short_dir))
+    directory = prepare_ch_vsock_dir("ir-dmz-pivot-sample-1-abcdef")
+    assert directory == ch_vsock_dir("ir-dmz-pivot-sample-1-abcdef")
+    assert directory.stat().st_mode & 0o7777 == 0o1733
+    assert directory.parent.stat().st_mode & 0o777 == 0o700
+    assert len(str(directory / "attacker.sock")) < 108
+    os.chmod(directory.parent, 0o755)
+    with pytest.raises(PermissionError, match="mode 0700"):
+        prepare_ch_vsock_dir("ir-other")

@@ -3,12 +3,14 @@
 Everything a project owns is found by its compose label (containers, volumes, networks) or its deterministic name, so `down` works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and compose volume names, and never touches other prefixes (the channel track's `chan-` batteries run concurrently on shared hosts).
 """
 
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from .ownership import (
     PROJECT_PREFIX,
+    ch_vsock_dir,
     default_state_dir,
     list_projects,
     remove_project,
@@ -86,6 +88,14 @@ def down(
     networks = _ids(run, network_query)
     if networks:
         _remove(run, ["docker", "network", "rm", *networks], network_query)
+    sockets = ch_vsock_dir(project)
+    if sockets.exists():
+        try:
+            shutil.rmtree(sockets)
+        except OSError as error:
+            raise DownError(
+                f"cannot remove cloud-hypervisor socket dir {sockets}: {error}"
+            ) from error
     if not keep_state:
         remove_project(state, project)
     return DownResult(
@@ -129,8 +139,6 @@ def down_all(
     # sweep --from-spec staging leftovers (a SIGKILLed up cannot clean its own)
     staging = state.parent / "staging"
     if staging.is_dir():
-        import shutil
-
         for leftover in staging.iterdir():
             shutil.rmtree(leftover, ignore_errors=True)
     results: list[DownResult] = []
