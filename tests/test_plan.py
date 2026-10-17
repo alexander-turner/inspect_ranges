@@ -1,5 +1,7 @@
 import hashlib
 import json
+import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -190,29 +192,33 @@ def test_uplink_compose_variant(cache: Path, tmp_path: Path) -> None:
     render_bundle(nat_spec(), out, options(cache))
     compose = (out / "compose.yaml").read_text()
     assert "network_mode: none" not in compose
-    assert "UPLINK_NETWORK" in compose and "ip_forward=1" in compose
+    assert "UPLINK_NETWORK" in compose
 
 
 @pytest.mark.parametrize(
-    "spec", [two_segment_spec(), nat_spec()], ids=["isolated", "uplink"]
+    ("spec", "expected"),
+    [
+        (two_segment_spec, ["net.ipv6.conf.default.disable_ipv6=1"]),
+        (nat_spec, ["net.ipv6.conf.default.disable_ipv6=1", "net.ipv4.ip_forward=1"]),
+    ],
+    ids=["isolated", "uplink"],
 )
-def test_range_netns_disables_ipv6_on_new_interfaces(
-    spec: RangeSpec, cache: Path, tmp_path: Path
+def test_range_service_sysctls(
+    spec: Callable[[], RangeSpec], expected: list[str], cache: Path, tmp_path: Path
 ) -> None:
-    # bridges come up after the container starts: they must inherit IPv6 off,
-    # so no management address answers on a segment (agent-containment.md)
+    # bridges come up after the container starts and inherit IPv6 off, so no
+    # management address answers on a segment (agent-containment.md)
     out = tmp_path / "bundle"
-    render_bundle(spec, out, options(cache))
+    render_bundle(spec(), out, options(cache))
     compose = yaml.safe_load((out / "compose.yaml").read_text())
-    sysctls = compose["services"]["range"]["sysctls"]
-    assert "net.ipv6.conf.default.disable_ipv6=1" in sysctls
+    assert compose["services"]["range"]["sysctls"] == expected
 
 
 def test_range_bridges_are_created_without_multicast_snooping() -> None:
     # a snooping bridge joins 224.0.0.106 and sends an IGMP report from its own
     # MAC when it comes up: a frame on the segment that belongs to no guest
     entrypoint = (range_image_context() / "entrypoint.sh").read_text()
-    assert 'ip link add "$name" type bridge mcast_snooping 0' in entrypoint
+    assert re.search(r"ip link add \S+ type bridge\b.*\bmcast_snooping 0\b", entrypoint)
 
 
 def test_render_refuses_nonempty_directory(cache: Path, tmp_path: Path) -> None:

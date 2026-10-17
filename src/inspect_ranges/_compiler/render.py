@@ -96,13 +96,7 @@ services:
     image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
     init: true
     network_mode: none
-    # bridges, taps and probe veths are created later in this netns and
-    # inherit `default`, so none gets an IPv6 address and no management address
-    # answers on any segment (agent-containment.md); guest IPv6 still crosses
-    # the bridges. Set here because /proc/sys is read-only in the container
-    # and a per-bridge key cannot be set before the bridge exists.
-    sysctls:
-      - net.ipv6.conf.default.disable_ipv6=1
+    sysctls: [__SYSCTLS__]
     cap_drop: [ALL]
     cap_add: [__CAPS__]
     security_opt:
@@ -183,20 +177,14 @@ def _compose_with_probe(compose: str) -> str:
     return compose.replace(marker, "\n" + _COMPOSE_PROBE_SERVICE + marker, 1)
 
 
-_COMPOSE_UPLINK = (
-    _COMPOSE_ISOLATED.replace(
-        "    network_mode: none\n",
-        """    # this range requests egress: the deployment supplies the uplink network
+_COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
+    "    network_mode: none\n",
+    """    # this range requests egress: the deployment supplies the uplink network
     networks: [uplink]
 """,
-    )
-    .replace(
-        "      - net.ipv6.conf.default.disable_ipv6=1\n",
-        "      - net.ipv6.conf.default.disable_ipv6=1\n      - net.ipv4.ip_forward=1\n",
-    )
-    .replace(
-        "volumes:\n  scratch:\n",
-        """networks:
+).replace(
+    "volumes:\n  scratch:\n",
+    """networks:
   uplink:
     name: ${UPLINK_NETWORK:?this range requests egress; set UPLINK_NETWORK to the deployment-supplied uplink}
     external: true
@@ -204,7 +192,6 @@ _COMPOSE_UPLINK = (
 volumes:
   scratch:
 """,
-    )
 )
 
 
@@ -267,7 +254,15 @@ def render_bundle(
     if any(network.dhcp for network in plan.networks):
         caps.append("NET_RAW")
     template = _COMPOSE_UPLINK if plan.requirements.egress_uplink else _COMPOSE_ISOLATED
-    compose = template.replace("__CAPS__", ", ".join(caps))
+    # interfaces created later in the range netns (bridges, taps) inherit
+    # `default`, so none holds an IPv6 address on a segment; set at container
+    # create because /proc/sys is read-only inside the container
+    sysctls = ["net.ipv6.conf.default.disable_ipv6=1"]
+    if plan.requirements.egress_uplink:
+        sysctls.append("net.ipv4.ip_forward=1")
+    compose = template.replace("__CAPS__", ", ".join(caps)).replace(
+        "__SYSCTLS__", ", ".join(sysctls)
+    )
     if plan.requirements.evidence_capture:
         compose = _compose_with_capture(compose)
         write(
