@@ -1,0 +1,4 @@
+name: bv1.bg
+version: "1"
+entrypoint: run.sh
+mode: online
