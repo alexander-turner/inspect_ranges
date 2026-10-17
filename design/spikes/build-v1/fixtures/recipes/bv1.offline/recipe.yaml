@@ -1,0 +1,4 @@
+name: bv1.offline
+version: "1"
+entrypoint: run.sh
+mode: offline
