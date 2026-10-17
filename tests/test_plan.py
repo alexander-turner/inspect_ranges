@@ -191,7 +191,9 @@ def test_domain_turns_off_q35_legacy_devices(cache: Path, tmp_path: Path) -> Non
     out = tmp_path / "bundle"
     render_bundle(chained_spec(), out, options(cache))
     qemu = "{http://libvirt.org/schemas/domain/qemu/1.0}"
-    for xml in sorted(out.glob("guests/*/domain.xml")):
+    domains = sorted(out.glob("guests/*/domain.xml"))
+    assert domains
+    for xml in domains:
         domain = ElementTree.fromstring(xml.read_text())
         vmport = domain.find("features/vmport")
         assert vmport is not None and vmport.get("state") == "off"
