@@ -1,5 +1,6 @@
 """Build orchestration through the public `build_range` surface: real spec validation, real egress transformation, real render into staging, with the boot/teardown/recipe seams faked (no VMs)."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from inspect_ranges._build import (
     default_build_nameserver,
     egress_build_spec,
 )
-from inspect_ranges._build.recipes import RecipeTarget, ResolvedRecipe
+from inspect_ranges._build.recipes import RecipeTarget, ResolvedRecipe, StageSink
 from inspect_ranges._runtime.up import GuestState, UpOptions, UpResult
 from inspect_ranges.types import (
     Attacker,
@@ -84,10 +85,12 @@ class Fakes:
         self.down_calls: list[str] = []
         self.recipe_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.uplinks: list[str] = []
+        self.compose: str = ""
         self._guests = project_guests
 
     def up_fn(self, bundle: Path, options: UpOptions, **_: Any) -> UpResult:
         self.up_calls.append((bundle, options))
+        self.compose = (bundle / "compose.yaml").read_text()
         assert options.project is not None
         guests = [
             GuestState(name=name, cid=3000 + i, ready=True)
@@ -104,10 +107,11 @@ class Fakes:
         self,
         recipe: ResolvedRecipe,
         *,
-        step_vars: dict[str, Any],
+        step_vars: Mapping[str, Any],
         target: RecipeTarget,
         log_dir: Path,
-        **_: Any,
+        stage_log: StageSink | None = None,
+        budget_s: float = 0.0,
     ) -> RecipeRun:
         self.recipe_calls.append((recipe.name, target.guest, dict(step_vars)))
         return RecipeRun(
@@ -189,9 +193,10 @@ def test_build_runs_recipes_in_declaration_order_and_tears_down(
     assert fakes.down_calls == [result.project]
     assert not result.kept and len(result.recipes) == 3
     assert fakes.uplinks == ["ir-uplink"]
-    # the staging bundle rendered the egress variant: uplink compose + nat
-    bundle = fakes.up_calls[0][0]
-    assert "UPLINK_NETWORK" in (bundle / "compose.yaml").read_text()
+    # the staging bundle rendered the egress variant (uplink compose) and was
+    # removed after the non-keep build
+    assert "UPLINK_NETWORK" in fakes.compose
+    assert not fakes.up_calls[0][0].exists()
 
 
 def test_keep_skips_teardown(tmp_path: Path, cache: Path) -> None:
@@ -207,6 +212,8 @@ def test_keep_skips_teardown(tmp_path: Path, cache: Path) -> None:
         ensure_uplink=fakes.ensure_uplink,
     )
     assert result.kept and fakes.down_calls == []
+    # keep leaves the staging bundle: the running range mounts it
+    assert fakes.up_calls[0][0].exists()
 
 
 def test_recipe_failure_tears_down_and_names_everything(
@@ -215,7 +222,15 @@ def test_recipe_failure_tears_down_and_names_everything(
     spec, range_dir = build_spec_fixture(tmp_path)
     fakes = Fakes(["web", "db", "attacker"])
 
-    def failing_recipe(recipe: ResolvedRecipe, **kwargs: Any) -> RecipeRun:
+    def failing_recipe(
+        recipe: ResolvedRecipe,
+        *,
+        step_vars: Mapping[str, Any],
+        target: RecipeTarget,
+        log_dir: Path,
+        stage_log: StageSink | None = None,
+        budget_s: float = 0.0,
+    ) -> RecipeRun:
         if len(fakes.recipe_calls) >= 1:
             raise RecipeError(
                 "run",
@@ -224,7 +239,14 @@ def test_recipe_failure_tears_down_and_names_everything(
                 guest="web",
                 log_path=tmp_path / "r.log",
             )
-        return fakes.recipe_fn(recipe, **kwargs)
+        return fakes.recipe_fn(
+            recipe,
+            step_vars=step_vars,
+            target=target,
+            log_dir=log_dir,
+            stage_log=stage_log,
+            budget_s=budget_s,
+        )
 
     with pytest.raises(BuildError) as excinfo:
         build_range(
@@ -241,6 +263,26 @@ def test_recipe_failure_tears_down_and_names_everything(
     assert error.guest == "web" and error.recipe == "acme.web"
     assert error.log_path == tmp_path / "r.log"
     assert len(fakes.down_calls) == 1
+
+
+def test_bare_build_uses_the_default_image_cache(
+    tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review-caught regression: no --image-cache must mean the shared default, not digest-less refusal."""
+    monkeypatch.setenv("INSPECT_RANGES_IMAGE_CACHE", str(cache))
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    result = build_range(
+        spec,
+        range_dir,
+        BuildOptions(state_dir=tmp_path / "state" / "projects", settle_probe=None),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+    )
+    assert len(result.recipes) == 3
+    assert fakes.up_calls[0][1].image_cache == cache
 
 
 def test_network_settle_gates_each_guest_once(tmp_path: Path, cache: Path) -> None:

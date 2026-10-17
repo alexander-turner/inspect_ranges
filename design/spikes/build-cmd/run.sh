@@ -30,6 +30,13 @@ PASS=0; FAIL=0
 ok()  { echo "PASS  $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
 ir_containers() { docker ps -aq --filter "name=ir-" | wc -l; }
+ir_leftovers() {
+  local c v s
+  c=$(docker ps -aq --filter "name=ir-" | wc -l)
+  v=$(docker volume ls -q | grep -c '^ir-' || true)
+  s=$(ls -d "$XDG_STATE_HOME"/inspect-ranges/staging/* 2>/dev/null | wc -l)
+  echo "containers=$c volumes=$v staging=$s"
+}
 
 exec 9>/tmp/inspect-ranges-battery.lock
 flock 9
@@ -92,7 +99,9 @@ kill -9 "$BUILD_PID" 2>/dev/null || true
 pkill -9 -f "inspect-ranges build" 2>/dev/null || true
 wait "$BUILD_PID" 2>/dev/null || true
 $IR down --all >/dev/null 2>&1 || true
-[[ "$(ir_containers)" == "0" ]] && ok "C7 kill during boot + down --all leaves nothing" || bad "C7 crash cleanup ($(ir_containers) left)"
+[[ "$(ir_leftovers)" == "containers=0 volumes=0 staging=0" ]] \
+  && ok "C7 kill during boot + down --all leaves nothing (containers, volumes, staging)" \
+  || bad "C7 crash cleanup ($(ir_leftovers))"
 
 echo "=== C8 kill -9 during a recipe, then down --all cleans ==="
 (cd "$SPIKE/fixtures/slowrange" && "$IRBIN" build "${BUILD_FLAGS[@]}" >"$SPIKE/tmp/c8.txt" 2>&1) &
@@ -108,7 +117,9 @@ pkill -9 -f "inspect-ranges build" 2>/dev/null || true
 pkill -9 -f "bc.sleep" 2>/dev/null || true
 wait "$BUILD_PID" 2>/dev/null || true
 $IR down --all >/dev/null 2>&1 || true
-[[ "$(ir_containers)" == "0" ]] && ok "C8 kill during recipe + down --all leaves nothing" || bad "C8 crash cleanup ($(ir_containers) left)"
+[[ "$(ir_leftovers)" == "containers=0 volumes=0 staging=0" ]] \
+  && ok "C8 kill during recipe + down --all leaves nothing (containers, volumes, staging)" \
+  || bad "C8 crash cleanup ($(ir_leftovers))"
 
 echo
 echo "$PASS passed, $FAIL failed"
