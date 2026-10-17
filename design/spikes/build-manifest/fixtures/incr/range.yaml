@@ -1,0 +1,33 @@
+# build-manifest battery fixture: two provisioned hosts so incremental rebuild
+# has substance (web's nginx is the expensive stack to reuse; db's marker
+# recipe is the cheap one to edit).
+range:
+  name: bmincr
+  schema_version: "0.3"
+  description: Incremental build and manifest fixture.
+
+networks:
+  - name: lab
+    cidr: 10.98.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.98.10.10 }]
+    provisioning:
+      - { recipe: bm.nginx }
+    services:
+      - { name: nginx, port: 80, version: "1.18", package: nginx-core }
+  - name: db
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.98.10.11 }]
+    provisioning:
+      - { recipe: bm.marker, vars: { text: original } }
+
+attacker:
+  image: focal-guest
+  interfaces: [{ network: lab }]
+  entry: external

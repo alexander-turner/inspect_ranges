@@ -1,5 +1,6 @@
 """Build orchestration through the public `build_range` surface: real spec validation, real egress transformation, real render into staging, with the boot/teardown/recipe seams faked (no VMs)."""
 
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -37,8 +38,11 @@ from tests.test_compiler import chained_spec
 def build_spec_fixture(tmp_path: Path) -> tuple[RangeSpec, Path]:
     """A one-segment spec with three provisioning steps across two hosts, plus its range dir with recipes."""
     range_dir = tmp_path / "range"
-    write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
-    write_recipe(range_dir, name="acme.db")
+    if not (
+        range_dir / "recipes" / "acme.web"
+    ).exists():  # idempotent for rebuild tests
+        write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
+        write_recipe(range_dir, name="acme.db")
     spec = RangeSpec(
         meta=RangeMeta(name="buildme", description="orchestration fixture"),
         networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
@@ -86,6 +90,7 @@ class Fakes:
         self.down_calls: list[str] = []
         self.recipe_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.uplinks: list[str] = []
+        self.captures: list[tuple[str, str, str]] = []
         self.compose: str = ""
         self._guests = project_guests
 
@@ -127,9 +132,26 @@ class Fakes:
     def ensure_uplink(self, name: str) -> None:
         self.uplinks.append(name)
 
+    def capture_fn(
+        self,
+        project: str,
+        guest: str,
+        cids: dict[str, int],
+        *,
+        image_cache: Path,
+        golden_file: str,
+        realized_name: str,
+        meta: Any,
+    ) -> str:
+        self.captures.append((guest, realized_name, golden_file))
+        data = b"realized:" + guest.encode()
+        (image_cache / realized_name).write_bytes(data)
+        return hashlib.sha256(data).hexdigest()
+
 
 def options_for(tmp_path: Path, cache: Path, **overrides: Any) -> BuildOptions:
     overrides.setdefault("settle_probe", None)
+    overrides.setdefault("build_cache", tmp_path / "builds")
     return BuildOptions(
         image_cache=cache, state_dir=tmp_path / "state" / "projects", **overrides
     )
@@ -184,6 +206,7 @@ def test_build_runs_recipes_in_declaration_order_and_tears_down(
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
     )
     assert [(name, guest) for name, guest, _ in fakes.recipe_calls] == [
         ("acme.web", "web"),
@@ -211,6 +234,7 @@ def test_keep_skips_teardown(tmp_path: Path, cache: Path) -> None:
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
     )
     assert result.kept and fakes.down_calls == []
     # keep leaves the staging bundle: the running range mounts it
@@ -258,6 +282,7 @@ def test_recipe_failure_tears_down_and_names_everything(
             down_fn=fakes.down_fn,
             recipe_fn=failing_recipe,
             ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
         )
     error = excinfo.value
     assert error.stage == "recipe"
@@ -276,11 +301,16 @@ def test_bare_build_uses_the_default_image_cache(
     result = build_range(
         spec,
         range_dir,
-        BuildOptions(state_dir=tmp_path / "state" / "projects", settle_probe=None),
+        BuildOptions(
+            state_dir=tmp_path / "state" / "projects",
+            settle_probe=None,
+            build_cache=tmp_path / "builds",
+        ),
         up_fn=fakes.up_fn,
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
     )
     assert len(result.recipes) == 3
     assert fakes.up_calls[0][1].image_cache == cache
@@ -304,6 +334,7 @@ def test_network_settle_gates_each_guest_once(tmp_path: Path, cache: Path) -> No
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
         settle_fn=settle,
     )
     # once per guest with steps, not per step; db settles after web's steps
@@ -326,6 +357,7 @@ def test_settle_failure_tears_down(tmp_path: Path, cache: Path) -> None:
             down_fn=fakes.down_fn,
             recipe_fn=fakes.recipe_fn,
             ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
             settle_fn=settle,
         )
     assert excinfo.value.stage == "network-settle"
@@ -376,6 +408,7 @@ def test_verify_runs_after_recipes_and_failures_tear_down(
             down_fn=fakes.down_fn,
             recipe_fn=tracking_recipe,
             ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
             verify_fn=failing_verify,
         )
     assert excinfo.value.stage == "verify"
@@ -403,6 +436,7 @@ def test_raising_verify_probe_tears_down_and_stages(
             down_fn=fakes.down_fn,
             recipe_fn=fakes.recipe_fn,
             ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
             verify_fn=exploding_verify,
         )
     assert excinfo.value.stage == "verify"
@@ -439,6 +473,7 @@ def test_verifications_land_on_the_result(tmp_path: Path, cache: Path) -> None:
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
         verify_fn=passing_verify,
     )
     assert result.verifications == (ok,)
@@ -459,6 +494,7 @@ def test_resolution_fails_fast_before_boot(tmp_path: Path, cache: Path) -> None:
             down_fn=fakes.down_fn,
             recipe_fn=fakes.recipe_fn,
             ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
         )
     codes = sorted(issue.code for issue in excinfo.value.issues)
     assert codes == [
@@ -467,3 +503,79 @@ def test_resolution_fails_fast_before_boot(tmp_path: Path, cache: Path) -> None:
         "recipe-var-unknown",
     ]
     assert fakes.up_calls == [] and fakes.recipe_calls == []
+
+
+def full_build(tmp_path: Path, cache: Path, fakes: Fakes, **opt: Any) -> Any:
+    spec, range_dir = build_spec_fixture(tmp_path)
+    return build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache, **opt),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+    )
+
+
+def test_first_build_captures_and_writes_the_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, fakes)
+    assert not result.cached and result.manifest_path is not None
+    assert [guest for guest, _, _ in fakes.captures] == ["web", "db"]
+    from inspect_ranges._build import load_manifest
+
+    manifest = load_manifest(tmp_path / "builds", "buildme")
+    assert manifest is not None and len(manifest.guests) == 2
+    web = manifest.guest("web")
+    assert web is not None and web.recipes[0].name == "acme.web"
+    assert (cache / web.realized_file).is_file()
+
+
+def test_noop_rebuild_is_the_cached_fast_path(tmp_path: Path, cache: Path) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    first = full_build(tmp_path, cache, fakes)
+    again = Fakes(["web", "db", "attacker"])
+    second = full_build(tmp_path, cache, again)
+    assert second.cached and second.verified_at == first.verified_at
+    # nothing booted, ran, or captured
+    assert again.up_calls == [] and again.recipe_calls == [] and again.captures == []
+    assert second.manifest_path == first.manifest_path
+
+
+def test_reverify_boots_despite_matching_keys(tmp_path: Path, cache: Path) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    full_build(tmp_path, cache, fakes)
+    again = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, again, reverify=True)
+    assert not result.cached
+    assert len(again.up_calls) == 1
+    # all guests reused: recipes skipped, nothing recaptured
+    assert again.recipe_calls == [] and again.captures == []
+
+
+def test_recipe_edit_rebuilds_exactly_that_guest(tmp_path: Path, cache: Path) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    full_build(tmp_path, cache, fakes)
+    # change web's recipe content: its digest, so its key, moves
+    (tmp_path / "range" / "recipes" / "acme.web" / "run.sh").write_text(
+        "#!/bin/sh\nexit 0\n# edited\n"
+    )
+    again = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, again)
+    assert not result.cached
+    assert {guest for _, guest, _ in again.recipe_calls} == {"web"}
+    assert [guest for guest, _, _ in again.captures] == ["web"]
+    # db booted from its realized image (the build spec swapped its reference)
+    assert "db" not in {g for g, _, _ in again.captures}
+
+
+def test_keep_builds_are_diagnostic_and_mint_no_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, fakes, keep=True)
+    assert result.kept and result.manifest_path is None and fakes.captures == []

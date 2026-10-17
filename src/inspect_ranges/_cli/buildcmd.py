@@ -5,9 +5,9 @@ from typing import Any
 
 import click
 
+from .._build.errors import BuildError
 from .._build.orchestrate import (
     DEFAULT_UPLINK_NETWORK,
-    BuildError,
     BuildOptions,
     build_range,
 )
@@ -81,6 +81,18 @@ def _echo_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
     show_default="derived from the host's resolv.conf",
     help="Resolver handed to build guests (fleets forcing DNS through a VPC resolver are the norm, not the exception).",
 )
+@click.option(
+    "--build-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/builds (or INSPECT_RANGES_BUILD_CACHE)",
+    help="Builds cache where the range's manifest lives.",
+)
+@click.option(
+    "--reverify",
+    is_flag=True,
+    help="Boot and verify in full even when every build key matches the recorded manifest.",
+)
 @click.option("--readiness-timeout", type=float, default=300.0, show_default=True)
 @click.option(
     "--recipe-budget",
@@ -100,6 +112,8 @@ def build(
     keep: bool,
     uplink_network: str,
     build_nameserver: str | None,
+    build_cache: Path | None,
+    reverify: bool,
     readiness_timeout: float,
     recipe_budget_s: float,
 ) -> None:
@@ -116,6 +130,8 @@ def build(
         keep=keep,
         uplink_network=uplink_network,
         build_nameserver=build_nameserver,
+        build_cache=build_cache,
+        reverify=reverify,
         readiness_timeout=readiness_timeout,
         recipe_budget_s=recipe_budget_s,
     )
@@ -131,6 +147,13 @@ def build(
     except BuildError as error:
         click.echo(f"build FAILED: {error}")
         ctx.exit(1)
+    if result.cached:
+        click.echo(
+            f"build OK (cached, verified {result.verified_at}; pass --reverify to re-run)"
+        )
+        ctx.exit(0)
+    if result.manifest_path is not None:
+        click.echo(f"manifest  {result.manifest_path}")
     click.echo(
         f"build OK ({result.seconds:.1f} s, {len(result.recipes)} recipes) project {result.project}"
     )
