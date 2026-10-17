@@ -9,9 +9,8 @@ set -euo pipefail
 chown root:kvm /dev/kvm /dev/vhost-net /dev/vhost-vsock
 chmod 660 /dev/kvm /dev/vhost-net /dev/vhost-vsock
 
-# IPv6 is already off for new interfaces (compose sets
-# net.ipv6.conf.default.disable_ipv6=1); without multicast snooping a bridge
-# joins no router-discovery group, so it sends no IGMP report of its own
+# no multicast snooping: a snooping bridge joins 224.0.0.106 and sends an
+# IGMP report from its own MAC onto the segment
 while read -r name; do
   ip link add "$name" type bridge mcast_snooping 0
   ip link set "$name" up
