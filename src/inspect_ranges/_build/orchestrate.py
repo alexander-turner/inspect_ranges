@@ -428,7 +428,17 @@ def build_range(
             ) from error
 
         verify_dir = project_dir(state_dir, project) / "verify"
-        verifications = verify_fn(spec, cids, log_dir=verify_dir, stage_log=tee)
+        try:
+            verifications = verify_fn(spec, cids, log_dir=verify_dir, stage_log=tee)
+        except BuildError:
+            raise  # re-wrapped with disposition below via the outer handler
+        except Exception as error:
+            tee.log("verify", "fail", error=str(error))
+            disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+            raise BuildError(
+                "verify",
+                f"verification probe failed: {error} ({disposition})",
+            ) from error
         failed = [result for result in verifications if result.status == "fail"]
         if failed:
             disposition, kept = _dispose(options, project, down_fn, tee, state_dir)

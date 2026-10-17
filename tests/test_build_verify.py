@@ -66,6 +66,8 @@ def test_parse_packages_and_attributions() -> None:
         ("1.1", "1.18.0-6ubuntu14.4", False),
         ("1.19", "1.18.0-6ubuntu14.4", False),
         ("8.0.39", "8.0.39-0ubuntu0.20.04.1", True),
+        ("1.18", "1.18~rc1-1", False),
+        ("1:3.0.3", "1:3.0.3+dfsg-1", True),
     ],
 )
 def test_version_matches(declared: str, observed: str, expected: bool) -> None:
