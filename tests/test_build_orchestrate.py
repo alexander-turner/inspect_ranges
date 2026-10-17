@@ -384,6 +384,35 @@ def test_verify_runs_after_recipes_and_failures_tear_down(
     assert len(fakes.down_calls) == 1
 
 
+def test_raising_verify_probe_tears_down_and_stages(
+    tmp_path: Path, cache: Path
+) -> None:
+    """A wedged probe is a stage-named BuildError with teardown, never a raw traceback."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def exploding_verify(*args: Any, **kwargs: Any) -> list[Any]:
+        raise RuntimeError("fact probe on guest 'web' exited 124")
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            verify_fn=exploding_verify,
+        )
+    assert excinfo.value.stage == "verify"
+    assert "verification probe failed" in str(excinfo.value)
+    assert "range torn down" in str(excinfo.value)
+    assert len(fakes.down_calls) == 1
+    # the staging bundle is cleaned up with the range
+    assert not fakes.up_calls[0][0].exists()
+
+
 def test_verifications_land_on_the_result(tmp_path: Path, cache: Path) -> None:
     from inspect_ranges._build.verify import DeclarationResult
 

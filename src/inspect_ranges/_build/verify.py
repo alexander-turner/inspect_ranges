@@ -118,14 +118,18 @@ def parse_pid_packages(output: str) -> dict[int, str]:
 
 
 def version_matches(declared: str, observed: str) -> bool:
-    """Component-prefix match on the upstream version, epoch stripped.
+    """Component-prefix match on the upstream version, epochs stripped from both sides.
 
-    `"1.18"` matches `1.18.0-6ubuntu14` and `1:1.18.0+dfsg-1`, but not `1.180` (the next character after the declared prefix must not extend a numeric component).
+    `"1.18"` matches `1.18.0-6ubuntu14` and `1:1.18.0+dfsg-1`, but not `1.180` (the next character must not extend a numeric component) and not `1.18~rc1-1` (a `~` suffix orders strictly below the declared version in dpkg semantics, so a pre-release never satisfies a release declaration).
     """
     upstream = observed.split(":", 1)[-1]
-    if not upstream.startswith(declared):
+    wanted = declared.split(":", 1)[-1]
+    if not upstream.startswith(wanted):
         return False
-    return len(upstream) == len(declared) or not upstream[len(declared)].isdigit()
+    if len(upstream) == len(wanted):
+        return True
+    following = upstream[len(wanted)]
+    return not following.isdigit() and following != "~"
 
 
 def evaluate_host(host: Host, facts: GuestFacts) -> list[DeclarationResult]:
@@ -298,6 +302,15 @@ async def _collect_facts(cids: dict[str, int], guest: str, log_path: Path) -> Gu
         ),
     )
     text = outcome.stdout.decode(errors="replace")
+    stderr_text = outcome.stderr.decode(errors="replace")
+    if outcome.rc != 0 or outcome.stdout_truncated:
+        log_path.write_text(
+            f"# build-verify probe of guest {guest} FAILED rc={outcome.rc} truncated={outcome.stdout_truncated}\n{text}\n===STDERR===\n{stderr_text}"
+        )
+        raise RuntimeError(
+            f"fact probe on guest {guest!r} exited {outcome.rc}"
+            f"{' (output truncated)' if outcome.stdout_truncated else ''}; log: {log_path}"
+        )
     sections = _split_sections(text)
     listeners = parse_ss(sections.get("TCP", ""), "tcp") + parse_ss(
         sections.get("UDP", ""), "udp"
@@ -323,7 +336,7 @@ async def _collect_facts(cids: dict[str, int], guest: str, log_path: Path) -> Gu
         attribution_text = attribution.stdout.decode(errors="replace")
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     log_path.write_text(
-        f"# build-verify probe of guest {guest} at {stamp}\n{text}\n===ATTRIBUTION===\n{attribution_text}"
+        f"# build-verify probe of guest {guest} at {stamp}\n{text}\n===STDERR===\n{stderr_text}\n===ATTRIBUTION===\n{attribution_text}"
     )
     return GuestFacts(
         listeners=listeners,
