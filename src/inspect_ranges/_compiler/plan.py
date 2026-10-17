@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route
+from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route, Vmm
 from .allocate import (
     Allocation,
     GuestAllocation,
@@ -110,6 +110,8 @@ class PlannedGuest(BaseModel):
     """What the applier waits on before the range is ready."""
     profile: Literal["strict"]
     """Device-model profile (min-devices strict; richer profiles arrive with a schema field)."""
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor: `qemu` boots from the guest's domain XML via libvirt; `cloud-hypervisor` is started directly by the boot script."""
 
 
 class Requirements(BaseModel):
@@ -237,6 +239,27 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
+    if options.cpu_model != "host-passthrough":
+        # Cloud Hypervisor takes no CPU model: its guests always see the host
+        # CPU, so a pinned model would silently not apply to them
+        pinned_cpu_guests: list[tuple[tuple[Any, ...], Any]] = [
+            (("hosts", index), host) for index, host in enumerate(spec.hosts)
+        ]
+        pinned_cpu_guests += [
+            (("routers", index), r) for index, r in enumerate(spec.routers)
+        ]
+        if spec.attacker.host is None:
+            pinned_cpu_guests.append((("attacker",), spec.attacker))
+        issues.extend(
+            Issue(
+                code="cloud-hypervisor-cpu-model",
+                path=(*path, "vmm"),
+                message=f"guest {guest.name!r} runs on cloud-hypervisor, which cannot apply the pinned CPU model {options.cpu_model!r}",
+                hint="use cpu_model host-passthrough, or run this guest on qemu",
+            )
+            for path, guest in pinned_cpu_guests
+            if guest.vmm == "cloud-hypervisor"
+        )
     for index, router in enumerate(spec.routers):
         if router.os is not None and router.os.type == "windows":
             issues.append(
@@ -383,6 +406,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 injector="cloud-init",
                 readiness="cloud-init",
                 profile="strict",
+                vmm=declared.vmm,
             )
         )
 

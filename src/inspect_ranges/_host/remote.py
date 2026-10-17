@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .._channel.channel import HostRefused, MessageChannel, RangeChannel
 from .._channel.uds import UdsTransport
+from .._channel.vsock import HybridEndpoint
 from .._compiler.plan import ResolvedPlan
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
@@ -194,7 +195,7 @@ async def _drive_realize(
 RemoteSeams = tuple[
     Callable[[Path, UpOptions, OnStage | None], UpResult],
     Callable[[str, Path], DownResult],
-    Callable[[dict[str, int], str], MessageChannel],
+    Callable[[dict[str, int], str, dict[str, HybridEndpoint]], MessageChannel],
 ]
 
 
@@ -228,7 +229,11 @@ def remote_seams(socket_path: Path, state_dir: Path) -> RemoteSeams:
         # wire-growth candidate, not something to fabricate)
         return DownResult(project=project, containers=0, volumes=0, networks=0)
 
-    def channel_factory(cids: dict[str, int], label: str) -> MessageChannel:
+    def channel_factory(
+        cids: dict[str, int], label: str, hybrid_sockets: dict[str, HybridEndpoint]
+    ) -> MessageChannel:
+        # hybrid_sockets is unused: the applier dials Cloud Hypervisor guests
+        # itself (its guest connector), so the client relays by name as usual
         lease = _lease_for_project(store, label)
         if lease is None:
             raise RuntimeError(f"no host lease found for project {label!r}")

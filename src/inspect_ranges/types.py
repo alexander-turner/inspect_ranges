@@ -321,6 +321,10 @@ class Interface(_StrictModel):
         ) -> None: ...
 
 
+Vmm = Literal["qemu", "cloud-hypervisor"]
+"""The virtual machine monitors a guest can run under."""
+
+
 class Os(_StrictModel):
     """Guest operating system."""
 
@@ -654,6 +658,9 @@ class Router(_StrictModel):
     resources: Resources | None = None
     """Sizing; omitted means backend defaults."""
 
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor that runs this guest: `qemu` (default, via libvirt) or `cloud-hypervisor` (smaller device model; started directly, reached over its hybrid-vsock Unix socket)."""
+
     interfaces: list[Interface] = Field(min_length=2)
     """One attachment per joined network (at least two)."""
 
@@ -687,6 +694,9 @@ class Host(_StrictModel):
 
     resources: Resources | None = None
     """Sizing; omitted means backend defaults."""
+
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor that runs this guest: `qemu` (default, via libvirt) or `cloud-hypervisor` (smaller device model; started directly, reached over its hybrid-vsock Unix socket)."""
 
     interfaces: list[Interface] = Field(min_length=1)
     """Network attachments (explicit; v0.1 has no implicit attachment)."""
@@ -737,6 +747,9 @@ class Attacker(_StrictModel):
     resources: Resources | None = None
     """Attack box sizing."""
 
+    vmm: Vmm = "qemu"
+    """Attack box virtual machine monitor (see `Host.vmm`); with `host` set, the foothold host's own `vmm` applies and declaring one here is refused."""
+
     interfaces: list[Interface] | None = None
     """Attack box network attachments (required unless `host` is set)."""
 
@@ -754,6 +767,8 @@ class Attacker(_StrictModel):
                 for field in ("image", "resources", "interfaces")
                 if getattr(self, field) is not None
             ]
+            if self.vmm != "qemu":
+                extras.append("vmm")
             if extras:
                 raise IssueError(
                     [

@@ -15,16 +15,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from .ownership import (
     PROJECT_PREFIX,
     StageLog,
     default_state_dir,
     owner_record,
+    prepare_ch_vsock_dir,
     project_dir,
     write_owner,
 )
@@ -98,6 +99,8 @@ class GuestState(BaseModel):
     name: str
     cid: int
     ready: bool
+    hybrid_vsock: HybridEndpoint | None = None
+    """A Cloud Hypervisor guest's hybrid-vsock socket and the VMM uid its peer must have (`SO_PEERCRED`); `None` for QEMU guests, which are reached by CID."""
 
 
 class UpResult(BaseModel):
@@ -226,13 +229,22 @@ def verify_bundle(bundle: Path, expected_digest: str | None = None) -> dict[str,
 _SAFE_NAME = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 
 
+class BootInterface(BaseModel):
+    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bridge: str = Field(pattern=_SAFE_NAME, max_length=15)
+    mac: str = Field(pattern=r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+
 class BootGuest(BaseModel):
     """One guest in `boot.json`, shape-validated before anything interpolates it anywhere."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_SAFE_NAME)
-    cid: int = Field(ge=3)
+    cid: int = Field(ge=3, le=99_999_999)
     image_file: str = Field(pattern=_SAFE_NAME)
     image_digest: str | None = None
     backing_file: str | None = Field(default=None, pattern=_SAFE_NAME)
@@ -240,6 +252,19 @@ class BootGuest(BaseModel):
     backing_digest: str | None = None
     overlay_gb: int = Field(ge=1)
     readiness: Literal["cloud-init"]
+    vmm: Literal["qemu", "cloud-hypervisor"] = "qemu"
+    cpus: int | None = Field(default=None, ge=1)
+    memory_mb: int | None = Field(default=None, ge=64)
+    interfaces: list[BootInterface] = []
+
+    @model_validator(mode="after")
+    def _check_vmm_fields(self) -> "BootGuest":
+        sized = self.cpus is not None and self.memory_mb is not None
+        if self.vmm == "cloud-hypervisor" and not sized:
+            raise ValueError(
+                f"cloud-hypervisor guest {self.name!r} needs cpus and memory_mb"
+            )
+        return self
 
 
 class BootPlan(BaseModel):
@@ -266,9 +291,26 @@ def load_boot(bundle: Path) -> BootPlan:
         ) from error
 
 
+CH_UID_BASE = 1_000_000
+"""Each Cloud Hypervisor runs as its own uid, `CH_UID_BASE + cid`: CIDs are leased host-unique, so no two VMMs (and no QEMU, which runs as `libvirt-qemu`) share a uid, and a host-side dialer's `SO_PEERCRED` check names exactly one VMM."""
+CH_BINARY = "/usr/local/bin/cloud-hypervisor"
+CH_FIRMWARE = "/usr/local/share/cloud-hypervisor/firmware.fd"
+CH_VSOCK_MOUNT = "/run/ch-vsock"
+"""Where the range container sees the host directory holding Cloud Hypervisor guests' vsock sockets (compose's `CH_VSOCK_DIR`)."""
+
+
+def ch_uid(cid: int) -> int:
+    """The uid the Cloud Hypervisor of the guest with this CID runs as (see `CH_UID_BASE`)."""
+    return CH_UID_BASE + cid
+
+
 def boot_script(boot: BootPlan) -> str:
-    """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway."""
+    """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway.
+
+    A `cloud-hypervisor` guest has no domain XML: root prepares what the unprivileged VMM cannot (a persistent tap per NIC owned by the VMM's uid, image and console-log ownership), then Cloud Hypervisor starts as its own uid (`ch_uid`) with group `kvm`, no capabilities and its default seccomp filter, detached, its vsock socket in the host-supplied directory.
+    """
     lines = ["#!/bin/bash", "set -euo pipefail"]
+    ch_guests: list[str] = []
     for guest in boot.guests:
         name = shlex.quote(guest.name)
         image = shlex.quote(guest.image_file)
@@ -281,10 +323,77 @@ def boot_script(boot: BootPlan) -> str:
             f"/scratch/{name}-seed.iso "
             f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
         )
+        if guest.vmm == "qemu":
+            lines.append(
+                f"virsh -c qemu:///system define /render/guests/{name}/domain.xml >/dev/null"
+            )
+            lines.append(f"virsh -c qemu:///system start {name} >/dev/null")
+            continue
+        if not ch_guests:
+            lines.append("install -d -m 0755 /scratch/ch")
+        ch_guests.append(name)
+        uid = ch_uid(guest.cid)
+        lines.append(f"chown {uid}:kvm /scratch/{name}.qcow2 /scratch/{name}-seed.iso")
+        # the VMM cannot create files in the libvirt-qemu console dir: hand it its log
         lines.append(
-            f"virsh -c qemu:///system define /render/guests/{name}/domain.xml >/dev/null"
+            f"install -o {uid} -g kvm -m 0640 /dev/null /scratch/console/{name}.log"
         )
-        lines.append(f"virsh -c qemu:///system start {name} >/dev/null")
+        nets: list[str] = []
+        for index, interface in enumerate(guest.interfaces):
+            tap = f"ch{guest.cid}n{index}"  # CID-derived: unique per host, within IFNAMSIZ
+            lines.append(f"ip tuntap add dev {tap} mode tap user {uid} group kvm")
+            # libvirt's tap MAC rule (guest MAC, first octet 0xfe): the bridge
+            # adopts its lowest port MAC, and a random tap MAC would leak onto
+            # the segment in the bridge's own frames, unlike QEMU ranges
+            lines.append(f"ip link set {tap} address fe{interface.mac[2:]}")
+            lines.append(f"ip link set {tap} master {shlex.quote(interface.bridge)}")
+            lines.append(f"ip link set {tap} up")
+            nets.append(f"tap={tap},mac={interface.mac}")
+        socket = f"{CH_VSOCK_MOUNT}/{name}.sock"
+        argv = [
+            CH_BINARY,
+            "--firmware",
+            CH_FIRMWARE,
+            "--cpus",
+            f"boot={guest.cpus}",
+            "--memory",
+            f"size={guest.memory_mb}M",
+            "--disk",
+            f"path=/scratch/{name}.qcow2,image_type=qcow2,backing_files=on",
+            f"path=/scratch/{name}-seed.iso,image_type=raw,readonly=on",
+            *(["--net", *nets] if nets else []),
+            "--vsock",
+            f"cid={guest.cid},socket={socket}",
+            "--serial",
+            f"file=/scratch/console/{name}.log",
+            "--console",
+            "off",
+            "--rng",
+            "src=/dev/urandom",
+        ]
+        lines.append(f"rm -f {socket}")
+        lines.append(
+            f"(exec setsid setpriv --reuid={uid} --regid=kvm "
+            f"--clear-groups {' '.join(argv)} </dev/null "
+            f">/scratch/ch/{name}.log 2>&1) &"
+        )
+        lines.append(f"echo $! > /scratch/ch/{name}.pid")
+    if ch_guests:
+        # a VMM that refuses its configuration never creates its socket: fail
+        # the boot stage with its own error rather than timing out at readiness
+        for name in ch_guests:
+            socket = f"{CH_VSOCK_MOUNT}/{name}.sock"
+            lines.append(
+                f"for _ in $(seq 50); do [ -S {socket} ] && break; sleep 0.1; done"
+            )
+            lines.append(
+                f"[ -S {socket} ] || {{ echo 'cloud-hypervisor for {name} did not start:' >&2; "
+                f"tail -5 /scratch/ch/{name}.log >&2; exit 1; }}"
+            )
+            # Cloud Hypervisor creates the socket 0700 whatever the umask; the
+            # host-side dialer runs as a uid this container does not know, so
+            # open it up here: the host directory's private root bounds access
+            lines.append(f"chmod 0666 {socket}")
     return "\n".join(lines) + "\n"
 
 
@@ -312,13 +421,17 @@ CLOUD_INIT_PROBE = ["sh", "-c", "cloud-init status --wait >/dev/null 2>&1"]
 """The readiness exec: the exit status of `cloud-init status --wait` IS the signal (0 done; nonzero error or degraded, both meaning the declared configuration did not fully apply)."""
 
 
-def make_channel(cids: "dict[str, int]") -> MessageChannel:
+def make_channel(
+    cids: "dict[str, int]", hybrid_sockets: "dict[str, HybridEndpoint] | None" = None
+) -> MessageChannel:
     """The readiness channel to this range's guests (a test seam; built inside the event loop).
 
     The per-round-trip allowance is readiness-tuned: a daemon that accepts but never replies must cost seconds per attempt, not the channel's long default, or one wedged guest overshoots the whole readiness budget. Long cloud-init waits stay fine: exec liveness rides pending polls, each bounded by this allowance.
     """
     return MessageChannel(
-        VsockTransport(cids), label="up-readiness", channel_budget_s=10.0
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets),
+        label="up-readiness",
+        channel_budget_s=10.0,
     )
 
 
@@ -478,6 +591,13 @@ def up(
     # the hardened image is hard-required: no environment override survives
     env["RANGE_IMAGE"] = range_image
     env["IMAGE_CACHE"] = str(options.image_cache)
+    ch_dir: Path | None = None
+    if any(guest.vmm == "cloud-hypervisor" for guest in guests):
+        try:
+            ch_dir = prepare_ch_vsock_dir(project)
+        except OSError as error:
+            raise UpError("range-container", str(error)) from error
+        env["CH_VSOCK_DIR"] = str(ch_dir)
     if options.uplink_network is not None:
         env["UPLINK_NETWORK"] = options.uplink_network
 
@@ -529,6 +649,16 @@ def up(
         )
     log.log("range-container", "ok")
 
+    # each VMM's uid follows from its CID in boot.json (`ch_uid`); host-side
+    # dialers refuse any socket whose peer is not that one uid
+    ch_sockets: dict[str, HybridEndpoint] = {}
+    if ch_dir is not None:
+        ch_sockets = {
+            guest.name: HybridEndpoint(ch_dir / f"{guest.name}.sock", ch_uid(guest.cid))
+            for guest in guests
+            if guest.vmm == "cloud-hypervisor"
+        }
+
     log.log("guest-boot", "start", guests=[g.name for g in guests])
     boot_result = run(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
@@ -546,7 +676,7 @@ def up(
     log.log("guest-boot", "ok")
 
     async def _readiness() -> list[GuestState]:
-        channel = make_channel({g.name: g.cid for g in guests})
+        channel = make_channel({g.name: g.cid for g in guests}, ch_sockets)
         deadline = time.monotonic() + options.readiness_timeout
         collected: list[GuestState] = []
         for guest in guests:
@@ -564,7 +694,14 @@ def up(
                 guest_deadline,
                 min_window=options.readiness_min_window,
             )
-            collected.append(GuestState(name=guest.name, cid=guest.cid, ready=ready))
+            collected.append(
+                GuestState(
+                    name=guest.name,
+                    cid=guest.cid,
+                    ready=ready,
+                    hybrid_vsock=ch_sockets.get(guest.name),
+                )
+            )
             log.log(
                 "readiness",
                 "ok" if ready else "fail",
