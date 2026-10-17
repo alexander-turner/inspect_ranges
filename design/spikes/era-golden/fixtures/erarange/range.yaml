@@ -1,0 +1,25 @@
+# era-golden battery fixture: one focal guest, one trivial recipe, so the
+# full path (derive, render, up, readiness, daemon, executor) runs on the era
+# base, not just a bare boot.
+range:
+  name: era
+  schema_version: "0.3"
+  description: Battery fixture proving the focal-class golden end to end.
+
+networks:
+  - name: lab
+    cidr: 10.94.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: era-guest
+    interfaces: [{ network: lab, ip: 10.94.10.10 }]
+    provisioning:
+      - { recipe: era.touch }
+
+attacker:
+  image: era-guest
+  interfaces: [{ network: lab }]
+  entry: external
