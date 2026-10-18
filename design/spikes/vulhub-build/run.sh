@@ -14,6 +14,7 @@ RANGE="$ROOT/design/inspect-ranges/ranges/vulhub-zabbix"
 ERA="${ERA:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"
 export INSPECT_RANGES_BUILD_CACHE="$SPIKE/tmp/builds"
+export CAPTURE_CHUNK_MB=1  # beacons must land in a rotated (harvested) chunk for pcap corroboration
 IR="uv run inspect-ranges"
 IRBIN="$ROOT/.venv/bin/inspect-ranges"
 CACHE="$SPIKE/tmp/cache"
