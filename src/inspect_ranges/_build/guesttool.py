@@ -21,11 +21,41 @@ from .._channel.channel import (
     request_id,
 )
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
 
 EXIT_BUDGET = 124
 EXIT_CHANNEL = 125
 EXIT_USAGE = 2
+
+
+def sockets_from_env(environ: dict[str, str]) -> dict[str, HybridEndpoint]:
+    """Cloud Hypervisor guests' hybrid-vsock endpoints from `IR_GUEST_SOCKETS` (JSON name to [socket path, VMM uid]); empty when unset (pre-hybrid executors).
+
+    Raises:
+        ValueError: when the variable is present but malformed.
+    """
+    raw = environ.get("IR_GUEST_SOCKETS", "")
+    if not raw:
+        return {}
+    try:
+        parsed: object = json.loads(raw)
+    except ValueError as error:
+        raise ValueError(f"IR_GUEST_SOCKETS is not valid JSON: {error}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("IR_GUEST_SOCKETS must map guest names to [path, uid]")
+    sockets: dict[str, HybridEndpoint] = {}
+    for name, value in cast(dict[object, object], parsed).items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(value, list)
+            or len(cast(list[object], value)) != 2
+            or not isinstance(cast(list[object], value)[0], str)
+            or not isinstance(cast(list[object], value)[1], int)
+        ):
+            raise ValueError("IR_GUEST_SOCKETS must map guest names to [path, uid]")
+        path, uid = cast(list[object], value)
+        sockets[name] = HybridEndpoint(Path(cast(str, path)), cast(int, uid))
+    return sockets
 
 
 def cids_from_env(environ: dict[str, str]) -> tuple[str, dict[str, int]]:
@@ -67,7 +97,10 @@ def exit_code(rc: int) -> int:
 
 async def _run_exec(args: argparse.Namespace) -> int:
     guest, cids = cids_from_env(dict(os.environ))
-    channel = MessageChannel(VsockTransport(cids), label="recipe")
+    sockets = sockets_from_env(dict(os.environ))
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=sockets), label="recipe"
+    )
     budget = Budget(command_ms=int(args.budget_ms))
     script: str | None = args.script
     if script is not None:
@@ -107,7 +140,10 @@ async def _run_push(args: argparse.Namespace) -> int:
     # stage through /tmp and promote via a root exec (install creates parents
     # and applies the mode atomically with the copy).
     guest, cids = cids_from_env(dict(os.environ))
-    channel = MessageChannel(VsockTransport(cids), label="recipe")
+    sockets = sockets_from_env(dict(os.environ))
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=sockets), label="recipe"
+    )
     data = Path(str(args.local)).read_bytes()
     mode = int(str(args.mode), 8)
     staging = f"/tmp/.ir-push-{request_id()}"

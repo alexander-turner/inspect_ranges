@@ -142,6 +142,7 @@ class Fakes:
         golden_file: str,
         realized_name: str,
         meta: Any,
+        hybrid_sockets: Any = None,
     ) -> str:
         self.captures.append((guest, realized_name, golden_file))
         data = b"realized:" + guest.encode()
@@ -328,7 +329,13 @@ def test_network_settle_gates_each_guest_once(tmp_path: Path, cache: Path) -> No
     fakes = Fakes(["web", "db", "attacker"])
     settled: list[str] = []
 
-    def settle(cids: dict[str, int], guest: str, probe: str, timeout_s: float) -> float:
+    def settle(
+        cids: dict[str, int],
+        guest: str,
+        probe: str,
+        timeout_s: float,
+        hybrid_sockets: Any = None,
+    ) -> float:
         assert probe == "archive.ubuntu.com" and "web" in cids
         settled.append(guest)
         return 0.5
@@ -352,7 +359,13 @@ def test_settle_failure_tears_down(tmp_path: Path, cache: Path) -> None:
     spec, range_dir = build_spec_fixture(tmp_path)
     fakes = Fakes(["web", "db", "attacker"])
 
-    def settle(cids: dict[str, int], guest: str, probe: str, timeout_s: float) -> float:
+    def settle(
+        cids: dict[str, int],
+        guest: str,
+        probe: str,
+        timeout_s: float,
+        hybrid_sockets: Any = None,
+    ) -> float:
         raise BuildError("network-settle", "cannot resolve", guest=guest)
 
     with pytest.raises(BuildError) as excinfo:
@@ -391,6 +404,7 @@ def test_verify_runs_after_recipes_and_failures_tear_down(
         *,
         log_dir: Path,
         stage_log: Any,
+        hybrid_sockets: Any = None,
     ) -> list[DeclarationResult]:
         order.append("verify")
         assert "web" in cids

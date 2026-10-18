@@ -9,7 +9,7 @@ import asyncio
 import fcntl
 import subprocess
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._runtime.images import sha256_file
 from .errors import BuildError
 
@@ -53,7 +53,11 @@ def default_capture_runner(argv: list[str]) -> str:
     return completed.stdout.decode(errors="replace")
 
 
-def scrub_guest(cids: dict[str, int], guest: str) -> None:
+def scrub_guest(
+    cids: dict[str, int],
+    guest: str,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+) -> None:
     """Pre-capture cleanup so the realized image is a clean golden-like artifact (parked-decisions item 2): `cloud-init clean --logs` removes the build boot's instance state (every runtime boot then seeds fresh) and the build seed's rendered netplan goes with it, so neither the build's egress nameserver (a deployment's VPC resolver IP) nor an already-run marker survives into the captured disk.
 
     Raises:
@@ -61,7 +65,9 @@ def scrub_guest(cids: dict[str, int], guest: str) -> None:
     """
 
     async def scrub() -> None:
-        channel = MessageChannel(VsockTransport(cids), label="build-capture")
+        channel = MessageChannel(
+            VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-capture"
+        )
         outcome = await channel.exec(
             guest,
             ExecRequest(
@@ -86,14 +92,20 @@ def scrub_guest(cids: dict[str, int], guest: str) -> None:
     asyncio.run(scrub())
 
 
-def shutdown_guest(cids: dict[str, int], guest: str) -> str | None:
+def shutdown_guest(
+    cids: dict[str, int],
+    guest: str,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+) -> str | None:
     """Ask the guest to power off cleanly; the channel dying mid-call is the expected outcome.
 
     Returns a short diagnosis when the poweroff visibly did NOT take (a nonzero exit from `systemctl poweroff`), else None; `wait_shutoff` folds it into its timeout error so a never-delivered poweroff is not reported as a slow one (round-1 review).
     """
 
     async def poweroff() -> str | None:
-        channel = MessageChannel(VsockTransport(cids), label="build-capture")
+        channel = MessageChannel(
+            VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-capture"
+        )
         try:
             outcome = await channel.exec(
                 guest,

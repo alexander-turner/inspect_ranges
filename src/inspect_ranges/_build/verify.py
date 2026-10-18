@@ -8,6 +8,7 @@ Verification is mechanical and derived from the spec, never from recipe claims: 
 import asyncio
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -15,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from ..types import Host, RangeSpec
 from .recipes import StageSink
 
@@ -287,6 +288,7 @@ def verify_range(
     *,
     log_dir: Path,
     stage_log: StageSink | None = None,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
 ) -> list[DeclarationResult]:
     """Verify every host's declarations against the live range; one probe pass per declaring guest.
 
@@ -298,7 +300,7 @@ def verify_range(
         if not host.services and not host.vulnerabilities:
             continue
         log_path = log_dir / f"{host.name}.log"
-        facts = asyncio.run(_collect_facts(cids, host.name, log_path))
+        facts = asyncio.run(_collect_facts(cids, host.name, log_path, hybrid_sockets))
         host_results = evaluate_host(host, facts)
         results.extend(host_results)
         if stage_log is not None:
@@ -318,9 +320,14 @@ def verify_range(
 
 
 async def _collect_facts(
-    cids: dict[str, int], guest: str, log_path: Path
+    cids: dict[str, int],
+    guest: str,
+    log_path: Path,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
 ) -> GuestFacts:
-    channel = MessageChannel(VsockTransport(cids), label="build-verify")
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-verify"
+    )
     probe = (
         "echo ===TCP===; ss -tlnpH; echo ===UDP===; ss -ulnpH; "
         "echo ===PKGS===; dpkg-query -W -f '${Package}\\t${Version}\\t${Status}\\n'"
