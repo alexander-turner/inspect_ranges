@@ -27,4 +27,4 @@
 
 ## Files
 
-- `run.sh` — the battery; CID band 3700, battery-isolated image/build/state caches; builds the real `design/inspect-ranges/ranges/vulhub-zabbix` range in place.
+- `run.sh` — the battery; CID band 3700, battery-isolated image/build/state caches; builds the real `examples/vulhub-zabbix` range in place.

@@ -108,7 +108,7 @@ rm -f /tmp/host.$$
 
 ### Period software (the era-archive pattern)
 
-Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. The `vulhub-zabbix` example range is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar actually requires.
+Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. The [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) example range is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar actually requires.
 
 ## Verification {#verification}
 

@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges up"
+description: "Realize a rendered bundle into a running, ready range."
+reference: inspect-ranges up
+---

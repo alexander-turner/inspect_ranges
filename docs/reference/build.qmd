@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges build"
+description: "Build a range: realize, verify, capture, and prove its declared guest content."
+reference: inspect-ranges build
+---

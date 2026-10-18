@@ -1,5 +1,31 @@
 ---
 title: Reference
-description: Command line reference for the inspect-ranges CLI.
-reference: inspect-ranges
 ---
+
+### Python API
+
+| | |
+|---|---|
+| [inspect_ranges](inspect_ranges.qmd) | Loading, validation, and revalidation of range definitions. |
+| [inspect_ranges.types](types.qmd) | Range definition types, usable directly as sandbox configuration. |
+: {.borderless tbl-colwidths=[35,65]}
+
+### CLI
+
+| | |
+|---|---|
+| [inspect-ranges applier](applier.qmd) | Serve realize/teardown/heartbeat and the guest relay for driver processes on this host. |
+| [inspect-ranges build](build.qmd) | Build a range: realize, verify, capture, and prove its declared guest content. |
+| [inspect-ranges daemon-bundle](daemon-bundle.qmd) | Build the byte-deterministic daemon bundle the realizer bakes into goldens. |
+| [inspect-ranges devbox](devbox.qmd) | Provision and manage an inspect_ranges development box on EC2. |
+| [inspect-ranges doctor](doctor.qmd) | Check that this machine can run and develop ranges. |
+| [inspect-ranges down](down.qmd) | Tear down a project (idempotent, works from any process, after any crash). |
+| [inspect-ranges evidence](evidence.qmd) | Work with evidence locations: verify a record's chains and seals. |
+| [inspect-ranges images](images.qmd) | Manage the golden image cache: derive, list, and prune. |
+| [inspect-ranges plan](plan.qmd) | Resolve a range directory or spec file into its immutable plan. |
+| [inspect-ranges reaper](reaper.qmd) | Reclaim expired host leases: teardown first, then CID and lease release. |
+| [inspect-ranges render](render.qmd) | Render a range directory or spec file into its realization bundle. |
+| [inspect-ranges schema](schema.qmd) | Print the JSON Schema for range.yaml to stdout. |
+| [inspect-ranges up](up.qmd) | Realize a rendered bundle into a running, ready range. |
+| [inspect-ranges validate](validate.qmd) | Validate range.yaml files with complete diagnostics. |
+: {.borderless tbl-colwidths=[35,65]}

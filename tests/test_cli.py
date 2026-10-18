@@ -6,10 +6,7 @@ from click.testing import CliRunner
 from inspect_ranges import __version__
 from inspect_ranges._cli.main import ranges
 
-EXAMPLE = str(
-    Path(__file__).parent.parent
-    / "design/inspect-ranges/ranges/vulhub-zabbix/range.yaml"
-)
+EXAMPLE = str(Path(__file__).parent.parent / "examples/vulhub-zabbix/range.yaml")
 
 
 def test_version() -> None:

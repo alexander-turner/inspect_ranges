@@ -15,7 +15,7 @@ timestamp: 2026-09-30
 
 | Example | Source artifact (license) | Shape | Why it's in the set |
 |---|---|---|---|
-| [vulhub-zabbix](ranges/vulhub-zabbix/notes.md) | vulhub `zabbix/CVE-2016-10134` (MIT) | 4 Linux hosts, 1 flat network | the minimal case: real public CVE, name-based discovery, boots in seconds upstream |
+| [vulhub-zabbix](../../examples/vulhub-zabbix/notes.md) | vulhub `zabbix/CVE-2016-10134` (MIT) | 4 Linux hosts, 1 flat network | the minimal case: real public CVE, name-based discovery, boots in seconds upstream |
 | [kypo-demo](ranges/kypo-demo/notes.md) | KYPO CRP demo sandbox (MIT) | 2 hosts + explicit router, 2 routed subnets | cleanest published topology schema; static IPs, user-accessibility flags, per-instance randomized variables |
 | [cyris-basic](ranges/cyris-basic/notes.md) | CyRIS `examples/full.yml` (BSD-3) | 3 guests (firewall as gateway), 2 segments | KVM/libvirt-native; entry_point marker, guest tasks layer, forwarding rules, range replication |
 | [mhbench-equifax-small](ranges/mhbench-equifax-small/notes.md) | MHBench `equifax_small` (MIT) | 7 hosts (2 web + 4 db + attacker), 3 subnets + mgmt plane | breach-derived; asymmetric per-subnet ACLs, planted credential-reuse path, exfil oracle |

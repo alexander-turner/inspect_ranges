@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges reaper"
+description: "Reclaim expired host leases: teardown first, then CID and lease release."
+reference: inspect-ranges reaper
+---

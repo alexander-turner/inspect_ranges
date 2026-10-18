@@ -14,7 +14,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/design/inspect-ranges/ranges/vulhub-zabbix"
+RANGE="$ROOT/examples/vulhub-zabbix"
 ERA="${ERA:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
 IR="uv run inspect-ranges"
 IRBIN="$ROOT/.venv/bin/inspect-ranges"

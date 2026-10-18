@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges validate"
+description: "Validate range.yaml files with complete diagnostics."
+reference: inspect-ranges validate
+---

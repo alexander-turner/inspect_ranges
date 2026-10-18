@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges down"
+description: "Tear down a project (idempotent, works from any process, after any crash)."
+reference: inspect-ranges down
+---

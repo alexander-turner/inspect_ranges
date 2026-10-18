@@ -42,7 +42,7 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 
 **Status: translated requirements fixtures** — each `range.yaml` validates against schema v0.1 and preserves upstream semantics, but none has been built or booted as a VM range (images are logical references; provisioning is deferred). Each directory holds `range.yaml` (our translation, draft schema v0.1), `challenges.yaml` (task prompts as example-dataset seeds — verbatim from the upstream ecosystem where tasks exist: KYPO training levels, Incalmo attacker prompts, cochise pentest scenario; tagged as ours where not), `notes.md` (per-field provenance, tagged defaults, to-verify items), and `upstream/` (the verbatim original source configs and prompts, so `inspect_ranges` code can see the originals, not just our translation).
 
-* [vulhub-zabbix](ranges/vulhub-zabbix/notes.md) - 4 Linux hosts, flat network, real CVE (Zabbix SQLi→RCE); the minimal/smoke-test case
+* [vulhub-zabbix](../../examples/vulhub-zabbix/notes.md) - 4 Linux hosts, flat network, real CVE (Zabbix SQLi→RCE); the minimal/smoke-test case
 * [kypo-demo](ranges/kypo-demo/notes.md) - 2 hosts + explicit router across 2 routed subnets; static IPs, randomized variables (KYPO CRP)
 * [cyris-basic](ranges/cyris-basic/notes.md) - firewall-gatewayed office/servers segments with per-guest task provisioning (CyRIS, KVM-native)
 * [mhbench-equifax-small](ranges/mhbench-equifax-small/notes.md) - breach-derived 3-subnet enterprise with asymmetric ACLs and a planted SSH-key pivot (MHBench, CMU)

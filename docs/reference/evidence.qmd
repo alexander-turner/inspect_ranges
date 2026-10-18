@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges evidence"
+description: "Work with evidence locations: verify a record's chains and seals."
+reference: inspect-ranges evidence
+---

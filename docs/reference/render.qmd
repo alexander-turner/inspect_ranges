@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges render"
+description: "Render a range directory or spec file into its realization bundle."
+reference: inspect-ranges render
+---

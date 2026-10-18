@@ -8,7 +8,7 @@ timestamp: 2026-10-17
 
 # Journey A, written first: an author iterates on vulhub-zabbix
 
-*The target experience for the range author, written as a terminal session before any of it exists. [build-images-requirements](build-images-requirements.md) section 5.4 makes the three journeys the architecture's usability acceptance test; this document is Journey A's half of that test, and the first vertical slice ([vulhub-zabbix](ranges/vulhub-zabbix/range.yaml)) builds until this transcript is true. Command names and output formats here are proposals for taste review, not commitments; the sequence and concept count are the contract. Spec syntax follows the provisional grammar in [build-images-spine](build-images-spine.md); whether vulhub's app stack is recipes (shown here) or a prebuilt scenario image is Q4, deferred to its own memo with this range written out both ways.*
+*The target experience for the range author, written as a terminal session before any of it exists. [build-images-requirements](build-images-requirements.md) section 5.4 makes the three journeys the architecture's usability acceptance test; this document is Journey A's half of that test, and the first vertical slice ([vulhub-zabbix](../../examples/vulhub-zabbix/range.yaml)) builds until this transcript is true. Command names and output formats here are proposals for taste review, not commitments; the sequence and concept count are the contract. Spec syntax follows the provisional grammar in [build-images-spine](build-images-spine.md); whether vulhub's app stack is recipes (shown here) or a prebuilt scenario image is Q4, deferred to its own memo with this range written out both ways.*
 
 ## The spec, revised under the proposed grammar
 

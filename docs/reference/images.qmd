@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges images"
+description: "Manage the golden image cache: derive, list, and prune."
+reference: inspect-ranges images
+---

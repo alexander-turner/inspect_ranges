@@ -16,7 +16,7 @@ The source code is available in the [inspect_ranges](https://github.com/meridian
 
 ## Documentation
 
-The documentation is organized in three sections, available for review and feedback:
+The [Tutorial](tutorial.qmd) is a hands-on walkthrough, from a first minimal range to building and evaluating the vulhub-zabbix example. The rest of the documentation is organized in three sections, available for review and feedback:
 
 - [Building Ranges](building.qmd): authoring a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
 

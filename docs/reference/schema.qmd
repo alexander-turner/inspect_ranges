@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges schema"
+description: "Print the JSON Schema for range.yaml to stdout."
+reference: inspect-ranges schema
+---
