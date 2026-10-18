@@ -35,7 +35,7 @@ from inspect_ranges._channel.protocol import ExecRequest, Message, WriteFileRequ
 from inspect_ranges._compiler.plan import ResolvedPlan, Totals
 from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._provider.provider import (
-    LibvirtRangeSandboxEnvironment,
+    RangeSandboxEnvironment,
     sample_handle_for,
 )
 from inspect_ranges._provider.state import SampleHandle
@@ -431,7 +431,7 @@ class TestOracleSurface:
         with pytest.raises(TypeError):
             sample_handle_for(cast(Any, object()))
         _, _, handle = make_oracle(tmp_path)
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         assert sample_handle_for(env) is handle
 
     def test_available_observers(self, tmp_path: Path) -> None:

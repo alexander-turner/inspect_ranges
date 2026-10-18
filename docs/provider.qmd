@@ -1,12 +1,12 @@
 ---
 title: "Sandbox Provider"
-description: "Running Inspect evals against ranges: the libvirt_range sandbox provider, its configuration forms, retry contract, cleanup semantics, and environment knobs."
-llms-description: "The libvirt_range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), foothold-only sandbox registration (the agent/target wall), the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
+description: "Running Inspect evals against ranges: the range sandbox provider, its configuration forms, retry contract, cleanup semantics, and environment knobs."
+llms-description: "The range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), foothold-only sandbox registration (the agent/target wall), the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
 ---
 
 ## Overview
 
-Installing `inspect_ranges` registers the `libvirt_range` sandbox provider with Inspect. A task that names it gets a freshly booted range per sample: the attacker box (or foothold host) is the sample's sandbox, and the whole range is torn down when the sample ends. By default only the foothold is registered, so the agent's tool loop cannot reach targets by name; targets are reachable solely through the range network. See [Challenges](challenges.qmd) for why that wall exists.
+Installing `inspect_ranges` registers the `range` sandbox provider with Inspect. A task that names it gets a freshly booted range per sample: the attacker box (or foothold host) is the sample's sandbox, and the whole range is torn down when the sample ends. By default only the foothold is registered, so the agent's tool loop cannot reach targets by name; targets are reachable solely through the range network. See [Challenges](challenges.qmd) for why that wall exists.
 
 ``` {.python .fragment}
 from inspect_ai import Task, task
@@ -17,7 +17,7 @@ def my_task() -> Task:
     return Task(
         dataset=[Sample(input="Recover the flag from the web host.")],
         solver=my_solver(),
-        sandbox=("libvirt_range", "range.yaml"),
+        sandbox=("range", "range.yaml"),
     )
 ```
 
@@ -27,13 +27,13 @@ Before the first eval on a machine, derive a golden image and check the host (se
 
 The sandbox config is a range definition (see [Defining Ranges](ranges.qmd)), in either form:
 
-- **A `range.yaml` path**: `sandbox=("libvirt_range", "range.yaml")`. A bare `sandbox="libvirt_range"` picks up a `range.yaml` next to the task file.
-- **A typed spec**: pass a `RangeSpec` constructed with the Python API, via `SandboxEnvironmentSpec("libvirt_range", spec)`. The spec round-trips through the eval log typed.
+- **A `range.yaml` path**: `sandbox=("range", "range.yaml")`. A bare `sandbox="range"` picks up a `range.yaml` next to the task file.
+- **A typed spec**: pass a `RangeSpec` constructed with the Python API, via `SandboxEnvironmentSpec("range", spec)`. The spec round-trips through the eval log typed.
 
 ``` {.python .fragment}
 from inspect_ai.util import SandboxEnvironmentSpec
 
-sandbox = SandboxEnvironmentSpec("libvirt_range", spec)  # spec: a RangeSpec
+sandbox = SandboxEnvironmentSpec("range", spec)  # spec: a RangeSpec
 ```
 
 A valid two-guest definition for the examples on this page:
@@ -108,8 +108,8 @@ The daemon runs commands as the `agent` user via an absolute-path `runuser` unle
 
 - **Normal completion**: each sample's range is destroyed at sample end; the eval's remaining ranges are swept at task end.
 - **Interrupted samples** (Ctrl-C): teardown is deferred to task end, the Docker provider's convention, so cancellation never stalls on a slow teardown. The range stays booted but hypervisor-isolated and egress-controlled until the run finishes: containment does not depend on teardown having happened.
-- **`--no-sandbox-cleanup`**: ranges stay up, and the log names the removal commands per project. On the default local topology that is `inspect-ranges down <project>` or `inspect sandbox cleanup libvirt_range <project>`; on the separated (`uds:`) topology use `INSPECT_RANGES_HOST=uds:<socket> inspect sandbox cleanup libvirt_range <project>` or the reaper, never a direct `inspect-ranges down`; the env prefix is what routes the teardown through the applier, and without it (or with it unset in a fresh shell) the cleanup is a direct down that leaks the applier's admission charge until the lease expires.
-- **Crash recovery**: `inspect sandbox cleanup libvirt_range` (no project argument) removes EVERY provider-origin project found in on-disk state (the CID lease registry plus provider-marked ownership records), from any shell, after any crash. It does not touch ranges booted by the CLI or other tools.
+- **`--no-sandbox-cleanup`**: ranges stay up, and the log names the removal commands per project. On the default local topology that is `inspect-ranges down <project>` or `inspect sandbox cleanup range <project>`; on the separated (`uds:`) topology use `INSPECT_RANGES_HOST=uds:<socket> inspect sandbox cleanup range <project>` or the reaper, never a direct `inspect-ranges down`; the env prefix is what routes the teardown through the applier, and without it (or with it unset in a fresh shell) the cleanup is a direct down that leaks the applier's admission charge until the lease expires.
+- **Crash recovery**: `inspect sandbox cleanup range` (no project argument) removes EVERY provider-origin project found in on-disk state (the CID lease registry plus provider-marked ownership records), from any shell, after any crash. It does not touch ranges booted by the CLI or other tools.
 
 A destroyed range releases its CID lease, ownership record, staging, and admission charge only after the teardown actually succeeded, so a failed teardown stays visible and recoverable rather than leaking.
 

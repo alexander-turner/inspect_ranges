@@ -165,7 +165,7 @@ async def provider_exec(
     user: str | None,
     timeout: int | None,
 ) -> InspectExecResult[str]:
-    """The contract's `exec` over the channel; see `LibvirtRangeSandboxEnvironment.exec` for semantics."""
+    """The contract's `exec` over the channel; see `RangeSandboxEnvironment.exec` for semantics."""
     channel = _channel(handle)
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME

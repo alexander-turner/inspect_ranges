@@ -75,7 +75,7 @@ def main() -> int:
         ),
         solver=[plant_goals(), reference_chain_solver()],
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", str(RANGE_DIR / "range.yaml")),
+        sandbox=("range", str(RANGE_DIR / "range.yaml")),
     )
     started = time.monotonic()
     logs: list[EvalLog] = inspect_eval(

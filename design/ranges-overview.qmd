@@ -76,7 +76,7 @@ At startup, the definition is compiled into libvirt/KVM infrastructure: networks
 
 ## Evaluation
 
-Datasets provide challenges that an attacker agent runs on the range (an Inspect `libvirt_range` sandbox):
+Datasets provide challenges that an attacker agent runs on the range (an Inspect `range` sandbox):
 
 ``` python
 from inspect_ai import Task, task
@@ -93,7 +93,7 @@ def dmz_pivot():
         dataset=challenge_dataset("challenges.yaml"),
         solver=react(tools=[bash()]),
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", "range.yaml"),
+        sandbox=("range", "range.yaml"),
     )
 ```
 

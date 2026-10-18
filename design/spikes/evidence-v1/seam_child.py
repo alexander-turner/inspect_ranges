@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope  # noqa: E402
 
 from inspect_ranges._provider.provider import (  # noqa: E402
-    LibvirtRangeSandboxEnvironment as Env,
+    RangeSandboxEnvironment as Env,
 )
 from inspect_ranges.schema import load_range  # noqa: E402
 

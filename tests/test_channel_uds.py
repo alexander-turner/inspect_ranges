@@ -295,7 +295,7 @@ def test_provider_lifecycle_over_the_uds_backend(
     monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
     from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
     from inspect_ranges._provider.provider import (
-        LibvirtRangeSandboxEnvironment as Env,
+        RangeSandboxEnvironment as Env,
     )
 
     from tests.test_provider_lifecycle import lease_store, renewal_tasks, small_spec
@@ -335,7 +335,7 @@ def test_admission_eagain_respins_and_enospc_refuses_permanently(
     from inspect_ranges._compiler.plan import Totals
     from inspect_ranges._provider.admission import HostCapacity
     from inspect_ranges._provider.provider import (
-        LibvirtRangeSandboxEnvironment as Env,
+        RangeSandboxEnvironment as Env,
     )
     from inspect_ranges._runtime.up import UpError
 

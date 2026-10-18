@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot one provider-driven range, record the project, then die like `kill -9` (no cleanup hooks run). run.sh then proves `inspect sandbox cleanup libvirt_range` recovers from on-disk state in a fresh shell."""
+"""Boot one provider-driven range, record the project, then die like `kill -9` (no cleanup hooks run). run.sh then proves `inspect sandbox cleanup range` recovers from on-disk state in a fresh shell."""
 
 import asyncio
 import json
@@ -16,7 +16,7 @@ SPEC = SPIKE / "range.yaml"
 
 async def main() -> None:
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
     with sandbox_lifecycle_scope():
         await env_type.task_init("matrix-kill9", str(SPEC))
         envs = await env_type.sample_init(

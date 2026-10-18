@@ -1,4 +1,4 @@
-"""The slice-5 inspect-eval smoke: a real eval over the libvirt_range provider with evidence on.
+"""The slice-5 inspect-eval smoke: a real eval over the range provider with evidence on.
 
 Run (from run_seam.sh): .venv/bin/inspect eval seam_task.py --model mockllm/model. The point is the identity path: no `INSPECT_RANGES_EVIDENCE_SINK` override, so the evidence location derives from the ACTIVE SAMPLE (log stem, sample id, epoch, attempt) and the store binding lands in the eval log, where the battery reads it back and verifies with `--expect-seal`.
 """
@@ -31,5 +31,5 @@ def seam_smoke() -> Task:
         dataset=[Sample(input="Reach the internal db host.", target="done")],
         solver=seam_solver(),
         scorer=includes(),
-        sandbox=("libvirt_range", str(Path(__file__).parent / "spec.yaml")),
+        sandbox=("range", str(Path(__file__).parent / "spec.yaml")),
     )

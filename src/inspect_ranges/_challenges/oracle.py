@@ -345,6 +345,6 @@ def range_oracle() -> RangeOracle:
     Call only from setup (`plant_goals`) or scoring code running inside the sample context. The returned capability must never be exposed to the agent's tool loop.
 
     Raises:
-        TypeError: The sample's sandbox is not a `libvirt_range` environment.
+        TypeError: The sample's sandbox is not a `range` environment.
     """
     return RangeOracle(sample_handle_for(sandbox()))

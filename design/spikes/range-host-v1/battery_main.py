@@ -189,7 +189,7 @@ async def self_check_and_timings(state_dir: Path) -> None:
     from inspect_ai.util._sandbox.registry import registry_find_sandboxenv
 
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
 
     async def boot_and_cleanup(backend: str, run_checks: bool) -> float:
         os.environ["INSPECT_RANGES_HOST"] = backend

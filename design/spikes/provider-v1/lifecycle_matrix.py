@@ -2,7 +2,7 @@
 """provider-v1 slice-5 lifecycle matrix, scenarios that live in one process.
 
 1. Interrupt deferral: `sample_cleanup(interrupted=True)` leaves the range booted (containment, never a stalled cancellation) and `task_cleanup(cleanup=True)` sweeps it.
-2. `cleanup=False`: the range stays up, the logged guidance names the removal commands, and running the printed `inspect sandbox cleanup libvirt_range <project>` from a FRESH process removes it.
+2. `cleanup=False`: the range stays up, the logged guidance names the removal commands, and running the printed `inspect sandbox cleanup range <project>` from a FRESH process removes it.
 3. Concurrency: two same-spec samples boot concurrently with distinct projects and disjoint CID leases, both serve ops mid-overlap, and both tear down; the overlap evidence is persisted to tmp/concurrency.json.
 
 The kill-9 recovery scenario lives in boot_and_die.py + run.sh (it needs a process to die). The provider is reached only through the entry-point registry.
@@ -91,7 +91,7 @@ async def cleanup_false_prints_the_recovery_command(env_type: type) -> None:
     )
     # run the printed command from a FRESH process (the operator's path)
     recovered = subprocess.run(
-        ["uv", "run", "inspect", "sandbox", "cleanup", "libvirt_range", project],
+        ["uv", "run", "inspect", "sandbox", "cleanup", "range", project],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -182,7 +182,7 @@ async def _sweep(env_type: type, task_name: str) -> None:
 
 async def main() -> int:
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
     for scenario, task_name in (
         (interrupt_defers_then_sweeps, "matrix-interrupt"),
         (cleanup_false_prints_the_recovery_command, "matrix-keep"),
