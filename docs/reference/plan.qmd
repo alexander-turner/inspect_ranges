@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges plan"
+description: "Resolve a range directory or spec file into its immutable plan."
+reference: inspect-ranges plan
+---

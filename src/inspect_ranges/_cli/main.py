@@ -15,7 +15,7 @@ from .upcmd import down, up
 from .validate import validate
 
 
-@click.group()
+@click.group(name="inspect-ranges")
 @click.version_option(version=__version__, prog_name="inspect-ranges")
 def ranges() -> None:
     """Inspect Ranges CLI."""

@@ -16,6 +16,8 @@ inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
 
+This page is the narrative tour of the workflow; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
+
 Each stage consumes only the verified output of the one before it: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance. `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
 
 ## daemon-bundle

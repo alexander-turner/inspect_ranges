@@ -12,7 +12,7 @@ Each example range vendors verbatim copies of its source's configuration (and, w
 
 | Vendored under | Upstream project | Copyright | License |
 |---|---|---|---|
-| `ranges/vulhub-zabbix/upstream/` | [vulhub](https://github.com/vulhub/vulhub) (`zabbix/CVE-2016-10134/`) | Vulhub contributors | MIT |
+| `examples/vulhub-zabbix/upstream/` | [vulhub](https://github.com/vulhub/vulhub) (`zabbix/CVE-2016-10134/`) | Vulhub contributors | MIT |
 | `ranges/kypo-demo/upstream/` | [kypo-crp-demo-training](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) | 2020 Masaryk University | MIT |
 | `ranges/cyris-basic/upstream/` | [CyRIS](https://github.com/crond-jaist/cyris) (`examples/`) | 2016–2021 Japan Advanced Institute of Science and Technology | BSD-3-Clause |
 | `ranges/mhbench-equifax-small/upstream/` (topology, specs, playbook) | [MHBench](https://github.com/bsinger98/MHBench) | 2025 Brian Singer | MIT |
@@ -24,7 +24,7 @@ Each example range vendors verbatim copies of its source's configuration (and, w
 Notes:
 
 - The GOAD files are unmodified copies of configuration data distributed under GPL-3.0; this folder redistributes them with attribution and this notice. Our `range.yaml`/`challenges.yaml`/`notes.md` are independent factual descriptions, not derivative code.
-- `ranges/vulhub-zabbix/upstream/README.txt` and `ranges/goad-light/upstream/cochise/scenario.txt` are upstream Markdown files renamed to `.txt` (kept byte-identical).
+- `examples/vulhub-zabbix/upstream/README.txt` and `ranges/goad-light/upstream/cochise/scenario.txt` are upstream Markdown files renamed to `.txt` (kept byte-identical).
 - Our own files in this folder (every `range.yaml`, `challenges.yaml`, `notes.md`, and the documents at the folder root) carry this repository's license.
 
 ## Pinned upstream sources
