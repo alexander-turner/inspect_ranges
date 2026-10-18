@@ -386,8 +386,8 @@ corp_breach = RangeSpec(
 Python range definitions use the types defined in `inspect_ranges.types` and construction reads similar to YAML whenever possible. A `RangeSpec` object is accepted directly as sandbox configuration:
 
 ``` {.python .fragment}
-Task(..., sandbox=("libvirt_range", corp_breach))   # python config
-Task(..., sandbox=("libvirt_range", "range.yaml"))  # file config
+Task(..., sandbox=("range", corp_breach))   # python config
+Task(..., sandbox=("range", "range.yaml"))  # file config
 ```
 
 Python configuration objects validate fully at construction and stay mutable for programmatic building. Validity is re-established at every consumer boundary (the sandbox revalidates a typed configuration on receipt), so mutating a spec between construction and handoff is safe.

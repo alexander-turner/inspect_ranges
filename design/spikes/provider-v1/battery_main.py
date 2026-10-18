@@ -231,10 +231,10 @@ async def retry_restart_surfaces_session_change(web: object) -> None:
 
 async def main() -> int:
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
     check(
-        "entry point resolves libvirt_range",
-        env_type.__name__ == "LibvirtRangeSandboxEnvironment",
+        "entry point resolves range",
+        env_type.__name__ == "RangeSandboxEnvironment",
         env_type.__name__,
     )
     with sandbox_lifecycle_scope():

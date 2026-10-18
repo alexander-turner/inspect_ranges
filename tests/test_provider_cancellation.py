@@ -12,7 +12,7 @@ from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._host import LeasePlacement, SampleSpec
 from inspect_ranges._provider.provider import (
-    LibvirtRangeSandboxEnvironment as Env,
+    RangeSandboxEnvironment as Env,
 )
 from inspect_ranges._runtime.ownership import read_owner
 from inspect_ranges._runtime.up import UpOptions, UpResult

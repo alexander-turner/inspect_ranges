@@ -1,4 +1,4 @@
-"""`LibvirtRangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
+"""`RangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
 
 Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), the FOOTHOLD alone registered as the sample's sandbox by default (the agent/target wall from challenges-overview.qmd: targets are reachable only through the range network and the scoring oracle; `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out that registers every guest, attacker first), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages. The op surface (`exec`, `read_file`, `write_file`) rides the raw channel through `_provider/ops.py` with the layered retry and session-confirmation contract documented there.
 """
@@ -68,12 +68,10 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
         return revalidate_range(config)
     if isinstance(config, BaseModel):
         raise TypeError(
-            f"libvirt_range config must be a RangeSpec or a range.yaml path, "
+            f"range config must be a RangeSpec or a range.yaml path, "
             f"got {type(config).__name__}"
         )
-    raise ValueError(
-        "libvirt_range requires a config: a range.yaml path or a RangeSpec object"
-    )
+    raise ValueError("range requires a config: a range.yaml path or a RangeSpec object")
 
 
 def _default_guest(spec: RangeSpec) -> str:
@@ -103,8 +101,8 @@ def _registered_guests(spec: RangeSpec, guest_names: Iterable[str]) -> list[str]
     return [default, *(name for name in guest_names if name != default)]
 
 
-@sandboxenv(name="libvirt_range")  # pyright: ignore[reportUntypedClassDecorator]
-class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
+@sandboxenv(name="range")  # pyright: ignore[reportUntypedClassDecorator]
+class RangeSandboxEnvironment(SandboxEnvironment):
     """One guest of one sample's range, driven over the vsock channel."""
 
     def __init__(self, guest: str, handle: SampleHandle) -> None:
@@ -603,7 +601,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         handles = {
             env._handle.project: env._handle  # pyright: ignore[reportPrivateUsage]
             for env in environments.values()
-            if isinstance(env, LibvirtRangeSandboxEnvironment)
+            if isinstance(env, RangeSandboxEnvironment)
         }
         for handle in handles.values():
             if interrupted:
@@ -653,7 +651,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         "is no longer renewed, so 'inspect-ranges reaper' "
                         "reclaims it through the applier after expiry; remove "
                         "it sooner with: INSPECT_RANGES_HOST=%s "
-                        "inspect sandbox cleanup libvirt_range %s  (the env "
+                        "inspect sandbox cleanup range %s  (the env "
                         "prefix is what routes the teardown THROUGH the "
                         "applier; without it the cleanup is a direct down and "
                         "leaks the applier's admission charge)",
@@ -667,7 +665,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         "lease is no longer renewed, so 'inspect-ranges "
                         "reaper' reclaims it after expiry; remove it sooner "
                         "with: inspect-ranges down %s  (or: inspect sandbox "
-                        "cleanup libvirt_range %s)",
+                        "cleanup range %s)",
                         handle.project,
                         handle.project,
                         handle.project,
@@ -682,7 +680,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         if failures:
             raise RuntimeError(
                 "task_cleanup could not tear down every range (retry with "
-                "'inspect sandbox cleanup libvirt_range'):\n  " + "\n  ".join(failures)
+                "'inspect sandbox cleanup range'):\n  " + "\n  ".join(failures)
             )
 
     @classmethod
@@ -792,13 +790,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
         raise NotImplementedError(
-            "libvirt_range provides no interactive connection yet (a console "
+            "range provides no interactive connection yet (a console "
             "command is a recorded follow-up in provider-v1.md)"
         )
 
 
 def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
-    """The sample handle behind a `libvirt_range` sandbox environment.
+    """The sample handle behind a `range` sandbox environment.
 
     Scoring-internal: the oracle factory (`challenges-v1.md`) resolves the current sample's handle through the default sandbox. Never expose the handle to solver-visible surfaces.
 
@@ -809,7 +807,7 @@ def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
         The sample's handle.
 
     Raises:
-        TypeError: `environment` is not a `libvirt_range` environment.
+        TypeError: `environment` is not a `range` environment.
     """
     # In a live eval, inspect_ai hands out sandboxes wrapped in its event
     # proxy; unwrap it to reach the provider environment. Private API,
@@ -821,9 +819,8 @@ def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
             environment = environment._sandbox  # pyright: ignore[reportPrivateUsage]
     except ImportError:  # pragma: no cover - inspect_ai moved the proxy
         pass
-    if not isinstance(environment, LibvirtRangeSandboxEnvironment):
+    if not isinstance(environment, RangeSandboxEnvironment):
         raise TypeError(
-            "expected a libvirt_range sandbox environment, got "
-            f"{type(environment).__name__}"
+            f"expected a range sandbox environment, got {type(environment).__name__}"
         )
     return environment._handle  # pyright: ignore[reportPrivateUsage]

@@ -21,7 +21,7 @@ async def main() -> None:
     from inspect_ai.util._sandbox.registry import registry_find_sandboxenv
 
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
     with sandbox_lifecycle_scope():
         await env_type.task_init("kill9", str(SPEC))
         envs = await env_type.sample_init("kill9", str(SPEC), {"__sample_id__": "k9"})

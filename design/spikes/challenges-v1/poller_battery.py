@@ -114,7 +114,7 @@ def part_a() -> None:
         dataset=challenge_dataset(str(SPIKE / "poller-challenges.yaml"), str(spec)),
         solver=[plant_goals(), battery_solver()],
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", str(spec)),
+        sandbox=("range", str(spec)),
     )
     started = time.monotonic()
     logs: list[EvalLog] = inspect_eval(

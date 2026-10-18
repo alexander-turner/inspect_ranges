@@ -169,14 +169,14 @@ def test_int_sample_ids_are_stringified(tmp_path: Path) -> None:
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             _runtime, seams = rigged_runtime(tmp_path)
-            envs = await provider_module.LibvirtRangeSandboxEnvironment.sample_init(
+            envs = await provider_module.RangeSandboxEnvironment.sample_init(
                 "task",
                 small_spec(),
                 {"__sample_id__": 7},  # type: ignore[dict-item]  (what inspect-ai actually passes)
             )
             project = seams.up_calls[0].project
             assert project is not None and "-7-" in project
-            await provider_module.LibvirtRangeSandboxEnvironment.sample_cleanup(
+            await provider_module.RangeSandboxEnvironment.sample_cleanup(
                 "task", None, envs, interrupted=False
             )
 

@@ -29,7 +29,7 @@ from inspect_ranges._channel.protocol import (
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._provider.errors import SessionChangedError
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
-from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
+from inspect_ranges._provider.provider import RangeSandboxEnvironment
 from inspect_ranges._provider.retry import RetryConfig, RetryPolicy
 from inspect_ranges._provider.state import SampleHandle
 
@@ -44,7 +44,7 @@ FAST_RETRY = RetryConfig(
 
 def make_env(
     root: Path,
-) -> tuple[LibvirtRangeSandboxEnvironment, LoopbackTransport]:
+) -> tuple[RangeSandboxEnvironment, LoopbackTransport]:
     transport = LoopbackTransport(guests=())
     transport.guests["box"] = LocalEndpoint("box", root)
     channel = MessageChannel(transport, label="ops-test")
@@ -58,7 +58,7 @@ def make_env(
         channel=channel,
         retry=FAST_RETRY,
     )
-    return LibvirtRangeSandboxEnvironment("box", handle), transport
+    return RangeSandboxEnvironment("box", handle), transport
 
 
 def test_path_resolution() -> None:
@@ -216,7 +216,7 @@ def test_estale_retry_reruns_a_fresh_wrapper(tmp_path: Path) -> None:
             channel=channel,
             retry=FAST_RETRY,
         )
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         chunk = "w" * 40_000  # forces the wrapper path
         result = await env.exec(["printf", "%s", chunk])
         assert result.success, f"fabricated failure leaked: {result.stderr!r}"
@@ -288,7 +288,7 @@ def test_tamper_is_never_unavailable(tmp_path: Path) -> None:
             channel=channel,
             retry=FAST_RETRY,
         )
-        env = LibvirtRangeSandboxEnvironment("web", handle)
+        env = RangeSandboxEnvironment("web", handle)
         with pytest.raises(TamperError):
             await env.exec(["echo", "hi"])
 
@@ -346,7 +346,7 @@ def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> Non
         )
         pinned = endpoint.session  # what sample_init pins at boot
         handle.sessions["box"] = pinned
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError) as info:
             await env.exec(["echo", "hi"])
         assert info.value.pinned == pinned
@@ -463,7 +463,7 @@ def test_resent_exec_that_times_out_still_confirms_the_session(
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             await env.exec(["sh", "-c", "sleep 30"], timeout=1)
 
@@ -532,7 +532,7 @@ def test_fresh_id_retry_across_restart_confirms_even_on_errno_failure(
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             # the retry's second attempt fails ENOENT (missing cwd), an errno
             # shape that previously skipped the confirm entirely
@@ -573,7 +573,7 @@ def test_resent_write_across_restart_confirms_the_session(tmp_path: Path) -> Non
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             await env.write_file("note.txt", "contents")
         fresh = await env.exec(["echo", "ok"])
@@ -616,7 +616,7 @@ def test_uncertifiable_success_downgrades_to_unavailable(tmp_path: Path) -> None
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SandboxUnavailableError):
             await env.exec(["echo", "hi"])
 

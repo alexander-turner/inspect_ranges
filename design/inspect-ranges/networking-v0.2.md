@@ -114,7 +114,7 @@ Added to the diagnostics registry as the v0.2 slices land: `name-collision`, `am
 
 ## 8. Public spec API (typed sandbox configuration)
 
-The sandbox configuration is `str | RangeSpec`: a `range.yaml` path or a fully realized pydantic object, matching Inspect's sandbox contract (`SandboxEnvironmentConfigType` is `BaseModel | str`) and the precedent set by the Docker, k8s, and Proxmox sandboxes. `sandbox=("libvirt_range", RangeSpec(...))` and `sandbox=("libvirt_range", "range.yaml")` are equally supported, and programmatic range construction (including by the generation layer later) goes through the same types as hand-written YAML.
+The sandbox configuration is `str | RangeSpec`: a `range.yaml` path or a fully realized pydantic object, matching Inspect's sandbox contract (`SandboxEnvironmentConfigType` is `BaseModel | str`) and the precedent set by the Docker, k8s, and Proxmox sandboxes. `sandbox=("range", RangeSpec(...))` and `sandbox=("range", "range.yaml")` are equally supported, and programmatic range construction (including by the generation layer later) goes through the same types as hand-written YAML.
 
 Consequences:
 

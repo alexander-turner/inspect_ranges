@@ -311,7 +311,7 @@ def main() -> int:
         dataset=challenge_dataset(str(challenges), str(spec)),
         solver=[arming_solver(), plant_goals(), battery_solver()],
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", str(spec)),
+        sandbox=("range", str(spec)),
     )
     started = time.monotonic()
     logs: list[EvalLog] = inspect_eval(

@@ -131,9 +131,7 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
     # entry point: the only registration path `inspect eval` has
     entries = {e.name: e.value for e in metadata.entry_points(group="inspect_ai")}
     if entries.get("inspect_ranges") == "inspect_ranges._registry":
-        results.append(
-            CheckResult(PROVIDER, "entry point", "ok", "libvirt_range registered")
-        )
+        results.append(CheckResult(PROVIDER, "entry point", "ok", "range registered"))
     else:
         results.append(
             CheckResult(
@@ -318,7 +316,7 @@ def _strict_registry_check(
             f"{path} unreadable or corrupt ({error}): {hazard}",
             fix=(
                 "tear everything down, then remove the registry: "
-                f"inspect sandbox cleanup libvirt_range && rm {path}"
+                f"inspect sandbox cleanup range && rm {path}"
             ),
         )
 

@@ -26,7 +26,7 @@ def zabbix() -> Task:
         ),
         solver=[plant_goals(), react()],
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", "range.yaml"),
+        sandbox=("range", "range.yaml"),
     )
 ```
 

@@ -51,7 +51,7 @@ def make_task(sandbox_config: object) -> Task:
         dataset=[Sample(input="probe", target="resolved")],
         solver=probe(),
         scorer=includes(),
-        sandbox=("libvirt_range", sandbox_config),  # type: ignore[arg-type]
+        sandbox=("range", sandbox_config),  # type: ignore[arg-type]
         name="api_check",
     )
 
@@ -139,7 +139,7 @@ results.append(
     check(
         "typed config survives the eval log",
         sb is not None
-        and sb.type == "libvirt_range"
+        and sb.type == "range"
         and isinstance(sb.config, RangeSpec)
         and sb.config == spec()
         and deserialized,
@@ -186,14 +186,14 @@ dist_info.mkdir(parents=True)
 )
 (dist_info / "entry_points.txt").write_text("[inspect_ai]\napicheck_ep = apicheck_ep\n")
 (site / "apicheck_ep.py").write_text(
-    f"import sys\nsys.path.insert(0, {str(SPIKE)!r})\nimport provider  # noqa: F401  registers libvirt_range\n"
+    f"import sys\nsys.path.insert(0, {str(SPIKE)!r})\nimport provider  # noqa: F401  registers range\n"
 )
 eval_script = site / "run_eval.py"
 eval_script.write_text(
     "from inspect_ai import Task, eval as inspect_eval\n"
     "from inspect_ai.dataset import Sample\n"
     "from inspect_ai.solver import generate\n"
-    f"task = Task(dataset=[Sample(input='x')], solver=generate(), sandbox=('libvirt_range', {str(SPIKE / 'range.yaml')!r}), name='ep_check')\n"
+    f"task = Task(dataset=[Sample(input='x')], solver=generate(), sandbox=('range', {str(SPIKE / 'range.yaml')!r}), name='ep_check')\n"
     f"log = inspect_eval(task, model='mockllm/model', log_dir={str(SPIKE / 'tmp' / 'logs')!r}, log_level='warning')[0]\n"
     "print('STATUS:' + log.status)\n"
 )

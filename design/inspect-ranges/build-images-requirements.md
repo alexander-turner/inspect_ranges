@@ -161,7 +161,7 @@ Each question lists constraints and evidence, and what resolves it (analysis, me
 
 ### 7.1 CLI surface today
 
-`inspect-ranges validate | plan | render | up | down | images derive | images list | daemon-bundle | doctor | schema | devbox` (src/inspect_ranges/_cli/main.py). Provider-side: `inspect sandbox cleanup libvirt_range` and the `libvirt_range` sandbox type. No build, pull, push, or prune verbs exist.
+`inspect-ranges validate | plan | render | up | down | images derive | images list | daemon-bundle | doctor | schema | devbox` (src/inspect_ranges/_cli/main.py). Provider-side: `inspect sandbox cleanup range` and the `range` sandbox type. No build, pull, push, or prune verbs exist.
 
 ### 7.2 Artifact and key inventory today
 

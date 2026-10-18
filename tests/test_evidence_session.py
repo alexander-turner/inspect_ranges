@@ -18,7 +18,7 @@ from inspect_ranges._provider.evidence import (
     resolve_evidence_session,
 )
 from inspect_ranges._provider.provider import (
-    LibvirtRangeSandboxEnvironment as Env,
+    RangeSandboxEnvironment as Env,
 )
 
 from tests.test_provider_lifecycle import rigged_runtime, small_spec

@@ -36,7 +36,7 @@ from inspect_ranges._host import (
     SampleSpec,
 )
 from inspect_ranges._provider.admission import AdmissionRefused, HostCapacity
-from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as Env
+from inspect_ranges._provider.provider import RangeSandboxEnvironment as Env
 from inspect_ranges._provider.state import ProviderRuntime, provider_runtime
 from inspect_ranges._runtime.down import DownResult
 from inspect_ranges._runtime.ownership import owner_record, read_owner, write_owner
@@ -334,7 +334,7 @@ def test_cleanup_false_leaves_ranges_up_with_recovery_commands(
             assert len(runtime.registry) == 1, "the range stays registered"
             messages = " ".join(record.getMessage() for record in caplog.records)
             assert "inspect-ranges down" in messages
-            assert "inspect sandbox cleanup libvirt_range" in messages
+            assert "inspect sandbox cleanup range" in messages
             # the lease stays (the reaper reclaims after expiry) but renewal
             # stops, and the recovery note names the reaper
             assert "inspect-ranges reaper" in messages
@@ -479,9 +479,9 @@ def test_config_forms_and_registration() -> None:
     import inspect_ranges._registry as registry_module
     from inspect_ai.util._sandbox.registry import registry_find_sandboxenv
 
-    assert registry_module.LibvirtRangeSandboxEnvironment is Env
+    assert registry_module.RangeSandboxEnvironment is Env
 
-    assert registry_find_sandboxenv("libvirt_range") is Env
+    assert registry_find_sandboxenv("range") is Env
     assert Env.config_files() == ["range.yaml"]
     assert Env.is_docker_compatible() is False
     spec = small_spec()

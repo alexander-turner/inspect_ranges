@@ -1,6 +1,6 @@
 """Public types for `range.yaml` schema v0.1: the strict, runtime-consumed core of a range definition.
 
-These models are the typed form of the sandbox configuration: `sandbox=("libvirt_range", RangeSpec(...))` and `sandbox=("libvirt_range", "range.yaml")` are equally supported, and both surfaces are governed by `schema_version`. Construction reads like the YAML (strings coerce to address types, literals take plain strings, nested dicts are accepted via `model_validate`); the one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
+These models are the typed form of the sandbox configuration: `sandbox=("range", RangeSpec(...))` and `sandbox=("range", "range.yaml")` are equally supported, and both surfaces are governed by `schema_version`. Construction reads like the YAML (strings coerce to address types, literals take plain strings, nested dicts are accepted via `model_validate`); the one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
 
 Address fields are dual-stack (`AnyIPAddress`/`AnyIPNetwork`) so the type surface never migrates, but IPv6 values are rejected by the `ipv6-not-realized` gate until each construct's realization lands (networking-v0.2 §4).
 

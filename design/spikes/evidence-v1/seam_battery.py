@@ -24,7 +24,7 @@ from inspect_ranges._evidence.reader import VerifyReport, verify_location  # noq
 from inspect_ranges._evidence.s3 import store_for_location  # noqa: E402
 from inspect_ranges._host.reaper import sweep  # noqa: E402
 from inspect_ranges._provider.provider import (  # noqa: E402
-    LibvirtRangeSandboxEnvironment as Env,
+    RangeSandboxEnvironment as Env,
 )
 from inspect_ranges._runtime.ownership import default_state_dir  # noqa: E402
 from inspect_ranges.schema import load_range  # noqa: E402

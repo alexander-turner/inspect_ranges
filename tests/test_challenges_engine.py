@@ -671,12 +671,12 @@ class TestSandboxProxyPin:
     def test_proxy_unwraps_to_the_handle(self, tmp_path: Path) -> None:
         from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
         from inspect_ranges._provider.provider import (
-            LibvirtRangeSandboxEnvironment,
+            RangeSandboxEnvironment,
             sample_handle_for,
         )
 
         _, _, handle = make_oracle(tmp_path)
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         assert sample_handle_for(SandboxEnvironmentProxy(env)) is handle
 
 
