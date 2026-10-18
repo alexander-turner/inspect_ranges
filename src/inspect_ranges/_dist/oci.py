@@ -11,8 +11,9 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +26,7 @@ __all__ = [
     "MEDIA_TYPE_MANIFEST",
     "OCI_LAYOUT_VERSION",
     "REF_NAME_ANNOTATION",
+    "ContentStore",
     "Descriptor",
     "OciIndex",
     "OciLayout",
@@ -424,6 +426,138 @@ class OciLayout:
         return Descriptor(
             media_type=MEDIA_TYPE_EMPTY, digest=digest, size=len(EMPTY_BLOB)
         )
+
+    # -- the index as a store surface (shared with registries) ---------------------
+
+    def put_index(self, name: str, index: OciIndex) -> Descriptor:
+        """Store an index and name it `name`; returns its descriptor (a layout stores it as a blob plus an index.json ref; a registry tags it)."""
+        data = index.canonical_bytes()
+        digest = self.put_blob_bytes(data)
+        descriptor = Descriptor(
+            media_type=index.media_type,
+            digest=digest,
+            size=len(data),
+            annotations=dict(index.annotations or {}) or None,
+        )
+        self.set_ref(name, descriptor)
+        return descriptor
+
+    def read_index(self, descriptor: Descriptor) -> OciIndex:
+        """A named or digest-addressed index's verified, parsed content.
+
+        Raises:
+            DistError: blob errors, or `manifest-invalid` when the bytes do not parse as an OCI index.
+        """
+        data = self.read_blob(descriptor)
+        try:
+            return OciIndex.model_validate_json(data)
+        except ValueError as error:
+            raise DistError(
+                "manifest-invalid",
+                f"blob {descriptor.digest} is not a valid OCI index: {error}",
+            ) from error
+
+    # -- streaming (store-to-store transfer) ----------------------------------------
+
+    def blob_chunks(self, descriptor: Descriptor) -> Iterator[bytes]:
+        """A blob's bytes as a chunk stream (UNVERIFIED: the consumer verifies while writing; see `put_blob_stream`).
+
+        Raises:
+            DistError: `missing-blob`.
+        """
+        digest = descriptor.require_sha256()
+        source = self.blob_path(digest)
+        if not source.is_file():
+            raise DistError("missing-blob", f"{self.root} has no blob {digest}")
+        with source.open("rb") as handle:
+            yield from iter(lambda: handle.read(_BLOB_CHUNK), b"")
+
+    def put_blob_stream(
+        self, chunks: Iterator[bytes], *, expected: str, size: int
+    ) -> str:
+        """Store a chunk stream as a blob with verify-while-write; nothing is addressable on mismatch.
+
+        Raises:
+            DistError: `blob-digest-mismatch` when the stream's bytes disagree with `expected`.
+        """
+        if DIGEST_PATTERN.fullmatch(expected) is None:
+            raise DistError(
+                "unsupported-digest", f"{expected!r} is not a sha256 digest"
+            )
+        if self.has_blob(expected):
+            for _ in chunks:  # drain so the source can close cleanly
+                pass
+            return expected
+        blobs = self.root / "blobs" / "sha256"
+        blobs.mkdir(parents=True, exist_ok=True)
+        hasher = hashlib.sha256()
+        written = 0
+        fd, temp_name = tempfile.mkstemp(dir=blobs, prefix=".incoming-")
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                for chunk in chunks:
+                    hasher.update(chunk)
+                    written += len(chunk)
+                    out.write(chunk)
+            digest = f"sha256:{hasher.hexdigest()}"
+            if digest != expected or written != size:
+                raise DistError(
+                    "blob-digest-mismatch",
+                    f"stream hashed to {digest} ({written} bytes), expected {expected} ({size} bytes)",
+                )
+            target = self.blob_path(digest)
+            if target.exists():
+                temp.unlink()
+            else:
+                temp.chmod(0o644)
+                os.replace(temp, target)
+            return digest
+        finally:
+            temp.unlink(missing_ok=True)
+
+
+class ContentStore(Protocol):
+    """The store surface push, materialize, and mirror run against: a location's three forms (layout directory, OCI registry, and later the hub) all implement it, so the transfer logic is written once.
+
+    Semantics every implementation holds: blobs are content-addressed and immutable, writes are atomic and converge by digest, reads verify bytes against the descriptor before the caller sees them, and `put_index`/`ref` give a root a name without weakening digest addressing.
+    """
+
+    def has_blob(self, digest: str) -> bool: ...
+
+    def put_blob_bytes(self, data: bytes) -> str: ...
+
+    def put_blob_file(self, source: Path, *, expected: str | None = None) -> str: ...
+
+    def read_blob(
+        self, descriptor: Descriptor, *, cap: int = 64 * 1024 * 1024
+    ) -> bytes: ...
+
+    def copy_blob_to(
+        self,
+        descriptor: Descriptor,
+        destination: Path,
+        *,
+        temp_prefix: str | None = None,
+    ) -> None: ...
+
+    def blob_chunks(self, descriptor: Descriptor) -> Iterator[bytes]: ...
+
+    def put_blob_stream(
+        self, chunks: Iterator[bytes], *, expected: str, size: int
+    ) -> str: ...
+
+    def put_manifest(self, manifest: OciManifest) -> Descriptor: ...
+
+    def manifest(self, descriptor: Descriptor) -> OciManifest: ...
+
+    def ensure_empty_config(self) -> Descriptor: ...
+
+    def put_index(self, name: str, index: OciIndex) -> Descriptor: ...
+
+    def read_index(self, descriptor: Descriptor) -> OciIndex: ...
+
+    def ref(self, name: str) -> Descriptor: ...
 
 
 def atomic_write(path: Path, data: bytes) -> None:
