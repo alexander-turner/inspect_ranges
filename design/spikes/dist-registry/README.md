@@ -13,6 +13,6 @@
 
 ## Files
 
-- `run.sh` — build, push, dedup, pull, boot, mirror under the battery lock.
-- `dist.py` — drives the store forms (`layout:` and `registry+http:`) through `push_build`/`materialize_closure`/`copy_closure`.
-- `fixtures/minirange/` — the smallest buildable range, so the battery proves transport rather than compilation.
+- `run.sh`: build, push, dedup, pull, boot, mirror under the battery lock.
+- `dist.py`: drives the store forms (`layout:` and `registry+http:`) through `push_build`/`materialize_closure`/`copy_closure`.
+- `fixtures/minirange/`: the smallest buildable range, so the battery proves transport rather than compilation.

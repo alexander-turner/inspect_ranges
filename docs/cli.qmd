@@ -38,6 +38,10 @@ Failure modes, each stage-named: vendor digest mismatch (nothing written), missi
 
 `inspect-ranges build` (default `.`) realizes a range's declared guest content: recipes run against a booted, egress-enabled build plan, every declared service and vulnerability is verified against the live guests, the provisioned guests are captured as realized images, and the build manifest makes the range consumable by `plan`, `render`, `up --from-spec`, and the sandbox provider. Rebuilds are incremental per guest and an unchanged range is a cached no-op. The full reference, including recipe authoring, lives in [Building Ranges](building.qmd).
 
+## push, pull, and mirror
+
+`push` publishes the current range's build to a location, bare `pull` fetches the build matching this `range.yaml` exactly (the provider also pulls implicitly at eval init), and `mirror` moves content between locations, including the air-gap directory form. `images pull` and `images refresh` fetch and advance catalog images; `images prune --chains` reclaims unreferenced chains. The whole surface, with the location forms and the search path, lives in [Distribution](distribution.qmd).
+
 ## up
 
 `inspect-ranges up <bundle>` realizes a rendered bundle into a running, ready range: every manifest digest verifies first (tampered, incomplete, unlisted-file, or path-escaping bundles refuse; `boot.json` is shape-validated before any value reaches a command), image digests re-verify against the cache, then the hardened range container comes up on the bundle's own compose project, guests boot per `boot.json`, and readiness waits on every guest (daemon answering over vsock, then `cloud-init status --wait` succeeding, probed over the control channel). The hardened non-root-QEMU range image is built automatically and is required; there is no bypass.

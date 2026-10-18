@@ -15,4 +15,4 @@
 
 ## Files
 
-- `run.sh` — the whole arc under the battery lock; publishes catalog images via a small inline driver (the `publish` promotion verb is catalog-phase work).
+- `run.sh`: the whole arc under the battery lock; publishes catalog images via a small inline driver (the `publish` promotion verb is catalog-phase work).

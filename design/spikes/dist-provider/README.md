@@ -13,5 +13,5 @@
 
 ## Files
 
-- `run.sh` — builder, publish, consumer evals, never-pull, under the battery lock.
-- `dist_eval.py` — the minimal real eval (mockllm; a deterministic solver probing the marker through the foothold).
+- `run.sh`: builder, publish, consumer evals, never-pull, under the battery lock.
+- `dist_eval.py`: the minimal real eval (mockllm; a deterministic solver probing the marker through the foothold).
