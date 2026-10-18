@@ -7,6 +7,7 @@ The egress build plan is a plan transformation, never a spec change (build-v1, d
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +40,10 @@ from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
 from .capture import (
     RealizedImageMeta,
     capture_guest,
+    collect_realized_garbage,
     default_capture_runner,
+    live_project_files,
+    scrub_guest,
     shutdown_guest,
     wait_shutoff,
 )
@@ -58,7 +62,6 @@ from .manifest import (
     manifest_path,
     now_iso,
     realized_file_name,
-    retract_manifest,
     save_manifest,
     validate_range_name,
     vars_hash,
@@ -175,6 +178,7 @@ def _capture_realized(
     realized_name: str,
     meta: RealizedImageMeta,
 ) -> str:
+    scrub_guest(cids, guest)
     diagnosis = shutdown_guest(cids, guest)
     wait_shutoff(default_capture_runner, project, guest, shutdown_diagnosis=diagnosis)
     return capture_guest(
@@ -481,7 +485,6 @@ def build_range(
             "behavioral", f"behavioral-check inputs are unreadable: {error}"
         ) from error
     prior = load_manifest(build_cache, spec.meta.name)
-    prior_built_at = prior.built_at if prior is not None else None
     if prior is not None and prior.checks_sha256 and not checks:
         # the inverse of the misnamed-metadata guard (round-2 review): the
         # recorded build was PROVEN by checks that no longer exist, so a
@@ -515,6 +518,10 @@ def build_range(
         and manifest_matches_spec(prior, spec_hash)
         and all(host.name in reusable for host in content_hosts)
         and prior.checks_sha256 == current_checks_sha
+        and all(
+            record.status == "pass" for record in prior.verification.behavioral_checks
+        )
+        # a refused manifest (failed proof) is a reuse source, never a cache
     ):
         # the no-op fast path: every key matches, the verification is
         # recorded, and the behavioral-check inputs are the ones that were
@@ -823,8 +830,9 @@ def build_range(
         if not options.keep and manifest is not None and checks:
             # behavioral checks run against the CAPTURED artifacts: the exact
             # images samples boot, after the build range is down (slice 6);
-            # the manifest is handed over in memory and lands on disk only
-            # when every check has passed
+            # the manifest is handed over in memory and lands on disk either
+            # proven (all checks pass) or REFUSED (the gate rejects it,
+            # parked-decisions item 4)
             behavioral = (
                 behavioral_fn if behavioral_fn is not None else _run_behavioral_phase
             )
@@ -843,26 +851,65 @@ def build_range(
                     down_fn=down_fn,
                 )
             except BuildError as error:
+                # an infra or authoring failure left the proof unrun: the
+                # refused manifest carries a synthetic phase record, so the
+                # gate refuses range-unproven while guest reuse survives
+                # (parked-decisions item 4; this replaced deletion)
                 tee.log("behavioral", "fail", error=str(error))
-                clause = _retract_unproven(
-                    spec.meta.name, spec_hash, build_cache, tee, prior_built_at
+                _save_refused(
+                    manifest,
+                    (
+                        BehavioralCheckRecord(
+                            challenge="",
+                            check="phase",
+                            status="fail",
+                            detail=_strip_stage(error),
+                        ),
+                    ),
+                    build_cache,
+                    tee,
                 )
                 raise BuildError(
                     error.stage,
-                    f"{_strip_stage(error)} ({clause}; the build is unproven)",
+                    f"{_strip_stage(error)} ({REFUSED_CLAUSE})",
                 ) from error
             except Exception as error:
-                # an infra failure (the -bx boot, evidence plumbing) leaves the
-                # checks unrun, which is just as unproven as a failing check: no
-                # consumer may boot a range whose challenge was never exercised
                 tee.log("behavioral", "fail", error=str(error))
-                clause = _retract_unproven(
-                    spec.meta.name, spec_hash, build_cache, tee, prior_built_at
+                _save_refused(
+                    manifest,
+                    (
+                        BehavioralCheckRecord(
+                            challenge="",
+                            check="phase",
+                            status="fail",
+                            detail=str(error),
+                        ),
+                    ),
+                    build_cache,
+                    tee,
                 )
                 raise BuildError(
                     "behavioral",
-                    f"behavioral phase failed: {error} ({clause}; the build is unproven)",
+                    f"behavioral phase failed: {error} ({REFUSED_CLAUSE})",
                 ) from error
+            failed = [
+                record for record in behavioral_records if record.status != "pass"
+            ]
+            if failed:
+                verdict = failed[0]
+                tee.log(
+                    "behavioral",
+                    "fail",
+                    challenge=verdict.challenge,
+                    check=verdict.check,
+                    error=verdict.detail,
+                )
+                _save_refused(manifest, behavioral_records, build_cache, tee)
+                raise BuildError(
+                    "behavioral",
+                    f"challenge {verdict.challenge!r} check {verdict.check!r} "
+                    f"failed: {verdict.detail} ({REFUSED_CLAUSE})",
+                )
             tee.log("behavioral", "ok", checks=len(behavioral_records))
             manifest = manifest.model_copy(
                 update={
@@ -888,6 +935,29 @@ def build_range(
     finally:
         if not kept:
             shutil.rmtree(staging, ignore_errors=True)
+
+    if saved_manifest is not None and manifest is not None:
+        # automatic realized-image GC at build success (parked-decisions item
+        # 1): range-scoped, keep-1 (the replaced manifest's generation stays
+        # for free rollback), running projects excluded precisely via their
+        # boot.json; failures here never fail a green build
+        try:
+            keep = {record.realized_file for record in manifest.guests}
+            if prior is not None:
+                keep |= {record.realized_file for record in prior.guests}
+            keep |= live_project_files(state_dir)
+            removed, reclaimed = collect_realized_garbage(
+                spec.meta.name, image_cache, keep
+            )
+            if removed:
+                tee.log(
+                    "gc",
+                    "ok",
+                    files=removed,
+                    reclaimed_mb=round(reclaimed / (1024 * 1024)),
+                )
+        except Exception as error:  # pragma: no cover - best-effort stewardship
+            tee.log("gc", "fail", error=str(error))
 
     seconds = time.monotonic() - started
     tee.log("build", "ok", seconds=round(seconds, 1), recipes=len(runs), kept=kept)
@@ -953,6 +1023,12 @@ def _run_behavioral_phase(
     # CAP_DAC_OVERRIDE), so container root cannot traverse a 0700 bundle mount
     staging.chmod(0o755)
     bx_project = f"{project}-bx"
+    # beacons must land in a ROTATED capture chunk to corroborate, and the
+    # default 10 MB chunk never rotates for check-sized traffic: the bx boot
+    # defaults to 1 MB chunks (parked-decisions item 6); explicit env wins
+    chunk_override = os.environ.get("CAPTURE_CHUNK_MB")
+    if chunk_override is None:
+        os.environ["CAPTURE_CHUNK_MB"] = "1"
     bx_down = True  # until a boot succeeds there is nothing to keep the bundle for
     try:
         plan = render_bundle(
@@ -978,6 +1054,39 @@ def _run_behavioral_phase(
             on_stage=None,
         )
         cids = {guest.name: guest.cid for guest in result.guests}
+        # the realized boot must CONVERGE before the proof runs: readiness
+        # covers the control plane, not the app stack (a fresh-instance boot
+        # re-seeds, and era daemons reconnect to their databases on their own
+        # schedule), and the declared services are exactly the convergence
+        # contract, so the slice-4 engine gates the checks (vulhub live
+        # finding: zabbix-server listens only once mysqld accepts)
+        from .verify import verify_range
+
+        settle_dir = project_dir(state_dir, bx_project) / "settle"
+        settle_started = time.monotonic()
+        deadline = settle_started + options.readiness_timeout
+        while True:
+            failing = [
+                result_
+                for result_ in verify_range(spec, cids, log_dir=settle_dir)
+                if result_.status != "ok"
+            ]
+            if not failing:
+                break
+            if time.monotonic() > deadline:
+                first = failing[0]
+                raise BuildError(
+                    "behavioral",
+                    f"the realized boot did not converge within "
+                    f"{options.readiness_timeout:.0f} s: {first.kind} "
+                    f"{first.guest}/{first.name} ({first.observed})",
+                )
+            time.sleep(5.0)
+        stage_log.log(
+            "behavioral-settle",
+            "ok",
+            seconds=round(time.monotonic() - settle_started, 1),
+        )
         try:
             return asyncio.run(
                 run_behavioral_checks(
@@ -1004,6 +1113,8 @@ def _run_behavioral_phase(
                     project=bx_project,
                 )
     finally:
+        if chunk_override is None:
+            os.environ.pop("CAPTURE_CHUNK_MB", None)
         # the surviving-range-keeps-its-bundle invariant applies to the bx
         # range too (round-2): a failed bx teardown leaves the bundle for the
         # retry hint to make sense
@@ -1076,27 +1187,32 @@ def _dispose(
     return "range torn down", False
 
 
-def _retract_unproven(
-    range_name: str,
-    spec_hash: str,
+REFUSED_CLAUSE = (
+    "a refused manifest was recorded; consumers refuse range-unproven "
+    "until a rebuild proves the range"
+)
+"""The failure clause for the behavioral phase: proof-or-refuse now lands as a saved-but-gate-refused manifest (parked-decisions item 4), which keeps guest reuse while nothing unproven is consumable."""
+
+
+def _save_refused(
+    manifest: BuildManifest,
+    records: tuple[BehavioralCheckRecord, ...],
     build_cache: Path,
     tee: "_BuildTee",
-    prior_built_at: str | None,
-) -> str:
-    """A failed behavioral phase must leave nothing consumable (round-1 review).
-
-    On a first build the deferred save means nothing was written. On a rebuild a PRIOR manifest may still match the current spec hash (every guest reused, or a checks-only edit): the gate would keep serving the exact artifacts that just failed their proof, so that manifest is deleted, under the per-range lock (round-2: an unlocked unlink could land inside a concurrent stamp's critical section and be resurrected) and only when it predates this build (a concurrent sibling's fresh green manifest is not "prior"). Returns the clause for the raised error, naming which state held.
-    """
-    if prior_built_at is not None and retract_manifest(
-        build_cache, range_name, spec_hash, built_at=prior_built_at
-    ):
-        tee.log(
-            "manifest",
-            "fail",
-            error="prior same-spec manifest deleted: its artifacts failed the current checks",
-        )
-        return "the prior manifest was deleted"
-    return "no manifest was written"
+) -> None:
+    """Record the failed proof on the build's own manifest (atomically replacing any prior revision under the per-range lock); a save failure is logged, never masks the verdict."""
+    refused = manifest.model_copy(
+        update={
+            "verification": manifest.verification.model_copy(
+                update={"behavioral_checks": records}
+            )
+        }
+    )
+    try:
+        path = save_manifest(refused, build_cache)
+        tee.log("manifest", "ok", path=str(path), refused=True)
+    except Exception as error:  # the verdict is the primary diagnosis
+        tee.log("manifest", "fail", error=f"refused-manifest write failed: {error}")
 
 
 def _strip_stage(error: BuildError) -> str:

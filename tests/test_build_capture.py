@@ -105,3 +105,65 @@ def test_wait_shutoff_timeout_carries_the_shutdown_diagnosis() -> None:
     message = str(excinfo.value)
     assert "did not reach 'shut off'" in message
     assert "systemctl poweroff exited 1" in message
+
+
+def write_realized(cache: Path, range_name: str, guest: str, key: str) -> Path:
+    image = cache / f"{range_name}-{guest}-{key}.qcow2"
+    image.write_bytes(b"x" * 1024)
+    sidecar = cache / f"{range_name}-{guest}-{key}.realized.json"
+    sidecar.write_text(
+        meta_for("golden.qcow2")
+        .model_copy(
+            update={"range_name": range_name, "guest": guest, "build_key": key * 6}
+        )
+        .model_dump_json()
+    )
+    return image
+
+
+def test_collect_realized_garbage_is_range_scoped_and_keeps_the_kept(
+    tmp_path: Path,
+) -> None:
+    """Parked-decisions item 1: the sweep deletes only this range's unkept generations; other ranges and unreadable sidecars are untouched."""
+    from inspect_ranges._build.capture import collect_realized_garbage
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    current = write_realized(cache, "gcrange", "web", "aaaaaaaaaaaa")
+    previous = write_realized(cache, "gcrange", "web", "bbbbbbbbbbbb")
+    stale = write_realized(cache, "gcrange", "web", "cccccccccccc")
+    other = write_realized(cache, "other", "web", "dddddddddddd")
+    (cache / "broken-web-eeeeeeeeeeee.realized.json").write_text("{not json")
+    deleted, reclaimed = collect_realized_garbage(
+        "gcrange", cache, {current.name, previous.name}
+    )
+    assert deleted == 1 and reclaimed == 1024
+    assert current.exists() and previous.exists() and other.exists()
+    assert not stale.exists()
+    assert not (cache / "gcrange-web-cccccccccccc.realized.json").exists()
+
+
+def test_live_project_files_reads_boot_json(tmp_path: Path) -> None:
+    import json
+
+    from inspect_ranges._build.capture import live_project_files
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    state = tmp_path / "state"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "boot.json").write_text(
+        json.dumps(
+            {
+                "guests": [
+                    {
+                        "name": "web",
+                        "image_file": "r-web-abc.qcow2",
+                        "backing_file": "golden.qcow2",
+                    }
+                ]
+            }
+        )
+    )
+    write_owner(state, owner_record("ir-live-1", "r", "0" * 64, bundle))
+    assert live_project_files(state) == {"r-web-abc.qcow2", "golden.qcow2"}

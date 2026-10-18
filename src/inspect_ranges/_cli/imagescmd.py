@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from .._build.manifest import default_build_cache, recorded_realized_files
 from .._runtime import DeriveError, derive_golden, list_images
 from .._runtime.images import RECIPE_VERSION, default_image_cache
 
@@ -127,9 +128,24 @@ def list_cmd(image_cache: Path | None) -> None:
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "
             f"recipe=v{metadata.recipe_version}  created={metadata.created}{flags}"
         )
+    recorded = recorded_realized_files(default_build_cache())
+    reclaimable = 0
     for listing in realized:
+        flags = ""
+        if listing.file not in recorded:
+            # no manifest references this generation: a superseded or orphaned
+            # capture (parked-decisions item 1)
+            try:
+                reclaimable += (image_cache / listing.file).stat().st_size
+            except OSError:
+                pass
+            flags = "  SUPERSEDED (no manifest references it; images prune reclaims)"
         click.echo(
-            f"  {listing.file}  realized {listing.range_name}/{listing.guest}  key {listing.build_key[:12]}  ({listing.created})"
+            f"  {listing.file}  realized {listing.range_name}/{listing.guest}  key {listing.build_key[:12]}  ({listing.created}){flags}"
+        )
+    if reclaimable:
+        click.echo(
+            f"  {reclaimable / (1024 * 1024):.0f} MB reclaimable: inspect-ranges images prune"
         )
     for file in unmanaged:
         if file.endswith(".deriving"):
@@ -144,3 +160,88 @@ def list_cmd(image_cache: Path | None) -> None:
         else:
             note = "unmanaged: no provenance metadata"
         click.echo(f"{file}  ({note})")
+
+
+@images.command("prune")
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache to prune.",
+)
+@click.option(
+    "--build-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/builds (or INSPECT_RANGES_BUILD_CACHE)",
+    help="Builds cache whose manifests define liveness.",
+)
+@click.option("--yes", is_flag=True, help="Delete instead of reporting.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Prune even while registered projects exist (their referenced files are still excluded).",
+)
+def prune(
+    image_cache: Path | None, build_cache: Path | None, yes: bool, force: bool
+) -> None:
+    """Reclaim realized images no manifest references, plus capture temps and orphan sidecars.
+
+    Build success already garbage-collects its own range (keeping the previous generation for rollback); prune covers the rest: generations stranded by refused manifests or crashes, ranges whose builds are gone, `.capturing` temps, and sidecars whose image vanished. Reports by default; `--yes` deletes. Refuses while registered projects exist unless `--force` (running projects' files are excluded either way).
+    """
+    from .._build.capture import live_project_files
+    from .._runtime.ownership import default_state_dir, list_projects
+
+    if image_cache is None:
+        image_cache = default_image_cache()
+    state_dir = default_state_dir()
+    live = recorded_realized_files(
+        build_cache if build_cache is not None else default_build_cache()
+    ) | live_project_files(state_dir)
+    try:
+        running = list_projects(state_dir)
+    except OSError:
+        running = []
+    if running and not force:
+        raise click.ClickException(
+            f"{len(running)} registered project(s) exist ({', '.join(running[:3])}"
+            f"{', ...' if len(running) > 3 else ''}); tear down first, or pass --force"
+        )
+    victims: list[tuple[Path, int, str]] = []
+    for sidecar in sorted(image_cache.glob("*.realized.json")):
+        image = image_cache / (sidecar.name.removesuffix(".realized.json") + ".qcow2")
+        if image.name in live:
+            continue
+        if image.is_file():
+            victims.append((image, image.stat().st_size, "superseded realized image"))
+        victims.append(
+            (
+                sidecar,
+                sidecar.stat().st_size,
+                "its sidecar" if image.is_file() else "orphan sidecar (image gone)",
+            )
+        )
+    for temp in sorted(image_cache.glob(".*.capturing")) + sorted(
+        image_cache.glob("*.capturing")
+    ):
+        if temp.is_file():
+            victims.append((temp, temp.stat().st_size, "stranded capture temp"))
+    if not victims:
+        click.echo("nothing to prune")
+        return
+    total = sum(size for _, size, _ in victims)
+    for path, size, kind in victims:
+        click.echo(f"{path.name}  {size / (1024 * 1024):.0f} MB  {kind}")
+    if not yes:
+        click.echo(
+            f"{total / (1024 * 1024):.0f} MB reclaimable; re-run with --yes to delete"
+        )
+        return
+    seen: set[Path] = set()
+    for path, _, _ in victims:
+        if path in seen:
+            continue
+        seen.add(path)
+        path.unlink(missing_ok=True)
+    click.echo(f"pruned {len(seen)} file(s), {total / (1024 * 1024):.0f} MB reclaimed")

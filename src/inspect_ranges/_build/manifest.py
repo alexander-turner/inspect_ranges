@@ -26,23 +26,22 @@ from .verify import DeclarationResult
 
 MANIFEST_FORMAT_VERSION = "1"
 
-_RANGE_NAME_RE = re.compile(
-    r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?:/[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)?$"
-)
+_RANGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+"""The schema's own `range.name` grammar (parked-decisions item 5: the strict slug IS the v1 contract everywhere; the spine's org-prefixed one-slash published names arrive with the distribution phase)."""
 
 
 def validate_range_name(name: str) -> Issue | None:
-    """The spine's published-name grammar for `range.name` (lowercase slug, at most one `/`), enforced before the name composes cache paths.
+    """`range.name` against the schema grammar, as defense in depth before the name composes cache paths.
 
-    Returns the refusal issue, or None when the name conforms. `..` and absolute forms can never pass, which is what keeps `manifest_path` and `realized_file_name` inside their caches (the slice-1 traversal lesson, applied to range names).
+    On every reachable path the schema has already enforced this inside spec validation; this gate is belt-and-braces for direct callers. `..`, slashes, and absolute forms cannot pass, which keeps `manifest_path` and `realized_file_name` inside their caches (the slice-1 traversal lesson, applied to range names).
     """
     if _RANGE_NAME_RE.match(name):
         return None
     return Issue(
         code="range-name-invalid",
         path=("range", "name"),
-        message=f"range name {name!r} is not a lowercase slug (letters, digits, `.`, `_`, `-`, at most one `/`), so it cannot name build artifacts",
-        hint="rename the range per the published-name grammar (build-images-spine.md)",
+        message=f"range name {name!r} is not a lowercase slug (letters, digits, `_`, `-`), so it cannot name build artifacts",
+        hint="rename the range to the schema grammar; org-prefixed published names arrive with the distribution phase",
     )
 
 
@@ -219,6 +218,22 @@ def realized_backings(manifest: "BuildManifest") -> dict[str, tuple[str, str]]:
     }
 
 
+def recorded_realized_files(build_cache: Path) -> set[str]:
+    """Every realized file name any recorded manifest references (both nesting depths): the liveness set for `images prune` and the superseded annotation in `images list`."""
+    files: set[str] = set()
+    if not build_cache.is_dir():
+        return files
+    for manifest_file in list(build_cache.glob("*/manifest.json")) + list(
+        build_cache.glob("*/*/manifest.json")
+    ):
+        try:
+            manifest = BuildManifest.model_validate_json(manifest_file.read_text())
+        except (OSError, ValueError):
+            continue
+        files |= {record.realized_file for record in manifest.guests}
+    return files
+
+
 def manifest_path(build_cache: Path, range_name: str) -> Path:
     """Where a range's manifest lives in the builds cache."""
     return build_cache / range_name / "manifest.json"
@@ -265,33 +280,6 @@ def stamp_bundle_sha256(
                 + "\n"
             )
             temp.replace(path)
-            return True
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-
-
-def retract_manifest(
-    build_cache: Path, range_name: str, spec_sha256: str, *, built_at: str
-) -> bool:
-    """Delete the recorded manifest when it is exactly the revision a failing build saw at resolve time (`spec_sha256` + `built_at`), under the per-range lock.
-
-    The behavioral failure path calls this (round-1 R1-A): the lock serializes against `save_manifest`/`stamp_bundle_sha256` so a concurrent stamp cannot resurrect the retracted manifest from its own read-modify-write window, and the identity match keeps a concurrent sibling build's FRESH green manifest out of reach (round-2 review). Returns whether a manifest was deleted.
-    """
-    path = manifest_path(build_cache, range_name)
-    if not path.parent.is_dir():
-        return False
-    lock_path = path.parent / ".manifest.lock"
-    with open(lock_path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            current = load_manifest(build_cache, range_name)
-            if (
-                current is None
-                or current.spec_sha256 != spec_sha256
-                or current.built_at != built_at
-            ):
-                return False
-            path.unlink(missing_ok=True)
             return True
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -366,6 +354,27 @@ def apply_build_manifest(
         raise refuse(
             "the recorded build is for a different spec revision",
             "the spec changed since the last build; run `inspect-ranges build` again",
+        )
+    failed_checks = [
+        record
+        for record in manifest.verification.behavioral_checks
+        if record.status != "pass"
+    ]
+    if failed_checks:
+        verdict = failed_checks[0]
+        raise IssueError(
+            [
+                Issue(
+                    code="range-unproven",
+                    path=("range", "name"),
+                    message=(
+                        f"range {spec.meta.name!r} is built but its behavioral proof "
+                        f"failed ({verdict.challenge or 'phase'}/{verdict.check}: "
+                        f"{verdict.detail})"
+                    ),
+                    hint="fix the failing check or chain and run `inspect-ranges build` again (guests are reused; only the proof re-runs)",
+                )
+            ]
         )
     swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
     return swapped, sections, manifest

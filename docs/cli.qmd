@@ -30,7 +30,7 @@ Failure modes: a missing or wrong-version toolchain refuses with the pin named; 
 
 Failure modes, each stage-named: vendor digest mismatch (nothing written), missing, tampered, pin-mismatched, or protocol-skewed daemon artifact (each error names the `daemon-bundle` republish command), an unmanaged file squatting on the target name (never clobbered), a corrupt provenance sidecar (unmanaged to both `list` and `derive`), interrupted derives (self-healing on the next run). Re-running with the same inputs is a cache hit that re-verifies the recorded digests, including the in-cache vendor.
 
-`images list` shows managed goldens with provenance and flags everything else: unmanaged files, stale derivation temps, goldens whose recipe version is behind, and legacy double-suffix names from before the image-name unification.
+`images list` shows managed goldens with provenance, build-captured realized images (flagging superseded generations no manifest references), and everything else: unmanaged files, stale derivation and capture temps, goldens whose recipe version is behind, and legacy double-suffix names. `images prune` reclaims what no manifest references (superseded or stranded realized generations, capture temps, orphan sidecars): it reports by default, deletes with `--yes`, and refuses while registered projects exist unless forced; build success already prunes its own range's garbage automatically, keeping one previous generation for rollback.
 
 ## build
 
