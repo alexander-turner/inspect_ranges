@@ -167,6 +167,40 @@ def list_cmd(image_cache: Path | None) -> None:
         click.echo(f"{file}  ({note})")
 
 
+def prune_delete_pass(
+    victims: "list[tuple[Path, int, str]]",
+    *,
+    still: "set[Path]",
+    fresh_live: "set[str]",
+) -> "set[Path]":
+    """The locked delete pass, routed by the EXACT kinds the scans emit (phase round-2 B1): chain victims (goldens, their provenance sidecars, vendors) live or die with the fresh chain scan, realized victims re-check fresh manifest liveness, temps always go. Returns what was deleted."""
+    chain_kinds = ("unreferenced golden", "its provenance sidecar")
+    seen: set[Path] = set()
+    for path, _, kind in victims:
+        if path in seen:
+            continue
+        if kind in chain_kinds or kind.startswith("unreferenced vendor"):
+            if path not in still:
+                continue  # the world moved; keep it
+        elif kind in (
+            "superseded realized image",
+            "its sidecar",
+            "orphan sidecar (image gone)",
+        ):
+            image_name = (
+                path.name.removesuffix(".realized.json") + ".qcow2"
+                if path.name.endswith(".realized.json")
+                else path.name
+            )
+            if image_name in fresh_live:
+                continue  # a landing finished; its manifest references this now
+        seen.add(path)
+        if path.is_dir():
+            continue  # directories (recipe stagings) are removed by the caller
+        path.unlink(missing_ok=True)
+    return seen
+
+
 @images.command("pull")
 @click.argument("name")
 @click.option(
@@ -175,7 +209,13 @@ def list_cmd(image_cache: Path | None) -> None:
     default=None,
     help="Location override; default is the configured search path (INSPECT_RANGES_REGISTRY).",
 )
-@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache the chain materializes into.",
+)
 def images_pull(name: str, from_location: str | None, image_cache: Path | None) -> None:
     """Fetch a published catalog image's chain into the cache (sticky thereafter: later builds keep resolving the cached artifact until an explicit refresh)."""
     from .._dist import DistError
@@ -197,8 +237,12 @@ def images_pull(name: str, from_location: str | None, image_cache: Path | None) 
         raise click.ClickException(str(error)) from error
     display.close()
     if pulled is None:
+        searched = ", ".join(
+            location.describe() for location in registry_locations(from_location)
+        )
         raise click.ClickException(
-            f"[image-not-published] no configured location publishes {name!r}"
+            f"[image-not-published] no location publishes {name!r} "
+            f"(searched: {searched})"
         )
     location, result = pulled
     click.echo(
@@ -215,7 +259,13 @@ def images_pull(name: str, from_location: str | None, image_cache: Path | None) 
     default=None,
     help="Location override; default is the configured search path (INSPECT_RANGES_REGISTRY).",
 )
-@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache whose chains move forward.",
+)
 def images_refresh(
     names: tuple[str, ...], from_location: str | None, image_cache: Path | None
 ) -> None:
@@ -265,6 +315,13 @@ def images_refresh(
     help="Prune even while registered projects exist (their referenced files are still excluded).",
 )
 @click.option(
+    "--recipe-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/recipes (or INSPECT_RANGES_RECIPE_CACHE)",
+    help="Recipe cache whose stranded pull stagings are reclaimed.",
+)
+@click.option(
     "--chains",
     is_flag=True,
     help="Also reclaim goldens and vendor bases nothing references (the distribution tier): eviction is by whole chain, never a backing out from under a dependent.",
@@ -272,6 +329,7 @@ def images_refresh(
 def prune(
     image_cache: Path | None,
     build_cache: Path | None,
+    recipe_cache: Path | None,
     yes: bool,
     force: bool,
     chains: bool,
@@ -281,6 +339,7 @@ def prune(
     Build success already garbage-collects its own range (keeping the previous generation for rollback); prune covers the rest: generations stranded by refused manifests or crashes, ranges whose builds are gone, `.capturing` and `.pulling` temps, and sidecars whose image vanished. The chain tier's liveness scan: a golden survives while any realized sidecar names it, any build manifest records it, or a live project boots it; a vendor base survives while any surviving golden's provenance names it. Reports by default; `--yes` deletes. Refuses while registered projects exist unless `--force` (running projects' files are excluded either way).
     """
     from .._build.capture import live_project_files
+    from .._build.recipes import default_recipe_cache
     from .._runtime.ownership import default_state_dir, list_projects
 
     if image_cache is None:
@@ -295,7 +354,7 @@ def prune(
         running = []
     if running and not force:
         raise click.ClickException(
-            f"{len(running)} registered project(s) exist ({', '.join(running[:3])}"
+            f"[projects-running] {len(running)} registered project(s) exist ({', '.join(running[:3])}"
             f"{', ...' if len(running) > 3 else ''}); tear down first, or pass --force"
         )
     victims: list[tuple[Path, int, str]] = []
@@ -317,13 +376,30 @@ def prune(
     for temp in sorted(image_cache.glob("*.capturing")):
         if temp.is_file():
             victims.append((temp, temp.stat().st_size, "stranded capture temp"))
+    import shutil as shutil_module
     import time as time_module
 
-    for temp in sorted(image_cache.glob("*.pulling-*")):
-        # in-flight pulls own fresh temps under their name locks; only aged
+    def aged(path: Path) -> bool:
+        # in-flight writers own fresh temps under their locks; only aged
         # debris is reclaimable here (round-5 N8)
-        if temp.is_file() and time_module.time() - temp.stat().st_mtime > 3600:
+        return time_module.time() - path.stat().st_mtime > 3600
+
+    for temp in sorted(image_cache.glob("*.pulling-*")):
+        if temp.is_file() and aged(temp):
             victims.append((temp, temp.stat().st_size, "stranded pull temp"))
+    for temp in sorted(image_cache.glob(".incoming-*")):
+        # a hard-killed sidecar/atomic write strands these in the image cache
+        # (phase round-2 N13); blobs land atomically, so aged ones are debris
+        if temp.is_file() and aged(temp):
+            victims.append((temp, temp.stat().st_size, "stranded write temp"))
+    recipe_dir = recipe_cache if recipe_cache is not None else default_recipe_cache()
+    stale_recipe_dirs: list[Path] = []
+    if recipe_dir.is_dir():
+        for staging in sorted(recipe_dir.glob(".*.pulling-*")):
+            if staging.is_dir() and aged(staging):
+                size = sum(f.stat().st_size for f in staging.rglob("*") if f.is_file())
+                victims.append((staging, size, "stranded recipe staging"))
+                stale_recipe_dirs.append(staging)
     frozen_reasons: list[str] = []
     if chains:
         from .._dist.gc import chains_lock, unreferenced_chain_files
@@ -349,7 +425,6 @@ def prune(
             f"{total / (1024 * 1024):.0f} MB reclaimable; re-run with --yes to delete"
         )
         return
-    seen: set[Path] = set()
     from .._dist.gc import chains_lock, unreferenced_chain_files
 
     # EVERY deleting pass holds the exclusive chains lock and recomputes
@@ -369,21 +444,8 @@ def prune(
                 fresh_live,
             )
             still = {path for path, _ in fresh}
-        for path, _, kind in victims:
-            if path in seen:
-                continue
-            if "golden" in kind or "vendor" in kind:
-                if path not in still:
-                    continue  # the world moved; keep it
-            elif "realized" in kind or "sidecar" in kind:
-                image_name = path.name.removesuffix(".realized.json")
-                image_name = (
-                    image_name
-                    if image_name.endswith(".qcow2")
-                    else image_name + ".qcow2"
-                )
-                if image_name in fresh_live:
-                    continue  # a landing finished; its manifest references this now
-            seen.add(path)
-            path.unlink(missing_ok=True)
+        seen = prune_delete_pass(victims, still=still, fresh_live=fresh_live)
+        for staging in stale_recipe_dirs:
+            if staging in seen:
+                shutil_module.rmtree(staging, ignore_errors=True)
     click.echo(f"pruned {len(seen)} file(s), {total / (1024 * 1024):.0f} MB reclaimed")

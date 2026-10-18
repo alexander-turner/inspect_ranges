@@ -7,6 +7,7 @@ Backing relationships are pinned by digest in annotations (image-distribution.md
 
 import io
 import json
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -41,6 +42,7 @@ __all__ = [
     "encode_image_chain",
     "push_build",
     "qcow2_backing_name",
+    "validated_cache_name",
     "recipe_bundle_tar",
 ]
 
@@ -69,6 +71,20 @@ ANN_RECIPE_DIGEST = "org.inspect-ranges.recipe.digest"
 ANN_RANGE = "org.inspect-ranges.range"
 ANN_SPEC_SHA256 = "org.inspect-ranges.spec-sha256"
 ANN_BUILT_AT = "org.inspect-ranges.built-at"
+
+
+_CACHE_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+
+def validated_cache_name(name: str) -> str:
+    """Names that reach filesystem paths and glob patterns hold an allowlisted grammar (no separators, no glob metacharacters) plus a ban on the temp marker: enforced at PUBLISH so a bad spec name fails the producer with this message, not every consumer (phase round-2 N2), and re-enforced at materialization against hostile closures (phase round-1 N3).
+
+    Raises:
+        DistError: `manifest-invalid` naming the offending value.
+    """
+    if _CACHE_NAME.fullmatch(name) is None or ".pulling-" in name:
+        raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
+    return name
 
 
 def qcow2_backing_name(path: Path) -> str | None:
@@ -161,6 +177,7 @@ def encode_image_chain(
         DistError: `artifact-missing` for absent files or unreadable sidecars, `blob-digest-mismatch` for cache bytes disagreeing with `digest`, `chain-invalid` for a sidecar-less image embedding a backing.
     """
     members: list[Descriptor] = []
+    validated_cache_name(file)
     metadata_path = _metadata_path(image_cache, file)
     if not metadata_path.is_file():
         # closed-world check: a sidecar-less image publishes as a bare
@@ -192,6 +209,7 @@ def encode_image_chain(
             "artifact-missing",
             f"{metadata_path} is not a valid golden sidecar: {error}",
         ) from error
+    validated_cache_name(metadata.vendor_file)
     vendor_path = image_cache / metadata.vendor_file
     vendor_blob = _qcow2_descriptor(
         store,
@@ -278,6 +296,7 @@ def push_build(
     for guest in manifest.guests:
         golden_file = image_file_name(guest.golden_reference)
         encode_golden_chain(golden_file, guest.golden_digest)
+        validated_cache_name(guest.realized_file)
         realized_path = image_cache / guest.realized_file
         sidecar_path = _realized_sidecar_path(image_cache, guest.realized_file)
         if not sidecar_path.is_file():

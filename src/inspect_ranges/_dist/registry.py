@@ -445,18 +445,17 @@ class RegistryRepo:
             raise DistError(
                 "registry-protocol", f"{self._host} started an upload with no Location"
             )
-        if location.startswith("/"):
-            location = f"{self.base_url}{location}"
-        elif urllib.parse.urlparse(location).netloc != self._host:
-            # the bearer token must never travel to a foreign origin (the
-            # redirect handler covers redirects; this covers server-supplied
-            # upload URLs, phase round-1 N1); on-origin uploads are what every
-            # real registry does
+        # Location is a URI-reference (relative forms are legal): resolve it
+        # against the registry origin, then refuse only a TRULY foreign origin
+        # (the bearer token must never travel there; phase round-1 N1, grammar
+        # corrected round-2 N3)
+        location = urllib.parse.urljoin(f"{self.base_url}/", location)
+        target_host = urllib.parse.urlparse(location).netloc
+        if target_host != self._host:
             raise DistError(
                 "registry-protocol",
                 f"{self._host} directed the upload to a different origin "
-                f"({urllib.parse.urlparse(location).netloc}); refusing to send "
-                "credentials there",
+                f"({target_host or 'unparseable'}); refusing to send credentials there",
             )
         separator = "&" if "?" in location else "?"
         self._request(

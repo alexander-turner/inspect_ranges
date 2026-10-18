@@ -9,7 +9,6 @@ import fcntl
 import glob as glob_module
 import hashlib
 import os
-import re
 import shutil
 import tarfile
 import tempfile
@@ -39,6 +38,9 @@ from .encode import (
 )
 from .encode import (
     qcow2_backing_name as _qcow2_backing_name,
+)
+from .encode import (
+    validated_cache_name as _validated_cache_name,
 )
 from .errors import DistError
 from .oci import (
@@ -94,16 +96,6 @@ def _name_lock(cache: Path, file: str) -> "Generator[None]":
             yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
-
-
-_CACHE_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-
-
-def _validated_cache_name(name: str) -> str:
-    """Untrusted annotation names reach filesystem paths and glob patterns: an allowlisted grammar (no separators, no glob metacharacters) plus a ban on the temp marker closes traversal, cross-name temp sweeps, and prune-bait names (phase round-1 N3)."""
-    if _CACHE_NAME.fullmatch(name) is None or ".pulling-" in name:
-        raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
-    return name
 
 
 def _annotation(manifest: OciManifest, key: str) -> str:
@@ -346,17 +338,25 @@ def _land_images(
     """The image-landing phase, held under the shared chains lock so the GC's exclusive scan never observes a half-landed chain (round-5 B2)."""
     if replace_images:
         # the refresh barrier (round-3 B4): every image in the closure stages
-        # fully under every member's lock, then the renames happen together,
-        # so the mixed-chain window is two renames wide instead of a multi-GB
-        # download wide; a crash inside even that window is caught by up's
-        # full-chain verification, never booted silently
+        # fully under every member's lock, then the renames happen together
+        # (images before their sidecars), so the mixed-chain window is two
+        # renames wide instead of a multi-GB download wide, and every state a
+        # crash inside it can leave refuses at up's full-chain verification
+        # (phase round-2 B2 closed the one window the vendor-edge check
+        # could not see)
         _replace_chain(
             store,
             [
                 (manifest, suffix, first)
                 for kind, suffix, first in (
                     (ARTIFACT_VENDOR_BASE, None, False),
-                    (ARTIFACT_GOLDEN, ".json", True),
+                    # replace renames the golden IMAGE first (phase round-2
+                    # B2): sidecar-first exists for first landings where the
+                    # image is absent; in replace both exist, and writing the
+                    # new sidecar before the image creates the one crash
+                    # window (new vendor + new sidecar + old golden) that
+                    # up's vendor-edge check cannot see
+                    (ARTIFACT_GOLDEN, ".json", False),
                     (ARTIFACT_REALIZED, ".realized.json", False),
                 )
                 for manifest in artifacts[kind]

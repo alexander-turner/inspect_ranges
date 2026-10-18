@@ -616,8 +616,9 @@ def up(
                     raise UpError(
                         "verify-images",
                         f"backing golden {guest.backing_file} digest {actual} does not match the build's {guest.backing_digest}: "
-                        "the golden was re-derived since the build, so the realized overlay would boot over a composition "
-                        "no build verified; rebuild the range",
+                        "the golden was re-derived or refreshed since the build, so the realized overlay would boot over a "
+                        "composition no build verified; rebuild the range (builders), or re-pull the matching build / pin it "
+                        "by digest (consumers)",
                         guest=guest.name,
                     )
             verify_vendor_edge(guest.backing_file, guest.name)

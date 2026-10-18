@@ -158,14 +158,25 @@ def check_distribution(image_cache: Path) -> list[CheckResult]:
             and not (image_cache / vendor).is_file()
         ):
             missing.append(f"{file} -> {vendor}")
+    try:
+        from .._build.manifest import default_build_cache as _builds
+        from .._dist.gc import unreferenced_chain_files
+
+        # a dirty (lock-free) read is fine for a warn row; the GC itself
+        # always re-scans under its exclusive lock
+        _, frozen = unreferenced_chain_files(image_cache, _builds(), set())
+    except Exception:
+        frozen = []
+    for reason in frozen[:3]:
+        missing.append(f"frozen: {reason}")
     if missing:
         results.append(
             CheckResult(
                 DISTRIBUTION,
                 "cache chains",
                 "warn",
-                f"{len(missing)} broken backing reference(s): {'; '.join(missing[:3])}",
-                fix="re-pull or re-derive the named chains (up refuses mixed chains either way)",
+                f"{len(missing)} issue(s): {'; '.join(missing[:4])}",
+                fix="re-pull or re-derive the named chains (up refuses mixed chains; a frozen chain also skips the vendor-edge boot check until fixed)",
             )
         )
     else:
