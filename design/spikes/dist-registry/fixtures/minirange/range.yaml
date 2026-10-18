@@ -1,0 +1,27 @@
+# dist-registry battery fixture: the smallest buildable range (one marker
+# recipe, no declared services), so the battery proves the registry transport
+# on a real build without paying the vulhub compile.
+range:
+  name: distmini
+  schema_version: "0.3"
+  description: >
+    Battery fixture for registry push/pull: one guest with one marker recipe;
+    the pulled artifacts must boot and carry the marker.
+
+networks:
+  - name: lab
+    cidr: 10.94.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: ubuntu-focal
+    interfaces: [{ network: lab, ip: 10.94.10.10 }]
+    provisioning:
+      - { recipe: dr.marker, vars: { content: shipped-by-registry } }
+
+attacker:
+  image: ubuntu-focal
+  interfaces: [{ network: lab }]
+  entry: external

@@ -1,0 +1,7 @@
+name: dr.marker
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  content:
+    description: line written to /opt/dist-marker, read back after the registry round trip
