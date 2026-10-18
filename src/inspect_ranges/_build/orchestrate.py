@@ -458,12 +458,18 @@ def build_range(
             continue
         reference = resolve_image_reference(host.image, image_cache)
         if reference.digest is None:
+            # the Q1 registry tier: a bare name absent from the cache resolves
+            # against the configured search path, fetched once and sticky
+            # thereafter (freezing is automatic; moving forward is `images
+            # refresh`); every fetch failure falls through to the refusal
+            reference = _fetch_image_tier(host.image, image_cache) or reference
+        if reference.digest is None:
             missing.append(
                 Issue(
                     code="image-not-in-cache",
                     path=("hosts", index, "image"),
-                    message=f"image {host.image!r} for guest {host.name!r} is not in the image cache, so its build key cannot resolve",
-                    hint="pull or derive the golden into the cache first",
+                    message=f"image {host.image!r} for guest {host.name!r} is not in the image cache and no configured location publishes it, so its build key cannot resolve",
+                    hint="derive the golden, or publish it and 'inspect-ranges images pull' it (INSPECT_RANGES_REGISTRY sets the search path)",
                 )
             )
             continue
@@ -1208,6 +1214,21 @@ def _prove_realized_boot(
             hybrid_sockets=bx_hybrid,
         )
     )
+
+
+def _fetch_image_tier(name: str, image_cache: Path) -> "ImageRef | None":
+    """Try the registry search path for a bare image name; `None` on any miss or failure (the caller's refusal stays the diagnosis, with the fetch option in its hint)."""
+    from .._dist import DistError
+    from .._dist.location import registry_locations
+    from .._dist.resolve import pull_image
+
+    try:
+        pulled = pull_image(name, registry_locations(), image_cache=image_cache)
+    except DistError:
+        return None
+    if pulled is None:
+        return None
+    return resolve_image_reference(name, image_cache)
 
 
 def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:

@@ -38,6 +38,7 @@ __all__ = [
     "LAYER_QCOW2",
     "LAYER_RECIPE_TAR",
     "LAYER_SIDECAR",
+    "encode_image_chain",
     "push_build",
     "qcow2_backing_name",
     "recipe_bundle_tar",
@@ -141,6 +142,92 @@ def recipe_bundle_tar(recipe: ResolvedRecipe) -> bytes:
     return buffer.getvalue()
 
 
+def encode_image_chain(
+    store: ContentStore,
+    image_cache: Path,
+    file: str,
+    digest: str | None,
+    *,
+    config: Descriptor,
+) -> list[Descriptor]:
+    """Encode one cache image's chain (golden with its vendor base via the provenance sidecar; a sidecar-less chainless image as a bare vendor base) and return the member manifest descriptors.
+
+    Raises:
+        DistError: `artifact-missing` for absent files or unreadable sidecars, `blob-digest-mismatch` for cache bytes disagreeing with `digest`, `chain-invalid` for a sidecar-less image embedding a backing.
+    """
+    members: list[Descriptor] = []
+    metadata_path = _metadata_path(image_cache, file)
+    if not metadata_path.is_file():
+        # closed-world check: a sidecar-less image publishes as a bare
+        # vendor base, which never joins a validated chain, so an embedded
+        # backing here would publish a chain that cannot boot (round-1 N6)
+        if file.endswith(".qcow2") and qcow2_backing_name(image_cache / file):
+            raise DistError(
+                "chain-invalid",
+                f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
+            )
+        blob = _qcow2_descriptor(store, image_cache / file, expected=digest)
+        members.append(
+            store.put_manifest(
+                OciManifest(
+                    artifact_type=ARTIFACT_VENDOR_BASE,
+                    config=config,
+                    layers=[blob],
+                    annotations={ANN_KIND: "vendor-base", ANN_NAME: file},
+                )
+            )
+        )
+        return members
+    try:
+        metadata = ImageMetadata.model_validate_json(metadata_path.read_text())
+    except ValueError as error:
+        raise DistError(
+            "artifact-missing",
+            f"{metadata_path} is not a valid golden sidecar: {error}",
+        ) from error
+    vendor_path = image_cache / metadata.vendor_file
+    vendor_blob = _qcow2_descriptor(
+        store, vendor_path, expected=_prefixed(metadata.vendor_sha256)
+    )
+    members.append(
+        store.put_manifest(
+            OciManifest(
+                artifact_type=ARTIFACT_VENDOR_BASE,
+                config=config,
+                layers=[vendor_blob],
+                annotations={
+                    ANN_KIND: "vendor-base",
+                    ANN_NAME: metadata.vendor_file,
+                },
+            )
+        )
+    )
+    golden_blob = _qcow2_descriptor(
+        store,
+        image_cache / file,
+        expected=_prefixed(digest or metadata.golden_sha256),
+    )
+    members.append(
+        store.put_manifest(
+            OciManifest(
+                artifact_type=ARTIFACT_GOLDEN,
+                config=config,
+                layers=[
+                    golden_blob,
+                    _sidecar_descriptor(store, metadata_path),
+                ],
+                annotations={
+                    ANN_KIND: "golden",
+                    ANN_NAME: file,
+                    ANN_BACKING_FILE: metadata.vendor_file,
+                    ANN_BACKING_DIGEST: _prefixed(metadata.vendor_sha256),
+                },
+            )
+        )
+    )
+    return members
+
+
 def push_build(
     manifest: BuildManifest,
     store: ContentStore,
@@ -149,6 +236,7 @@ def push_build(
     build_cache: Path,
     range_dir: Path | None = None,
     recipe_cache: Path | None = None,
+    ref: str | None = None,
 ) -> Descriptor:
     """Encode a built range's transitive closure into `store` and return the root index descriptor (the publishable identity).
 
@@ -167,76 +255,10 @@ def push_build(
             members.append(manifest_descriptor)
 
     def encode_golden_chain(file: str, digest: str | None) -> None:
-        """A golden with its vendor base; a file with no provenance sidecar encodes as a bare vendor base."""
-        metadata_path = _metadata_path(image_cache, file)
-        if not metadata_path.is_file():
-            # closed-world check: a sidecar-less image publishes as a bare
-            # vendor base, which never joins a validated chain, so an embedded
-            # backing here would publish a chain that cannot boot (round-1 N6)
-            if file.endswith(".qcow2") and qcow2_backing_name(image_cache / file):
-                raise DistError(
-                    "chain-invalid",
-                    f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
-                )
-            blob = _qcow2_descriptor(store, image_cache / file, expected=digest)
-            add(
-                store.put_manifest(
-                    OciManifest(
-                        artifact_type=ARTIFACT_VENDOR_BASE,
-                        config=config,
-                        layers=[blob],
-                        annotations={ANN_KIND: "vendor-base", ANN_NAME: file},
-                    )
-                )
-            )
-            return
-        try:
-            metadata = ImageMetadata.model_validate_json(metadata_path.read_text())
-        except ValueError as error:
-            raise DistError(
-                "artifact-missing",
-                f"{metadata_path} is not a valid golden sidecar: {error}",
-            ) from error
-        vendor_path = image_cache / metadata.vendor_file
-        vendor_blob = _qcow2_descriptor(
-            store, vendor_path, expected=_prefixed(metadata.vendor_sha256)
-        )
-        add(
-            store.put_manifest(
-                OciManifest(
-                    artifact_type=ARTIFACT_VENDOR_BASE,
-                    config=config,
-                    layers=[vendor_blob],
-                    annotations={
-                        ANN_KIND: "vendor-base",
-                        ANN_NAME: metadata.vendor_file,
-                    },
-                )
-            )
-        )
-        golden_blob = _qcow2_descriptor(
-            store,
-            image_cache / file,
-            expected=_prefixed(digest or metadata.golden_sha256),
-        )
-        add(
-            store.put_manifest(
-                OciManifest(
-                    artifact_type=ARTIFACT_GOLDEN,
-                    config=config,
-                    layers=[
-                        golden_blob,
-                        _sidecar_descriptor(store, metadata_path),
-                    ],
-                    annotations={
-                        ANN_KIND: "golden",
-                        ANN_NAME: file,
-                        ANN_BACKING_FILE: metadata.vendor_file,
-                        ANN_BACKING_DIGEST: _prefixed(metadata.vendor_sha256),
-                    },
-                )
-            )
-        )
+        for member in encode_image_chain(
+            store, image_cache, file, digest, config=config
+        ):
+            add(member)
 
     for base in manifest.base_images:
         encode_golden_chain(base.file, base.digest or None)
@@ -369,4 +391,4 @@ def push_build(
             ANN_BUILT_AT: manifest.built_at,
         },
     )
-    return store.put_index(manifest.range_name, index)
+    return store.put_index(ref or manifest.range_name, index)
