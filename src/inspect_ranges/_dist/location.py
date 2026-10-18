@@ -61,6 +61,11 @@ class Location:
             return layout.ensure() if create else layout.open()
         assert self._registry_url is not None
         repo = f"{self._prefix}/{name}" if self._prefix else name
+        if self._registry_url == _HUB_REGISTRY and repo.count("/") > 1:
+            raise DistError(
+                "registry-protocol",
+                f"{name!r} under {self.raw!r} would need the nested repository {repo!r}, but the hub is two-level; group content lives in its own org or a nested-path registry (spine Q1)",
+            )
         return RegistryRepo(self._registry_url, repo)
 
     def latest_ref(self, name: str) -> str:
@@ -99,8 +104,6 @@ def parse_location(raw: str) -> Location:
             registry_url=f"{parsed.scheme}://{parsed.netloc}",
             prefix=parsed.path,
         )
-    if Path(raw).is_dir():
-        return Location(raw, directory=Path(raw))
     host, _, prefix = raw.partition("/")
     if host in ("docker.io", "index.docker.io", "registry-1.docker.io"):
         if not prefix:
@@ -110,9 +113,12 @@ def parse_location(raw: str) -> Location:
             )
         return Location(raw, registry_url=_HUB_REGISTRY, prefix=prefix)
     if "." not in host and ":" not in host and host != "localhost":
+        # never cwd-dependent (round-3 N4): a directory location must LOOK like
+        # a path (/, ./, ../, ~), so the same configured value parses the same
+        # way everywhere
         raise DistError(
             "location-invalid",
-            f"{raw!r} is neither an existing directory nor a registry host",
+            f"{raw!r} is not a registry host; directory locations start with /, ./, ../ or ~",
         )
     return Location(raw, registry_url=f"https://{host}", prefix=prefix)
 

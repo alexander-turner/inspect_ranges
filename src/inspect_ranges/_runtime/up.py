@@ -545,6 +545,44 @@ def up(
         )
 
     guests = boot.guests
+    vendor_memo: dict[str, str] = {}
+
+    def verify_vendor_edge(image_file: str, guest_name: str) -> None:
+        # the golden-to-vendor edge (round-3 distribution review B4): a golden
+        # whose provenance sidecar names a vendor must sit over exactly those
+        # vendor bytes, or QEMU would silently read a mixed chain (an
+        # interrupted refresh, a re-pulled vendor) that no build verified
+        sidecar = options.image_cache / (image_file.removesuffix(".qcow2") + ".json")
+        if not sidecar.is_file():
+            return
+        try:
+            meta = json.loads(sidecar.read_text())
+            vendor_file = meta.get("vendor_file")
+            vendor_sha = meta.get("vendor_sha256")
+        except (OSError, ValueError):
+            return  # a corrupt sidecar is the derive path's concern, not boot's
+        if not isinstance(vendor_file, str) or not isinstance(vendor_sha, str):
+            return
+        vendor = options.image_cache / vendor_file
+        if not vendor.is_file():
+            raise UpError(
+                "verify-images",
+                f"vendor base {vendor_file} backing {image_file} is not in the cache; "
+                "re-derive the golden or re-pull the image chain",
+                guest=guest_name,
+            )
+        if vendor_file not in vendor_memo:
+            vendor_memo[vendor_file] = _sha256(vendor)
+        if vendor_memo[vendor_file] != vendor_sha:
+            raise UpError(
+                "verify-images",
+                f"vendor base {vendor_file} hashes {vendor_memo[vendor_file][:12]}..., but "
+                f"{image_file}'s provenance records {vendor_sha[:12]}...: the chain is mixed "
+                "(a vendor refresh under an older golden, or an interrupted image refresh); "
+                "refresh or re-derive the golden so the chain agrees",
+                guest=guest_name,
+            )
+
     for guest in guests:
         image = options.image_cache / guest.image_file
         if not image.is_file():
@@ -582,6 +620,9 @@ def up(
                         "no build verified; rebuild the range",
                         guest=guest.name,
                     )
+            verify_vendor_edge(guest.backing_file, guest.name)
+        else:
+            verify_vendor_edge(guest.image_file, guest.name)
 
     try:
         range_image = ensure_range_image(

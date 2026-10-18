@@ -7,6 +7,7 @@ Backing-chain validation runs at materialization: the qcow2 header's embedded ba
 
 import fcntl
 import hashlib
+import os
 import shutil
 import tarfile
 import tempfile
@@ -139,9 +140,11 @@ def _land_image(
             if sidecar_suffix is None:
                 return
             sidecar_path = image_cache / (name.removesuffix(".qcow2") + sidecar_suffix)
-            data = store.read_blob(_layer(manifest, LAYER_SIDECAR))
-            if heal and sidecar_path.is_file() and sidecar_path.read_bytes() == data:
+            if heal and sidecar_path.is_file():
+                # the sticky path never mutates present provenance (round-3 N3);
+                # healing covers only the crash window's MISSING sidecar
                 return
+            data = store.read_blob(_layer(manifest, LAYER_SIDECAR))
             atomic_write(sidecar_path, data)
             fetched.append(sidecar_path.name)
 
@@ -214,10 +217,13 @@ def materialize_closure(
     build_cache: Path | None = None,
     recipe_cache: Path | None = None,
     replace_images: bool = False,
+    require_manifest: bool = False,
+    expect_range: str | None = None,
+    expect_spec: str | None = None,
 ) -> MaterializeResult:
     """Materialize a pull root's closure into the local caches, verified end to end; returns what was fetched versus already present.
 
-    A range closure carries exactly one build manifest and needs all three caches; an image-only closure (a published golden chain) carries none and touches only the image cache, with `build_cache`/`recipe_cache` permitted to be `None`. `replace_images` is the explicit move-forward act (`images refresh`): a cache name holding DIFFERENT content is overwritten instead of refusing, chain and sidecars together, and the next build's keys change accordingly; it never applies to range closures, whose cache names are content-addressed by construction.
+    A range closure carries exactly one build manifest and needs all three caches; an image-only closure (a published golden chain) carries none and touches only the image cache, with `build_cache`/`recipe_cache` permitted to be `None`. Range pulls pass `require_manifest` (a manifest-less root refuses rather than reporting vacuous success) and `expect_range`/`expect_spec`: tags are mutable, so what a ref RESOLVED TO is untrusted until the landed manifest's recorded identity equals what was asked for, checked BEFORE the manifest lands (round-3 review B1). `replace_images` is the explicit move-forward act (`images refresh`): a cache name holding DIFFERENT content is overwritten instead of refusing, chain and sidecars together, and the next build's keys change accordingly; it never applies to range closures, whose cache names are content-addressed by construction.
 
     Raises:
         DistError: missing or corrupt blobs, invalid manifests, cache name conflicts, broken backing chains, or recipe bundles whose extracted content does not reproduce the recorded recipe digest. On refusal the build manifest has NOT landed, so nothing consumable dangles.
@@ -243,6 +249,11 @@ def materialize_closure(
             "manifest-invalid",
             f"a pull root carries at most one build manifest; this one carries {len(builds)}",
         )
+    if require_manifest and not builds:
+        raise DistError(
+            "manifest-invalid",
+            "this root is not a range closure (it carries no build manifest)",
+        )
     if builds and (build_cache is None or recipe_cache is None):
         raise DistError(
             "manifest-invalid",
@@ -257,6 +268,47 @@ def materialize_closure(
     fetched: list[str] = []
     present: list[str] = []
     landed_digests: dict[str, str] = {}
+
+    if replace_images:
+        # the refresh barrier (round-3 B4): every image in the closure stages
+        # fully under every member's lock, then the renames happen together,
+        # so the mixed-chain window is two renames wide instead of a multi-GB
+        # download wide; a crash inside even that window is caught by up's
+        # full-chain verification, never booted silently
+        _replace_chain(
+            store,
+            [
+                (manifest, suffix, first)
+                for kind, suffix, first in (
+                    (ARTIFACT_VENDOR_BASE, None, False),
+                    (ARTIFACT_GOLDEN, ".json", True),
+                    (ARTIFACT_REALIZED, ".realized.json", False),
+                )
+                for manifest in artifacts[kind]
+            ],
+            image_cache,
+            fetched=fetched,
+            present=present,
+        )
+        for kind in (ARTIFACT_VENDOR_BASE, ARTIFACT_GOLDEN, ARTIFACT_REALIZED):
+            for manifest in artifacts[kind]:
+                landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
+                    manifest, LAYER_QCOW2
+                ).digest
+                if kind != ARTIFACT_VENDOR_BASE:
+                    _validate_chain(manifest, image_cache, landed_digests)
+        return _finish_closure(
+            store,
+            artifacts,
+            landed_digests,
+            build_cache=build_cache,
+            recipe_cache=recipe_cache,
+            require_manifest=require_manifest,
+            expect_range=expect_range,
+            expect_spec=expect_spec,
+            fetched=fetched,
+            present=present,
+        )
 
     for manifest in artifacts[ARTIFACT_VENDOR_BASE]:
         _land_image(
@@ -303,6 +355,103 @@ def materialize_closure(
         ).digest
         _validate_chain(manifest, image_cache, landed_digests)
 
+    return _finish_closure(
+        store,
+        artifacts,
+        landed_digests,
+        build_cache=build_cache,
+        recipe_cache=recipe_cache,
+        require_manifest=require_manifest,
+        expect_range=expect_range,
+        expect_spec=expect_spec,
+        fetched=fetched,
+        present=present,
+    )
+
+
+def _replace_chain(
+    store: ContentStore,
+    members: "list[tuple[OciManifest, str | None, bool]]",
+    image_cache: Path,
+    *,
+    fetched: list[str],
+    present: list[str],
+) -> None:
+    """The refresh barrier: hold every member's name lock, stage every changed image fully, then rename the whole set together (sidecars with their kind's order)."""
+    from contextlib import ExitStack
+
+    plans: list[tuple[str, OciManifest, str | None, bool]] = []
+    for manifest, suffix, sidecar_first in members:
+        name = _annotation(manifest, ANN_NAME)
+        if "/" in name or name.startswith("."):
+            raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
+        plans.append((name, manifest, suffix, sidecar_first))
+    with ExitStack() as stack:
+        for name, _, _, _ in sorted(plans):  # sorted: one lock order, no deadlock
+            stack.enter_context(_name_lock(image_cache, name))
+        staged: list[tuple[Path, Path, OciManifest, str | None, bool]] = []
+        for name, manifest, suffix, sidecar_first in plans:
+            for stale in image_cache.glob(f".{name}.pulling-*"):
+                stale.unlink(missing_ok=True)
+            blob = _layer(manifest, LAYER_QCOW2)
+            target = image_cache / name
+            if target.is_file():
+                hasher = hashlib.sha256()
+                with target.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        hasher.update(chunk)
+                if f"sha256:{hasher.hexdigest()}" == blob.digest:
+                    present.append(name)
+                    continue
+            stage = image_cache / f".{name}.pulling-staged"
+            store.copy_blob_to(blob, stage, temp_prefix=f".{name}.pulling-")
+            staged.append((stage, target, manifest, suffix, sidecar_first))
+        try:
+            for stage, target, manifest, suffix, sidecar_first in staged:
+                name = target.name
+                if sidecar_first and suffix is not None:
+                    _write_replace_sidecar(
+                        store, manifest, image_cache, suffix, fetched
+                    )
+                os.replace(stage, target)
+                if not sidecar_first and suffix is not None:
+                    _write_replace_sidecar(
+                        store, manifest, image_cache, suffix, fetched
+                    )
+                fetched.append(name)
+        finally:
+            for stage, _, _, _, _ in staged:
+                stage.unlink(missing_ok=True)
+
+
+def _write_replace_sidecar(
+    store: ContentStore,
+    manifest: OciManifest,
+    image_cache: Path,
+    suffix: str,
+    fetched: list[str],
+) -> None:
+    name = _annotation(manifest, ANN_NAME)
+    sidecar_path = image_cache / (name.removesuffix(".qcow2") + suffix)
+    atomic_write(sidecar_path, store.read_blob(_layer(manifest, LAYER_SIDECAR)))
+    fetched.append(sidecar_path.name)
+
+
+def _finish_closure(
+    store: ContentStore,
+    artifacts: dict[str, list[OciManifest]],
+    landed_digests: dict[str, str],
+    *,
+    build_cache: Path | None,
+    recipe_cache: Path | None,
+    require_manifest: bool,
+    expect_range: str | None,
+    expect_spec: str | None,
+    fetched: list[str],
+    present: list[str],
+) -> MaterializeResult:
+    """The closure's tail, shared by the normal and replace paths: recipes, the identity and completeness gates, and the manifest landing LAST."""
+    builds = artifacts[ARTIFACT_BUILD_MANIFEST]
     landed_recipes: dict[str, str] = {}
     for manifest in artifacts[ARTIFACT_RECIPE_BUNDLE]:
         assert recipe_cache is not None  # refused above when absent
@@ -324,6 +473,16 @@ def materialize_closure(
         raise DistError(
             "manifest-invalid", f"the pulled build manifest does not parse: {error}"
         ) from error
+    if expect_range is not None and build_manifest.range_name != expect_range:
+        raise DistError(
+            "published-mismatch",
+            f"this root carries a build of {build_manifest.range_name!r}, not {expect_range!r}; the location's reference points at the wrong range",
+        )
+    if expect_spec is not None and build_manifest.spec_sha256 != expect_spec:
+        raise DistError(
+            "published-spec-mismatch",
+            f"this root's build manifest records spec {build_manifest.spec_sha256[:12]}..., not the requested {expect_spec[:12]}...; the location's spec reference was re-pointed at a different build",
+        )
     # the completeness gate (round-1 B1): the build manifest lands only when
     # the closure actually delivered every artifact it references, so a pruned
     # or partial root can never materialize as a consumable range (and a
