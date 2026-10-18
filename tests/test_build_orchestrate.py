@@ -1418,3 +1418,73 @@ def test_refused_save_never_clobbers_a_sibling_green_manifest(
     assert survivor is not None
     assert survivor.built_at == "2099-01-01T00:00:00Z"
     assert survivor.verification.behavioral_checks[0].status == "pass"
+
+
+class RecorderSink:
+    """A minimal `StageSink` for driving the behavioral phase directly."""
+
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, dict[str, Any]]] = []
+
+    def log(self, stage: str, status: str, **fields: Any) -> None:
+        self.entries.append((stage, status, fields))
+
+
+def test_conformance_refusal_tears_down_the_bx_range(
+    tmp_path: Path, cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 B1: the conformance stage's designed refusal (like every post-boot raise) must pass through the bx teardown finally; before the fix it leaked the running bx range while the outer finally rmtree'd the staging bundle the range mounts."""
+    import inspect_ranges._build.behavioral as behavioral_module
+    import inspect_ranges._build.manifest as manifest_module
+    from inspect_ranges._build import orchestrate
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    # the real swap strips provisioning (a realized image never re-provisions)
+    swapped = spec.model_copy(
+        update={
+            "hosts": [
+                host.model_copy(update={"provisioning": None}) for host in spec.hosts
+            ]
+        }
+    )
+
+    def fake_swap(
+        spec_: RangeSpec, manifest: Any, image_cache: Path
+    ) -> tuple[RangeSpec, frozenset[str]]:
+        return swapped, frozenset()
+
+    def fake_backings(manifest: Any) -> dict[str, tuple[str, str]]:
+        return {}
+
+    def converged(*args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(manifest_module, "swap_realized_spec", fake_swap)
+    monkeypatch.setattr(manifest_module, "realized_backings", fake_backings)
+    monkeypatch.setattr(orchestrate, "verify_range", converged)
+
+    async def refuse(*args: Any, **kwargs: Any) -> None:
+        raise BuildError("conformance", "attacker answers from web: 10.0.0.9 22")
+
+    monkeypatch.setattr(behavioral_module, "run_conformance_checks", refuse)
+    options = options_for(tmp_path, cache)
+    state_dir = options.state_dir
+    assert state_dir is not None
+    with pytest.raises(BuildError, match="conformance"):
+        orchestrate._run_behavioral_phase(
+            spec,
+            range_dir,
+            manifest=cast(Any, None),
+            image_cache=cache,
+            build_cache=tmp_path / "builds",
+            state_dir=state_dir,
+            options=options,
+            project="buildme",
+            stage_log=RecorderSink(),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+        )
+    assert fakes.down_calls == ["buildme-bx"]
+    staging_root = state_dir.parent / "staging"
+    assert not any(staging_root.iterdir())

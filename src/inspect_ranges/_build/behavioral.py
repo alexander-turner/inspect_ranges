@@ -45,7 +45,7 @@ _SUBMIT = re.compile(r"SUBMIT\s+(\S+)\s+(.+)$")
 def sweep_script(ips: "list[str]", allowed: "set[int] | None" = None) -> str:
     """A same-segment TCP connect sweep: prints `OPEN <ip> <port>` per answering port (closed ports RST instantly on shared L2), always exits 0 (the caller parses stdout).
 
-    `allowed` ports are skipped (a reserved hypervisor address legitimately answers DNS when the segment declares it).
+    `allowed` ports are skipped (a reserved hypervisor address legitimately answers DNS when the segment declares it). Every connect is bounded by `timeout 1`: a dropped SYN (an address behind a drop policy) must cost one second, not the kernel's ~130 s connect timeout (round-3 review B2).
     """
     ports = [
         port
@@ -56,7 +56,8 @@ def sweep_script(ips: "list[str]", allowed: "set[int] | None" = None) -> str:
     ip_list = " ".join(ips)
     return (
         f"for ip in {ip_list}; do for p in {port_list}; do "
-        '(exec 3<>"/dev/tcp/$ip/$p") 2>/dev/null && echo "OPEN $ip $p"; '
+        '(timeout 1 bash -c "exec 3<>/dev/tcp/$ip/$p") 2>/dev/null '
+        '&& echo "OPEN $ip $p"; '
         "done; done; exit 0"
     )
 
@@ -77,14 +78,17 @@ def conformance_plan(
 ) -> "tuple[str | None, list[str], dict[str, tuple[str, set[int]]], list[str]]":
     """The section-6 negative checks, resolved against the plan (pure).
 
-    Returns `(defender, attacker_ips, hypervisor: {network: (address, allowed ports)}, silent_candidates)`: the defender is a guest sharing a segment with the attacker (None skips the sweep: unreachable means contained by construction); the attacker's own addresses are the sweep targets; each reserved hypervisor address may answer exactly its declared service; the candidates are conventional gateway addresses on attacker segments with NO reservation, which must be silent.
+    Returns `(defender, attacker_ips, hypervisor: {network: (address, allowed ports)}, silent_candidates)`: the defender is a guest sharing a segment with the attacker (None skips the sweep: unreachable means contained by construction); the attacker's addresses ON THE SHARED SEGMENTS are the sweep targets (an address on a segment the defender cannot reach proves nothing and would only measure the segment's drop policy); each reserved hypervisor address may answer exactly its declared service; the candidates are conventional gateway addresses on attacker segments with NO reservation, which must be silent.
+
+    A foothold plan has no dedicated attack box (the agent lands on a declared host whose services legitimately answer), so the whole plan is empty: `(None, [], {}, [])`.
     """
-    attacker = next(guest for guest in plan.guests if guest.kind == "attacker")
+    attacker = next((guest for guest in plan.guests if guest.kind == "attacker"), None)
+    if attacker is None:
+        return None, [], {}, []
     attacker_networks = {interface.network for interface in attacker.interfaces}
-    attacker_ips = [str(interface.ip) for interface in attacker.interfaces]
-    defender = next(
+    defender_guest = next(
         (
-            guest.name
+            guest
             for guest in plan.guests
             if guest.kind != "attacker"
             and attacker_networks
@@ -92,6 +96,18 @@ def conformance_plan(
         ),
         None,
     )
+    defender = defender_guest.name if defender_guest is not None else None
+    shared: set[str] = (
+        attacker_networks
+        & {interface.network for interface in defender_guest.interfaces}
+        if defender_guest is not None
+        else set()
+    )
+    attacker_ips = [
+        str(interface.ip)
+        for interface in attacker.interfaces
+        if interface.network in shared
+    ]
     assigned = {
         str(interface.ip) for guest in plan.guests for interface in guest.interfaces
     }
@@ -100,8 +116,12 @@ def conformance_plan(
     for network in plan.networks:
         if network.name not in attacker_networks:
             continue
+        # same predicate as the allocator: only range-SERVED dns (records) puts
+        # a dnsmasq listener on the bridge; nameservers/authoritative do not
         declares_dns = any(
-            spec_network.name == network.name and spec_network.dns is not None
+            spec_network.name == network.name
+            and spec_network.dns is not None
+            and spec_network.dns.records is not None
             for spec_network in spec.networks
         )
         if network.hypervisor_address is not None:
@@ -158,15 +178,33 @@ async def run_conformance_checks(
             stdin=b"",
         )
         if outcome.rc != 0:
+            hint = (
+                " (the conformance probes run bash on the guest; a guest image "
+                "without bash cannot serve as the probing endpoint)"
+                if outcome.rc in (126, 127)
+                else ""
+            )
             raise BuildError(
                 "conformance",
                 f"probe on {guest!r} exited {outcome.rc}: "
-                f"{outcome.stderr.decode(errors='replace')[-200:]}",
+                f"{outcome.stderr.decode(errors='replace')[-200:]}{hint}",
             )
         return outcome.stdout.decode(errors="replace")
 
+    attacker = next((guest for guest in plan.guests if guest.kind == "attacker"), None)
+    if attacker is None:
+        # a foothold range has no dedicated attack box: the agent lands on a
+        # declared host whose services legitimately answer, so the section-6
+        # negative checks do not apply (scope recorded in agent-containment.md)
+        if stage_log is not None:
+            stage_log.log(
+                "conformance",
+                "ok",
+                check="attacker-surface",
+                detail="foothold range: no dedicated attack box",
+            )
+        return
     defender, attacker_ips, hypervisor, silent = conformance_plan(spec, plan)
-    attacker = next(guest for guest in plan.guests if guest.kind == "attacker")
     findings: list[str] = []
     if defender is not None and attacker_ips:
         output = await execute(defender, sweep_script(attacker_ips), 240_000)
@@ -190,11 +228,12 @@ async def run_conformance_checks(
         )
     for network, (address, allowed) in hypervisor.items():
         output = await execute(attacker.name, sweep_script([address], allowed), 240_000)
-        extras = [line for line in output.splitlines() if line.startswith("OPEN ")]
-        findings += [
+        extras = [
             f"hypervisor address {address} ({network}) answers beyond its declared service: {line[5:]}"
-            for line in extras
+            for line in output.splitlines()
+            if line.startswith("OPEN ")
         ]
+        findings += extras
         if stage_log is not None:
             stage_log.log(
                 "conformance",
@@ -202,7 +241,7 @@ async def run_conformance_checks(
                 check="hypervisor-endpoint",
                 network=network,
                 allowed=",".join(str(p) for p in sorted(allowed)) or "none",
-                **({"error": "; ".join(findings)} if extras else {}),
+                **({"error": "; ".join(extras)} if extras else {}),
             )
     if silent:
         output = await execute(attacker.name, silence_script(silent), 120_000)
