@@ -87,6 +87,12 @@ grep -q '"bundle_sha256": "' "$SPIKE/tmp/builds/vulhub-zabbix/manifest.json" \
 echo "=== Z7 the realized range boots and the stack serves ==="
 $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >"$SPIKE/tmp/z7.txt" 2>&1 \
   && ok "Z7 up from the manifest-rendered bundle reaches ready" || { bad "Z7 up"; tail -5 "$SPIKE/tmp/z7.txt"; }
+RC=$(docker ps --format '{{.Names}}' | grep -E '^ir-vulhub-zabbix-.*-range-1$' | head -1)
+V6=$(docker exec "$RC" ip -6 addr show dev br-lab 2>/dev/null | grep -c inet6 || true)
+SNOOP=$(docker exec "$RC" ip -d link show br-lab 2>/dev/null | grep -o 'mcast_snooping [01]' | head -1)
+[[ "$V6" == "0" && "$SNOOP" == "mcast_snooping 0" ]] \
+  && ok "Z7c segment silence: the lab bridge has no IPv6 address and snooping is off (PR #9 live)" \
+  || bad "Z7c segment silence (inet6=$V6 snoop=$SNOOP)"
 FRONT=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --guest attacker --user root exec \
   "wget -q -O- http://web/index.php 2>/dev/null | grep -io 'zabbix' | head -1" || true)
 [[ "$FRONT" == *[Zz]abbix* ]] && ok "Z8 the frontend serves to the attacker over the range network" || bad "Z8 frontend (got: $FRONT)"
