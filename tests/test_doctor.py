@@ -679,3 +679,65 @@ def test_check_evidence_local_probe_value_error_is_a_row() -> None:
 
 # the stubbed probe of an s3:// sink lives in tests/test_evidence_s3.py
 # (that file carries the per-file boto pragmas)
+
+
+def test_check_build_absent_caches_are_healthy(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_build
+
+    results = check_build(tmp_path / "builds", tmp_path / "recipes")
+    by_name = {r.name: r for r in results}
+    assert by_name["builds cache"].status == "ok"
+    assert by_name["recipe cache"].status == "ok"
+    assert "first use" in by_name["builds cache"].detail
+    assert by_name["build nameserver"].status in ("ok", "warn")
+
+
+def test_check_build_flags_broken_recorded_state(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_build
+
+    builds = tmp_path / "builds"
+    (builds / "goodless").mkdir(parents=True)
+    (builds / "goodless" / "manifest.json").write_text("{not json")
+    recipes = tmp_path / "recipes"
+    (recipes / "acme.broken").mkdir(parents=True)
+    (recipes / "acme.broken" / "recipe.yaml").write_text("name: [unterminated")
+    results = check_build(builds, recipes)
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "fail"
+    assert "goodless" in by_name["manifests"].detail
+    assert by_name["cached recipes"].status == "fail"
+    assert "acme.broken" in by_name["cached recipes"].detail
+
+
+def test_check_build_passes_healthy_recorded_state(tmp_path: Path) -> None:
+    from inspect_ranges._build.manifest import (
+        BuildManifest,
+        VerificationRecord,
+        save_manifest,
+    )
+    from inspect_ranges._doctor.checks import check_build
+
+    from tests.test_build_recipes import write_recipe
+
+    builds = tmp_path / "builds"
+    manifest = BuildManifest(
+        range_name="healthy",
+        schema_version="0.3",
+        spec_sha256="0" * 64,
+        built_at="2026-10-18T00:00:00Z",
+        guests=(),
+        verification=VerificationRecord(
+            verified_at="2026-10-18T00:00:00Z", declarations=()
+        ),
+    )
+    save_manifest(manifest, builds)
+    recipes = tmp_path / "recipes"
+    write_recipe(recipes.parent / "range-shim", name="acme.ok")
+    (recipes).mkdir(exist_ok=True)
+    (recipes / "acme.ok").symlink_to(
+        recipes.parent / "range-shim" / "recipes" / "acme.ok"
+    )
+    results = check_build(builds, recipes)
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "ok"
+    assert by_name["cached recipes"].status == "ok"

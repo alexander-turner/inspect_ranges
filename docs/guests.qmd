@@ -283,6 +283,8 @@ With `host:`, the attacker declares no machine of its own (the foothold is the m
 
 Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest, not boot-time actions. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample.
 
+Today [`inspect-ranges build`](building.qmd) realizes `provisioning`, `services`, and `vulnerabilities`: a range declaring any of them refuses planning (`range-not-built`) until a matching build exists, then boots its captured realized images. The other content sections below validate but refuse at planning (`guest-config-not-realized`) until their build slices land, so nothing boots with silently missing content.
+
 ## Users {#users}
 
 `users` declares a guest's local accounts (routers can carry them too). Domain accounts belong in [`active_directory`](#active-directory), not here:
@@ -350,7 +352,7 @@ users = RangeSpec(
 
 ## Services {#services}
 
-`services` entries are assertions about the guest's converged listening surface, not an installation language. The build satisfies them (through a recipe, the image, or a checkpoint) and verifies them: the named service is listening on the declared port at the declared version. Installation itself belongs in [`provisioning`](#provisioning-references):
+`services` entries are assertions about the guest's converged listening surface, not an installation language. The build satisfies them (through a recipe, the image, or a checkpoint) and verifies them: the named service is listening on the declared port at the declared version. Installation itself belongs in [`provisioning`](#provisioning-references). The optional `package` names the dpkg package that embodies the service, for version attribution when the listening process cannot provide it (a PHP frontend served by apache attributes through `package: php7.4`, not the apache listener); the verification contract is in [Building Ranges](building.qmd#verification):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -775,7 +777,7 @@ ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `Gener
 
 ## Provisioning References {#provisioning-references}
 
-Everything above declares state; `provisioning` names the build-time work that produces it when the image alone does not. Steps reference recipes by name and version, in order. The recipe language itself is deliberately outside the definition: recipes run once at range build, their versions land in the build manifest, and the runtime never runs them:
+Everything above declares state; `provisioning` names the build-time work that produces it when the image alone does not. Steps reference recipes by name and version, in order. The recipe language itself is deliberately outside the definition: recipes run once at range build, their versions land in the build manifest, and the runtime never runs them (authoring guide: [Building Ranges](building.qmd#authoring-recipes)):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

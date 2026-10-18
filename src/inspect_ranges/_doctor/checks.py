@@ -19,6 +19,7 @@ VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
 IMAGE_TOOLING = "Image tooling"
+BUILD = "Build"
 
 # same minimums as inspect_ai's Docker sandbox provider (Compose 2.22.0 is its `pull --policy` floor)
 DOCKER_ENGINE_MIN_VERSION = (24, 0, 6)
@@ -53,6 +54,10 @@ def run_checks() -> list[CheckResult]:
         sink_override=os.environ.get("INSPECT_RANGES_EVIDENCE_SINK"),
         log_dir=os.environ.get("INSPECT_LOG_DIR"),
     )
+    from .._build.manifest import default_build_cache
+    from .._build.recipes import default_recipe_cache
+
+    results += check_build(default_build_cache(), default_recipe_cache())
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
     else:
@@ -619,6 +624,110 @@ def check_evidence(
             )
         )
     return results
+
+
+def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
+    """The build surface (`build-v1.md`): caches writable, cached manifests and recipe bundles parseable, and the build nameserver derivable from this host.
+
+    Caches that do not exist yet are fine (first `build` creates them); what fails is a cache that exists but cannot be used, or recorded state that no longer parses (a manifest or cached recipe that loads with an error would otherwise surface mid-build, minutes in).
+    """
+    results: list[CheckResult] = [
+        _probe_cache_dir("builds cache", build_cache),
+        _probe_cache_dir("recipe cache", recipe_cache),
+    ]
+    if build_cache.is_dir():
+        broken: list[str] = []
+        for manifest_file in sorted(build_cache.glob("*/manifest.json")):
+            try:
+                from .._build.manifest import BuildManifest
+
+                BuildManifest.model_validate_json(manifest_file.read_text())
+            except Exception as error:
+                broken.append(f"{manifest_file.parent.name} ({error})")
+        if broken:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "manifests",
+                    "fail",
+                    f"unparseable build manifest(s): {'; '.join(broken[:3])}",
+                    fix="delete the broken manifest directory and run `inspect-ranges build` again",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "manifests",
+                    "ok",
+                    f"{len(list(build_cache.glob('*/manifest.json')))} recorded build(s) parse",
+                )
+            )
+    if recipe_cache.is_dir():
+        bad: list[str] = []
+        bundles = sorted(path.parent for path in recipe_cache.glob("*/recipe.yaml"))
+        for bundle in bundles:
+            try:
+                from .._build.recipes import load_recipe
+
+                load_recipe(bundle, source="cache")
+            except Exception as error:
+                bad.append(f"{bundle.name} ({error})")
+        if bad:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "cached recipes",
+                    "fail",
+                    f"unloadable cached recipe(s): {'; '.join(bad[:3])}",
+                    fix="remove the broken bundle from the recipe cache; range-local ./recipes/ bundles are unaffected",
+                )
+            )
+        elif bundles:
+            results.append(
+                CheckResult(
+                    BUILD, "cached recipes", "ok", f"{len(bundles)} bundle(s) load"
+                )
+            )
+    from .._build.orchestrate import FALLBACK_BUILD_NAMESERVER, default_build_nameserver
+
+    nameserver = default_build_nameserver()
+    if nameserver == FALLBACK_BUILD_NAMESERVER:
+        results.append(
+            CheckResult(
+                BUILD,
+                "build nameserver",
+                "warn",
+                f"no host resolver derivable from resolv.conf; builds fall back to {nameserver}, which VPC-restricted deployments often block",
+                fix="pass --build-nameserver <ip> to `inspect-ranges build` (your VPC's resolver)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(BUILD, "build nameserver", "ok", f"host-derived {nameserver}")
+        )
+    return results
+
+
+def _probe_cache_dir(name: str, root: Path) -> CheckResult:
+    """A cache dir is healthy when absent (first use creates it) or writable."""
+    import uuid
+
+    if not root.exists():
+        return CheckResult(BUILD, name, "ok", f"{root} (absent; created on first use)")
+    try:
+        probe = root / f".doctor-probe-{uuid.uuid4().hex}"
+        probe.write_bytes(b"doctor")
+        probe.unlink()
+        return CheckResult(BUILD, name, "ok", f"writable at {root}")
+    except OSError as error:
+        return CheckResult(
+            BUILD,
+            name,
+            "fail",
+            f"{root} is not writable ({error})",
+            fix=f"make {root} writable by this user, or point the cache env var elsewhere",
+        )
 
 
 def _probe_local_sink(base: str) -> CheckResult:

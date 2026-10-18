@@ -1,0 +1,122 @@
+---
+title: "Building Ranges"
+description: "How declared guest content becomes captured, verified images: the build command, recipe authoring, verification, and behavioral checks."
+llms-description: "Reference for inspect-ranges build: the build-aware gate, recipe bundles and the IR_* execution contract, incremental rebuilds and caching, declaration verification, and challenge behavioral checks."
+---
+
+## What the build is
+
+A definition's [guest content](guests.qmd#guest-content) describes converged state: services listening at versions, seeded vulnerabilities, provisioning steps that produce them. None of that is applied at boot. `inspect-ranges build` realizes it once: the range boots on an egress-enabled build plan, recipes converge each guest, every declaration is verified against the live guests, each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning.
+
+```{.bash filename="Terminal"}
+cd my-range/        # range.yaml plus ./recipes/
+inspect-ranges build
+```
+
+Until a range has a matching build, every content-consuming verb refuses with `range-not-built`: `plan`, `render`, `up --from-spec`, and the sandbox provider all check for a manifest whose spec hash matches the definition and whose realized images verify by digest in the image cache. The refusal names the fix (`run inspect-ranges build first`); nothing ever boots with silently missing content.
+
+## What a build does
+
+1. **The egress build plan.** Routerless isolated networks are transformed, for the build only, into NAT networks with full egress and a host-derived nameserver (deployments that force DNS through a VPC resolver are the norm; `--build-nameserver` overrides). The runtime spec is untouched: samples boot with the isolation the definition declares. A per-guest network-settle gate holds each guest's first recipe until in-guest name resolution works.
+2. **Recipes**, in declaration order per guest (see [Authoring recipes](#authoring-recipes)).
+3. **Verification** of every declared `services` and `vulnerabilities` entry against the live guests, independent of what the recipes claimed (see [Verification](#verification)).
+4. **Capture.** Each provisioned guest is cleanly shut down and its overlay captured into the image cache as a realized image (a qcow2 rebased onto its golden, digest-recorded, with a provenance sidecar).
+5. **The manifest.** The builds cache (`~/.cache/inspect-ranges/builds/<range>/manifest.json`, or `INSPECT_RANGES_BUILD_CACHE`) records the spec and its hash, every guest's build key and realized digest, recipe versions and digests, base-image digests, and the verification results.
+6. **Behavioral checks**, when the range declares them: the captured images boot once more and each challenge's reference/insufficient/forged chains run against the thing that ships (see [Behavioral checks](#behavioral-checks)). The manifest lands on disk only after this phase passes; a build interrupted or failed at any point before full proof leaves no consumable manifest.
+
+`--keep` preserves the build range (success or failure) for diagnosis; a kept build captures nothing and mints no manifest. On failure the error names the stage and guest and points at the recipe log; the range tears down unless kept.
+
+## Incremental rebuilds
+
+Each guest gets a build key: a hash of its golden image digest, its own spec declarations, and its ordered recipe digests with their variables. On rebuild:
+
+- A guest whose key is unchanged boots from its captured realized image with its recipes skipped; verification still covers it in full.
+- A guest whose recipe, variables, declarations, or golden changed rebuilds from its golden.
+- When every key matches, the spec hash matches, and the behavioral-check inputs are unchanged, the build is a no-op: nothing boots, and the recorded verification is reported with its timestamp in seconds. `--reverify` forces the full boot-and-verify pass anyway.
+- Check scripts and `challenges.yaml` are build inputs through their own content digest: authoring or editing a check after a green build re-runs the pass (guests are reused; only the proof re-runs).
+
+## Authoring recipes {#authoring-recipes}
+
+A recipe is a content-addressed bundle: a directory holding the recipe's code plus a `recipe.yaml` self-description. Resolution looks in the range directory first (`./recipes/<name>/`), then the shared recipe cache (`~/.cache/inspect-ranges/recipes/`, or `INSPECT_RANGES_RECIPE_CACHE`). The bundle's identity is a deterministic digest over its files (paths, content, executable bits), recorded in the build manifest; editing any bundle file invalidates exactly the guests that reference it.
+
+```{.yaml filename="recipes/acme.telemetry_stack/recipe.yaml"}
+name: acme.telemetry_stack       # the name provisioning steps reference
+version: "2.1"                   # recorded in the manifest; steps may pin it
+entrypoint: run.sh               # executable, relative to the bundle
+mode: online                     # online converges a booted guest (v1); offline parses but refuses
+inputs:
+  splunk_ip:
+    description: Indexer address written into outputs.conf
+  verbose:
+    default: false               # a default makes an input optional; none makes it required
+```
+
+The entrypoint runs **on the host**, with the bundle directory as working directory and the step's validated `vars` as environment variables. Guest access goes through the `IR_*` contract:
+
+| Variable | Contents |
+|---|---|
+| `IR_GUEST` | The target guest's name |
+| `IR_GUEST_CIDS` | JSON map of every guest name to its vsock CID |
+| `IR_EXEC` | Path to a wrapper that runs a command in the target guest as root (`--budget-ms` bounds it; `--user` switches principal) |
+| `IR_PUSH` | Path to a wrapper that pushes a local file to a guest path (`--mode` sets permissions) |
+| `IR_EXEC_BUDGET_MS` | The default per-exec budget |
+
+Exit status 0 is demanded and is never sufficient: verification of the declared state happens independently, after all recipes. The whole entrypoint is bounded by `--recipe-budget` (default 1800 s) and killed as a process group on expiry, so stray children cannot hold the build.
+
+### The house entrypoint style
+
+Two conventions, both learned from undiagnosable failures:
+
+**Every step announces itself and surfaces its evidence.** A recipe whose steps are silent (`wget -q`, output redirected into in-guest files) fails as "exited 1" with a log that ends at the previous step. Print a marker before each step, and on failure of a step whose output went to an in-guest file, tail that file to stderr:
+
+```{.bash filename="recipes/acme.telemetry_stack/run.sh"}
+#!/bin/sh
+set -e
+exec_guest() { "$IR_EXEC" --budget-ms 600000 -- sh -c "$1"; }
+
+echo "step: fetch vendor tarball"
+exec_guest 'cd /opt && wget -nv -t 5 --waitretry=15 -O stack.tar.gz "https://..." && tar -xzf stack.tar.gz'
+
+echo "step: compile"
+exec_guest 'cd /opt/stack && { ./configure >/tmp/configure.log 2>&1 || { echo "configure failed:" >&2; tail -30 /tmp/configure.log >&2; exit 1; }; } && make -s install >/tmp/make.log 2>&1'
+```
+
+**Variables never splice into guest shell strings.** A step's `vars` arrive as host environment; interpolating them into a single-quoted `sh -c` string hands the variable's value to the guest shell as code. Pass values through `IR_PUSH`ed files, or expand them host-side into positional arguments:
+
+```{.bash}
+# UNSAFE: $splunk_ip is parsed by the guest shell; a crafted value injects
+exec_guest "sed -i 's/HOST/$splunk_ip/' /etc/stack/outputs.conf"
+
+# Safe: the value travels as file content, never as shell text
+printf '%s' "$splunk_ip" > /tmp/host.$$
+"$IR_PUSH" /tmp/host.$$ /etc/stack/indexer_host --mode 644
+rm -f /tmp/host.$$
+```
+
+### Period software (the era-archive pattern)
+
+Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. The `vulhub-zabbix` example range is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar actually requires.
+
+## Verification {#verification}
+
+After all recipes, every declared `services` and `vulnerabilities` entry is checked against the live guests over the control channel, whole-range, with one probe per guest:
+
+- A service with a `port` must have a TCP or UDP socket listening on it in-guest.
+- A service with a `version` must match the observed version: attribution tries the declared `package` (a dpkg name), then the listener's process chain (port → pid → exe → owning package), then an exact-name dpkg lookup. Declared versions match as a component prefix of the upstream version, epochs stripped (`"3.0"` matches `1:3.0.3+dfsg-1`); pre-release observations (`~`) never satisfy a release declaration. A declared version that cannot be attributed fails, naming the paths tried.
+- A vulnerability with a `service` reference verifies exactly when its service verifies; one without a reference verifies vacuously and is recorded as such. Exploitability proof lives in [behavioral checks](#behavioral-checks), not here.
+
+Failures produce coded refusals (`service-not-verified`, `vulnerability-not-verified`) with the declared-versus-observed delta and the probe log path, and the build fails. Software installed from tarballs has no dpkg identity: declare its service by port alone and record the version in the range's notes.
+
+## Behavioral checks {#behavioral-checks}
+
+A range that carries challenges can prove them at build time. Convention: `checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script executed on the attacker guest with `IR_ATTACKER_IP` exported, emitting `SUBMIT <goal-id> <value>` lines. The contract:
+
+- `reference.sh` must exercise the real attack chain and score 1.0 with validity `valid` (beacons corroborated in the range's packet capture).
+- `insufficient.sh` must do real but incomplete work and score 0.0.
+- `forged.sh` must submit plausible fakes and score 0.0.
+
+The checks run against the **captured** realized images in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Each check gets fresh per-sample proof material (plants), removed afterward; nothing a check planted survives as a valid secret at runtime. A declared checks tree must be complete: a misnamed directory or missing script refuses rather than silently skipping, and any failure, of a check or of the phase's own infrastructure, leaves no manifest. The build reports `behavioral` stage lines per check and records the results in the manifest.
+
+## Diagnosing failures
+
+Every failure names its stage (`recipe`, `verify`, `capture`, `manifest`, `behavioral`, `teardown`) and, where it has one, the guest. Recipe output lands in one log per run under the project state directory (`~/.local/state/inspect-ranges/projects/<project>/recipes/`); the error carries the path and a tail. `--keep` holds the failed range up for inspection (`inspect-ranges down <project>` when done). `inspect-ranges doctor` checks the build surface up front: cache writability, recorded manifests and cached recipe bundles still parse, and whether a build nameserver is derivable from this host.
