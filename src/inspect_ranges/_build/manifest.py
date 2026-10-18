@@ -12,11 +12,15 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
 from .._diagnostics import Issue
 from ..types import Host
+
+if TYPE_CHECKING:
+    from ..types import RangeSpec
 from .recipes import ResolvedRecipe, VarValue
 from .verify import DeclarationResult
 
@@ -231,3 +235,87 @@ def manifest_matches_spec(manifest: BuildManifest, spec_sha256: str) -> bool:
 def now_iso() -> str:
     """UTC timestamp in the manifest's format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def apply_build_manifest(
+    spec: "RangeSpec",
+    *,
+    image_cache: Path,
+    build_cache: Path,
+) -> "tuple[RangeSpec, frozenset[str], BuildManifest | None]":
+    """The build-aware runtime gate (ratified 2026-10-17): consume a matching build manifest, or refuse.
+
+    A spec with no realized-content sections passes through untouched. One with content requires a manifest built from exactly this (normalized) spec whose realized images verify in the cache: hosts then boot their captured realized images and the manifest's sections count as realized at planning. Anything else refuses with `range-not-built`: honest-but-inert became honest-or-built.
+
+    Returns:
+        The (possibly swapped) spec, the realized sections for `PlanOptions`, and the consumed manifest (None when the spec carries no content).
+
+    Raises:
+        IssueError: `range-not-built` when content is declared and no matching, verifiable build exists.
+    """
+    from ..types import IssueError  # local: keep module import-light
+    from ..types import RangeSpec as _RangeSpec
+
+    content_hosts = [
+        host
+        for host in spec.hosts
+        if host.provisioning or host.services or host.vulnerabilities
+    ]
+    if not content_hosts:
+        return spec, frozenset(), None
+
+    def refuse(reason: str, hint: str) -> "IssueError":
+        return IssueError(
+            [
+                Issue(
+                    code="range-not-built",
+                    path=("range", "name"),
+                    message=f"range {spec.meta.name!r} declares guest content but {reason}",
+                    hint=hint,
+                )
+            ]
+        )
+
+    manifest = load_manifest(build_cache, spec.meta.name)
+    if manifest is None:
+        raise refuse(
+            "no build manifest exists for it",
+            "run `inspect-ranges build` first (guest content realizes at build, never at boot)",
+        )
+    from .._compiler.plan import spec_sha256 as _spec_sha256
+
+    if not manifest_matches_spec(manifest, _spec_sha256(spec)):
+        raise refuse(
+            "the recorded build is for a different spec revision",
+            "the spec changed since the last build; run `inspect-ranges build` again",
+        )
+    import hashlib as _hashlib
+
+    swapped = spec.model_copy(deep=True)
+    for host in swapped.hosts:
+        record = manifest.guest(host.name)
+        if record is None:
+            if host.provisioning or host.services or host.vulnerabilities:
+                raise refuse(
+                    f"its build manifest has no record for guest {host.name!r}",
+                    "run `inspect-ranges build` again",
+                )
+            continue
+        realized = image_cache / record.realized_file
+        if not realized.is_file():
+            raise refuse(
+                f"the realized image {record.realized_file!r} for guest {host.name!r} is not in the image cache",
+                "rebuild, or pull the build artifacts into the cache",
+            )
+        hasher = _hashlib.sha256()
+        with open(realized, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 22), b""):
+                hasher.update(chunk)
+        if hasher.hexdigest() != record.realized_sha256:
+            raise refuse(
+                f"the realized image for guest {host.name!r} does not match the manifest's digest",
+                "the cache copy changed since the build; rebuild",
+            )
+        host.image = record.realized_file
+    assert isinstance(swapped, _RangeSpec)
+    return swapped, frozenset(manifest.realized_sections), manifest

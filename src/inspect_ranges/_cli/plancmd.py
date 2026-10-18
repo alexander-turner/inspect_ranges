@@ -4,6 +4,12 @@ from pathlib import Path
 
 import click
 
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    load_manifest,
+    save_manifest,
+)
 from .._compiler import PlanOptions, plan_json, render_bundle, resolve_plan
 from .._diagnostics import IssueError, ValidationReport, locate, parse_marked
 from .._runtime.images import default_image_cache
@@ -76,10 +82,16 @@ def plan(
     spec = load_or_exit(ctx, path)
     if image_cache is None:
         image_cache = default_image_cache()
-    options = PlanOptions(
-        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
-    )
     try:
+        spec, realized_sections, _ = apply_build_manifest(
+            spec, image_cache=image_cache, build_cache=default_build_cache()
+        )
+        options = PlanOptions(
+            image_cache=image_cache,
+            cpu_model=cpu_model,
+            cid_base=cid_base,
+            realized_sections=realized_sections,
+        )
         resolved = resolve_plan(spec, options)
     except IssueError as error:
         click.echo(planning_report(path, error).render())
@@ -157,13 +169,17 @@ def render(
     spec = load_or_exit(ctx, path)
     if image_cache is None:
         image_cache = default_image_cache()
-    options = PlanOptions(
-        image_cache=image_cache,
-        cpu_model=cpu_model,
-        cid_base=cid_base,
-        evidence_capture=evidence_capture,
-    )
     try:
+        spec, realized_sections, consumed = apply_build_manifest(
+            spec, image_cache=image_cache, build_cache=default_build_cache()
+        )
+        options = PlanOptions(
+            image_cache=image_cache,
+            cpu_model=cpu_model,
+            cid_base=cid_base,
+            evidence_capture=evidence_capture,
+            realized_sections=realized_sections,
+        )
         render_bundle(spec, out, options)
     except IssueError as error:
         click.echo(planning_report(path, error).render())
@@ -171,6 +187,15 @@ def render(
     manifest_bytes = (out / "manifest.json").read_bytes()
     manifest = json_module.loads(manifest_bytes)
     digest = hashlib.sha256(manifest_bytes).hexdigest()
+    if consumed is not None:
+        # wraps-by-reference: the build manifest records the runtime bundle
+        # rendered from it (the spine's two-manifest decision)
+        build_manifest = load_manifest(default_build_cache(), consumed.range_name)
+        if build_manifest is not None:
+            save_manifest(
+                build_manifest.model_copy(update={"bundle_sha256": digest}),
+                default_build_cache(),
+            )
     click.echo(
         f"{click.style('✓', fg='green')} {out}  bundle sha256:{digest[:16]}  ({len(manifest['files']) + 1} files)"
     )

@@ -45,7 +45,7 @@ def test_spec_verbs_accept_a_range_directory(tmp_path: Path) -> None:
     assert ok.exit_code == 0 and "vulhub-zabbix" in ok.output
     plan_result = CliRunner().invoke(ranges, ["plan", str(range_dir)])
     assert plan_result.exit_code == 1
-    assert "has not yet realized" in plan_result.output  # planning gates, positioned
+    assert "declares guest content but" in plan_result.output  # the build-aware gate
     empty = CliRunner().invoke(ranges, ["validate", str(tmp_path)])
     assert empty.exit_code == 2 and "range.yaml" in empty.output
 
@@ -88,12 +88,11 @@ def test_plan_json_contract(tmp_path: Path) -> None:
 
 
 def test_plan_gates_migrated_guest_content() -> None:
+    """The build-aware gate (slice 6): unbuilt content refuses range-not-built, pointing at build."""
     result = CliRunner().invoke(ranges, ["plan", EXAMPLE])
     assert result.exit_code == 1
-    assert (
-        "guest-config-not-realized" in result.output
-        or "not yet realized" in result.output
-    )
+    assert "declares guest content but" in result.output
+    assert "inspect-ranges build" in result.output
 
 
 def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
@@ -113,16 +112,14 @@ def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
 
 
 def test_plan_refuses_windows_examples() -> None:
+    """Content-carrying Windows examples hit the build-aware gate first (build itself still refuses Windows render; unit-covered in test_plan.py)."""
     goad = str(
         Path(__file__).parent.parent
         / "design/inspect-ranges/ranges/goad-light/range.yaml"
     )
     result = CliRunner().invoke(ranges, ["plan", goad])
     assert result.exit_code == 1
-    assert (
-        "windows-render-not-supported" in result.output
-        or "Windows guest" in result.output
-    )
+    assert "declares guest content but" in result.output
 
 
 def test_devbox_command_registered() -> None:
