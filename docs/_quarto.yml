@@ -20,6 +20,8 @@ inspect-docs:
           href: guests.qmd
         - text: Networks
           href: networks.qmd
+    - text: Building Ranges
+      href: building.qmd
     - text: Running Ranges
       href: cli.qmd
     - text: Sandbox Provider
