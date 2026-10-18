@@ -86,7 +86,18 @@ Alternatives weighed (2026-10-01), and why Docker stays:
 - **containerd/nerdctl, systemd-nspawn, raw runc** — remove dockerd, then reimplement image distribution, lifecycle, and limits with less tooling. Worse, raw containerd applies **no default seccomp or AppArmor confinement** — Docker's defaults are load-bearing on the range container (the second boundary in the escape chain), so a lower-level runtime would mean hand-maintaining that security-critical configuration forever. Rejected.
 - **gVisor / Kata / Firecracker / outer VM as the container layer** — structurally unfit: gVisor cannot pass KVM ioctls; the others reintroduce nesting or cannot expose KVM at all. Rejected above.
 
-**Open question (not an action): libvirtd itself.** The heavyweight surface inside the range container is libvirtd, of which we use a thin slice (domain lifecycle, console, screenshot, hotplug). Driving QEMU directly would shrink the container's daemon surface at the cost of reimplementing that slice. Same trade-off structure as the Docker question; park until the sandbox provider's real libvirt usage is known.
+**Open question (not an action): libvirtd itself.** The heavyweight surface inside the range container is libvirtd, of which we use a thin slice (domain lifecycle, console, screenshot, hotplug). Driving QEMU directly would shrink the container's daemon surface at the cost of reimplementing that slice. Same trade-off structure as the Docker question; park until the sandbox provider's real libvirt usage is known. *Partially resolved for the attack box (below): the most adversarial guest no longer has libvirtd or QEMU in its path at all.*
+
+## The attack box runs on Cloud Hypervisor by default (2026-10-19)
+
+The guest whose VM-escape surface matters most is the attack box: it runs the adversarial workload, takes the heaviest exec/file traffic, and is the one guest an agent drives directly. It now defaults to Cloud Hypervisor instead of QEMU/libvirt (contributed as PR #10, reworked for the build pipeline and flipped in-tree), which changes the escape calculus in four ways:
+
+- **A smaller, memory-safe device model.** Cloud Hypervisor is rust-vmm userspace with virtio-only devices; the q35 legacy surface (already minimized for QEMU guests) does not exist at all. The binary and its firmware are sha256-pinned into the range image.
+- **Per-guest unprivileged identity.** Each VMM runs as its own uid, derived from the guest's leased vsock CID (`CH_UID_BASE + cid`), with no capabilities and Cloud Hypervisor's default seccomp filter. Against QEMU's shared `libvirt-qemu` uid, an escape from one CH guest lands in a uid that owns nothing else, not even a sibling VMM's processes or sockets.
+- **No management daemon in the path.** The attack box has no libvirtd and no QMP socket; the boot script starts the VMM directly and teardown works by process and ownership records, so the range container's richest daemon surface is not reachable from the most adversarial guest's VMM.
+- **A credential-checked control plane.** CH guests are reached over the VMM's hybrid-vsock Unix socket, not `AF_VSOCK`; every host-side dialer verifies the socket peer's uid (`SO_PEERCRED`) against the VMM's before sending a byte and refuses a mismatch without retry, so a squatted socket path gets nothing. The sockets live in a private per-user directory the realizer owns.
+
+Hosts and routers stay on QEMU by default and may opt in per guest (`vmm: cloud-hypervisor`); a CH guest cannot carry buildable guest content yet (the build captures through libvirt), which planning refuses fail-closed. Declaring `vmm: qemu` on the attacker restores the old behavior. Live proof: the ch-vmm battery (first boot, unprivileged uid, hybrid channel, teardown) and the vulhub battery's full CVE chain executing from a Cloud Hypervisor attack box.
 
 ## How hard is the QEMU boundary? (grading the escape tiers)
 
