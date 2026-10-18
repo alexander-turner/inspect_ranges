@@ -7,6 +7,7 @@ import click
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
+    realized_backings,
     stamp_bundle_sha256,
 )
 from .._compiler import PlanOptions, plan_json, render_bundle, resolve_plan
@@ -178,6 +179,7 @@ def render(
             cid_base=cid_base,
             evidence_capture=evidence_capture,
             realized_sections=realized_sections,
+            realized_backings=realized_backings(consumed) if consumed else {},
         )
         render_bundle(spec, out, options)
     except IssueError as error:

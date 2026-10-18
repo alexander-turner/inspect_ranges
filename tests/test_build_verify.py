@@ -78,6 +78,8 @@ def test_parse_packages_and_attributions() -> None:
         # round-1: the +really downgrade convention binds to what ships
         ("1.18.0", "1.18.0+really1.16.1-1", False),
         ("1.16", "1.18.0+really1.16.1-1", True),
+        # round-2: a verbatim-copied +really declaration matches itself
+        ("1.18.0+really1.16.1", "1.18.0+really1.16.1-1", True),
     ],
 )
 def test_version_matches(declared: str, observed: str, expected: bool) -> None:
@@ -185,11 +187,15 @@ def test_parse_packages_filters_removed_but_not_purged() -> None:
     output = (
         "nginx-core\t1.18.0-6ubuntu14.4\tinstall ok installed\n"
         "oldpkg\t2.0-1\tdeinstall ok config-files\n"
+        "pinned\t1.2.3-1\thold ok installed\n"
         "legacyline\t3.1-2\n"
     )
     packages = parse_packages(output)
     assert packages == {
         "nginx-core": "1.18.0-6ubuntu14.4",
+        # held-but-installed stays counted (round-2: apt-mark hold is the
+        # canonical pin for vulnerable-by-design versions)
+        "pinned": "1.2.3-1",
         # a status-less line (the pre-review probe shape) stays accepted
         "legacyline": "3.1-2",
     }

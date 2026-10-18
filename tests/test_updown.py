@@ -760,3 +760,41 @@ def test_raising_on_stage_callback_never_alters_up(
     assert (broken_state / result.project / "stages.jsonl").read_bytes() == (
         plain_state / plain.project / "stages.jsonl"
     ).read_bytes()
+
+
+def test_up_verifies_the_realized_overlays_backing_golden(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-2 blocking: the overlay's digest cannot see its backing, and goldens re-derive in place under the same name, so boot.json records the backing and up re-verifies it."""
+    import hashlib as hashlib_module
+    import json as json_module
+
+    (cache / "web-backing.qcow2").write_bytes(b"backing")
+    backing_digest = f"sha256:{hashlib_module.sha256(b'backing').hexdigest()}"
+    out = tmp_path / "backed-bundle"
+    render_bundle(
+        tiny_spec(),
+        out,
+        PlanOptions(
+            image_cache=cache,
+            cid_base=3000,
+            realized_backings={"web": ("web-backing.qcow2", backing_digest)},
+        ),
+    )
+    boot = json_module.loads((out / "boot.json").read_text())
+    web = next(guest for guest in boot["guests"] if guest["name"] == "web")
+    assert web["backing_file"] == "web-backing.qcow2"
+    assert web["backing_digest"] == backing_digest
+    # a golden re-derived in place under the same name: refuse naming the cause
+    (cache / "web-backing.qcow2").write_bytes(b"backing-v2")
+    with pytest.raises(
+        UpError, match=r"\[verify-images\] guest 'web'.*backing golden.*rebuild"
+    ):
+        up(out, options(cache, tmp_path), runner=FakeDocker())
+    # a missing backing: refuse naming the remedy
+    (cache / "web-backing.qcow2").unlink()
+    with pytest.raises(
+        UpError,
+        match=r"\[verify-images\] guest 'web'.*backing golden.*not in the cache",
+    ):
+        up(out, options(cache, tmp_path), runner=FakeDocker())

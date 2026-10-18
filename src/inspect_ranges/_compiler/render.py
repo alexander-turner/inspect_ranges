@@ -332,6 +332,7 @@ def render_bundle(
             ),
         )
 
+    backings = options.realized_backings if options is not None else {}
     write(
         "boot.json",
         json.dumps(
@@ -343,6 +344,10 @@ def render_bundle(
                         "cid": guest.cid,
                         "image_file": guest.image.file,
                         "image_digest": guest.image.digest,
+                        # a realized overlay's backing golden, verified by up
+                        # at boot (the overlay digest cannot see its backing)
+                        "backing_file": backings.get(guest.name, (None, None))[0],
+                        "backing_digest": backings.get(guest.name, (None, None))[1],
                         "overlay_gb": guest.disk_gb,
                         "readiness": guest.readiness,
                     }

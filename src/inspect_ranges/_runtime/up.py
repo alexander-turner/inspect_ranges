@@ -235,6 +235,9 @@ class BootGuest(BaseModel):
     cid: int = Field(ge=3)
     image_file: str = Field(pattern=_SAFE_NAME)
     image_digest: str | None = None
+    backing_file: str | None = Field(default=None, pattern=_SAFE_NAME)
+    """A realized overlay's backing golden in the cache; verified at boot like the overlay itself (round-2 review: the overlay digest cannot see its backing, and goldens re-derive in place under the same name)."""
+    backing_digest: str | None = None
     overlay_gb: int = Field(ge=1)
     readiness: Literal["cloud-init"]
 
@@ -437,6 +440,25 @@ def up(
                     "re-render the bundle",
                     guest=guest.name,
                 )
+        if guest.backing_file is not None:
+            backing = options.image_cache / guest.backing_file
+            if not backing.is_file():
+                raise UpError(
+                    "verify-images",
+                    f"backing golden {guest.backing_file} for {guest.image_file} is not in the cache {options.image_cache}; "
+                    "re-derive the golden or pull the build artifacts",
+                    guest=guest.name,
+                )
+            if guest.backing_digest:
+                actual = f"sha256:{_sha256(backing)}"
+                if actual != guest.backing_digest:
+                    raise UpError(
+                        "verify-images",
+                        f"backing golden {guest.backing_file} digest {actual} does not match the build's {guest.backing_digest}: "
+                        "the golden was re-derived since the build, so the realized overlay would boot over a composition "
+                        "no build verified; rebuild the range",
+                        guest=guest.name,
+                    )
 
     try:
         range_image = ensure_range_image(

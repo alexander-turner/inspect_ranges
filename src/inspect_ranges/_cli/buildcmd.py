@@ -1,4 +1,4 @@
-"""The `build` verb (build-v1 slice 2): boot the egress build plan, run recipes, tear down."""
+"""The `build` verb: the full author loop (recipes, verification, capture, manifest, behavioral checks)."""
 
 from pathlib import Path
 from typing import Any
@@ -95,6 +95,20 @@ def _echo_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
 )
 @click.option("--readiness-timeout", type=float, default=300.0, show_default=True)
 @click.option(
+    "--settle-probe",
+    default=None,
+    show_default="archive.ubuntu.com",
+    help="Hostname each guest must resolve before its first recipe runs; pass 'off' to skip the gate (fleets whose resolver answers only internal names).",
+)
+@click.option(
+    "--settle-timeout",
+    "settle_timeout_s",
+    type=float,
+    default=None,
+    show_default="90",
+    help="Seconds to wait for the settle probe per guest.",
+)
+@click.option(
     "--recipe-budget",
     "recipe_budget_s",
     type=float,
@@ -115,11 +129,13 @@ def build(
     build_cache: Path | None,
     reverify: bool,
     readiness_timeout: float,
+    settle_probe: str | None,
+    settle_timeout_s: float | None,
     recipe_budget_s: float,
 ) -> None:
-    """Build PATH (default `.`): boot the range's egress build plan and run its provisioning recipes.
+    """Build PATH (default `.`): realize, verify, capture, and prove the range's declared guest content.
 
-    The build boots an egress-enabled variant of the range (runtime isolation is untouched), runs each host's `provisioning` steps in declaration order against the live guests, and tears the range down on success and on failure (`--keep` preserves it for diagnosis). Verification of declared state and the build manifest arrive with later build-v1 slices.
+    The build boots an egress-enabled variant of the range (runtime isolation is untouched), runs each host's `provisioning` steps in declaration order, verifies every declared service and vulnerability against the live guests, captures each provisioned guest as a realized image, runs any declared behavioral checks against the captured artifacts, and records the build manifest that `plan`/`render`/`up`/the provider consume. Rebuilds are incremental per guest; an unchanged range is a cached no-op. `--keep` preserves the running range for diagnosis (and captures nothing). Full reference: the Building Ranges docs page.
     """
     spec_path = resolve_spec_path(path)
     spec = load_or_exit(ctx, spec_path)
@@ -135,6 +151,12 @@ def build(
         readiness_timeout=readiness_timeout,
         recipe_budget_s=recipe_budget_s,
     )
+    if settle_probe is not None:
+        options = options.model_copy(
+            update={"settle_probe": None if settle_probe == "off" else settle_probe}
+        )
+    if settle_timeout_s is not None:
+        options = options.model_copy(update={"settle_timeout_s": settle_timeout_s})
     try:
         result = build_range(spec, spec_path.parent, options, on_stage=_echo_stage)
     except IssueError as error:
@@ -160,5 +182,7 @@ def build(
     if result.kept:
         click.echo(
             f"range kept running; tear down with: inspect-ranges down {result.project}"
+            " (it holds this --cid-base's vsock CIDs: tear down before rebuilding,"
+            " or rebuild with a different --cid-base)"
         )
     ctx.exit(0)

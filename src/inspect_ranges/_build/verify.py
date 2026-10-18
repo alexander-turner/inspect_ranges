@@ -108,7 +108,10 @@ def parse_packages(output: str) -> dict[str, str]:
         version, _, status = rest.partition("\t")
         if not (name and version):
             continue
-        if status and status.strip() != "install ok installed":
+        # Status is `want error-flag status`: match the status WORD so
+        # held-but-installed packages (apt-mark hold, the canonical pin for
+        # vulnerable-by-design versions) stay counted (round-2 review)
+        if status and status.strip().split()[-1] != "installed":
             continue
         packages[name.strip()] = version.strip()
     return packages
@@ -133,6 +136,10 @@ def version_matches(declared: str, observed: str) -> bool:
     wanted = declared.split(":", 1)[-1]
     if "+really" in upstream:
         upstream = upstream.split("+really", 1)[1]
+        # an author who copied the shipped string verbatim declared the same
+        # convention; bind both sides to what actually ships (round-2 review)
+        if "+really" in wanted:
+            wanted = wanted.split("+really", 1)[1]
     if not upstream.startswith(wanted):
         return False
     if len(upstream) == len(wanted):

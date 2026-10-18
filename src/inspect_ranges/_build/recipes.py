@@ -366,8 +366,11 @@ def validate_vars(
             )
             continue
         env[key] = rendered
+    reported_invalid = {
+        issue.path[-1] for issue in issues if issue.code == "recipe-var-invalid"
+    }
     for key, declared in recipe.spec.inputs.items():
-        if key in env:
+        if key in env or key in reported_invalid:
             continue
         if declared.default is None:
             issues.append(

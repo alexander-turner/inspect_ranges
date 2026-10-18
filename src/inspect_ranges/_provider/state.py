@@ -15,7 +15,11 @@ from inspect_ai.util._sandbox.lifecycle import (
     sandbox_lifecycle_state,
 )
 
-from .._build.manifest import apply_build_manifest, default_build_cache
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._channel.channel import MessageChannel
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
@@ -109,7 +113,8 @@ class ProviderRuntime:
         self._allocator: CidAllocator | None = None
         self._host_provider: HostProvider | None = None
         self._resolved: dict[
-            str | RangeSpec, tuple[RangeSpec, ResolvedPlan, frozenset[str]]
+            str | RangeSpec,
+            tuple[RangeSpec, ResolvedPlan, frozenset[str], dict[str, tuple[str, str]]],
         ] = {}
         if self.host_backend.startswith("uds:"):
             # the derived seams install at construction, not lazily: paths
@@ -177,7 +182,7 @@ class ProviderRuntime:
 
     def resolve_config(
         self, config: "str | RangeSpec", resolver: Callable[[], RangeSpec]
-    ) -> tuple[RangeSpec, ResolvedPlan, frozenset[str]]:
+    ) -> tuple[RangeSpec, ResolvedPlan, frozenset[str], dict[str, tuple[str, str]]]:
         """The validated spec, base plan, and realized sections for one config, resolved once per batch.
 
         Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample. The build-aware gate applies here (build-v1 slice 6): a spec with guest content consumes its build manifest (hosts swap to the captured realized images; the manifest's sections count as realized at planning) or refuses `range-not-built` before anything boots.
@@ -186,14 +191,18 @@ class ProviderRuntime:
         if cached is not None:
             return cached
         spec = resolver()
-        spec, realized_sections, _ = apply_build_manifest(
+        spec, realized_sections, consumed = apply_build_manifest(
             spec, image_cache=self.image_cache, build_cache=default_build_cache()
         )
+        backings = realized_backings(consumed) if consumed else {}
         plan = resolve_plan(
-            spec, self.plan_options(realized_sections=realized_sections)
+            spec,
+            self.plan_options(
+                realized_sections=realized_sections, realized_backings=backings
+            ),
         )
-        self._resolved[config] = (spec, plan, realized_sections)
-        return spec, plan, realized_sections
+        self._resolved[config] = (spec, plan, realized_sections, backings)
+        return spec, plan, realized_sections, backings
 
     def plan_options(
         self,
@@ -201,6 +210,7 @@ class ProviderRuntime:
         evidence_capture: bool = False,
         probe_segments: tuple[str, ...] = (),
         realized_sections: frozenset[str] = frozenset(),
+        realized_backings: dict[str, tuple[str, str]] | None = None,
     ) -> PlanOptions:
         if cid_base is None:
             return PlanOptions(
@@ -208,6 +218,7 @@ class ProviderRuntime:
                 evidence_capture=evidence_capture,
                 probe_segments=probe_segments,
                 realized_sections=realized_sections,
+                realized_backings=realized_backings or {},
             )
         return PlanOptions(
             image_cache=self.image_cache,
@@ -215,6 +226,7 @@ class ProviderRuntime:
             evidence_capture=evidence_capture,
             probe_segments=probe_segments,
             realized_sections=realized_sections,
+            realized_backings=realized_backings or {},
         )
 
 
