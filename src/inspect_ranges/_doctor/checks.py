@@ -698,7 +698,12 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
 
     image_cache = default_image_cache()
     if image_cache.is_dir():
-        recorded = recorded_realized_files(build_cache)
+        from .._build.capture import live_project_files
+        from .._runtime.ownership import default_state_dir
+
+        recorded = recorded_realized_files(build_cache) | live_project_files(
+            default_state_dir()
+        )
         reclaimable = 0
         for sidecar in image_cache.glob("*.realized.json"):
             image = image_cache / (

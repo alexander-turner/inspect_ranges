@@ -149,7 +149,7 @@ class RecipeFn(Protocol):
 
 
 SettleFn = Callable[[dict[str, int], str, str, float, "HybridSockets"], float]
-"""The network-settle seam: `(cids, guest, probe, timeout_s) -> seconds waited`."""
+"""The network-settle seam: `(cids, guest, probe, timeout_s, hybrid_sockets) -> seconds waited` (the map dials Cloud Hypervisor guests through their hybrid-vsock sockets)."""
 
 
 HybridSockets = dict[str, HybridEndpoint]

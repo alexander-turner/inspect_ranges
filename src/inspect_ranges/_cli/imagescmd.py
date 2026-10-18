@@ -128,7 +128,12 @@ def list_cmd(image_cache: Path | None) -> None:
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "
             f"recipe=v{metadata.recipe_version}  created={metadata.created}{flags}"
         )
-    recorded = recorded_realized_files(default_build_cache())
+    from .._build.capture import live_project_files
+    from .._runtime.ownership import default_state_dir
+
+    recorded = recorded_realized_files(default_build_cache()) | live_project_files(
+        default_state_dir()
+    )
     reclaimable = 0
     for listing in realized:
         flags = ""
@@ -222,9 +227,9 @@ def prune(
                 "its sidecar" if image.is_file() else "orphan sidecar (image gone)",
             )
         )
-    for temp in sorted(image_cache.glob(".*.capturing")) + sorted(
-        image_cache.glob("*.capturing")
-    ):
+    # pathlib's `*` matches dotfiles, so one glob covers the hidden staging
+    # shape; a second `.*.capturing` glob double-listed and double-counted
+    for temp in sorted(image_cache.glob("*.capturing")):
         if temp.is_file():
             victims.append((temp, temp.stat().st_size, "stranded capture temp"))
     if not victims:
