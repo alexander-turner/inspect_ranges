@@ -248,3 +248,190 @@ def test_image_pull_sticky_then_explicit_refresh(tmp_path: Path) -> None:
     # unpublished names refuse with the coded cause
     with pytest.raises(DistError, match="image-not-published"):
         refresh_image("absent-name", [location], image_cache=consumer_cache)
+
+
+def test_pinned_image_only_root_refuses(tmp_path: Path) -> None:
+    """Round-3 B1a: a pin that names an image-only closure must refuse, never report pull OK with nothing consumable."""
+    from inspect_ranges._dist.resolve import pull_pinned
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog"))
+    image_root = push_image_artifact(
+        "focal-guest", location, image_cache=fixture.image_cache
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="manifest-invalid"):
+        pull_pinned(
+            "focal-guest",
+            image_root.digest,
+            [location],
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+    assert not any(builds.iterdir())
+
+
+def test_repointed_spec_tag_refuses_before_landing(tmp_path: Path) -> None:
+    """Round-3 B1b: tags are mutable; a spec ref re-pointed at a different build refuses published-spec-mismatch with nothing landed."""
+    from inspect_ranges._dist import OciLayout
+
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "mirror"))
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    # an attacker (or confused publisher) re-points the exact-spec ref at a
+    # build of a DIFFERENT spec
+    other = fixture.manifest.model_copy(update={"spec_sha256": "feed" * 16})
+    from inspect_ranges._build.manifest import save_manifest
+
+    save_manifest(other, fixture.build_cache)
+    layout = OciLayout(tmp_path / "mirror").open()
+    from inspect_ranges._dist import push_build
+
+    wrong_root = push_build(
+        other,
+        layout,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+        ref="decoy",
+    )
+    from inspect_ranges._compiler.plan import spec_sha256 as hash_spec
+
+    layout.set_ref(
+        location.spec_ref("distfix", hash_spec(spec)),  # type: ignore[arg-type]
+        wrong_root,
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="published-spec-mismatch"):
+        pull_range(
+            spec,  # type: ignore[arg-type]
+            [location],
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+    from inspect_ranges._build.manifest import load_manifest
+
+    assert load_manifest(builds, "distfix") is None
+
+
+def test_broken_location_aborts_instead_of_de_shadowing(tmp_path: Path) -> None:
+    """Round-3 B2: a broken first location aborts the search; silently falling through would de-shadow the deployment registry."""
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    fallback = parse_location(str(tmp_path / "fallback"))
+    push_range(
+        fixture.manifest,
+        fallback,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    broken = parse_location(str(tmp_path / "not-a-layout"))
+    (tmp_path / "not-a-layout").mkdir()  # exists but is not an OCI layout
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="layout-invalid"):
+        pull_range(
+            spec,  # type: ignore[arg-type]
+            [broken, fallback],
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+
+
+def test_pull_pinned_needs_no_spec(tmp_path: Path) -> None:
+    """Round-3 B5: the name@sha256 form pulls with no range.yaml in hand."""
+    from inspect_ranges._dist.resolve import pull_pinned
+
+    fixture = Fixture(tmp_path)
+    _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "mirror"))
+    root = push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    report = pull_pinned(
+        "distfix",
+        root.digest,
+        [location],
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert report.root == root.digest
+    from inspect_ranges._build.manifest import load_manifest
+
+    assert load_manifest(builds, "distfix") is not None
+
+
+def test_pinned_cli_form_parses() -> None:
+    from inspect_ranges._cli.distcmd import _parse_pinned
+
+    assert _parse_pinned("vulhub-zabbix@sha256:" + "ab" * 32) == (
+        "vulhub-zabbix",
+        "sha256:" + "ab" * 32,
+    )
+    assert _parse_pinned("./range.yaml") is None
+    assert _parse_pinned(None) is None
+    assert _parse_pinned("name@sha256:short") is None
+
+
+def test_hub_two_level_depth_refuses(tmp_path: Path) -> None:
+    """Round-3 N2: a one-slash published name against the two-level hub refuses where the docstring says it does."""
+    hub = parse_location("docker.io/meridianlabsai")
+    with pytest.raises(DistError, match="registry-protocol"):
+        hub.store_for("acme/payroll-db")
+
+
+def test_location_parsing_is_cwd_independent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 N4: a bare word never resolves as a directory, even when one exists in the cwd."""
+    (tmp_path / "mirror").mkdir()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(DistError, match="location-invalid"):
+        parse_location("mirror")
+    assert parse_location("./mirror").is_directory
+
+
+def test_sticky_pull_never_mutates_present_sidecars(tmp_path: Path) -> None:
+    """Round-3 N3: the converge heal writes a MISSING sidecar only; present provenance is never rewritten outside the explicit refresh."""
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog"))
+    push_image_artifact("focal-guest", location, image_cache=fixture.image_cache)
+    consumer = tmp_path / "consumer-images"
+    consumer.mkdir()
+    pull_image("focal-guest", [location], image_cache=consumer)
+    (consumer / "focal-guest.json").write_text('{"local": "annotation"}')
+    again = pull_image("focal-guest", [location], image_cache=consumer)
+    assert again is not None
+    assert (consumer / "focal-guest.json").read_text() == '{"local": "annotation"}'
+    assert "focal-guest.json" not in again[1].fetched
+
+
+def test_push_cli_refuses_without_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 N5: bare push with nothing configured refuses rather than aiming at the public org."""
+    from click.testing import CliRunner
+    from inspect_ranges._cli.distcmd import push as push_cmd
+
+    monkeypatch.delenv(REGISTRY_ENV, raising=False)
+    runner = CliRunner()
+    spec_path = spec_file(tmp_path)
+    result = runner.invoke(push_cmd, [str(spec_path)])
+    assert result.exit_code != 0
+    assert "no-push-location" in result.output

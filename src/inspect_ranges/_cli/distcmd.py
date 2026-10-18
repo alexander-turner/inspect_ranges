@@ -3,6 +3,7 @@
 Verb composition (the phase's Q8 decision, recorded here): `push` and `pull` are the RANGE closure verbs, spec-driven by default in the Journey A/B tradition (bare in a range directory, `.` semantics everywhere); the catalog-image verbs live under `images` (`images pull` fetches a bare name into the cache, `images refresh` is the explicit move-forward act), so `pull` never means two different things. `mirror` arrives in slice 5.
 """
 
+import re
 from pathlib import Path
 
 import click
@@ -12,7 +13,7 @@ from .._build.recipes import default_recipe_cache
 from .._compiler.plan import spec_sha256
 from .._dist import DistError
 from .._dist.location import parse_location, registry_locations
-from .._dist.resolve import pull_range, push_range
+from .._dist.resolve import PullReport, pull_pinned, pull_range, push_range
 from .._runtime.images import default_image_cache
 from ..schema import load_range
 from ..types import IssueError
@@ -50,6 +51,24 @@ def push(
     """Publish the current range's build (its manifest's transitive closure) to a location."""
     spec_path = resolve_spec_path(spec)
     try:
+        # the destination resolves first: a missing destination is a config
+        # refusal that must not depend on cache state (round-3 N5)
+        if to_location is not None:
+            location = parse_location(to_location)
+        else:
+            import os
+
+            configured = os.environ.get("INSPECT_RANGES_REGISTRY", "").strip()
+            if not configured:
+                # pushing to the public org is the publisher's job, never a
+                # default (round-3 N5): user ranges must not aim anywhere
+                # public without an explicit destination
+                raise click.ClickException(
+                    "[no-push-location] no destination configured; pass --to "
+                    "or set INSPECT_RANGES_REGISTRY to your deployment's "
+                    "registry (the public org is never a push default)"
+                )
+            location = registry_locations(configured)[0]
         validated = load_range(spec_path)
         images, builds, recipes = _caches(image_cache, build_cache, recipe_cache)
         manifest = load_manifest(builds, validated.meta.name)
@@ -58,9 +77,6 @@ def push(
                 f"[range-not-built] no build manifest for "
                 f"{validated.meta.name!r} in {builds}; run 'inspect-ranges build' first"
             )
-        location = (
-            parse_location(to_location) if to_location else (registry_locations()[0])
-        )
         click.echo(
             f"manifest  {manifest.range_name} (spec sha256:{manifest.spec_sha256[:6]}...) "
             f"-> {location.describe()}"
@@ -81,7 +97,7 @@ def push(
 
 
 @click.command()
-@click.argument("spec", required=False, type=click.Path(path_type=Path))
+@click.argument("target", required=False)
 @click.option(
     "--pin",
     default=None,
@@ -97,19 +113,33 @@ def push(
 @click.option("--build-cache", type=click.Path(path_type=Path), default=None)
 @click.option("--recipe-cache", type=click.Path(path_type=Path), default=None)
 def pull(
-    spec: Path | None,
+    target: str | None,
     pin: str | None,
     from_location: str | None,
     image_cache: Path | None,
     build_cache: Path | None,
     recipe_cache: Path | None,
 ) -> None:
-    """Resolve and fetch the published build matching this range.yaml exactly (preflight; the provider pulls implicitly at eval init)."""
-    spec_path = resolve_spec_path(spec)
+    """Resolve and fetch a published build: bare (this directory's range.yaml, matched by its exact normalized-spec hash), a spec path, or the no-spec `name@sha256:...` form (Journey B's pulling-without-a-spec-in-hand)."""
     try:
-        validated = load_range(spec_path)
         images, builds, recipes = _caches(image_cache, build_cache, recipe_cache)
         locations = registry_locations(from_location)
+        pinned = _parse_pinned(target)
+        if pinned is not None:
+            name, digest = pinned
+            report = pull_pinned(
+                name,
+                digest,
+                locations,
+                image_cache=images,
+                build_cache=builds,
+                recipe_cache=recipes,
+            )
+            click.echo(f"resolve   {name}@{report.root} ({report.location})")
+            _echo_fetch(report)
+            return
+        spec_path = resolve_spec_path(Path(target) if target else None)
+        validated = load_range(spec_path)
         report = pull_range(
             validated,
             locations,
@@ -118,18 +148,32 @@ def pull(
             recipe_cache=recipes,
             pin=pin,
         )
-        fetched, present = len(report.result.fetched), len(report.result.present)
         click.echo(
             f"resolve   spec sha256:{spec_sha256(validated)[:6]}... -> "
             f"{validated.meta.name}@{report.root} ({report.location})"
         )
-        click.echo(f"fetch     {fetched} fetched, {present} already present, verified")
-        if report.result.superseded_built_at:
-            click.echo(
-                f"supersede local manifest built {report.result.superseded_built_at}"
-            )
-        click.echo("pull OK")
+        _echo_fetch(report)
     except DistError as error:
         raise click.ClickException(str(error)) from error
     except IssueError as error:
         raise click.ClickException(str(error)) from error
+
+
+_PINNED = re.compile(r"\A([a-z0-9][a-z0-9_-]*)@(sha256:[0-9a-f]{64})\Z")
+
+
+def _parse_pinned(target: str | None) -> tuple[str, str] | None:
+    if target is None:
+        return None
+    match = _PINNED.fullmatch(target)
+    return (match.group(1), match.group(2)) if match else None
+
+
+def _echo_fetch(report: PullReport) -> None:
+    fetched, present = len(report.result.fetched), len(report.result.present)
+    click.echo(f"fetch     {fetched} fetched, {present} already present, verified")
+    if report.result.superseded_built_at:
+        click.echo(
+            f"supersede local manifest built {report.result.superseded_built_at}"
+        )
+    click.echo("pull OK")

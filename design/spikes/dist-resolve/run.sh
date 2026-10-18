@@ -90,6 +90,12 @@ echo "=== S5 the pin form bypasses the spec match ==="
   && grep -q "pull OK" "$SPIKE/tmp/s5.txt" && [[ -f "$P2/builds/distmini/manifest.json" ]] \
   && ok "S5 name@digest pull works without a spec match" || { bad "S5 pin"; cat "$SPIKE/tmp/s5.txt"; }
 
+echo "=== S5b the name@digest form pulls with NO spec in hand ==="
+P2B="$SPIKE/tmp/p2b"; mkdir -p "$P2B/images" "$P2B/builds" "$P2B/recipes" "$P2B/empty"
+(cd "$P2B/empty" && "$IRBIN" pull "distmini@$ROOT1" --from "$L1" --image-cache "$P2B/images" --build-cache "$P2B/builds" --recipe-cache "$P2B/recipes" >"$SPIKE/tmp/s5b.txt" 2>&1) \
+  && grep -q "pull OK" "$SPIKE/tmp/s5b.txt" && [[ -f "$P2B/builds/distmini/manifest.json" ]] \
+  && ok "S5b name@sha256 pulls from a directory with no range.yaml (Journey B)" || { bad "S5b no-spec pin"; cat "$SPIKE/tmp/s5b.txt"; }
+
 echo "=== S6 a prepended registry shadows the fallback deterministically ==="
 sed -i 's/edited-content/shipped-by-registry/' "$RANGE/range.yaml"  # restore
 (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --reverify >"$SPIKE/tmp/s6build.txt" 2>&1) || { bad "S6 rebuild"; tail -5 "$SPIKE/tmp/s6build.txt"; }

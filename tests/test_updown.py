@@ -810,3 +810,53 @@ def test_up_verifies_the_realized_overlays_backing_golden(
         match=r"\[verify-images\] guest 'web'.*backing golden.*not in the cache",
     ):
         up(out, options(cache, tmp_path), runner=FakeDocker())
+
+
+def test_up_verifies_the_golden_to_vendor_edge(tmp_path: Path, cache: Path) -> None:
+    """Round-3 distribution review B4: a mixed chain (vendor moved under an older golden, e.g. an interrupted refresh) must refuse at verify-images, never boot silently corrupted."""
+    import hashlib as hashlib_module
+    import json as json_module
+
+    (cache / "web-backing.qcow2").write_bytes(b"backing")
+    backing_digest = f"sha256:{hashlib_module.sha256(b'backing').hexdigest()}"
+    (cache / "web-vendor.img").write_bytes(b"vendor-bytes")
+    vendor_sha = hashlib_module.sha256(b"vendor-bytes").hexdigest()
+    (cache / "web-backing.json").write_text(
+        json_module.dumps(
+            {
+                "name": "web-backing",
+                "file": "web-backing.qcow2",
+                "recipe_version": "4",
+                "derivation_key": "k" * 64,
+                "vendor_file": "web-vendor.img",
+                "vendor_sha256": vendor_sha,
+                "daemon": {"name": "vsockd", "version": "3.1.0", "sha256": "d" * 64},
+                "golden_sha256": hashlib_module.sha256(b"backing").hexdigest(),
+                "created": "2026-10-18T00:00:00Z",
+            }
+        )
+    )
+    out = tmp_path / "edge-bundle"
+    render_bundle(
+        tiny_spec(),
+        out,
+        PlanOptions(
+            image_cache=cache,
+            cid_base=3000,
+            realized_backings={"web": ("web-backing.qcow2", backing_digest)},
+        ),
+    )
+    # the agreeing chain passes verify-images (failing later, at readiness,
+    # proves the chain check was green)
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(out, options(cache, tmp_path / "ok"), runner=FakeDocker())
+    # the vendor moves under the same name: the mixed chain refuses loudly
+    (cache / "web-vendor.img").write_bytes(b"vendor-bytes-v2")
+    with pytest.raises(UpError, match=r"\[verify-images\].*chain is mixed"):
+        up(out, options(cache, tmp_path / "mixed"), runner=FakeDocker())
+    # a missing vendor refuses with the remedy
+    (cache / "web-vendor.img").unlink()
+    with pytest.raises(
+        UpError, match=r"\[verify-images\].*vendor base.*not in the cache"
+    ):
+        up(out, options(cache, tmp_path / "gone"), runner=FakeDocker())
