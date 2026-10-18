@@ -5,7 +5,11 @@ from pathlib import Path
 
 import click
 
-from .._build.manifest import apply_build_manifest, default_build_cache
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._compiler import PlanOptions, render_bundle
 from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
@@ -90,7 +94,7 @@ def up(
                 prefix="ir-bundle-", dir=staging_root
             ) as temp:
                 spec = load_range(resolve_spec_path(from_spec))
-                spec, realized_sections, _ = apply_build_manifest(
+                spec, realized_sections, consumed = apply_build_manifest(
                     spec,
                     image_cache=image_cache,
                     build_cache=default_build_cache(),
@@ -102,6 +106,9 @@ def up(
                         image_cache=image_cache,
                         cid_base=cid_base,
                         realized_sections=realized_sections,
+                        realized_backings=(
+                            realized_backings(consumed) if consumed else {}
+                        ),
                     ),
                 )
                 result = run_up(Path(temp) / "bundle", options)
@@ -111,7 +118,13 @@ def up(
     except UpError as error:
         raise click.ClickException(str(error)) from error
     except IssueError as error:
-        raise click.ClickException(str(error)) from error
+        # the refusal's remedy travels with it (round-2: plan/render print the
+        # hint through the planning report; this arm dropped it)
+        detail = "; ".join(
+            f"{issue.message}" + (f" ({issue.hint})" if issue.hint else "")
+            for issue in error.issues
+        )
+        raise click.ClickException(detail) from error
     click.echo(
         f"ready: project {result.project} ({result.range_name}) in {result.seconds}s"
     )

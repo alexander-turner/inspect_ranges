@@ -594,7 +594,12 @@ def test_invalid_range_name_refuses_before_anything(
 
 
 def full_build_spec(
-    spec: RangeSpec, range_dir: Path, tmp_path: Path, cache: Path, fakes: Fakes
+    spec: RangeSpec,
+    range_dir: Path,
+    tmp_path: Path,
+    cache: Path,
+    fakes: Fakes,
+    **extra: Any,
 ) -> Any:
     return build_range(
         spec,
@@ -605,6 +610,7 @@ def full_build_spec(
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
         capture_fn=fakes.capture_fn,
+        **extra,
     )
 
 
@@ -1147,3 +1153,88 @@ def test_strip_stage_preserves_message_colons() -> None:
     assert _strip_stage(plain) == "challenge 'demo' check 'forged' failed: value=0.00"
     with_guest = BuildError("recipe", "exited 1: tail", guest="web", recipe="acme.web")
     assert _strip_stage(with_guest) == "exited 1: tail"
+
+
+def test_unexpected_recipe_phase_exception_disposes_and_names_its_stage(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-2 blocking: the one post-boot arm without a broad catch leaked the egress-enabled range behind a raw traceback."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def exploding_recipe(*args: Any, **kwargs: Any) -> RecipeRun:
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=exploding_recipe,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert excinfo.value.stage == "recipe"
+    assert "No space left" in str(excinfo.value)
+    assert fakes.down_calls  # disposed, not leaked
+
+
+def test_removing_checks_after_a_proven_build_refuses(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-2: the inverse of the misnamed-metadata guard; a silent green rebuild would downgrade proven to unproven-but-consumable."""
+    import shutil as shutil_module
+
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    records = (
+        BehavioralCheckRecord(
+            challenge="demo", check="reference", status="pass", detail="value=1.00"
+        ),
+    )
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        return records
+
+    fakes = Fakes(["web", "db", "attacker"])
+    full_build_spec(
+        spec, range_dir, tmp_path, cache, fakes, behavioral_fn=behavioral_fn
+    )
+    shutil_module.rmtree(range_dir / "checks")
+    (range_dir / "challenges.yaml").unlink()
+    with pytest.raises(BuildError) as excinfo:
+        full_build_spec(
+            spec, range_dir, tmp_path, cache, fakes, behavioral_fn=behavioral_fn
+        )
+    assert excinfo.value.stage == "behavioral"
+    assert "declares no checks" in str(excinfo.value)
+
+
+def test_base_exception_from_up_preserves_staging(tmp_path: Path, cache: Path) -> None:
+    """Round-2: a Ctrl-C mid-boot gives no disposal guarantee; the bundle the (likely surviving) range mounts must not be destroyed."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    staged: list[Path] = []
+
+    def interrupted_up(bundle: Path, options: UpOptions, **_: Any) -> UpResult:
+        staged.append(bundle)
+        raise KeyboardInterrupt()
+
+    fakes = Fakes(["web", "db", "attacker"])
+    with pytest.raises(KeyboardInterrupt):
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=interrupted_up,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert staged and staged[0].exists()

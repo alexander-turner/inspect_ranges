@@ -52,6 +52,9 @@ class PlanOptions(BaseModel):
     realized_sections: frozenset[str] = frozenset()
     """Host guest-config sections the caller realizes itself, exempted from the `guest-config-not-realized` gate. Set by the build pipeline (`provisioning` as of build-v1 slice 2); the runtime path never sets it, so unbuilt content stays honestly inert."""
 
+    realized_backings: dict[str, tuple[str, str]] = {}
+    """Per-guest (backing golden cache file, `sha256:` digest) for realized overlays, recorded into boot.json so `up` verifies the overlay's backing at boot (round-2 review: goldens re-derive in place under the same name, and the overlay's own digest cannot see its backing). Set from the consumed build manifest by every gate consumer that renders."""
+
 
 class ImageRef(BaseModel):
     """An image as the plan records it: the logical reference plus its cache-resolved digest."""

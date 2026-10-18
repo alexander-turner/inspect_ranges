@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 from inspect_ranges._build.manifest import (
     BuildManifest,
     GuestRecord,
@@ -71,13 +72,19 @@ def test_build_key_moves_with_each_input() -> None:
     other_digest: Steps = [(resolved("d2"), {"marker": "x"})]
     other_vars: Steps = [(resolved("d1"), {"marker": "y"})]
     same_again: Steps = [(resolved("d1"), {"marker": "x"})]
-    key = guest_build_key("sha-golden", host, steps)
-    assert guest_build_key("sha-other", host, steps) != key
-    assert guest_build_key("sha-golden", host, other_digest) != key
-    assert guest_build_key("sha-golden", host, other_vars) != key
-    assert guest_build_key("sha-golden", make_host(services=[]), steps) != key
+    key = guest_build_key("sha-golden", host, steps, range_name="keyed")
+    assert guest_build_key("sha-other", host, steps, range_name="keyed") != key
+    assert guest_build_key("sha-golden", host, other_digest, range_name="keyed") != key
+    assert guest_build_key("sha-golden", host, other_vars, range_name="keyed") != key
+    assert (
+        guest_build_key("sha-golden", make_host(services=[]), steps, range_name="keyed")
+        != key
+    )
     # and it is stable for identical inputs
-    assert guest_build_key("sha-golden", make_host(), same_again) == key
+    assert (
+        guest_build_key("sha-golden", make_host(), same_again, range_name="keyed")
+        == key
+    )
 
 
 def test_vars_hash_is_order_insensitive() -> None:
@@ -359,3 +366,92 @@ def test_stamp_bundle_sha256_is_guarded_and_locked(tmp_path: Path) -> None:
     loaded = load_manifest(builds, "stamped")
     assert loaded is not None
     assert loaded.spec_sha256 == "b" * 64 and loaded.bundle_sha256 is None
+
+
+def test_provider_resolve_config_applies_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 gap: the provider-side gate (slice 6's headline behavior) had no unit coverage; a dropped gate call would have passed the whole suite."""
+    import hashlib as hashlib_module
+
+    from inspect_ranges._build.manifest import (
+        BuildManifest,
+        GuestRecord,
+        VerificationRecord,
+        now_iso,
+        save_manifest,
+    )
+    from inspect_ranges._compiler.plan import spec_sha256
+    from inspect_ranges._provider.state import ProviderRuntime
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        IssueError,
+        Network,
+        Os,
+        ProvisioningStep,
+        RangeMeta,
+        RangeSpec,
+    )
+    from inspect_ranges.types import Interface as I
+
+    image_cache = tmp_path / "images"
+    image_cache.mkdir()
+    builds = tmp_path / "builds"
+    monkeypatch.setenv("INSPECT_RANGES_IMAGE_CACHE", str(image_cache))
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(builds))
+    (image_cache / "focal-guest.qcow2").write_bytes(b"golden-bytes")
+    (image_cache / "noble-range-guest.qcow2").write_bytes(b"attacker-golden")
+    spec = RangeSpec(
+        meta=RangeMeta(name="provgate", description="gate through the provider"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="focal-guest",
+                interfaces=[I(network="lab")],
+                provisioning=[ProvisioningStep(recipe="acme.web")],
+            )
+        ],
+        attacker=Attacker(
+            image="noble-range-guest", interfaces=[I(network="lab")], entry="external"
+        ),
+    )
+    runtime = ProviderRuntime()
+    with pytest.raises(IssueError) as excinfo:
+        runtime.resolve_config("provgate.yaml", lambda: spec)
+    assert excinfo.value.issues[0].code == "range-not-built"
+
+    realized = image_cache / "provgate-web-abcdefabcdef.qcow2"
+    realized.write_bytes(b"realized-bytes")
+    manifest = BuildManifest(
+        range_name="provgate",
+        schema_version="0.3",
+        spec_sha256=spec_sha256(spec),
+        built_at=now_iso(),
+        guests=(
+            GuestRecord(
+                name="web",
+                golden_reference="focal-guest",
+                golden_digest=f"sha256:{hashlib_module.sha256(b'golden-bytes').hexdigest()}",
+                realized_file=realized.name,
+                realized_sha256=hashlib_module.sha256(b"realized-bytes").hexdigest(),
+                build_key="k" * 64,
+                recipes=(),
+            ),
+        ),
+        verification=VerificationRecord(verified_at=now_iso(), declarations=()),
+    )
+    save_manifest(manifest, builds)
+    swapped, plan, sections, backings = runtime.resolve_config(
+        "provgate.yaml", lambda: spec
+    )
+    assert swapped.hosts[0].image == realized.name
+    assert "provisioning" in sections
+    assert backings == {"web": ("focal-guest.qcow2", manifest.guests[0].golden_digest)}
+    web_guest = next(guest for guest in plan.guests if guest.name == "web")
+    assert web_guest.image.file == realized.name
+    # the batch cache serves the same resolution without re-running the gate
+    again = runtime.resolve_config("provgate.yaml", lambda: spec)
+    assert again[0] is swapped

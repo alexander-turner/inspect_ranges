@@ -185,7 +185,7 @@ def guest_build_key(
     host: Host,
     recipes: list[tuple[ResolvedRecipe, dict[str, VarValue]]],
     *,
-    range_name: str = "",
+    range_name: str,
 ) -> str:
     """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars.
 
@@ -204,6 +204,19 @@ def guest_build_key(
 def realized_file_name(range_name: str, guest: str, build_key: str) -> str:
     """Cache file name for a captured realized image; the key prefix keeps generations distinct, and a slashed range name flattens (file names are layout, not identity)."""
     return f"{range_name.replace('/', '-')}-{guest}-{build_key[:12]}.qcow2"
+
+
+def realized_backings(manifest: "BuildManifest") -> dict[str, tuple[str, str]]:
+    """Per-guest (golden cache file, recorded digest) for every realized guest.
+
+    Renderers thread this into `PlanOptions.realized_backings` so boot.json records each realized overlay's BACKING image, and `up` re-verifies it at boot: without it the direct-bundle consumer (`up <bundle>`, and the applier in the separated topology) booted overlay-over-whatever-now-sits-at-the-golden's-name, a composition no build verified (round-2 review).
+    """
+    from .._compiler.plan import image_file_name
+
+    return {
+        record.name: (image_file_name(record.golden_reference), record.golden_digest)
+        for record in manifest.guests
+    }
 
 
 def manifest_path(build_cache: Path, range_name: str) -> Path:
@@ -252,6 +265,33 @@ def stamp_bundle_sha256(
                 + "\n"
             )
             temp.replace(path)
+            return True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def retract_manifest(
+    build_cache: Path, range_name: str, spec_sha256: str, *, built_at: str
+) -> bool:
+    """Delete the recorded manifest when it is exactly the revision a failing build saw at resolve time (`spec_sha256` + `built_at`), under the per-range lock.
+
+    The behavioral failure path calls this (round-1 R1-A): the lock serializes against `save_manifest`/`stamp_bundle_sha256` so a concurrent stamp cannot resurrect the retracted manifest from its own read-modify-write window, and the identity match keeps a concurrent sibling build's FRESH green manifest out of reach (round-2 review). Returns whether a manifest was deleted.
+    """
+    path = manifest_path(build_cache, range_name)
+    if not path.parent.is_dir():
+        return False
+    lock_path = path.parent / ".manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = load_manifest(build_cache, range_name)
+            if (
+                current is None
+                or current.spec_sha256 != spec_sha256
+                or current.built_at != built_at
+            ):
+                return False
+            path.unlink(missing_ok=True)
             return True
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)

@@ -24,7 +24,7 @@ Until a range has a matching build, every content-consuming verb refuses with `r
 5. **The manifest.** The builds cache (`~/.cache/inspect-ranges/builds/<range>/manifest.json`, or `INSPECT_RANGES_BUILD_CACHE`; the consuming verbs and the provider resolve the cache the same way, so a non-default location is set through the environment variable, not per-verb flags) records the spec and its hash, every guest's build key and realized digest, recipe versions and digests, base-image digests, and the verification results.
 6. **Behavioral checks**, when the range declares them: the captured images boot once more and each challenge's reference/insufficient/forged chains run against the thing that ships (see [Behavioral checks](#behavioral-checks)). The manifest lands on disk only after this phase passes; a build interrupted or failed at any point before full proof leaves no consumable manifest.
 
-`--keep` preserves the build range (success or failure) for diagnosis; a kept build captures nothing and mints no manifest. On failure the error names the stage and guest and points at the recipe log; the range tears down unless kept.
+`--keep` preserves the build range (success or failure) for diagnosis; a kept build captures nothing and mints no manifest. A kept range holds its `--cid-base` vsock CIDs (host-global), so tear it down before the next build, or rebuild with a different `--cid-base`. On failure the error names the stage and guest and points at the recipe log; the range tears down unless kept.
 
 ## Incremental rebuilds
 

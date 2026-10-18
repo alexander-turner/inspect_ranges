@@ -1,6 +1,6 @@
 """The `build` orchestration (build-v1 slice 2): boot the egress build plan, run recipes, tear down.
 
-A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, every `services`/`vulnerabilities` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Capture of the provisioned disks and the build manifest arrive with slice 5; until then a build proves orchestration, realization, and verification, not persistence.
+A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, every `services`/`vulnerabilities` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Provisioned guests are then captured as realized images and the build manifest records the whole build (slice 5); declared behavioral checks run against the captured artifacts before the manifest lands (slice 6), so a recorded build is realized, verified, AND proven.
 
 The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and the build nameserver appended (host-derived by default, because fleets that force DNS through a VPC resolver are the norm), router-attached and `routed` networks are left untouched (the goad-era question), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate. The staging bundle is per-run (a fresh temp dir) and removed after the build unless `keep` left the range running from it, so the egress-enabled bundle never lingers where a runtime verb could boot it.
 """
@@ -32,7 +32,7 @@ from .._runtime.ownership import (
     default_state_dir,
     project_dir,
 )
-from .._runtime.up import OnStage, UpOptions, UpResult, up
+from .._runtime.up import OnStage, UpError, UpOptions, UpResult, up
 from ..schema import revalidate_range
 from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
 from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
@@ -58,6 +58,7 @@ from .manifest import (
     manifest_path,
     now_iso,
     realized_file_name,
+    retract_manifest,
     save_manifest,
     validate_range_name,
     vars_hash,
@@ -390,7 +391,7 @@ def build_range(
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
-    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project, and each run renders into its own staging directory so concurrent attempts can never destroy each other's bundles. On any failure after boot the range tears down (unless `keep`), the failure names its stage, guest, and recipe with a log path, and a teardown error is appended to the diagnosed failure, never substituted for it.
+    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project (known limit, round-2 review: the check sees compose containers, so the behavioral phase's `-bx` window is not covered and two same-spec builds can interleave there; the identity-matched retraction keeps a sibling's green manifest safe), and each run renders into its own staging directory so concurrent attempts can never destroy each other's bundles. On any failure after boot the range tears down (unless `keep`), the failure names its stage, guest, and recipe with a log path, and a teardown error is appended to the diagnosed failure, never substituted for it.
 
     Raises:
         IssueError: spec, recipe-resolution, build-variant, or planning refusals (all collected, house codes).
@@ -472,8 +473,27 @@ def build_range(
             "metadata file would otherwise silently skip the proof",
         )
     checks = checks_declared(range_dir)
-    current_checks_sha = checks_digest(range_dir) if checks else ""
+    try:
+        current_checks_sha = checks_digest(range_dir) if checks else ""
+    except OSError as error:
+        # unreadable check inputs refuse in the house shape, never traceback
+        raise BuildError(
+            "behavioral", f"behavioral-check inputs are unreadable: {error}"
+        ) from error
     prior = load_manifest(build_cache, spec.meta.name)
+    prior_built_at = prior.built_at if prior is not None else None
+    if prior is not None and prior.checks_sha256 and not checks:
+        # the inverse of the misnamed-metadata guard (round-2 review): the
+        # recorded build was PROVEN by checks that no longer exist, so a
+        # silent green rebuild would downgrade proven to unproven-but-
+        # consumable with zero signal
+        raise BuildError(
+            "behavioral",
+            "the recorded build carries behavioral proof but this range "
+            f"directory declares no checks ({CHECKS_DIR_NAME}/ with "
+            "challenges.yaml); restore the checks tree, or delete "
+            f"{manifest_path(build_cache, spec.meta.name)} to accept the downgrade",
+        )
     reusable: dict[str, GuestRecord] = {}
     if prior is not None:
         for host in content_hosts:
@@ -570,7 +590,11 @@ def build_range(
         tee.log("render", "ok", bundle=str(staging), guests=plan.totals.guests)
 
         uplink = ensure_uplink if ensure_uplink is not None else _ensure_uplink_network
-        uplink(options.uplink_network)
+        try:
+            uplink(options.uplink_network)
+        except BuildError as error:
+            tee.log("uplink", "fail", error=str(error))
+            raise
 
         try:
             result = up_fn(
@@ -585,11 +609,16 @@ def build_range(
                 ),
                 on_stage=on_stage,
             )
-        except BaseException:
-            # up disposes the range itself per keep_on_failure; the staging
-            # bundle must survive exactly when the range does (round-1 review:
-            # a kept boot failure is precisely when plan.json matters)
+        except UpError:
+            # up disposed (or kept) the range itself per keep_on_failure; the
+            # staging bundle must survive exactly when the range does (round-1
+            # review: a kept boot failure is precisely when plan.json matters)
             kept = options.keep
+            raise
+        except BaseException:
+            # a non-UpError exit (Ctrl-C mid-boot) gives no disposal guarantee:
+            # assume the range survives and keep the bundle it mounts (round-2)
+            kept = True
             raise
         # the range is running from here: staging survives (the running range
         # mounts it) until a teardown actually succeeds or _dispose rules
@@ -632,6 +661,7 @@ def build_range(
                 log_path=error.log_path,
             ) from error
         except BuildError as error:
+            tee.log(error.stage, "fail", error=_strip_stage(error))
             disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
             raise BuildError(
                 error.stage,
@@ -639,6 +669,16 @@ def build_range(
                 guest=error.guest,
                 recipe=error.recipe,
                 log_path=error.log_path,
+            ) from error
+        except Exception as error:
+            # the one post-boot arm that lacked a broad disposal catch
+            # (round-2 review): an ENOSPC out of the log plumbing must
+            # dispose and name its stage like every sibling phase, never
+            # leak the egress-enabled range behind a raw traceback
+            tee.log("recipe", "fail", error=str(error))
+            disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+            raise BuildError(
+                "recipe", f"recipe phase failed: {error} ({disposition})"
             ) from error
 
         verify_dir = project_dir(state_dir, project) / "verify"
@@ -804,7 +844,9 @@ def build_range(
                 )
             except BuildError as error:
                 tee.log("behavioral", "fail", error=str(error))
-                clause = _retract_unproven(spec.meta.name, spec_hash, build_cache, tee)
+                clause = _retract_unproven(
+                    spec.meta.name, spec_hash, build_cache, tee, prior_built_at
+                )
                 raise BuildError(
                     error.stage,
                     f"{_strip_stage(error)} ({clause}; the build is unproven)",
@@ -814,7 +856,9 @@ def build_range(
                 # checks unrun, which is just as unproven as a failing check: no
                 # consumer may boot a range whose challenge was never exercised
                 tee.log("behavioral", "fail", error=str(error))
-                clause = _retract_unproven(spec.meta.name, spec_hash, build_cache, tee)
+                clause = _retract_unproven(
+                    spec.meta.name, spec_hash, build_cache, tee, prior_built_at
+                )
                 raise BuildError(
                     "behavioral",
                     f"behavioral phase failed: {error} ({clause}; the build is unproven)",
@@ -899,7 +943,7 @@ def _run_behavioral_phase(
     The manifest arrives in memory, not from disk: it is saved only after this phase passes, so an unproven build is never consumable (slice 6 review).
     """
     from .behavioral import run_behavioral_checks
-    from .manifest import swap_realized_spec
+    from .manifest import realized_backings, swap_realized_spec
 
     swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
     staging_root = state_dir.parent / "staging"
@@ -909,6 +953,7 @@ def _run_behavioral_phase(
     # CAP_DAC_OVERRIDE), so container root cannot traverse a 0700 bundle mount
     staging.chmod(0o755)
     bx_project = f"{project}-bx"
+    bx_down = True  # until a boot succeeds there is nothing to keep the bundle for
     try:
         plan = render_bundle(
             swapped,
@@ -917,6 +962,7 @@ def _run_behavioral_phase(
                 image_cache=image_cache,
                 cid_base=options.cid_base,
                 realized_sections=sections,
+                realized_backings=realized_backings(manifest),
                 evidence_capture=True,
             ),
         )
@@ -948,7 +994,9 @@ def _run_behavioral_phase(
         finally:
             try:
                 down_fn(bx_project, state_dir=state_dir, keep_state=True)
+                bx_down = True
             except Exception as error:  # the primary diagnosis stays primary
+                bx_down = False
                 stage_log.log(
                     "teardown",
                     "fail",
@@ -956,7 +1004,11 @@ def _run_behavioral_phase(
                     project=bx_project,
                 )
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        # the surviving-range-keeps-its-bundle invariant applies to the bx
+        # range too (round-2): a failed bx teardown leaves the bundle for the
+        # retry hint to make sense
+        if bx_down:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:
@@ -1025,15 +1077,19 @@ def _dispose(
 
 
 def _retract_unproven(
-    range_name: str, spec_hash: str, build_cache: Path, tee: "_BuildTee"
+    range_name: str,
+    spec_hash: str,
+    build_cache: Path,
+    tee: "_BuildTee",
+    prior_built_at: str | None,
 ) -> str:
     """A failed behavioral phase must leave nothing consumable (round-1 review).
 
-    On a first build the deferred save means nothing was written. On a rebuild a PRIOR manifest may still match the current spec hash (every guest reused, or a checks-only edit): the gate would keep serving the exact artifacts that just failed their proof, so that manifest is deleted. Returns the clause for the raised error, naming which state held.
+    On a first build the deferred save means nothing was written. On a rebuild a PRIOR manifest may still match the current spec hash (every guest reused, or a checks-only edit): the gate would keep serving the exact artifacts that just failed their proof, so that manifest is deleted, under the per-range lock (round-2: an unlocked unlink could land inside a concurrent stamp's critical section and be resurrected) and only when it predates this build (a concurrent sibling's fresh green manifest is not "prior"). Returns the clause for the raised error, naming which state held.
     """
-    prior = load_manifest(build_cache, range_name)
-    if prior is not None and manifest_matches_spec(prior, spec_hash):
-        manifest_path(build_cache, range_name).unlink(missing_ok=True)
+    if prior_built_at is not None and retract_manifest(
+        build_cache, range_name, spec_hash, built_at=prior_built_at
+    ):
         tee.log(
             "manifest",
             "fail",
@@ -1119,11 +1175,14 @@ def _ensure_uplink_network(name: str) -> None:
     if create.returncode != 0:
         # two concurrent first builds can race create; the loser's failure is
         # benign iff the network now exists (round-1 review)
-        recheck = subprocess.run(
-            ["docker", "network", "inspect", name], capture_output=True, timeout=60
-        )
-        if recheck.returncode == 0:
-            return
+        try:
+            recheck = subprocess.run(
+                ["docker", "network", "inspect", name], capture_output=True, timeout=60
+            )
+            if recheck.returncode == 0:
+                return
+        except subprocess.TimeoutExpired:
+            pass  # fall through to the create failure, the primary diagnosis
         stderr = create.stderr.decode(errors="replace").strip()[-300:]
         raise BuildError(
             "uplink",

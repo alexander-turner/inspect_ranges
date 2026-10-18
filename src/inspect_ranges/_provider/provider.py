@@ -21,7 +21,11 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
-from .._build.manifest import apply_build_manifest, default_build_cache
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._channel.channel import TamperError
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
 from .._evidence.sealer import seal_abandoned
@@ -138,17 +142,23 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         """Validate the config once and resolve the plan so a broken range fails at startup, not per sample."""
         runtime = provider_runtime()
         if isinstance(config, (str, RangeSpec)):
-            spec, plan, _ = runtime.resolve_config(
+            spec, plan, _, _ = runtime.resolve_config(
                 config, lambda: _resolve_spec(config)
             )
         else:
             spec = _resolve_spec(config)
-            spec, sections, _ = apply_build_manifest(
+            spec, sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,
                 build_cache=default_build_cache(),
             )
-            plan = resolve_plan(spec, runtime.plan_options(realized_sections=sections))
+            plan = resolve_plan(
+                spec,
+                runtime.plan_options(
+                    realized_sections=sections,
+                    realized_backings=realized_backings(consumed) if consumed else {},
+                ),
+            )
         del spec
         logger.info(
             "task_init %s: range %s (%d guests, %d vCPUs, %d MiB)",
@@ -181,18 +191,22 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         )
         cache_key = config if isinstance(config, (str, RangeSpec)) else None
         if cache_key is not None:
-            spec, plan, realized_sections = runtime.resolve_config(
+            spec, plan, realized_sections, backings = runtime.resolve_config(
                 cache_key, lambda: _resolve_spec(config)
             )
         else:
             spec = _resolve_spec(config)
-            spec, realized_sections, _ = apply_build_manifest(
+            spec, realized_sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,
                 build_cache=default_build_cache(),
             )
+            backings = realized_backings(consumed) if consumed else {}
             plan = resolve_plan(
-                spec, runtime.plan_options(realized_sections=realized_sections)
+                spec,
+                runtime.plan_options(
+                    realized_sections=realized_sections, realized_backings=backings
+                ),
             )
 
         # evidence resolves before admission: its buffer caps join the memory
@@ -223,6 +237,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 charged_totals,
                 probe_segments,
                 realized_sections,
+                backings,
             )
         except BaseException:
             await runtime.admission.release(charged_totals)
@@ -274,6 +289,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         charged_totals: Totals,
         probe_segments: tuple[str, ...] = (),
         realized_sections: frozenset[str] = frozenset(),
+        realized_backings: dict[str, tuple[str, str]] | None = None,
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
@@ -334,6 +350,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                             evidence_capture=session is not None,
                             probe_segments=probe_segments,
                             realized_sections=realized_sections,
+                            realized_backings=realized_backings,
                         ),
                     )
                 )
