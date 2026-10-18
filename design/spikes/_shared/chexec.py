@@ -16,17 +16,42 @@ from pathlib import Path
 
 from inspect_ranges._channel.channel import MessageChannel, request_id
 from inspect_ranges._channel.protocol import Budget, ExecRequest
-from inspect_ranges._channel.vsock import VsockTransport
+from inspect_ranges._channel.vsock import HybridEndpoint, VsockTransport
 
 GUEST = "guest"
 
 
-def cid_map(args: argparse.Namespace) -> tuple[dict[str, int], str]:
+def cid_map(
+    args: argparse.Namespace,
+) -> tuple[dict[str, int], dict[str, HybridEndpoint], str]:
     if args.cid is not None:
-        return {GUEST: args.cid}, GUEST
+        return {GUEST: args.cid}, {}, GUEST
     boot = json.loads(Path(args.boot).read_text())
     cids = {g["name"]: g["cid"] for g in boot["guests"]}
-    return cids, args.guest
+    # cloud-hypervisor guests have no AF_VSOCK listener: dial their hybrid
+    # socket, derived from the project (pass --project for ranges with CH guests)
+    hybrid: dict[str, HybridEndpoint] = {}
+    ch_guests = {
+        g["name"]: g for g in boot["guests"] if g.get("vmm") == "cloud-hypervisor"
+    }
+    if ch_guests:
+        if args.project:
+            from inspect_ranges._runtime.ownership import ch_vsock_dir
+            from inspect_ranges._runtime.up import ch_uid
+
+            sockets = ch_vsock_dir(args.project)
+            hybrid = {
+                name: HybridEndpoint(sockets / f"{name}.sock", ch_uid(g["cid"]))
+                for name, g in ch_guests.items()
+            }
+        elif args.guest in ch_guests:
+            # dialing a qemu guest needs no project; a CH target does
+            print(
+                f"guest {args.guest!r} runs on cloud-hypervisor; pass --project",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+    return cids, hybrid, args.guest
 
 
 async def wait(channel: MessageChannel, guest: str, timeout: float) -> int:
@@ -62,13 +87,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cid", type=int, default=None)
     parser.add_argument("--boot", default=None)
+    parser.add_argument("--project", default=None)
     parser.add_argument("--guest", default=GUEST)
     parser.add_argument("--user", default=None)
     parser.add_argument("op", choices=["wait", "exec", "diag"])
     parser.add_argument("arg", nargs="?")
     args = parser.parse_args()
-    cids, guest = cid_map(args)
-    channel = MessageChannel(VsockTransport(cids), label="battery")
+    cids, hybrid, guest = cid_map(args)
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=hybrid), label="battery"
+    )
 
     async def diag() -> int:
         reply = await channel.diag(guest, max_entries=1000)
