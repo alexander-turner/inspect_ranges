@@ -115,6 +115,20 @@ else
     && ok "D8 tampered blob refuses by digest and no consumable manifest landed" || { bad "D8 refusal shape"; cat "$SPIKE/tmp/d8.txt"; }
 fi
 
+echo "=== D8b a missing blob refuses with its named cause ==="
+cp -r "$SPIKE/tmp/shipped/layout" "$SPIKE/tmp/holed"
+SMALLEST=$(find "$SPIKE/tmp/holed/blobs" -type f -size +100M -printf '%s %p\n' | sort -n | head -1 | cut -d' ' -f2)
+rm -f "$SMALLEST"
+mkdir -p "$SPIKE/tmp/h-images" "$SPIKE/tmp/h-builds" "$SPIKE/tmp/h-recipes"
+if $PYDIST pull --layout "$SPIKE/tmp/holed" --ref vulhub-zabbix \
+  --image-cache "$SPIKE/tmp/h-images" --build-cache "$SPIKE/tmp/h-builds" --recipe-cache "$SPIKE/tmp/h-recipes" >"$SPIKE/tmp/d8b.txt" 2>&1; then
+  bad "D8b holed pull was accepted"
+else
+  grep -q "missing-blob" "$SPIKE/tmp/d8b.txt" \
+    && [[ ! -f "$SPIKE/tmp/h-builds/vulhub-zabbix/manifest.json" ]] \
+    && ok "D8b missing blob refuses by name and no manifest landed" || { bad "D8b refusal shape"; cat "$SPIKE/tmp/d8b.txt"; }
+fi
+
 echo "=== D9 the pulled caches boot and serve (the headline) ==="
 INSPECT_RANGES_BUILD_CACHE="$PULLED/builds" $IR plan "$RANGE" --image-cache "$PULLED/images" >"$SPIKE/tmp/d9plan.txt" 2>&1 \
   && ok "D9a plan consumes the PULLED manifest and resolves the pulled realized images" || { bad "D9a plan"; tail -5 "$SPIKE/tmp/d9plan.txt"; }

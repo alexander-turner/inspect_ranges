@@ -6,6 +6,8 @@ Backing relationships are pinned by digest in annotations (image-distribution.md
 """
 
 import io
+import json
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -37,6 +39,7 @@ __all__ = [
     "LAYER_RECIPE_TAR",
     "LAYER_SIDECAR",
     "push_build",
+    "qcow2_backing_name",
     "recipe_bundle_tar",
 ]
 
@@ -65,6 +68,26 @@ ANN_RECIPE_DIGEST = "org.inspect-ranges.recipe.digest"
 ANN_RANGE = "org.inspect-ranges.range"
 ANN_SPEC_SHA256 = "org.inspect-ranges.spec-sha256"
 ANN_BUILT_AT = "org.inspect-ranges.built-at"
+
+
+def qcow2_backing_name(path: Path) -> str | None:
+    """The qcow2 header's embedded backing reference (a relative file name), via host qemu-img; `None` for raw images and chainless qcow2s.
+
+    Raises:
+        DistError: `chain-invalid` when qemu-img cannot read the file.
+    """
+    result = subprocess.run(
+        ["qemu-img", "info", "--output=json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise DistError(
+            "chain-invalid",
+            f"qemu-img could not read {path.name}: {result.stderr.strip()[:200]}",
+        )
+    backing = json.loads(result.stdout).get("backing-filename")
+    return str(backing) if backing is not None else None
 
 
 def _prefixed(digest: str) -> str:
@@ -147,6 +170,14 @@ def push_build(
         """A golden with its vendor base; a file with no provenance sidecar encodes as a bare vendor base."""
         metadata_path = _metadata_path(image_cache, file)
         if not metadata_path.is_file():
+            # closed-world check: a sidecar-less image publishes as a bare
+            # vendor base, which never joins a validated chain, so an embedded
+            # backing here would publish a chain that cannot boot (round-1 N6)
+            if file.endswith(".qcow2") and qcow2_backing_name(image_cache / file):
+                raise DistError(
+                    "chain-invalid",
+                    f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
+                )
             blob = _qcow2_descriptor(layout, image_cache / file, expected=digest)
             add(
                 layout.put_manifest(
@@ -298,6 +329,15 @@ def push_build(
             "artifact-missing", f"{manifest_file} is not in the builds cache"
         )
     manifest_bytes = manifest_file.read_bytes()
+    on_disk = BuildManifest.model_validate_json(manifest_bytes)
+    if (on_disk.spec_sha256, on_disk.built_at) != (
+        manifest.spec_sha256,
+        manifest.built_at,
+    ):
+        raise DistError(
+            "manifest-changed",
+            f"{manifest_file} changed since it was loaded (a concurrent rebuild?); re-run the push",
+        )
     manifest_digest = layout.put_blob_bytes(manifest_bytes)
     add(
         layout.put_manifest(

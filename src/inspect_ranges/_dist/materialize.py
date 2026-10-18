@@ -7,11 +7,9 @@ Backing-chain validation runs at materialization: the qcow2 header's embedded ba
 
 import fcntl
 import hashlib
-import io
-import json
 import shutil
-import subprocess
 import tarfile
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .._build.manifest import BuildManifest, load_manifest, save_manifest
 from .._build.recipes import recipe_digest
+from .._compiler.plan import image_file_name
 from .encode import (
     ANN_BACKING_DIGEST,
     ANN_BACKING_FILE,
@@ -35,8 +34,18 @@ from .encode import (
     LAYER_RECIPE_TAR,
     LAYER_SIDECAR,
 )
+from .encode import (
+    qcow2_backing_name as _qcow2_backing_name,
+)
 from .errors import DistError
-from .oci import MEDIA_TYPE_INDEX, Descriptor, OciIndex, OciLayout, OciManifest
+from .oci import (
+    MEDIA_TYPE_INDEX,
+    Descriptor,
+    OciIndex,
+    OciLayout,
+    OciManifest,
+    atomic_write,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -102,23 +111,6 @@ def _layer(manifest: OciManifest, media_type: str) -> Descriptor:
     )
 
 
-def _qcow2_backing_name(path: Path) -> str | None:
-    """The qcow2 header's embedded backing reference (relative file name), via qemu-img."""
-    result = subprocess.run(
-        ["qemu-img", "info", "--output=json", str(path)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise DistError(
-            "chain-invalid",
-            f"qemu-img could not read {path.name}: {result.stderr.strip()[:200]}",
-        )
-    info = json.loads(result.stdout)
-    backing = info.get("backing-filename")
-    return str(backing) if backing is not None else None
-
-
 def _land_image(
     layout: OciLayout,
     manifest: OciManifest,
@@ -136,33 +128,41 @@ def _land_image(
     blob = _layer(manifest, LAYER_QCOW2)
     target = image_cache / name
     with _name_lock(image_cache, name):
+        # a hard-killed pull of this name strands a `.{name}.pulling-*` temp;
+        # under the lock it is debris by definition (the derive/capture lesson)
+        for stale in image_cache.glob(f".{name}.pulling-*"):
+            stale.unlink(missing_ok=True)
+
+        def write_sidecar(*, heal: bool = False) -> None:
+            if sidecar_suffix is None:
+                return
+            sidecar_path = image_cache / (name.removesuffix(".qcow2") + sidecar_suffix)
+            if heal and sidecar_path.is_file():
+                return
+            data = layout.read_blob(_layer(manifest, LAYER_SIDECAR))
+            atomic_write(sidecar_path, data)
+            fetched.append(sidecar_path.name)
+
         if target.is_file():
             hasher = hashlib.sha256()
             with target.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1 << 20), b""):
                     hasher.update(chunk)
             if f"sha256:{hasher.hexdigest()}" == blob.digest:
+                # converge, but HEAL a missing sidecar: a crash window between
+                # image and sidecar must not become permanent (round-1 N4)
+                write_sidecar(heal=True)
                 present.append(name)
                 return
             raise DistError(
                 "cache-name-conflict",
                 f"{target} already holds different content than {blob.digest}; the flat cache holds one meaning per name (prune or rename the local file, then pull again)",
             )
-
-        def write_sidecar() -> None:
-            if sidecar_suffix is None:
-                return
-            sidecar = _layer(manifest, LAYER_SIDECAR)
-            data = layout.read_blob(sidecar)
-            sidecar_path = image_cache / (name.removesuffix(".qcow2") + sidecar_suffix)
-            sidecar_path.write_bytes(data)
-            fetched.append(sidecar_path.name)
-
         if sidecar_first:
             write_sidecar()
-            layout.copy_blob_to(blob, target)
+            layout.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
         else:
-            layout.copy_blob_to(blob, target)
+            layout.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
             write_sidecar()
         fetched.append(name)
 
@@ -211,7 +211,12 @@ def materialize_closure(
             "manifest-invalid",
             f"a pull root is an OCI index, not {root.media_type}",
         )
-    index = OciIndex.model_validate_json(layout.read_blob(root))
+    try:
+        index = OciIndex.model_validate_json(layout.read_blob(root))
+    except ValueError as error:
+        raise DistError(
+            "manifest-invalid", f"the pull root does not parse as an OCI index: {error}"
+        ) from error
     artifacts: dict[str, list[OciManifest]] = {kind: [] for kind in _KIND_ORDER}
     for member in index.manifests:
         manifest = layout.manifest(member)
@@ -274,8 +279,12 @@ def materialize_closure(
         ).digest
         _validate_chain(manifest, image_cache, landed_digests)
 
+    landed_recipes: dict[str, str] = {}
     for manifest in artifacts[ARTIFACT_RECIPE_BUNDLE]:
-        _land_recipe(layout, manifest, recipe_cache, fetched=fetched, present=present)
+        landed = _land_recipe(
+            layout, manifest, recipe_cache, fetched=fetched, present=present
+        )
+        landed_recipes[landed] = _annotation(manifest, ANN_RECIPE_DIGEST)
 
     build = builds[0]
     manifest_bytes = layout.read_blob(_layer(build, LAYER_BUILD_MANIFEST))
@@ -285,6 +294,11 @@ def materialize_closure(
         raise DistError(
             "manifest-invalid", f"the pulled build manifest does not parse: {error}"
         ) from error
+    # the completeness gate (round-1 B1): the build manifest lands only when
+    # the closure actually delivered every artifact it references, so a pruned
+    # or partial root can never materialize as a consumable range (and a
+    # slice-5 mirror of such a root refuses here rather than propagating)
+    _validate_completeness(build_manifest, landed_digests, landed_recipes)
     prior = load_manifest(build_cache, build_manifest.range_name)
     superseded: str | None = None
     if prior is not None and (
@@ -306,6 +320,47 @@ def materialize_closure(
     )
 
 
+def _validate_completeness(
+    build_manifest: BuildManifest,
+    landed_digests: dict[str, str],
+    landed_recipes: dict[str, str],
+) -> None:
+    """Every artifact the build manifest references must have landed (or converged) from this closure, at the recorded digest."""
+
+    def require(file: str, digest: str | None, what: str) -> None:
+        landed = landed_digests.get(file)
+        if landed is None:
+            raise DistError(
+                "closure-incomplete",
+                f"the build manifest references {what} {file!r} but the closure does not carry it",
+            )
+        if digest:
+            expected = digest if digest.startswith("sha256:") else f"sha256:{digest}"
+            if landed != expected:
+                raise DistError(
+                    "closure-incomplete",
+                    f"{what} {file!r} landed as {landed}, but the build manifest records {expected}",
+                )
+
+    for base in build_manifest.base_images:
+        require(base.file, base.digest or None, "base image")
+    for guest in build_manifest.guests:
+        require(guest.realized_file, guest.realized_sha256, "realized image")
+        require(image_file_name(guest.golden_reference), guest.golden_digest, "golden")
+        for record in guest.recipes:
+            landed = landed_recipes.get(record.name)
+            if landed is None:
+                raise DistError(
+                    "closure-incomplete",
+                    f"the build manifest references recipe {record.name!r} but the closure does not carry it",
+                )
+            if landed != record.digest:
+                raise DistError(
+                    "closure-incomplete",
+                    f"recipe {record.name!r} landed at digest {landed[:12]}, but the build manifest records {record.digest[:12]}",
+                )
+
+
 def _land_recipe(
     layout: OciLayout,
     manifest: OciManifest,
@@ -313,47 +368,61 @@ def _land_recipe(
     *,
     fetched: list[str],
     present: list[str],
-) -> None:
-    """Extract a recipe bundle into the flat name-keyed recipe cache; the recorded recipe digest must reproduce from the extracted tree."""
+) -> str:
+    """Extract a recipe bundle into the flat name-keyed recipe cache; the recorded recipe digest must reproduce from the extracted tree. Returns the landed name.
+
+    Concurrency follows the image cache's discipline: a per-name advisory lock (`.{name}.lock` in the recipe cache) serializes pullers of one bundle, staging directories are uniquely named and swept under the lock, and the tar bytes are verified into a private copy before anything parses them.
+    """
     name = _annotation(manifest, ANN_NAME)
     declared = _annotation(manifest, ANN_RECIPE_DIGEST)
     if "/" in name or name.startswith("."):
         raise DistError("manifest-invalid", f"{name!r} is not a recipe name")
+    recipe_cache.mkdir(parents=True, exist_ok=True)
     target = recipe_cache / name
-    if target.is_dir():
-        existing = recipe_digest(target)
-        if existing == declared:
-            present.append(f"recipes/{name}")
-            return
-        raise DistError(
-            "cache-name-conflict",
-            f"recipe cache already holds {name!r} at digest {existing[:12]}, not {declared[:12]}; remove it to pull this bundle",
-        )
-    data = layout.read_blob(_layer(manifest, LAYER_RECIPE_TAR))
-    staging = recipe_cache / f".{name}.pulling"
-    if staging.exists():
-        _rmtree(staging)
-    staging.mkdir(parents=True)
-    try:
-        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-            for member in tar.getmembers():
-                if not member.isfile() or member.name.startswith(("/", "..")):
-                    raise DistError(
-                        "recipe-bundle-invalid",
-                        f"bundle member {member.name!r} is not a safe regular file",
-                    )
-            tar.extractall(staging, filter="data")
-        extracted = recipe_digest(staging)
-        if extracted != declared:
+    with _name_lock(recipe_cache, name):
+        for stale in recipe_cache.glob(f".{name}.pulling-*"):
+            _rmtree(stale)
+        if target.is_dir():
+            try:
+                existing = recipe_digest(target)
+            except Exception as error:
+                raise DistError(
+                    "cache-name-conflict",
+                    f"recipe cache entry {name!r} is not a digestable bundle ({error}); remove it to pull this bundle",
+                ) from error
+            if existing == declared:
+                present.append(f"recipes/{name}")
+                return name
             raise DistError(
-                "blob-digest-mismatch",
-                f"recipe {name!r} extracted to digest {extracted[:12]}, expected {declared[:12]}",
+                "cache-name-conflict",
+                f"recipe cache already holds {name!r} at digest {existing[:12]}, not {declared[:12]}; remove it to pull this bundle",
             )
-        recipe_cache.mkdir(parents=True, exist_ok=True)
-        staging.rename(target)
-        fetched.append(f"recipes/{name}")
-    finally:
-        if staging.exists():
+        staging = Path(tempfile.mkdtemp(dir=recipe_cache, prefix=f".{name}.pulling-"))
+        try:
+            # verify-while-copy into a private file, then parse only verified
+            # bytes (read_blob's in-memory cap does not bound bundle size)
+            tar_path = staging / "bundle.tar"
+            layout.copy_blob_to(_layer(manifest, LAYER_RECIPE_TAR), tar_path)
+            tree = staging / "tree"
+            tree.mkdir()
+            with tarfile.open(tar_path) as tar:
+                for member in tar.getmembers():
+                    if not member.isfile() or member.name.startswith(("/", "..")):
+                        raise DistError(
+                            "recipe-bundle-invalid",
+                            f"bundle member {member.name!r} is not a safe regular file",
+                        )
+                tar.extractall(tree, filter="data")
+            extracted = recipe_digest(tree)
+            if extracted != declared:
+                raise DistError(
+                    "blob-digest-mismatch",
+                    f"recipe {name!r} extracted to digest {extracted[:12]}, expected {declared[:12]}",
+                )
+            tree.rename(target)
+            fetched.append(f"recipes/{name}")
+            return name
+        finally:
             _rmtree(staging)
 
 

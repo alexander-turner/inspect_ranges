@@ -513,6 +513,9 @@ def list_images(
             # next capture of the SAME name would clean, but a post-crash fix
             # usually changes the build key, so listing must surface it (round-1)
             or path.name.endswith(".capturing")
+            # same lesson for a hard-killed pull's `.{name}.pulling-*` temp
+            # (the next pull of that name sweeps it, but listing must see it)
+            or ".pulling-" in path.name
         )
         and path.name not in managed_files
     )
