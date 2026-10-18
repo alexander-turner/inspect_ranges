@@ -138,3 +138,69 @@ def test_reference_requires_corroborated_beacon_goals(
     )
     assert failing.status == "fail"
     assert "uncorroborated=execute-web" in failing.detail
+
+
+def test_conformance_plan_resolves_the_section6_targets() -> None:
+    """Issue #6: the pure resolution picks a shared-segment defender, the attacker's addresses, the reserved hypervisor endpoints with their allowed ports, and the silent candidates."""
+    from inspect_ranges._build.behavioral import conformance_plan
+    from inspect_ranges._compiler import resolve_plan
+    from inspect_ranges.types import (
+        Attacker,
+        DnsConfig,
+        Host,
+        Interface,
+        Network,
+        Os,
+        RangeMeta,
+        RangeSpec,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="conf", description="conformance targets"),
+        networks=[
+            Network(
+                name="lab",
+                cidr="10.44.0.0/24",
+                mode="isolated",
+                dns=DnsConfig(nameservers=["10.44.0.2"]),
+            )
+        ],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="tiny-golden",
+                interfaces=[Interface(network="lab", ip="10.44.0.10")],
+            )
+        ],
+        attacker=Attacker(
+            image="tiny-golden", interfaces=[Interface(network="lab")], entry="external"
+        ),
+    )
+    plan = resolve_plan(spec)
+    defender, attacker_ips, hypervisor, silent = conformance_plan(spec, plan)
+    assert defender == "web"
+    assert len(attacker_ips) == 1 and attacker_ips[0].startswith("10.44.0.")
+    if hypervisor:
+        address, allowed = hypervisor["lab"]
+        assert allowed == {53}
+        assert address.startswith("10.44.0.")
+    assigned = {g_if for g_if in attacker_ips} | {"10.44.0.10"}
+    assert all(candidate not in assigned for candidate in silent)
+
+
+def test_sweep_and_silence_scripts_are_falsifiable() -> None:
+    from inspect_ranges._build.behavioral import (
+        CONFORMANCE_EXTRA_PORTS,
+        silence_script,
+        sweep_script,
+    )
+
+    script = sweep_script(["10.44.0.9"], allowed={53})
+    assert "/dev/tcp/$ip/$p" in script
+    assert " 53 " not in f" {script.split('do for p in ', 1)[1].split(';')[0]} "
+    assert str(CONFORMANCE_EXTRA_PORTS[0]) in script
+    assert script.rstrip().endswith("exit 0")
+    probe = silence_script(["10.44.0.1", "10.44.0.254"])
+    assert 'echo "ALIVE $ip"' in probe
+    assert "TCP53" in probe and "timeout 1" in probe

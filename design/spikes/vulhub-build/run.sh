@@ -71,6 +71,10 @@ grep -q "behavioral.*check=reference" "$SPIKE/tmp/z2.txt" \
   && grep -q "behavioral.*check=forged" "$SPIKE/tmp/z2.txt" \
   && grep -q "behavioral checks=3" "$SPIKE/tmp/z2.txt" \
   && ok "Z3b reference/insufficient/forged all ran and the phase closed" || bad "Z3b behavioral lines"
+grep -q "conformance.*check=attacker-surface.*defender=" "$SPIKE/tmp/z2.txt" \
+  && ! grep -q "conformance.*fail" "$SPIKE/tmp/z2.txt" \
+  && ok "Z3d section-6 conformance ran green in the proof boot (defender sweep + endpoint checks)" \
+  || bad "Z3d conformance stage"
 grep -q '"check": "reference"' "$SPIKE/tmp/builds/vulhub-zabbix/manifest.json" \
   && grep -q '"status": "pass"' "$SPIKE/tmp/builds/vulhub-zabbix/manifest.json" \
   && ok "Z3c behavioral records landed in the manifest" || bad "Z3c manifest behavioral records"
@@ -93,6 +97,10 @@ SNOOP=$(docker exec "$RC" ip -d link show br-lab 2>/dev/null | grep -o 'mcast_sn
 [[ "$V6" == "0" && "$SNOOP" == "mcast_snooping 0" ]] \
   && ok "Z7c segment silence: the lab bridge has no IPv6 address and snooping is off (PR #9 live)" \
   || bad "Z7c segment silence (inet6=$V6 snoop=$SNOOP)"
+VM_UIDS=$(docker exec "$RC" sh -c "ps -eo uid,comm | grep -E 'qemu|cloud-hyper' | awk '{print \$1}' | sort -u" | grep -c "^10[0-9]\{5\}" || true)
+[[ "$VM_UIDS" == "5" ]] \
+  && ok "Z7d every VM process runs as its own GUEST_UID_BASE+cid uid (issue #5 live: $VM_UIDS distinct)" \
+  || bad "Z7d per-VM uids (got $VM_UIDS distinct, expected 5)"
 FRONT=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
   "wget -q -O- http://web/index.php 2>/dev/null | grep -io 'zabbix' | head -1" || true)
 [[ "$FRONT" == *[Zz]abbix* ]] && ok "Z8 the frontend serves to the attacker over the range network" || bad "Z8 frontend (got: $FRONT)"
