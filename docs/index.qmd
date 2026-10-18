@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI extension for ranges."
-llms-description: "What Inspect Ranges is, its development status, and where reviewers can find the design overview and range definition documentation."
+llms-description: "What Inspect Ranges is, its development status, where reviewers can find the design overview, and the documentation map: Building Ranges, Evaluation, and Running Ranges."
 ---
 
 ## Overview
@@ -14,12 +14,12 @@ Inspect Ranges is under active development and is not yet ready for general use.
 
 The source code is available in the [inspect_ranges](https://github.com/meridianlabs-ai/inspect_ranges) repository on GitHub. For the overall design (range definitions, the libvirt/KVM runtime, attacker containment, and evidence collection), start with the [Inspect Ranges overview](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/ranges-overview.qmd).
 
-## Defining Ranges
+## Documentation
 
-Documentation for the range definition language (`range.yaml` and its typed Python equivalent) is available for review and feedback:
+The documentation is organized in three sections, available for review and feedback:
 
-- [Ranges](ranges.qmd): what a range definition is, end-to-end examples in YAML and Python, and the validation workflow.
+- [Building Ranges](building.qmd): authoring a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
 
-- [Guests](guests.qmd): hosts, images, resources, routers and the attacker as guests, and guest content such as accounts, services, seeded weaknesses, defense, and Active Directory.
+- Evaluation: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
 
-- [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
+- [Running Ranges](cli.qmd): the operator workflow, the [sandbox provider](provider.qmd) that runs Inspect evals against ranges, the [host topology](topology.qmd), and the [security model](security.qmd).

@@ -1,8 +1,20 @@
 ---
 title: "Building Ranges"
-description: "How declared guest content becomes captured, verified images: the build command, recipe authoring, verification, and behavioral checks."
-llms-description: "Reference for inspect-ranges build: the build-aware gate, recipe bundles and the IR_* execution contract, incremental rebuilds and caching, declaration verification, and challenge behavioral checks."
+description: "Authoring a range from definition to verified images: the definition language pages, then the build command, recipe authoring, verification, and behavioral checks."
+llms-description: "Overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build-aware gate, recipe bundles and the IR_* execution contract, incremental rebuilds and caching, declaration verification, and challenge behavioral checks."
 ---
+
+## Overview
+
+A range is authored once and consumed many times: a definition (`range.yaml` or its typed Python equivalent) declares the networks, guests, and guest content, and `inspect-ranges build` realizes that content into captured, verified images that every downstream consumer boots. The definition language has its own pages:
+
+- [Ranges](ranges.qmd): what a range definition is, end-to-end examples in YAML and Python, and the validation workflow.
+
+- [Guests](guests.qmd): hosts, images, resources, routers and the attacker as guests, and guest content such as accounts, services, seeded weaknesses, defense, and Active Directory.
+
+- [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
+
+The rest of this page covers the build itself: how declared guest content becomes captured, verified images. For what happens after a build (rendering, booting, running evals), see [Running Ranges](cli.qmd).
 
 ## What the build is
 
