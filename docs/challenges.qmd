@@ -100,51 +100,7 @@ Submissions are recorded, not judged, at submission time: the scorer verifies at
 
 ## Custom goal types
 
-A goal type is a stateless object with a `Spec` (the schema class its YAML fields dispatch to), `setup` (plant per-sample material through the oracle), `check` (gather raw observations; never send an expected value guest-ward), and `compare` (a pure, host-side verdict against the plant record):
-
-``` {.python .fragment}
-from inspect_ranges import (
-    GoalResult,
-    GoalType,
-    Observations,
-    register_goal_type,
-)
-
-class MarkerType(GoalType):
-    name = "marker"
-    spec = MarkerGoal  # a GoalBase subclass
-    assurance = "guest-corroborated"
-
-    async def setup(self, goal, oracle):
-        value = oracle.nonce().encode()
-        key = f"marker:{goal.id}"
-        await oracle.store.record(
-            key, value, goal_id=goal.id,
-            guest=goal.host, path=goal.path,
-        )
-        await oracle.write_file(
-            goal.host, goal.path, value,
-            mode=0o600, owner=goal.owner,
-        )
-        return [key]
-
-    async def check(self, goal, oracle, submissions):
-        latest = submissions.value(goal.id)
-        return Observations(
-            source="submission",
-            reads={"v": (latest or "").encode()},
-        )
-
-    def compare(self, goal, obs, store):
-        expected = store.get(f"marker:{goal.id}")
-        return GoalResult(
-            achieved=obs.reads["v"].strip() == expected.strip()
-        )
-
-register_goal_type(MarkerType())
-```
-
-Register from an `inspect_ai` entry-point module (the same mechanism `inspect_ranges` uses for its built-ins), and state the type's scoring cost against the fifteen-minute design gate below. One v1 limitation, stated plainly: the `challenges.yaml` type union is closed, so a custom type's YAML `type:` name does not parse yet; registering custom types pairs with constructing challenges in Python or extending the schema in a fork, and opening the union is a recorded follow-up.
+When no built-in type expresses a scenario's proof contract, implement a new one: a stateless `GoalType` with a `Spec` (the schema class its YAML fields dispatch to), `setup` (plant per-sample material through the oracle), `check` (gather raw observations; never send an expected value guest-ward), and `compare` (a pure, host-side verdict against the plant record). [Custom Goals](goals.qmd) covers the full contract: the oracle surface, the proof-design rules, assurance labels, testing, registration, and the one open concern (the v1 `challenges.yaml` type union is closed, so a custom type's YAML `type:` name does not parse yet).
 
 ## Patch exploits
 
