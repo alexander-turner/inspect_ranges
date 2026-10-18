@@ -7,11 +7,11 @@
 ## Checks
 
 1. **M1** build green, published to registry A.
-2. **M2** whole-location mirror seeds the archive (the `/v2/_catalog` listing drives it; hub sources refuse enumeration with the catalog-phase follow-up named, pinned at the unit tier).
+2. **M2** whole-location mirror seeds the archive (the `/v2/_catalog` listing drives it, authenticated and paginated; hub sources refuse enumeration with the catalog-phase follow-up named, pinned at the unit tier). A whole-location mirror carries EVERY published build's spec ref per name, not just latest (round-5 B3), pinned at the unit tier by a two-build source whose older spec still pulls from the archive.
 3. **M3** the sneakernet: tar, ship, untar, and a disconnected consumer's spec-driven pull from the archive lands the exact manifest bytes.
 4. **M4** the cross-group move: spec-driven mirror A to B, and a pull from B is byte-identical.
 5. **M5** re-mirror copies zero blobs (dedup by digest at the destination).
-6. **M6** the chain tier: the orphan golden is offered and evicted with its sidecar; the shared vendor survives under its surviving dependent; the surviving manifest still plans green.
+6. **M6** the chain tier: the orphan golden is offered and evicted with its sidecar; the shared vendor survives under its surviving dependent; the surviving manifest still plans green. Round-5 hardening (unit-pinned): unreadable provenance freezes the vendor tier loudly instead of evicting a frozen golden's backing; vendors attribute by naming sidecars (`.qcow2` vendors leave with their chains); the scan-and-evict holds the cache-wide chains lock exclusively while every landing path (pull, derive, capture) holds it shared, and `--yes` re-scans under the lock so the report-mode window cannot evict moved state.
 
 ## Files
 

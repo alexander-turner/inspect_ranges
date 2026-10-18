@@ -291,6 +291,45 @@ def materialize_closure(
     present: list[str] = []
     landed_digests: dict[str, str] = {}
 
+    from .gc import chains_lock
+
+    with chains_lock(image_cache, exclusive=False):
+        _land_images(
+            store,
+            artifacts,
+            image_cache,
+            replace_images=replace_images,
+            fetched=fetched,
+            present=present,
+            landed_digests=landed_digests,
+            progress=progress,
+        )
+    return _finish_closure(
+        store,
+        artifacts,
+        landed_digests,
+        build_cache=build_cache,
+        recipe_cache=recipe_cache,
+        require_manifest=require_manifest,
+        expect_range=expect_range,
+        expect_spec=expect_spec,
+        fetched=fetched,
+        present=present,
+    )
+
+
+def _land_images(
+    store: ContentStore,
+    artifacts: dict[str, list[OciManifest]],
+    image_cache: Path,
+    *,
+    replace_images: bool,
+    fetched: list[str],
+    present: list[str],
+    landed_digests: dict[str, str],
+    progress: "ProgressFn | None",
+) -> None:
+    """The image-landing phase, held under the shared chains lock so the GC's exclusive scan never observes a half-landed chain (round-5 B2)."""
     if replace_images:
         # the refresh barrier (round-3 B4): every image in the closure stages
         # fully under every member's lock, then the renames happen together,
@@ -320,18 +359,7 @@ def materialize_closure(
                 ).digest
                 if kind != ARTIFACT_VENDOR_BASE:
                     _validate_chain(manifest, image_cache, landed_digests)
-        return _finish_closure(
-            store,
-            artifacts,
-            landed_digests,
-            build_cache=build_cache,
-            recipe_cache=recipe_cache,
-            require_manifest=require_manifest,
-            expect_range=expect_range,
-            expect_spec=expect_spec,
-            fetched=fetched,
-            present=present,
-        )
+        return
 
     for manifest in artifacts[ARTIFACT_VENDOR_BASE]:
         _land_image(
@@ -380,19 +408,6 @@ def materialize_closure(
             manifest, LAYER_QCOW2
         ).digest
         _validate_chain(manifest, image_cache, landed_digests)
-
-    return _finish_closure(
-        store,
-        artifacts,
-        landed_digests,
-        build_cache=build_cache,
-        recipe_cache=recipe_cache,
-        require_manifest=require_manifest,
-        expect_range=expect_range,
-        expect_spec=expect_spec,
-        fetched=fetched,
-        present=present,
-    )
 
 
 def _replace_chain(
