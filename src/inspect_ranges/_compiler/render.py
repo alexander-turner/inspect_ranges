@@ -96,6 +96,7 @@ services:
     image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
     init: true
     network_mode: none
+    sysctls: [__SYSCTLS__]
     cap_drop: [ALL]
     cap_add: [__CAPS__]
     security_opt:
@@ -180,8 +181,6 @@ _COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
     "    network_mode: none\n",
     """    # this range requests egress: the deployment supplies the uplink network
     networks: [uplink]
-    sysctls:
-      - net.ipv4.ip_forward=1
 """,
 ).replace(
     "volumes:\n  scratch:\n",
@@ -255,7 +254,15 @@ def render_bundle(
     if any(network.dhcp for network in plan.networks):
         caps.append("NET_RAW")
     template = _COMPOSE_UPLINK if plan.requirements.egress_uplink else _COMPOSE_ISOLATED
-    compose = template.replace("__CAPS__", ", ".join(caps))
+    # interfaces created later in the range netns (bridges, taps) inherit
+    # `default`, so none holds an IPv6 address on a segment; set at container
+    # create because /proc/sys is read-only inside the container
+    sysctls = ["net.ipv6.conf.default.disable_ipv6=1"]
+    if plan.requirements.egress_uplink:
+        sysctls.append("net.ipv4.ip_forward=1")
+    compose = template.replace("__CAPS__", ", ".join(caps)).replace(
+        "__SYSCTLS__", ", ".join(sysctls)
+    )
     if plan.requirements.evidence_capture:
         compose = _compose_with_capture(compose)
         write(

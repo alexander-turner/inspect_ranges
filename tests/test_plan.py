@@ -1,14 +1,18 @@
 import hashlib
 import json
+import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 from inspect_ranges._compiler import (
     PlanOptions,
     plan_json,
     render_bundle,
     resolve_plan,
 )
+from inspect_ranges._runtime.rangeimage import range_image_context
 from inspect_ranges.types import (
     Attacker,
     Host,
@@ -208,7 +212,33 @@ def test_uplink_compose_variant(cache: Path, tmp_path: Path) -> None:
     render_bundle(nat_spec(), out, options(cache))
     compose = (out / "compose.yaml").read_text()
     assert "network_mode: none" not in compose
-    assert "UPLINK_NETWORK" in compose and "ip_forward=1" in compose
+    assert "UPLINK_NETWORK" in compose
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (two_segment_spec, ["net.ipv6.conf.default.disable_ipv6=1"]),
+        (nat_spec, ["net.ipv6.conf.default.disable_ipv6=1", "net.ipv4.ip_forward=1"]),
+    ],
+    ids=["isolated", "uplink"],
+)
+def test_range_service_sysctls(
+    spec: Callable[[], RangeSpec], expected: list[str], cache: Path, tmp_path: Path
+) -> None:
+    # bridges come up after the container starts and inherit IPv6 off, so no
+    # management address answers on a segment (agent-containment.md)
+    out = tmp_path / "bundle"
+    render_bundle(spec(), out, options(cache))
+    compose = yaml.safe_load((out / "compose.yaml").read_text())
+    assert compose["services"]["range"]["sysctls"] == expected
+
+
+def test_range_bridges_are_created_without_multicast_snooping() -> None:
+    # a snooping bridge joins 224.0.0.106 and sends an IGMP report from its own
+    # MAC when it comes up: a frame on the segment that belongs to no guest
+    entrypoint = (range_image_context() / "entrypoint.sh").read_text()
+    assert re.search(r"ip link add \S+ type bridge\b.*\bmcast_snooping 0\b", entrypoint)
 
 
 def test_render_refuses_nonempty_directory(cache: Path, tmp_path: Path) -> None:
