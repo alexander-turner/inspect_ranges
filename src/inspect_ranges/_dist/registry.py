@@ -172,7 +172,7 @@ def _catalog_token(challenge: str, host: str, docker_config: Path | None) -> str
     if auth:
         request.add_header("Authorization", f"Basic {auth}")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _OPENER.open(request, timeout=60) as response:
             token = json.loads(_read_capped(response, _MANIFEST_CAP, "token")).get(
                 "token"
             )
@@ -404,7 +404,7 @@ class RegistryRepo:
         if auth:
             request.add_header("Authorization", f"Basic {auth}")
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with _OPENER.open(request, timeout=60) as response:
                 payload = json.loads(_read_capped(response, _MANIFEST_CAP, "token"))
         except (urllib.error.URLError, OSError, ValueError) as error:
             raise DistError(
@@ -447,6 +447,17 @@ class RegistryRepo:
             )
         if location.startswith("/"):
             location = f"{self.base_url}{location}"
+        elif urllib.parse.urlparse(location).netloc != self._host:
+            # the bearer token must never travel to a foreign origin (the
+            # redirect handler covers redirects; this covers server-supplied
+            # upload URLs, phase round-1 N1); on-origin uploads are what every
+            # real registry does
+            raise DistError(
+                "registry-protocol",
+                f"{self._host} directed the upload to a different origin "
+                f"({urllib.parse.urlparse(location).netloc}); refusing to send "
+                "credentials there",
+            )
         separator = "&" if "?" in location else "?"
         self._request(
             "PUT",

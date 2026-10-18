@@ -60,7 +60,7 @@ spec, or check out the spec revision matching a published build
 
 The `name@sha256:` form pulls an exact published root with no spec in hand: `inspect-ranges pull vulhub-zabbix@sha256:ab12e0...`. Either way, what a reference RESOLVED TO is untrusted until the landed manifest's recorded identity matches what was asked for: registry tags are mutable, and a re-pointed reference refuses before anything consumable lands.
 
-The warm path costs one spec hash plus artifact-presence checks and touches no network: a local build manifest matching the spec short-circuits, and a pruned artifact heals by re-pull. Byte integrity is enforced where it matters: `up` verifies every image, its backing golden, and the golden's vendor base against the recorded digests on every boot, so a corrupt or mixed cache always refuses with a named cause.
+The warm path costs one spec hash plus artifact-presence checks and touches no network: a local build manifest matching the spec short-circuits, and a pruned artifact heals by re-pull. Byte integrity is enforced where it matters: `up` verifies every image, its backing golden, and (whenever the golden's provenance sidecar is readable) the golden's vendor base against the recorded digests on every boot, so a corrupt or mixed cache refuses with a named cause; a golden whose provenance cannot be read skips the vendor edge, which `images prune --chains` and doctor surface as a frozen chain to fix.
 
 `INSPECT_RANGES_NEVER_PULL=1` pins a host against implicit transfers: the provider's auto-pull and the build's registry tier refuse or skip instead of touching the network. Explicit verbs still work on a pinned host, because typing them is the operator's intent; a fully offline host simply configures no reachable locations.
 

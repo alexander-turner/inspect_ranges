@@ -45,6 +45,8 @@ class FakeRegistryState:
         self.redirect_blobs_to: str | None = None
         self.put_401_budget = 0
         self.tokens_issued = 0
+        self.token_redirect_to: str | None = None
+        self.upload_location_override: str | None = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -82,6 +84,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self.state.auth_seen.append(self.headers.get("Authorization"))
         if self.path.startswith("/token"):
+            if self.state.token_redirect_to is not None:
+                self._send(302, Location=self.state.token_redirect_to)
+                return
             auth = self.headers.get("Authorization", "")
             if auth.startswith("Basic "):
                 self.state.seen_basic.append(auth.removeprefix("Basic "))
@@ -122,6 +127,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self.path.endswith("/blobs/uploads/"):
             self.state.uploads += 1
+            if self.state.upload_location_override is not None:
+                self._send(202, Location=self.state.upload_location_override)
+                return
             repo = self.path.split("/v2/")[1].removesuffix("/blobs/uploads/")
             self._send(202, Location=f"/v2/{repo}/blobs/uploads/session-1")
             return
@@ -417,3 +425,34 @@ def test_copy_closure_preserves_foreign_manifest_bytes(tmp_path: Path) -> None:
         )
         == b"foreign layer"
     )
+
+
+def test_token_realm_redirects_never_carry_basic_auth(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """Phase round-1 N1: a token realm redirecting to a foreign origin must not receive the docker-config Basic credential."""
+    url_storage, state_storage = fake_registry()
+    url_reg, state_reg = fake_registry(require_token=True)
+    state_reg.token_redirect_to = f"{url_storage}/token"
+    host = url_reg.removeprefix("http://")
+    config = tmp_path / "docker-config.json"
+    config.write_text(
+        json.dumps({"auths": {host: {"auth": base64.b64encode(b"o:s").decode()}}})
+    )
+    repo = RegistryRepo(url_reg, "ranges/tokredir", docker_config=config)
+    digest = repo.put_blob_bytes(b"token redirect probe")
+    assert repo.has_blob(digest)
+    assert all(
+        auth is None or not auth.startswith("Basic ")
+        for auth in state_storage.auth_seen
+    ), "the Basic credential leaked to the redirect target"
+
+
+def test_off_origin_upload_location_refuses(tmp_path: Path, fake_registry: Any) -> None:
+    """Phase round-1 N1: a server-supplied upload Location on a different origin refuses rather than sending the bearer there."""
+    url_evil, _ = fake_registry()
+    url_reg, state_reg = fake_registry()
+    state_reg.upload_location_override = f"{url_evil}/v2/ranges/evil/blobs/uploads/x"
+    repo = RegistryRepo(url_reg, "ranges/offorigin")
+    with pytest.raises(DistError, match="different origin"):
+        repo.put_blob_bytes(b"must not travel")
