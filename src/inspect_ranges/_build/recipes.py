@@ -32,6 +32,7 @@ class StageSink(Protocol):
 
     def log(self, stage: str, status: str, **fields: Any) -> None: ...
 
+
 RECIPES_DIR_NAME = "recipes"
 """Directory inside a range that holds its local recipe bundles."""
 
@@ -191,7 +192,9 @@ def load_recipe(
     Raises:
         IssueError: `recipe-bundle-invalid` when `recipe.yaml` is missing or malformed, or the entrypoint does not resolve to an executable regular file inside the bundle.
     """
-    bundle_dir = bundle_dir.resolve()  # the executor changes cwd, so paths must survive it
+    bundle_dir = (
+        bundle_dir.resolve()
+    )  # the executor changes cwd, so paths must survive it
     manifest = bundle_dir / "recipe.yaml"
     if not manifest.is_file():
         raise IssueError(
@@ -433,7 +436,11 @@ def run_recipe(
     log_path = _next_log_path(log_dir, recipe.name, target.guest)
     if stage_log is not None:
         stage_log.log(
-            "recipe", "start", recipe=recipe.name, version=recipe.version, guest=target.guest
+            "recipe",
+            "start",
+            recipe=recipe.name,
+            version=recipe.version,
+            guest=target.guest,
         )
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="ir-recipe-") as scratch:
@@ -453,10 +460,18 @@ def run_recipe(
                 message = f"could not launch entrypoint {recipe.spec.entrypoint!r}: {error}; log: {log_path}"
                 if stage_log is not None:
                     stage_log.log(
-                        "recipe", "fail", recipe=recipe.name, guest=target.guest, error=message
+                        "recipe",
+                        "fail",
+                        recipe=recipe.name,
+                        guest=target.guest,
+                        error=message,
                     )
                 raise RecipeError(
-                    "launch", message, recipe=recipe.name, guest=target.guest, log_path=log_path
+                    "launch",
+                    message,
+                    recipe=recipe.name,
+                    guest=target.guest,
+                    log_path=log_path,
                 ) from error
             try:
                 rc = process.wait(timeout=budget_s)
@@ -465,10 +480,18 @@ def run_recipe(
                 message = f"budget of {budget_s:.0f} s exceeded (process group killed); log: {log_path}"
                 if stage_log is not None:
                     stage_log.log(
-                        "recipe", "fail", recipe=recipe.name, guest=target.guest, error=message
+                        "recipe",
+                        "fail",
+                        recipe=recipe.name,
+                        guest=target.guest,
+                        error=message,
                     )
                 raise RecipeError(
-                    "budget", message, recipe=recipe.name, guest=target.guest, log_path=log_path
+                    "budget",
+                    message,
+                    recipe=recipe.name,
+                    guest=target.guest,
+                    log_path=log_path,
                 ) from None
     survivors_killed = _sweep_group(process)
     seconds = time.monotonic() - started
@@ -530,7 +553,9 @@ def _write_helper(scratch: Path, name: str, verb: str) -> str:
 def _kill_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:  # pragma: no cover - the group died between wait and kill
+    except (
+        ProcessLookupError
+    ):  # pragma: no cover - the group died between wait and kill
         pass
     process.wait()
 

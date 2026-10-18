@@ -440,20 +440,62 @@ def _derive_locked(
         metadata_temp.unlink(missing_ok=True)
 
 
-def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
-    """The cache's managed goldens (with provenance) and unmanaged files (no metadata sidecar).
+class RealizedListing(BaseModel):
+    """A build-captured realized image as `images list` reports it (shape-matched from its `.realized.json` sidecar; the build package owns the full model, and the boundary forbids importing it here)."""
+
+    file: str
+    range_name: str
+    guest: str
+    build_key: str
+    created: str
+
+
+def _load_realized(sidecar: Path) -> "RealizedListing | None":
+    try:
+        import json
+        from typing import cast
+
+        loaded: object = json.loads(sidecar.read_text())
+        if not isinstance(loaded, dict):
+            return None
+        data = cast(dict[str, object], loaded)
+        if data.get("type") != "realized":
+            return None
+        return RealizedListing(
+            file=sidecar.name.removesuffix(".realized.json") + ".qcow2",
+            range_name=str(data["range_name"]),
+            guest=str(data["guest"]),
+            build_key=str(data["build_key"]),
+            created=str(data["created"]),
+        )
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def list_images(
+    cache: Path,
+) -> tuple[list[ImageMetadata], list[RealizedListing], list[str]]:
+    """The cache's managed goldens, build-captured realized images, and unmanaged files.
 
     Args:
         cache: The image cache directory.
 
     Returns:
-        Managed metadata sorted by name, and unmanaged image file names sorted.
+        Managed golden metadata sorted by name, realized listings sorted by file, and unmanaged image file names sorted.
     """
     if not cache.is_dir():
-        return [], []
+        return [], [], []
     managed: list[ImageMetadata] = []
     managed_files: set[str] = set()
+    realized: list[RealizedListing] = []
+    for sidecar in sorted(cache.glob("*.realized.json")):
+        listing = _load_realized(sidecar)
+        if listing is not None and (cache / listing.file).is_file():
+            realized.append(listing)
+            managed_files.add(listing.file)
     for sidecar in sorted(cache.glob("*.json")):
+        if sidecar.name.endswith(".realized.json"):
+            continue
         metadata = _load_metadata(sidecar)
         if metadata is None:
             continue  # corrupt sidecar: its image surfaces as unmanaged below
@@ -469,4 +511,4 @@ def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
         )
         and path.name not in managed_files
     )
-    return managed, unmanaged
+    return managed, realized, unmanaged

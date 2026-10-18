@@ -21,11 +21,11 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import VsockTransport
-from .._compiler.plan import PlanOptions, resolve_image_reference, spec_sha256
+from .._compiler.plan import ImageRef, PlanOptions, resolve_image_reference, spec_sha256
 from .._compiler.render import render_bundle
 from .._diagnostics import issues_from_validation_error
 from .._runtime.down import down
-from .._runtime.images import default_image_cache
+from .._runtime.images import default_image_cache, sha256_file
 from .._runtime.ownership import (
     PROJECT_PREFIX,
     StageLog,
@@ -33,11 +33,18 @@ from .._runtime.ownership import (
     project_dir,
 )
 from .._runtime.up import OnStage, UpOptions, UpResult, up
-from .._runtime.images import sha256_file
 from ..schema import revalidate_range
-from .capture import RealizedImageMeta, capture_guest, default_capture_runner, shutdown_guest, wait_shutoff
+from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
+from .capture import (
+    RealizedImageMeta,
+    capture_guest,
+    default_capture_runner,
+    shutdown_guest,
+    wait_shutoff,
+)
 from .errors import BuildError
 from .manifest import (
+    BaseImageRecord,
     BuildManifest,
     GuestRecord,
     RecipeRecord,
@@ -50,9 +57,9 @@ from .manifest import (
     now_iso,
     realized_file_name,
     save_manifest,
+    validate_range_name,
     vars_hash,
 )
-from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
 from .recipes import (
     DEFAULT_RECIPE_BUDGET_S,
     RecipeError,
@@ -234,8 +241,6 @@ class BuildOptions(BaseModel):
     """Per-guest bound on the network-settle gate."""
 
 
-
-
 class BuildResult(BaseModel):
     """A completed build run (slice 2: orchestration proof; artifacts and manifest arrive with slice 5)."""
 
@@ -387,12 +392,20 @@ def build_range(
         else default_recipe_cache()
     )
     image_cache = (
-        options.image_cache if options.image_cache is not None else default_image_cache()
+        options.image_cache
+        if options.image_cache is not None
+        else default_image_cache()
     )
     build_cache = (
-        options.build_cache if options.build_cache is not None else default_build_cache()
+        options.build_cache
+        if options.build_cache is not None
+        else default_build_cache()
     )
     started = time.monotonic()
+
+    name_issue = validate_range_name(spec.meta.name)
+    if name_issue is not None:
+        raise IssueError([name_issue])
 
     steps = resolve_provisioning(spec, range_dir, recipe_cache)
     steps_by_host: dict[str, list[ResolvedStep]] = {}
@@ -403,7 +416,7 @@ def build_range(
         for host in spec.hosts
         if host.provisioning or host.services or host.vulnerabilities
     ]
-    goldens: dict[str, Any] = {}
+    goldens: dict[str, ImageRef] = {}
     keys: dict[str, str] = {}
     missing: list[Issue] = []
     for index, host in enumerate(spec.hosts):
@@ -450,8 +463,9 @@ def build_range(
         and all(host.name in reusable for host in content_hosts)
     ):
         # the no-op fast path: every key matches and the verification is
-        # recorded, so nothing boots (all-or-nothing caching, ratified)
-        project = f"{PROJECT_PREFIX}{spec.meta.name}-{spec_sha256(build_spec)[:12]}"
+        # recorded, so nothing boots (all-or-nothing caching, ratified); the
+        # stage record lands in the project that produced the verification
+        project = prior.project
         tee = _BuildTee(StageLog(state_dir, project), on_stage)
         tee.log(
             "build",
@@ -507,7 +521,9 @@ def build_range(
             cid_base=options.cid_base,
             # the build realizes provisioning (slice 2) and verifies services
             # and vulnerabilities (slice 4); the runtime path keeps its gates
-            realized_sections=frozenset({"provisioning", "services", "vulnerabilities"}),
+            realized_sections=frozenset(
+                {"provisioning", "services", "vulnerabilities"}
+            ),
         )
         try:
             plan = render_bundle(build_spec, staging, plan_options)
@@ -615,6 +631,9 @@ def build_range(
                     key = keys[host.name]
                     realized_name = realized_file_name(spec.meta.name, host.name, key)
                     golden = goldens[host.name]
+                    assert (
+                        golden.digest is not None
+                    )  # gated by the image-not-in-cache refusal above
                     digest = capture(
                         project,
                         host.name,
@@ -658,19 +677,39 @@ def build_range(
                     f"{_strip_stage(error)} ({disposition})",
                     guest=error.guest,
                 ) from error
-            verified_at = now_iso()
-            manifest = BuildManifest(
-                range_name=spec.meta.name,
-                schema_version=spec.meta.schema_version,
-                spec_sha256=spec_hash,
-                built_at=verified_at,
-                guests=tuple(guest_records),
-                verification=VerificationRecord(
-                    verified_at=verified_at, declarations=tuple(verifications)
-                ),
+            except Exception as error:
+                # a raising capture (docker cp timeout, full disk) must dispose
+                # like every other stage, never escape raw past teardown
+                tee.log("capture", "fail", error=str(error))
+                disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+                raise BuildError(
+                    "capture", f"capture failed: {error} ({disposition})"
+                ) from error
+            try:
+                verified_at = now_iso()
+                manifest = BuildManifest(
+                    range_name=spec.meta.name,
+                    schema_version=spec.meta.schema_version,
+                    spec_sha256=spec_hash,
+                    spec=spec.model_dump(mode="json", by_alias=True),
+                    project=project,
+                    built_at=verified_at,
+                    base_images=_base_images(spec, image_cache),
+                    guests=tuple(guest_records),
+                    verification=VerificationRecord(
+                        verified_at=verified_at, declarations=tuple(verifications)
+                    ),
+                )
+                saved_manifest = save_manifest(manifest, build_cache)
+            except Exception as error:
+                tee.log("manifest", "fail", error=str(error))
+                disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+                raise BuildError(
+                    "manifest", f"manifest write failed: {error} ({disposition})"
+                ) from error
+            tee.log(
+                "manifest", "ok", path=str(saved_manifest), guests=len(guest_records)
             )
-            saved_manifest = save_manifest(manifest, build_cache)
-            tee.log("manifest", "ok", path=str(saved_manifest), guests=len(guest_records))
 
         if not options.keep:
             try:
@@ -700,6 +739,30 @@ def build_range(
         manifest_path=saved_manifest,
         verified_at=verified_at,
     )
+
+
+def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:
+    """Every guest's base image resolved to a digest (range-build's resolved-inputs commitment)."""
+    records: list[BaseImageRecord] = []
+    guests: list[tuple[str, str, str | None]] = [
+        (host.name, "host", host.image) for host in spec.hosts
+    ]
+    guests += [(router.name, "router", router.image) for router in spec.routers]
+    guests.append((spec.attacker.name, "attacker", spec.attacker.image))
+    for name, kind, reference in guests:
+        if reference is None:
+            continue  # defaulted images resolve at plan time; recorded when a default lands here
+        resolved = resolve_image_reference(reference, image_cache)
+        records.append(
+            BaseImageRecord(
+                guest=name,
+                kind=kind,
+                reference=reference,
+                file=resolved.file,
+                digest=resolved.digest or "",
+            )
+        )
+    return tuple(records)
 
 
 class _BuildTee:
@@ -808,9 +871,7 @@ def _ensure_uplink_network(name: str) -> None:
             timeout=60,
         )
     except FileNotFoundError as error:
-        raise BuildError(
-            "uplink", "docker is not installed or not on PATH"
-        ) from error
+        raise BuildError("uplink", "docker is not installed or not on PATH") from error
     except subprocess.TimeoutExpired as error:
         raise BuildError(
             "uplink", f"docker did not answer within 60 s while ensuring {name!r}"

@@ -5,19 +5,41 @@ The manifest is the publishable identity of a built range version (range-build's
 Invalidation follows the spine's two-key algebra: each guest carries a build key hashing its golden digest, its realized-spec projection (provisioning, services, vulnerabilities, canonically dumped), and its ordered recipe digests and vars. A guest whose key matches the recorded manifest boots from its captured realized image and skips its recipes; a build whose guests all match and whose verification is recorded skips entirely, reporting the cached verification (all-or-nothing per the ratified decision), with `--reverify` forcing the full pass.
 """
 
+import fcntl
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from .._diagnostics import Issue
 from ..types import Host
 from .recipes import ResolvedRecipe, VarValue
 from .verify import DeclarationResult
 
 MANIFEST_FORMAT_VERSION = "1"
+
+_RANGE_NAME_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?:/[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)?$"
+)
+
+
+def validate_range_name(name: str) -> Issue | None:
+    """The spine's published-name grammar for `range.name` (lowercase slug, at most one `/`), enforced before the name composes cache paths.
+
+    Returns the refusal issue, or None when the name conforms. `..` and absolute forms can never pass, which is what keeps `manifest_path` and `realized_file_name` inside their caches (the slice-1 traversal lesson, applied to range names).
+    """
+    if _RANGE_NAME_RE.match(name):
+        return None
+    return Issue(
+        code="range-name-invalid",
+        path=("range", "name"),
+        message=f"range name {name!r} is not a lowercase slug (letters, digits, `.`, `_`, `-`, at most one `/`), so it cannot name build artifacts",
+        hint="rename the range per the published-name grammar (build-images-spine.md)",
+    )
 
 
 def default_build_cache() -> Path:
@@ -29,6 +51,18 @@ def default_build_cache() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".cache" / "inspect-ranges" / "builds"
+
+
+class BaseImageRecord(BaseModel):
+    """One guest's base image resolved to a digest at build time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    guest: str
+    kind: str
+    reference: str
+    file: str
+    digest: str
 
 
 class RecipeRecord(BaseModel):
@@ -58,6 +92,17 @@ class GuestRecord(BaseModel):
     recipes: tuple[RecipeRecord, ...]
 
 
+class BehavioralCheckRecord(BaseModel):
+    """One challenge behavioral check's outcome, as slice 6 records it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    challenge: str
+    check: str
+    status: str
+    detail: str = ""
+
+
 class VerificationRecord(BaseModel):
     """The build's verification evidence, cached all-or-nothing."""
 
@@ -65,6 +110,8 @@ class VerificationRecord(BaseModel):
 
     verified_at: str
     declarations: tuple[DeclarationResult, ...]
+    behavioral_checks: tuple[BehavioralCheckRecord, ...] = ()
+    """Challenge behavioral-check results (reference solution passes, insufficient attempt fails, oracle shortcuts fail); populated by slice 6."""
 
 
 class BuildManifest(BaseModel):
@@ -76,11 +123,26 @@ class BuildManifest(BaseModel):
     spec_sha256: str
     """Canonical hash of the validated spec (the normalized form; comments and formatting never participate)."""
 
+    spec: dict[str, object] = {}
+    """The validated spec embedded (Journey B's recovery promise: a pulled artifact set recovers to source). Scenario credentials are spec-plaintext by design; per-sample proof material never appears in a spec."""
+
+    project: str = ""
+    """The realizer project that produced this build (the stage log and verification evidence live under it)."""
+
+    bundle_sha256: str | None = None
+    """Wraps-by-reference slot for a runtime realization bundle built from this manifest; the build itself renders only its transient egress bundle, so this populates when the runtime path renders one (slice 6)."""
+
+    seeds: dict[str, str] = {}
+    """Reproducibility seeds (topology randomization); empty until the generation layer draws any. Never proof material."""
+
     built_at: str
     build_egress: bool = True
     """Whether build-time egress was granted (it always is today; recorded per the build-v1 decision)."""
 
     realized_sections: tuple[str, ...] = ("provisioning", "services", "vulnerabilities")
+    base_images: tuple[BaseImageRecord, ...] = ()
+    """Every guest's base image resolved to a digest at build time (range-build's resolved-inputs commitment)."""
+
     guests: tuple[GuestRecord, ...]
     verification: VerificationRecord
 
@@ -127,8 +189,8 @@ def guest_build_key(
 
 
 def realized_file_name(range_name: str, guest: str, build_key: str) -> str:
-    """Cache file name for a captured realized image; the key prefix keeps generations distinct."""
-    return f"{range_name}-{guest}-{build_key[:12]}.qcow2"
+    """Cache file name for a captured realized image; the key prefix keeps generations distinct, and a slashed range name flattens (file names are layout, not identity)."""
+    return f"{range_name.replace('/', '-')}-{guest}-{build_key[:12]}.qcow2"
 
 
 def manifest_path(build_cache: Path, range_name: str) -> Path:
@@ -137,12 +199,18 @@ def manifest_path(build_cache: Path, range_name: str) -> Path:
 
 
 def save_manifest(manifest: BuildManifest, build_cache: Path) -> Path:
-    """Write the manifest atomically (temp then rename); returns its path."""
+    """Write the manifest atomically (temp then rename) under a per-range lock; returns its path."""
     path = manifest_path(build_cache, manifest.range_name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".json.writing")
-    temp.write_text(manifest.model_dump_json(indent=2) + "\n")
-    temp.replace(path)
+    lock_path = path.parent / ".manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            temp = path.with_suffix(".json.writing")
+            temp.write_text(manifest.model_dump_json(indent=2) + "\n")
+            temp.replace(path)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
     return path
 
 

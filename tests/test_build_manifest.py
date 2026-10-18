@@ -62,20 +62,22 @@ def test_projection_covers_only_realized_sections() -> None:
     assert spec_projection(changed) != same
 
 
+Steps = list[tuple[ResolvedRecipe, dict[str, str | int | bool]]]
+
+
 def test_build_key_moves_with_each_input() -> None:
     host = make_host()
-    steps: list[tuple[ResolvedRecipe, dict[str, str | int | bool]]] = [
-        (resolved("d1"), {"marker": "x"})
-    ]
+    steps: Steps = [(resolved("d1"), {"marker": "x"})]
+    other_digest: Steps = [(resolved("d2"), {"marker": "x"})]
+    other_vars: Steps = [(resolved("d1"), {"marker": "y"})]
+    same_again: Steps = [(resolved("d1"), {"marker": "x"})]
     key = guest_build_key("sha-golden", host, steps)
     assert guest_build_key("sha-other", host, steps) != key
-    assert guest_build_key("sha-golden", host, [(resolved("d2"), {"marker": "x"})])  # pyright: ignore[reportArgumentType] != key
-    assert guest_build_key("sha-golden", host, [(resolved("d1"), {"marker": "y"})])  # pyright: ignore[reportArgumentType] != key
+    assert guest_build_key("sha-golden", host, other_digest) != key
+    assert guest_build_key("sha-golden", host, other_vars) != key
     assert guest_build_key("sha-golden", make_host(services=[]), steps) != key
     # and it is stable for identical inputs
-    assert guest_build_key(
-        "sha-golden", make_host(), [(resolved("d1"), {"marker": "x"})]
-    )  # pyright: ignore[reportArgumentType] == key
+    assert guest_build_key("sha-golden", make_host(), same_again) == key
 
 
 def test_vars_hash_is_order_insensitive() -> None:
@@ -126,3 +128,22 @@ def test_realized_file_name_distinguishes_generations() -> None:
     a = realized_file_name("r", "web", "a" * 64)
     b = realized_file_name("r", "web", "b" * 64)
     assert a != b and a.endswith(".qcow2") and "r-web-" in a
+
+
+def test_range_name_grammar_gate() -> None:
+    from inspect_ranges._build.manifest import validate_range_name
+
+    assert validate_range_name("vulhub-zabbix") is None
+    assert validate_range_name("acme/payroll") is None
+    for bad in ("../escape", "/abs", "a/b/c", "UPPER", "trail-", ".lead"):
+        issue = validate_range_name(bad)
+        assert issue is not None and issue.code == "range-name-invalid", bad
+
+
+def test_slashed_range_names_flatten_in_file_names_and_nest_in_builds() -> None:
+    name = realized_file_name("acme/payroll", "web", "k" * 64)
+    assert "/" not in name and name.startswith("acme-payroll-web-")
+    from inspect_ranges._build.manifest import manifest_path
+
+    path = manifest_path(Path("/builds"), "acme/payroll")
+    assert path == Path("/builds/acme/payroll/manifest.json")

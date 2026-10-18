@@ -98,7 +98,7 @@ def parse_ss(output: str, proto: Literal["tcp", "udp"]) -> list[Listener]:
 
 
 def parse_packages(output: str) -> dict[str, str]:
-    """Parse `dpkg-query -W -f '${Package}\\t${Version}\\n'` output."""
+    r"""Parse `dpkg-query -W -f '${Package}\t${Version}\n'` output."""
     packages: dict[str, str] = {}
     for line in output.splitlines():
         name, _, version = line.partition("\t")
@@ -148,7 +148,9 @@ def evaluate_host(host: Host, facts: GuestFacts) -> list[DeclarationResult]:
                     f"{listener.proto}/{listener.port} by {listener.process or 'unknown process'}"
                 )
         if service.version is not None:
-            attributed = _attribute_version(service.name, service.package, service.port, facts)
+            attributed = _attribute_version(
+                service.name, service.package, service.port, facts
+            )
             if attributed.version is None:
                 failures.append(f"version unattributable ({attributed.detail})")
             elif not version_matches(service.version, attributed.version):
@@ -156,9 +158,13 @@ def evaluate_host(host: Host, facts: GuestFacts) -> list[DeclarationResult]:
                     f"version {attributed.version} from {attributed.detail}, declared {service.version}"
                 )
             else:
-                observations.append(f"version {attributed.version} from {attributed.detail}")
+                observations.append(
+                    f"version {attributed.version} from {attributed.detail}"
+                )
         if service.port is None and service.version is None:
-            observations.append("nothing mechanically checkable (name-only declaration)")
+            observations.append(
+                "nothing mechanically checkable (name-only declaration)"
+            )
         ok = not failures
         service_ok[service.name] = ok
         results.append(
@@ -168,7 +174,11 @@ def evaluate_host(host: Host, facts: GuestFacts) -> list[DeclarationResult]:
                 name=service.name,
                 status="ok" if ok else "fail",
                 code="" if ok else "service-not-verified",
-                declared=_declared_service(service_name=service.name, port=service.port, version=service.version),
+                declared=_declared_service(
+                    service_name=service.name,
+                    port=service.port,
+                    version=service.version,
+                ),
                 observed="; ".join(failures or observations),
             )
         )
@@ -286,7 +296,9 @@ def verify_range(
     return results
 
 
-async def _collect_facts(cids: dict[str, int], guest: str, log_path: Path) -> GuestFacts:
+async def _collect_facts(
+    cids: dict[str, int], guest: str, log_path: Path
+) -> GuestFacts:
     channel = MessageChannel(VsockTransport(cids), label="build-verify")
     probe = (
         "echo ===TCP===; ss -tlnpH; echo ===UDP===; ss -ulnpH; "
