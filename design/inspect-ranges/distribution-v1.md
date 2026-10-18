@@ -1,0 +1,70 @@
+---
+type: document
+title: "Decision: distribution v1"
+audience: inspect-ranges development
+status: accepted
+tags: [inspect-ranges, images, distribution, registry, phase-plan, decision]
+timestamp: 2026-10-18
+---
+
+# Decision: distribution v1
+
+*Phase plan for the distribution phase of the build/images arc: push, mirror, and spec-driven pull over the ratified design. The exit criterion is literal, in the Journey A tradition: the [Journey B transcripts](build-images-journey-b.md) execute command for command, with the one honest substitution that the public org's role is played by the private test repo and a deployment-shaped local registry (canonical public artifacts land in the catalog phase, by user decision below), ending in an `inspect eval` on a machine that built nothing. The phase executes under the accepted [spine](build-images-spine.md) (Q1 reference grammar and resolution order, Q2 invalidation algebra, Q3 artifact ledger and the two manifests), the [image-distribution](image-distribution.md) record (chained-qcow2-over-OCI publication format, the integrity and materialization contract, eager pull as the baseline), and the registry posture and location forms ratified in Journey B. Build v1 is the substrate: everything here distributes what `build` already produces and verifies, and nothing here changes what a build is.*
+
+## Arc context (user decisions, 2026-10-18)
+
+This is phase 1 of the remaining images arc, sequenced ahead of its consumers because publishing is what makes every image built afterward reusable:
+
+1. **Distribution v1** (this plan).
+2. **Standard images v1 (the catalog)**: the dedicated attack image (broad kali-class toolset including metasploit, by user decision over the lean-core recommendation: ecosystem familiarity and agent expectations outweigh footprint and attribution concerns), the blessed goldens, the daemon bundle, and the hardened range container image (user decision: published as a canonical pinned image under the org), with publish day for all canonical public artifacts landing here, once, when the final artifact set and names exist.
+3. **The Linux examples** (kypo-demo, cyris-basic, mhbench-equifax-small), each forcing its guest-config gates open under the lockstep rule and shipping its reference chains and `patch` duals.
+4. **Windows and AD**, under the ratified posture: Windows artifacts build and distribute through local caches and private registries only, never the public org. The records carry this one-line statement and nothing more.
+
+Credentials posture, settled live before this plan: the org token (write-scoped to `meridianlabsai/ir-dist-test`) is logged in on the devbox and proven with a real push and registry-API read-back; canonical publishes to public repos remain a manual user step with staged commands. The AFK protocol applies throughout the arc: decisions that are the user's but non-blocking accumulate in [distribution-v1-parked-decisions.md](distribution-v1-parked-decisions.md) with a recommendation and a safe interim behavior, and work continues.
+
+## What this phase publishes and consumes
+
+The Q3 ledger rows in scope: vendor bases (the bottom layer of golden chains, which is what makes a mirror complete), goldens, realized scenario images (as delta layers on their base's chain), recipe bundles, the daemon bundle, and the build manifest as the pull root. Out of scope: checkpoint bundles (none exist until the Windows/AD phase; the encoding slot is reserved, not designed) and the realization bundle (never publishes; rendered on demand, unchanged).
+
+The encoding follows image-distribution verbatim: each qcow2 is a content-addressed blob, the backing relationship is pinned by digest in annotations, blobs materialize verbatim into the canonical relative cache layout and are never edited, a manifest is usable only when every referenced blob is present and verified, and eviction is by whole chain. Eager pull is the only fetch mode this phase ships; the curl/copy-on-read lazy path stays a recorded option gated on the integrity contract it still lacks.
+
+## The slices
+
+**Slice 1: the OCI encoding and the directory form (the registry-less core).** The artifact vocabulary as code: media types and manifest schemas for the five in-scope artifact kinds, the chained-qcow2 encoding with digest-pinned backing annotations, the build-manifest-as-pull-root closure walk (a manifest names its transitive references, which is what makes every later copy complete by construction), and read/write of the plain OCI image-layout directory. Consuming side: the pulled-blob cache contract (downloads land under temporary names and move in atomically, concurrent pullers converge by digest, backing-chain validation at materialization, no partial publication ever observed as complete). Battery (`dist-oci`, CID band 4000): round-trip the real vulhub build through a directory layout into a fresh empty cache on the same host, then boot the range from the materialized artifacts via the existing manifest consumption path; corrupt-blob, missing-blob, truncated-manifest, and drifted-backing-digest cases all refuse with named causes. This slice has zero network and zero new credentials, and it fixes the encoding every other slice rides on.
+
+**Slice 2: the registry client.** Push, pull, and cross-registry mirror against a live OCI registry: the v2 protocol (token auth against the auth service, chunked and mounted blob upload, manifest put/head/get), credentials from the standard docker config, and streaming transfer for mirror (blobs stream source to destination without materializing the whole set locally). The client build question (pure-Python protocol implementation versus shelling to skopeo) is settled by a short spike at the top of the slice and recorded; the working assumption is pure-Python, matching the house posture of owning the provider path and keeping zero external binary dependencies, with skopeo as the fallback if auth edge cases prove expensive. Battery (`dist-registry`): a local `registry:2` container; push the vulhub closure, wipe the cache, pull it back, boot; digest dedup proven by a second push reporting zero blobs sent; mirror between two local registries with the already-present accounting correct.
+
+**Slice 3: resolution and spec-driven pull.** The Q1 resolution order gains its registry tier: pin, then local cache, then the ordered registry search path (config plus `INSPECT_RANGES_REGISTRY`, default `[docker.io/meridianlabsai]`), first match wins, all three location forms interchangeable. `pull` run bare in a range directory computes the normalized-spec hash and selects the published build manifest whose recorded spec hash matches exactly; the mismatch refusal is `no-build-for-spec` with the nearest build named, per the transcript. The explicit `name@sha256:` form works without a spec. The freshness verb (the spine's explicit move-forward act; naming is Q8, decided here) re-resolves bare names and reports what changed. `image-not-in-cache` hints gain the pull option. The one-slash published-name grammar lands where publishing gives it a referent, with `range.name`'s stricter local slug unchanged. Battery (`dist-resolve`): search-path shadowing (a deployment registry shadowing a fallback name deterministically), spec-edit mismatch refusal, pin short-circuit, sticky-cache freezing with explicit refresh.
+
+**Slice 4: provider auto-pull and the transfer UX.** The resolve-verify-fetch runs in the provider's `task_init`, once per distinct sandbox config, before the eval UI comes up; samples share the materialized cache. Warm path cost is a spec hash plus one registry resolve plus sidecar-verified cache hits, never a re-hash of multi-GB blobs. Every long transfer (pull, push, mirror, auto-pull) renders the docker-pull shape: one live line per blob keyed by short digest with explicit states including `Already exists`, concurrent lines, a final `name@digest`; non-TTY degrades to periodic plain lines; failures end in the house coded refusal, never a traceback under a half-drawn bar. A config knob pins a host to never-pull for strict offline posture. Battery (`dist-provider`): a real `inspect eval` from a clean cache against a local registry, pull visible before the eval UI, second eval warm-path fast, never-pull refusing loudly with the registry untouched.
+
+**Slice 5: mirror, the air gap, and the GC tier.** `mirror` in both granularities (whole location for seeding and sync, single build manifest for one range) and both directions involving the directory form; the tar round trip proven end to end (mirror to directory, tar, untar elsewhere, consume with the mirror as the configured registry). The local GC grows the distribution tier: whole-chain eviction extending `images prune` (never a backing layer out from under a dependent, pulled chains accounted like built ones), and doctor gains distribution rows (configured locations parse and are reachable where network exists, cache chain integrity). Battery (`dist-mirror`): the sneakernet transcript verbatim plus eviction leaving every surviving manifest's closure intact.
+
+**Slice 6: hub conformance and close-out.** The real-Docker-Hub spike (`dist-hub`, credentialed, run-and-recorded like s3-pull rather than a repeatable battery leg): the production auth flow against `auth.docker.io`, OCI artifact media-type acceptance, repo semantics under the org token, and measured pull rate-limit behavior, all against `meridianlabsai/ir-dist-test`; the fleet guidance the measurements imply (prepend your own registry or mirror; anonymous-pull limits quantified) lands in the docs. Close-out: a Distribution docs page (locations and the three forms, push/pull/mirror, the spec-hash join, auto-pull, air gap, the never-pull knob), CLI page updates, doctor rows documented, CHANGELOG. Phase exit: the Journey B transcripts execute command for command (public-org legs played by the test repo and a deployment-shaped registry, re-executed for real on catalog-phase publish day), ending in `inspect eval` on a built-nothing consumer path, followed by the house two-round fresh-context review of the whole phase.
+
+## Non-goals
+
+- No canonical public artifacts: publish day is the catalog phase (user decision, 2026-10-18). The project publisher/CI story and the fleet pin file (Q11) land there with it; this phase proves the mechanics they will use.
+- No `publish` promotion verb (the deliberate act that gives a realized guest a consumable `image:` name): catalog-phase territory, where names get referents.
+- No CDC, no lazy/curl boot path, no signing or provenance machinery (trusted-operator posture holds until the distribution contract asks), no granted-urls or pre-seeded delivery changes (the host-provider seam already defines them; registry is the mode this phase adds).
+- No checkpoint-bundle encoding (reserved for the Windows/AD phase, when one exists to encode).
+- No Windows artifacts anywhere near a public location, per the ratified posture.
+
+## Decisions this phase owns (made in-slice, recorded)
+
+CLI verb composition and the freshness verb's name (Q8); the OCI client approach (slice-2 spike); exact media types and annotation keys; GC/eviction policy details; config knob names; the hub repo naming conventions the catalog phase inherits. Catalog growth (Q12) and the publisher/pin file (Q11) are explicitly deferred to the catalog phase.
+
+## Parked for the user
+
+Accumulated in [distribution-v1-parked-decisions.md](distribution-v1-parked-decisions.md) during the run, per the AFK protocol: each entry carries the question, the recommendation, and the safe interim behavior in force.
+
+## Ledger
+
+| Slice | Status |
+|---|---|
+| 1 OCI encoding + directory form | |
+| 2 registry client | |
+| 3 resolution + spec-driven pull | |
+| 4 provider auto-pull + UX | |
+| 5 mirror, air gap, GC tier | |
+| 6 hub conformance + close-out | |
