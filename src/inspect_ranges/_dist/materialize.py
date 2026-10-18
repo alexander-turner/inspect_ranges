@@ -40,9 +40,8 @@ from .encode import (
 from .errors import DistError
 from .oci import (
     MEDIA_TYPE_INDEX,
+    ContentStore,
     Descriptor,
-    OciIndex,
-    OciLayout,
     OciManifest,
     atomic_write,
 )
@@ -112,7 +111,7 @@ def _layer(manifest: OciManifest, media_type: str) -> Descriptor:
 
 
 def _land_image(
-    layout: OciLayout,
+    store: ContentStore,
     manifest: OciManifest,
     image_cache: Path,
     *,
@@ -139,7 +138,7 @@ def _land_image(
             sidecar_path = image_cache / (name.removesuffix(".qcow2") + sidecar_suffix)
             if heal and sidecar_path.is_file():
                 return
-            data = layout.read_blob(_layer(manifest, LAYER_SIDECAR))
+            data = store.read_blob(_layer(manifest, LAYER_SIDECAR))
             atomic_write(sidecar_path, data)
             fetched.append(sidecar_path.name)
 
@@ -160,9 +159,9 @@ def _land_image(
             )
         if sidecar_first:
             write_sidecar()
-            layout.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+            store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
         else:
-            layout.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+            store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
             write_sidecar()
         fetched.append(name)
 
@@ -194,7 +193,7 @@ def _validate_chain(
 
 
 def materialize_closure(
-    layout: OciLayout,
+    store: ContentStore,
     root: Descriptor,
     *,
     image_cache: Path,
@@ -211,15 +210,10 @@ def materialize_closure(
             "manifest-invalid",
             f"a pull root is an OCI index, not {root.media_type}",
         )
-    try:
-        index = OciIndex.model_validate_json(layout.read_blob(root))
-    except ValueError as error:
-        raise DistError(
-            "manifest-invalid", f"the pull root does not parse as an OCI index: {error}"
-        ) from error
+    index = store.read_index(root)
     artifacts: dict[str, list[OciManifest]] = {kind: [] for kind in _KIND_ORDER}
     for member in index.manifests:
-        manifest = layout.manifest(member)
+        manifest = store.manifest(member)
         if manifest.artifact_type not in artifacts:
             raise DistError(
                 "manifest-invalid",
@@ -239,7 +233,7 @@ def materialize_closure(
 
     for manifest in artifacts[ARTIFACT_VENDOR_BASE]:
         _land_image(
-            layout,
+            store,
             manifest,
             image_cache,
             sidecar_suffix=None,
@@ -252,7 +246,7 @@ def materialize_closure(
         ).digest
     for manifest in artifacts[ARTIFACT_GOLDEN]:
         _land_image(
-            layout,
+            store,
             manifest,
             image_cache,
             sidecar_suffix=".json",
@@ -266,7 +260,7 @@ def materialize_closure(
         _validate_chain(manifest, image_cache, landed_digests)
     for manifest in artifacts[ARTIFACT_REALIZED]:
         _land_image(
-            layout,
+            store,
             manifest,
             image_cache,
             sidecar_suffix=".realized.json",
@@ -282,12 +276,12 @@ def materialize_closure(
     landed_recipes: dict[str, str] = {}
     for manifest in artifacts[ARTIFACT_RECIPE_BUNDLE]:
         landed = _land_recipe(
-            layout, manifest, recipe_cache, fetched=fetched, present=present
+            store, manifest, recipe_cache, fetched=fetched, present=present
         )
         landed_recipes[landed] = _annotation(manifest, ANN_RECIPE_DIGEST)
 
     build = builds[0]
-    manifest_bytes = layout.read_blob(_layer(build, LAYER_BUILD_MANIFEST))
+    manifest_bytes = store.read_blob(_layer(build, LAYER_BUILD_MANIFEST))
     try:
         build_manifest = BuildManifest.model_validate_json(manifest_bytes)
     except ValueError as error:
@@ -362,7 +356,7 @@ def _validate_completeness(
 
 
 def _land_recipe(
-    layout: OciLayout,
+    store: ContentStore,
     manifest: OciManifest,
     recipe_cache: Path,
     *,
@@ -402,7 +396,7 @@ def _land_recipe(
             # verify-while-copy into a private file, then parse only verified
             # bytes (read_blob's in-memory cap does not bound bundle size)
             tar_path = staging / "bundle.tar"
-            layout.copy_blob_to(_layer(manifest, LAYER_RECIPE_TAR), tar_path)
+            store.copy_blob_to(_layer(manifest, LAYER_RECIPE_TAR), tar_path)
             tree = staging / "tree"
             tree.mkdir()
             with tarfile.open(tar_path) as tar:

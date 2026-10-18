@@ -16,7 +16,7 @@ from .._build.recipes import ResolvedRecipe, resolve_recipe
 from .._compiler.plan import image_file_name
 from .._runtime.images import ImageMetadata
 from .errors import DistError
-from .oci import Descriptor, OciIndex, OciLayout, OciManifest
+from .oci import ContentStore, Descriptor, OciIndex, OciManifest
 
 __all__ = [
     "ANN_BACKING_DIGEST",
@@ -105,17 +105,17 @@ def _realized_sidecar_path(image_cache: Path, file: str) -> Path:
 
 
 def _qcow2_descriptor(
-    layout: OciLayout, path: Path, *, expected: str | None
+    store: ContentStore, path: Path, *, expected: str | None
 ) -> Descriptor:
     if not path.is_file():
         raise DistError("artifact-missing", f"{path} is not in the image cache")
-    digest = layout.put_blob_file(path, expected=expected)
+    digest = store.put_blob_file(path, expected=expected)
     return Descriptor(media_type=LAYER_QCOW2, digest=digest, size=path.stat().st_size)
 
 
-def _sidecar_descriptor(layout: OciLayout, path: Path) -> Descriptor:
+def _sidecar_descriptor(store: ContentStore, path: Path) -> Descriptor:
     data = path.read_bytes()
-    digest = layout.put_blob_bytes(data)
+    digest = store.put_blob_bytes(data)
     return Descriptor(media_type=LAYER_SIDECAR, digest=digest, size=len(data))
 
 
@@ -143,21 +143,21 @@ def recipe_bundle_tar(recipe: ResolvedRecipe) -> bytes:
 
 def push_build(
     manifest: BuildManifest,
-    layout: OciLayout,
+    store: ContentStore,
     *,
     image_cache: Path,
     build_cache: Path,
     range_dir: Path | None = None,
     recipe_cache: Path | None = None,
 ) -> Descriptor:
-    """Encode a built range's transitive closure into `layout` and return the root index descriptor (the publishable identity).
+    """Encode a built range's transitive closure into `store` and return the root index descriptor (the publishable identity).
 
-    The closure: every base image's golden chain (golden plus its vendor base, read from the golden's provenance sidecar), every content guest's realized image with its sidecar, every referenced recipe bundle (resolved exactly as the build resolves them and required to match the manifest's recorded digest), and the build manifest itself as the pull root's entry point. Blobs the layout already holds are not rewritten (dedup by digest). The index is also named in the layout under the range name.
+    The closure: every base image's golden chain (golden plus its vendor base, read from the golden's provenance sidecar), every content guest's realized image with its sidecar, every referenced recipe bundle (resolved exactly as the build resolves them and required to match the manifest's recorded digest), and the build manifest itself as the pull root's entry point. Blobs the store already holds are not rewritten (dedup by digest). The index is also named in the store under the range name.
 
     Raises:
         DistError: `artifact-missing` when a closure member is absent from its cache, `blob-digest-mismatch` when cache bytes disagree with the recorded digest, `recipe-closure-broken` when a recorded recipe no longer resolves or resolves at a different digest.
     """
-    config = layout.ensure_empty_config()
+    config = store.ensure_empty_config()
     members: list[Descriptor] = []
     seen: set[str] = set()
 
@@ -178,9 +178,9 @@ def push_build(
                     "chain-invalid",
                     f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
                 )
-            blob = _qcow2_descriptor(layout, image_cache / file, expected=digest)
+            blob = _qcow2_descriptor(store, image_cache / file, expected=digest)
             add(
-                layout.put_manifest(
+                store.put_manifest(
                     OciManifest(
                         artifact_type=ARTIFACT_VENDOR_BASE,
                         config=config,
@@ -199,10 +199,10 @@ def push_build(
             ) from error
         vendor_path = image_cache / metadata.vendor_file
         vendor_blob = _qcow2_descriptor(
-            layout, vendor_path, expected=_prefixed(metadata.vendor_sha256)
+            store, vendor_path, expected=_prefixed(metadata.vendor_sha256)
         )
         add(
-            layout.put_manifest(
+            store.put_manifest(
                 OciManifest(
                     artifact_type=ARTIFACT_VENDOR_BASE,
                     config=config,
@@ -215,18 +215,18 @@ def push_build(
             )
         )
         golden_blob = _qcow2_descriptor(
-            layout,
+            store,
             image_cache / file,
             expected=_prefixed(digest or metadata.golden_sha256),
         )
         add(
-            layout.put_manifest(
+            store.put_manifest(
                 OciManifest(
                     artifact_type=ARTIFACT_GOLDEN,
                     config=config,
                     layers=[
                         golden_blob,
-                        _sidecar_descriptor(layout, metadata_path),
+                        _sidecar_descriptor(store, metadata_path),
                     ],
                     annotations={
                         ANN_KIND: "golden",
@@ -252,16 +252,16 @@ def push_build(
                 f"{sidecar_path} is missing; a realized image publishes with its provenance sidecar",
             )
         realized_blob = _qcow2_descriptor(
-            layout, realized_path, expected=_prefixed(guest.realized_sha256)
+            store, realized_path, expected=_prefixed(guest.realized_sha256)
         )
         add(
-            layout.put_manifest(
+            store.put_manifest(
                 OciManifest(
                     artifact_type=ARTIFACT_REALIZED,
                     config=config,
                     layers=[
                         realized_blob,
-                        _sidecar_descriptor(layout, sidecar_path),
+                        _sidecar_descriptor(store, sidecar_path),
                     ],
                     annotations={
                         ANN_KIND: "realized-image",
@@ -300,9 +300,9 @@ def push_build(
                 f"recipe {name!r} resolves at digest {recipe.digest[:12]} but the manifest recorded {digest[:12]}; the bundle changed since the build",
             )
         tar_bytes = recipe_bundle_tar(recipe)
-        tar_digest = layout.put_blob_bytes(tar_bytes)
+        tar_digest = store.put_blob_bytes(tar_bytes)
         add(
-            layout.put_manifest(
+            store.put_manifest(
                 OciManifest(
                     artifact_type=ARTIFACT_RECIPE_BUNDLE,
                     config=config,
@@ -338,9 +338,9 @@ def push_build(
             "manifest-changed",
             f"{manifest_file} changed since it was loaded (a concurrent rebuild?); re-run the push",
         )
-    manifest_digest = layout.put_blob_bytes(manifest_bytes)
+    manifest_digest = store.put_blob_bytes(manifest_bytes)
     add(
-        layout.put_manifest(
+        store.put_manifest(
             OciManifest(
                 artifact_type=ARTIFACT_BUILD_MANIFEST,
                 config=config,
@@ -369,17 +369,4 @@ def push_build(
             ANN_BUILT_AT: manifest.built_at,
         },
     )
-    index_bytes = index.canonical_bytes()
-    index_digest = layout.put_blob_bytes(index_bytes)
-    root = Descriptor(
-        media_type=index.media_type,
-        digest=index_digest,
-        size=len(index_bytes),
-        annotations={
-            ANN_RANGE: manifest.range_name,
-            ANN_SPEC_SHA256: manifest.spec_sha256,
-            ANN_BUILT_AT: manifest.built_at,
-        },
-    )
-    layout.set_ref(manifest.range_name, root)
-    return root
+    return store.put_index(manifest.range_name, index)

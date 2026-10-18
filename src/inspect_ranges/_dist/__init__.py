@@ -6,16 +6,29 @@ A location has three interchangeable forms (public hub, private OCI registry, pl
 from .encode import push_build
 from .errors import DistError
 from .materialize import MaterializeResult, materialize_closure
-from .oci import Descriptor, OciIndex, OciLayout, OciManifest, blob_sha256
+from .oci import (
+    ContentStore,
+    Descriptor,
+    OciIndex,
+    OciLayout,
+    OciManifest,
+    blob_sha256,
+)
+from .registry import RegistryRepo
+from .transfer import TransferResult, copy_closure
 
 __all__ = [
+    "ContentStore",
     "Descriptor",
     "DistError",
     "MaterializeResult",
     "OciIndex",
     "OciLayout",
     "OciManifest",
+    "RegistryRepo",
+    "TransferResult",
     "blob_sha256",
+    "copy_closure",
     "materialize_closure",
     "push_build",
 ]
