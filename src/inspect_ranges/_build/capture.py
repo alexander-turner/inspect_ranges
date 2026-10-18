@@ -53,6 +53,39 @@ def default_capture_runner(argv: list[str]) -> str:
     return completed.stdout.decode(errors="replace")
 
 
+def scrub_guest(cids: dict[str, int], guest: str) -> None:
+    """Pre-capture cleanup so the realized image is a clean golden-like artifact (parked-decisions item 2): `cloud-init clean --logs` removes the build boot's instance state (every runtime boot then seeds fresh) and the build seed's rendered netplan goes with it, so neither the build's egress nameserver (a deployment's VPC resolver IP) nor an already-run marker survives into the captured disk.
+
+    Raises:
+        BuildError: stage `capture`, when the scrub itself fails; a dirty capture must not pass silently.
+    """
+
+    async def scrub() -> None:
+        channel = MessageChannel(VsockTransport(cids), label="build-capture")
+        outcome = await channel.exec(
+            guest,
+            ExecRequest(
+                id=request_id(),
+                cmd=[
+                    "sh",
+                    "-c",
+                    "cloud-init clean --logs && rm -f /etc/netplan/50-cloud-init.yaml",
+                ],
+                user="root",
+                budget=Budget(command_ms=30_000),
+            ),
+        )
+        if outcome.rc != 0:
+            raise BuildError(
+                "capture",
+                f"pre-capture scrub exited {outcome.rc}: "
+                f"{outcome.stderr.decode(errors='replace')[-200:]}",
+                guest=guest,
+            )
+
+    asyncio.run(scrub())
+
+
 def shutdown_guest(cids: dict[str, int], guest: str) -> str | None:
     """Ask the guest to power off cleanly; the channel dying mid-call is the expected outcome.
 
@@ -190,6 +223,67 @@ def _capture_locked(
         return digest
     finally:
         staging.unlink(missing_ok=True)
+
+
+def live_project_files(state_dir: Path) -> set[str]:
+    """Every image or backing file a registered project's boot.json references: the precise concurrent-consumer exclusion for GC and prune (a stale owner record over-retains, which is the safe direction)."""
+    import json
+
+    from .._runtime.ownership import list_projects, read_owner
+
+    files: set[str] = set()
+    try:
+        projects = list_projects(state_dir)
+    except OSError:
+        return files
+    for project in projects:
+        owner = read_owner(state_dir, project)
+        if owner is None:
+            continue
+        try:
+            boot = json.loads((Path(owner.bundle) / "boot.json").read_text())
+            for guest in boot.get("guests", []):
+                for field in ("image_file", "backing_file"):
+                    value = guest.get(field)
+                    if value:
+                        files.add(str(value))
+        except (OSError, ValueError):
+            continue
+    return files
+
+
+def collect_realized_garbage(
+    range_name: str,
+    image_cache: Path,
+    keep_files: set[str],
+) -> tuple[int, int]:
+    """Delete this range's realized images (and sidecars) whose file name is not in `keep_files`, each under its name lock; returns (files deleted, bytes reclaimed).
+
+    The caller owns the liveness policy (parked-decisions item 1: the current manifest's generation, the immediately-prior one, and anything a running project references); this sweep only identifies candidates by their sidecars' recorded `range_name` and deletes what the caller did not keep. Unreadable sidecars are skipped (they surface through `images list`, and `images prune` handles orphans).
+    """
+    deleted = 0
+    reclaimed = 0
+    for sidecar in sorted(image_cache.glob("*.realized.json")):
+        try:
+            meta = RealizedImageMeta.model_validate_json(sidecar.read_text())
+        except (OSError, ValueError):
+            continue
+        if meta.range_name != range_name:
+            continue
+        image_name = sidecar.name.removesuffix(".realized.json") + ".qcow2"
+        if image_name in keep_files:
+            continue
+        image = image_cache / image_name
+        with _name_lock(image_cache, image_name):
+            try:
+                size = image.stat().st_size if image.is_file() else 0
+                image.unlink(missing_ok=True)
+                sidecar.unlink(missing_ok=True)
+                deleted += 1
+                reclaimed += size
+            except OSError:
+                continue  # a stuck file surfaces through images list / prune
+    return deleted, reclaimed
 
 
 @contextmanager

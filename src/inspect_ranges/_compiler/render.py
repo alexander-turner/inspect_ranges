@@ -318,7 +318,12 @@ def render_bundle(
         )
         write(
             f"guests/{guest.name}/seed/meta-data",
-            f"instance-id: {plan.range.name}-{guest.name}\nlocal-hostname: {guest.name}\n",
+            # the image file keys the instance-id (parked-decisions item 2):
+            # a realized image's name embeds its build key, so a new build
+            # generation is a NEW instance and cloud-init re-applies runtime
+            # seeds instead of skipping them as already-run
+            f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
+            f"local-hostname: {guest.name}\n",
         )
         write(
             f"guests/{guest.name}/seed/network-config",

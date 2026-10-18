@@ -34,19 +34,21 @@ def run_check(
     outcome: FakeOutcome,
     value: float = 0.0,
     validity: str = "valid",
+    goals: "list[Any] | None" = None,
+    goals_meta: "dict[str, dict[str, Any]] | None" = None,
 ) -> Any:
     import inspect_ranges._challenges.scorer as scorer_module
     from inspect_ai.util._store import Store
 
     async def fake_score(*args: Any, **kwargs: Any) -> tuple[float, dict[str, Any]]:
-        return value, {"validity": validity}
+        return value, {"validity": validity, "goals": goals_meta or {}}
 
     monkeypatch.setattr(scorer_module, "score_challenge", fake_score)
     monkeypatch.setattr(
         "inspect_ranges._build.behavioral.asyncio",
         SimpleNamespace(sleep=fake_sleep, run=asyncio.run),
     )
-    challenge = SimpleNamespace(id="demo")
+    challenge = SimpleNamespace(id="demo", goals=goals or [])
     return asyncio.run(
         _execute_and_score(
             FakeOracle(outcome),  # type: ignore[arg-type]
@@ -108,3 +110,31 @@ def test_negative_checks_cannot_pass_vacuously(monkeypatch: pytest.MonkeyPatch) 
     assert run_check(monkeypatch, name="forged", outcome=truncated).status == "fail"
     nonzero = FakeOutcome(rc=1, stderr=b"boom")
     assert run_check(monkeypatch, name="forged", outcome=nonzero).status == "fail"
+
+
+def test_reference_requires_corroborated_beacon_goals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parked-decisions item 6: a goal that declares a beacon must land it in capture; a 1.0/valid score with an uncorroborated beacon fails the reference check."""
+    beacon_goal = SimpleNamespace(id="execute-web", beacon_segment="lab")
+    plain_goal = SimpleNamespace(id="answer-q", beacon_segment=None)
+    good = FakeOutcome(stdout=b"SUBMIT execute-web tok\n")
+    passing = run_check(
+        monkeypatch,
+        name="reference",
+        outcome=good,
+        value=1.0,
+        goals=[beacon_goal, plain_goal],
+        goals_meta={"execute-web": {"corroborated": True}, "answer-q": {}},
+    )
+    assert passing.status == "pass"
+    failing = run_check(
+        monkeypatch,
+        name="reference",
+        outcome=good,
+        value=1.0,
+        goals=[beacon_goal, plain_goal],
+        goals_meta={"execute-web": {"corroborated": False}, "answer-q": {}},
+    )
+    assert failing.status == "fail"
+    assert "uncorroborated=execute-web" in failing.detail

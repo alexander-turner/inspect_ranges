@@ -90,6 +90,12 @@ $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" >"$SPIKE/tmp/z7.txt" 2>&1 \
 FRONT=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --guest attacker --user root exec \
   "wget -q -O- http://web/index.php 2>/dev/null | grep -io 'zabbix' | head -1" || true)
 [[ "$FRONT" == *[Zz]abbix* ]] && ok "Z8 the frontend serves to the attacker over the range network" || bad "Z8 frontend (got: $FRONT)"
+BUILD_NS=$(cd "$ROOT" && uv run python -c "from inspect_ranges._build.orchestrate import default_build_nameserver; print(default_build_nameserver())")
+SCRUB=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --guest web --user root exec \
+  "grep -rq '$BUILD_NS' /etc/netplan/ 2>/dev/null && echo LEAK || echo CLEAN; test -f /var/lib/cloud/instance/boot-finished && echo CLOUDINIT-RAN" || true)
+[[ "$SCRUB" == *CLEAN* && "$SCRUB" == *CLOUDINIT-RAN* ]] \
+  && ok "Z8b realized guest carries no build nameserver and cloud-init re-seeded (got: $SCRUB)" \
+  || bad "Z8b capture scrub (got: $SCRUB)"
 $IR down --all >/dev/null 2>&1 || true
 
 echo

@@ -146,7 +146,14 @@ class Fakes:
         self.captures.append((guest, realized_name, golden_file))
         data = b"realized:" + guest.encode()
         (image_cache / realized_name).write_bytes(data)
-        return hashlib.sha256(data).hexdigest()
+        digest = hashlib.sha256(data).hexdigest()
+        # the real capture writes the provenance sidecar beside the image; the
+        # GC sweep and images list key on it, so the fake does too
+        sidecar = image_cache / (
+            realized_name.removesuffix(".qcow2") + ".realized.json"
+        )
+        sidecar.write_text(meta.model_copy(update={"sha256": digest}).model_dump_json())
+        return digest
 
 
 def options_for(tmp_path: Path, cache: Path, **overrides: Any) -> BuildOptions:
@@ -717,11 +724,15 @@ def test_behavioral_records_land_in_the_manifest(tmp_path: Path, cache: Path) ->
     assert manifest.verification.behavioral_checks == records
 
 
-def test_failing_behavioral_check_leaves_no_manifest(
+def test_failing_behavioral_check_records_a_refused_manifest(
     tmp_path: Path, cache: Path
 ) -> None:
+    """Parked-decisions item 4: a failing check saves the manifest WITH its verdict; the gate refuses range-unproven; guest reuse survives for the next build."""
     from inspect_ranges._build import load_manifest
-    from inspect_ranges._build.manifest import BehavioralCheckRecord
+    from inspect_ranges._build.manifest import (
+        BehavioralCheckRecord,
+        apply_build_manifest,
+    )
 
     spec, range_dir = build_spec_fixture(tmp_path)
     declare_checks(range_dir)
@@ -730,8 +741,13 @@ def test_failing_behavioral_check_leaves_no_manifest(
     def behavioral_fn(
         spec: RangeSpec, range_dir: Path, **_: Any
     ) -> tuple[BehavioralCheckRecord, ...]:
-        raise BuildError(
-            "behavioral", "challenge 'demo' check 'reference' failed: value=0.00"
+        return (
+            BehavioralCheckRecord(
+                challenge="demo",
+                check="reference",
+                status="fail",
+                detail="value=0.00 validity=valid submissions=2",
+            ),
         )
 
     with pytest.raises(BuildError) as excinfo:
@@ -746,8 +762,46 @@ def test_failing_behavioral_check_leaves_no_manifest(
             capture_fn=fakes.capture_fn,
             behavioral_fn=behavioral_fn,
         )
-    assert "no manifest was written; the build is unproven" in str(excinfo.value)
-    assert load_manifest(tmp_path / "builds", "buildme") is None
+    assert "a refused manifest was recorded" in str(excinfo.value)
+    refused = load_manifest(tmp_path / "builds", "buildme")
+    assert refused is not None
+    assert refused.verification.behavioral_checks[0].status == "fail"
+    with pytest.raises(IssueError) as gate:
+        apply_build_manifest(spec, image_cache=cache, build_cache=tmp_path / "builds")
+    assert gate.value.issues[0].code == "range-unproven"
+    assert "demo/reference" in gate.value.issues[0].message
+    # the next build is NOT the cached fast path, but it reuses every guest
+    again = Fakes(["web", "db", "attacker"])
+
+    def passing_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        return (
+            BehavioralCheckRecord(
+                challenge="demo", check="reference", status="pass", detail="value=1.00"
+            ),
+        )
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=again.up_fn,
+        down_fn=again.down_fn,
+        recipe_fn=again.recipe_fn,
+        ensure_uplink=again.ensure_uplink,
+        capture_fn=again.capture_fn,
+        behavioral_fn=passing_fn,
+    )
+    assert not result.cached
+    assert again.recipe_calls == [] and again.captures == []  # all guests reused
+    proven = load_manifest(tmp_path / "builds", "buildme")
+    assert proven is not None
+    assert proven.verification.behavioral_checks[0].status == "pass"
+    swapped, _, _ = apply_build_manifest(
+        spec, image_cache=cache, build_cache=tmp_path / "builds"
+    )
+    assert swapped.hosts[0].image.endswith(".qcow2")
 
 
 def test_keep_skips_the_behavioral_phase(tmp_path: Path, cache: Path) -> None:
@@ -776,11 +830,15 @@ def test_keep_skips_the_behavioral_phase(tmp_path: Path, cache: Path) -> None:
     assert result.kept
 
 
-def test_behavioral_infra_failure_also_leaves_no_manifest(
+def test_behavioral_infra_failure_records_a_refused_manifest(
     tmp_path: Path, cache: Path
 ) -> None:
+    """An unrun proof is as unproven as a failed one: the refused manifest carries a synthetic phase record and the gate refuses."""
     from inspect_ranges._build import load_manifest
-    from inspect_ranges._build.manifest import BehavioralCheckRecord
+    from inspect_ranges._build.manifest import (
+        BehavioralCheckRecord,
+        apply_build_manifest,
+    )
 
     spec, range_dir = build_spec_fixture(tmp_path)
     declare_checks(range_dir)
@@ -804,8 +862,14 @@ def test_behavioral_infra_failure_also_leaves_no_manifest(
             behavioral_fn=behavioral_fn,
         )
     assert excinfo.value.stage == "behavioral"
-    assert "no manifest was written; the build is unproven" in str(excinfo.value)
-    assert load_manifest(tmp_path / "builds", "buildme") is None
+    assert "a refused manifest was recorded" in str(excinfo.value)
+    refused = load_manifest(tmp_path / "builds", "buildme")
+    assert refused is not None
+    record = refused.verification.behavioral_checks[0]
+    assert record.check == "phase" and record.status == "fail"
+    with pytest.raises(IssueError) as gate:
+        apply_build_manifest(spec, image_cache=cache, build_cache=tmp_path / "builds")
+    assert gate.value.issues[0].code == "range-unproven"
 
 
 def test_teardown_failure_with_checks_declared_leaves_no_manifest(
@@ -955,12 +1019,15 @@ def test_incomplete_check_trio_refuses(tmp_path: Path) -> None:
     assert "typo-dir" in str(excinfo.value)
 
 
-def test_failing_reproof_deletes_the_prior_same_spec_manifest(
+def test_failing_reproof_replaces_the_prior_manifest_with_a_refused_one(
     tmp_path: Path, cache: Path
 ) -> None:
-    """Round-1 blocking: the deferred save covered first builds only; a rebuild whose checks fail must retract the prior manifest or the gate keeps serving artifacts that just failed their proof."""
+    """A rebuild whose checks fail must retract the prior green manifest's consumability: the failing build's own refused manifest replaces it (parked-decisions item 4)."""
     from inspect_ranges._build import load_manifest
-    from inspect_ranges._build.manifest import BehavioralCheckRecord
+    from inspect_ranges._build.manifest import (
+        BehavioralCheckRecord,
+        apply_build_manifest,
+    )
 
     spec, range_dir = build_spec_fixture(tmp_path)
     declare_checks(range_dir)
@@ -969,14 +1036,17 @@ def test_failing_reproof_deletes_the_prior_same_spec_manifest(
             challenge="demo", check="reference", status="pass", detail="value=1.00"
         ),
     )
-    outcomes: list[str] = ["pass", "fail"]
+    bad = (
+        BehavioralCheckRecord(
+            challenge="demo", check="reference", status="fail", detail="value=0.00"
+        ),
+    )
+    outcomes: list[tuple[BehavioralCheckRecord, ...]] = [good, bad]
 
     def behavioral_fn(
         spec: RangeSpec, range_dir: Path, **_: Any
     ) -> tuple[BehavioralCheckRecord, ...]:
-        if outcomes.pop(0) == "pass":
-            return good
-        raise BuildError("behavioral", "check 'reference' failed: value=0.00")
+        return outcomes.pop(0)
 
     fakes = Fakes(["web", "db", "attacker"])
     first = build_range(
@@ -991,7 +1061,6 @@ def test_failing_reproof_deletes_the_prior_same_spec_manifest(
         behavioral_fn=behavioral_fn,
     )
     assert first.manifest_path is not None
-    assert load_manifest(tmp_path / "builds", "buildme") is not None
     # the check is edited (digest moves, spec hash does not): the rebuild
     # reuses every guest and the re-proof fails
     (range_dir / "checks" / "demo" / "reference.sh").write_text(
@@ -1009,8 +1078,13 @@ def test_failing_reproof_deletes_the_prior_same_spec_manifest(
             capture_fn=fakes.capture_fn,
             behavioral_fn=behavioral_fn,
         )
-    assert "the prior manifest was deleted" in str(excinfo.value)
-    assert load_manifest(tmp_path / "builds", "buildme") is None
+    assert "a refused manifest was recorded" in str(excinfo.value)
+    current = load_manifest(tmp_path / "builds", "buildme")
+    assert current is not None
+    assert current.verification.behavioral_checks[0].status == "fail"
+    with pytest.raises(IssueError) as gate:
+        apply_build_manifest(spec, image_cache=cache, build_cache=tmp_path / "builds")
+    assert gate.value.issues[0].code == "range-unproven"
 
 
 def test_verify_failure_leaves_no_manifest(tmp_path: Path, cache: Path) -> None:
@@ -1238,3 +1312,34 @@ def test_base_exception_from_up_preserves_staging(tmp_path: Path, cache: Path) -
             capture_fn=fakes.capture_fn,
         )
     assert staged and staged[0].exists()
+
+
+def test_build_success_collects_superseded_generations_keeping_one(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Parked-decisions item 1: generation 1 goes when generation 3 lands; generation 2 (the replaced manifest's) stays for free rollback."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    generations: list[set[str]] = []
+    for marker in ("one", "two", "three"):
+        (range_dir / "recipes" / "acme.db" / "run.sh").write_text(
+            f"#!/bin/sh\necho {marker}\n"
+        )
+        fakes = Fakes(["web", "db", "attacker"])
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+        generations.append({path.name for path in cache.glob("buildme-db-*.qcow2")})
+    assert len(generations[0]) == 1
+    assert len(generations[1]) == 2  # current + previous kept
+    assert len(generations[2]) == 2  # generation 1 collected
+    gen1 = generations[0]
+    assert not (gen1 & generations[2])
+    # web never changed: exactly one generation throughout
+    assert len({p.name for p in cache.glob("buildme-web-*.qcow2")}) == 1

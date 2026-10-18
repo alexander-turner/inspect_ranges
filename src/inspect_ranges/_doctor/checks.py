@@ -693,6 +693,35 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
                     BUILD, "cached recipes", "ok", f"{len(bundles)} bundle(s) load"
                 )
             )
+    from .._build.manifest import recorded_realized_files
+    from .._runtime.images import default_image_cache
+
+    image_cache = default_image_cache()
+    if image_cache.is_dir():
+        recorded = recorded_realized_files(build_cache)
+        reclaimable = 0
+        for sidecar in image_cache.glob("*.realized.json"):
+            image = image_cache / (
+                sidecar.name.removesuffix(".realized.json") + ".qcow2"
+            )
+            if image.name not in recorded and image.is_file():
+                reclaimable += image.stat().st_size
+        mb = reclaimable / (1024 * 1024)
+        if reclaimable:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "reclaimable",
+                    "warn" if mb > 20_480 else "ok",
+                    f"{mb:.0f} MB of realized images no manifest references",
+                    fix="inspect-ranges images prune",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(BUILD, "reclaimable", "ok", "no superseded realized images")
+            )
+
     from .._build.orchestrate import FALLBACK_BUILD_NAMESERVER, default_build_nameserver
 
     nameserver = default_build_nameserver()

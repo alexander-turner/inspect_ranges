@@ -138,16 +138,18 @@ def test_realized_file_name_distinguishes_generations() -> None:
 
 
 def test_range_name_grammar_gate() -> None:
+    """Parked-decisions item 5: the schema's strict slug is the v1 contract; org-prefixed one-slash names arrive with the distribution phase."""
     from inspect_ranges._build.manifest import validate_range_name
 
     assert validate_range_name("vulhub-zabbix") is None
-    assert validate_range_name("acme/payroll") is None
-    for bad in ("../escape", "/abs", "a/b/c", "UPPER", "trail-", ".lead"):
+    assert validate_range_name("buildme_2") is None
+    for bad in ("acme/payroll", "a.b", "../escape", "/abs", "UPPER", ".lead"):
         issue = validate_range_name(bad)
         assert issue is not None and issue.code == "range-name-invalid", bad
 
 
-def test_slashed_range_names_flatten_in_file_names_and_nest_in_builds() -> None:
+def test_file_name_flattening_survives_future_slashed_names() -> None:
+    """The slash-flattening in `realized_file_name` and the nested `manifest_path` are unreachable under the v1 grammar but stay correct for the distribution-phase grammar."""
     name = realized_file_name("acme/payroll", "web", "k" * 64)
     assert "/" not in name and name.startswith("acme-payroll-web-")
     from inspect_ranges._build.manifest import manifest_path

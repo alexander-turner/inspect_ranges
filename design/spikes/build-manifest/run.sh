@@ -93,6 +93,19 @@ grep -q "verify    ok  service web/nginx" "$SPIKE/tmp/m3.txt" \
 grep -E "recipe .*guest=db.*recipe=bm.marker.*seconds" "$SPIKE/tmp/m3.txt" >/dev/null \
   && ok "M5b db's edited recipe actually re-ran" || bad "M5b db re-run"
 
+echo "=== M11 build-success GC: generation 1 goes when generation 3 lands ==="
+sed -i 's/edited/edited-again/' "$SPIKE/tmp/incr/range.yaml"
+(cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" >"$SPIKE/tmp/m11.txt" 2>&1) \
+  || { bad "M11 third build"; tail -5 "$SPIKE/tmp/m11.txt"; }
+DB_GENS=$(ls "$CACHE"/bmincr-db-*.qcow2 2>/dev/null | wc -l)
+WEB_GENS=$(ls "$CACHE"/bmincr-web-*.qcow2 2>/dev/null | wc -l)
+grep -q '"stage": "gc", "status": "ok"' "$XDG_STATE_HOME"/inspect-ranges/projects/ir-bmincr-*/stages.jsonl 2>/dev/null \
+  && [[ "$DB_GENS" == "2" && "$WEB_GENS" == "1" ]] \
+  && ok "M11 GC kept current+previous for db ($DB_GENS) and the single web generation ($WEB_GENS), stage-logged" \
+  || bad "M11 GC (db=$DB_GENS web=$WEB_GENS)"
+sed -i 's/edited-again/edited/' "$SPIKE/tmp/incr/range.yaml"
+(cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" >/dev/null 2>&1) || true
+
 echo "=== M6 no-op rebuild: the cached fast path ==="
 START=$(date +%s)
 if (cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" | tee "$SPIKE/tmp/m6.txt"); then
