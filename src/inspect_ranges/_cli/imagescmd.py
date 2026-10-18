@@ -167,6 +167,67 @@ def list_cmd(image_cache: Path | None) -> None:
         click.echo(f"{file}  ({note})")
 
 
+@images.command("pull")
+@click.argument("name")
+@click.option(
+    "--from",
+    "from_location",
+    default=None,
+    help="Location override; default is the configured search path (INSPECT_RANGES_REGISTRY).",
+)
+@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
+def images_pull(name: str, from_location: str | None, image_cache: Path | None) -> None:
+    """Fetch a published catalog image's chain into the cache (sticky thereafter: later builds keep resolving the cached artifact until an explicit refresh)."""
+    from .._dist import DistError
+    from .._dist.location import registry_locations
+    from .._dist.resolve import pull_image
+
+    cache = image_cache or default_image_cache()
+    try:
+        pulled = pull_image(name, registry_locations(from_location), image_cache=cache)
+    except DistError as error:
+        raise click.ClickException(str(error)) from error
+    if pulled is None:
+        raise click.ClickException(
+            f"[image-not-published] no configured location publishes {name!r}"
+        )
+    location, result = pulled
+    click.echo(
+        f"pull OK   {name} from {location} "
+        f"({len(result.fetched)} fetched, {len(result.present)} already present)"
+    )
+
+
+@images.command("refresh")
+@click.argument("names", nargs=-1, required=True)
+@click.option(
+    "--from",
+    "from_location",
+    default=None,
+    help="Location override; default is the configured search path (INSPECT_RANGES_REGISTRY).",
+)
+@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
+def images_refresh(
+    names: tuple[str, ...], from_location: str | None, image_cache: Path | None
+) -> None:
+    """The explicit move-forward act: re-resolve bare names against the search path and replace cached chains that moved; the next build's keys change accordingly."""
+    from .._dist import DistError
+    from .._dist.location import registry_locations
+    from .._dist.resolve import refresh_image
+
+    cache = image_cache or default_image_cache()
+    locations = registry_locations(from_location)
+    for name in names:
+        try:
+            refreshed = refresh_image(name, locations, image_cache=cache)
+        except DistError as error:
+            raise click.ClickException(str(error)) from error
+        assert refreshed is not None
+        location, result = refreshed
+        state = "updated" if result.fetched else "already current"
+        click.echo(f"refresh   {name}: {state} (from {location})")
+
+
 @images.command("prune")
 @click.option(
     "--image-cache",

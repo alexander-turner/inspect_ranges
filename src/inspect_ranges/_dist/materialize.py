@@ -66,7 +66,9 @@ class MaterializeResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    range_name: str
+    range_name: str | None
+    """The pulled build manifest's range; `None` for an image-only closure."""
+
     fetched: tuple[str, ...]
     """Cache files and bundles written by this call."""
 
@@ -119,6 +121,7 @@ def _land_image(
     sidecar_first: bool,
     fetched: list[str],
     present: list[str],
+    replace: bool = False,
 ) -> None:
     """Land one image artifact (and its sidecar) under the cache's lock and write-order conventions."""
     name = _annotation(manifest, ANN_NAME)
@@ -136,9 +139,9 @@ def _land_image(
             if sidecar_suffix is None:
                 return
             sidecar_path = image_cache / (name.removesuffix(".qcow2") + sidecar_suffix)
-            if heal and sidecar_path.is_file():
-                return
             data = store.read_blob(_layer(manifest, LAYER_SIDECAR))
+            if heal and sidecar_path.is_file() and sidecar_path.read_bytes() == data:
+                return
             atomic_write(sidecar_path, data)
             fetched.append(sidecar_path.name)
 
@@ -153,10 +156,21 @@ def _land_image(
                 write_sidecar(heal=True)
                 present.append(name)
                 return
-            raise DistError(
-                "cache-name-conflict",
-                f"{target} already holds different content than {blob.digest}; the flat cache holds one meaning per name (prune or rename the local file, then pull again)",
-            )
+            if not replace:
+                raise DistError(
+                    "cache-name-conflict",
+                    f"{target} already holds different content than {blob.digest}; the flat cache holds one meaning per name (prune or rename the local file, or refresh to move the name forward)",
+                )
+            # the explicit move-forward act: land the new bytes atomically over
+            # the old name, sidecar refreshed with its kind's write order
+            if sidecar_first:
+                write_sidecar()
+                store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+            else:
+                store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+                write_sidecar()
+            fetched.append(name)
+            return
         if sidecar_first:
             write_sidecar()
             store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
@@ -197,10 +211,13 @@ def materialize_closure(
     root: Descriptor,
     *,
     image_cache: Path,
-    build_cache: Path,
-    recipe_cache: Path,
+    build_cache: Path | None = None,
+    recipe_cache: Path | None = None,
+    replace_images: bool = False,
 ) -> MaterializeResult:
     """Materialize a pull root's closure into the local caches, verified end to end; returns what was fetched versus already present.
+
+    A range closure carries exactly one build manifest and needs all three caches; an image-only closure (a published golden chain) carries none and touches only the image cache, with `build_cache`/`recipe_cache` permitted to be `None`. `replace_images` is the explicit move-forward act (`images refresh`): a cache name holding DIFFERENT content is overwritten instead of refusing, chain and sidecars together, and the next build's keys change accordingly; it never applies to range closures, whose cache names are content-addressed by construction.
 
     Raises:
         DistError: missing or corrupt blobs, invalid manifests, cache name conflicts, broken backing chains, or recipe bundles whose extracted content does not reproduce the recorded recipe digest. On refusal the build manifest has NOT landed, so nothing consumable dangles.
@@ -221,10 +238,20 @@ def materialize_closure(
             )
         artifacts[manifest.artifact_type].append(manifest)
     builds = artifacts[ARTIFACT_BUILD_MANIFEST]
-    if len(builds) != 1:
+    if len(builds) > 1:
         raise DistError(
             "manifest-invalid",
-            f"a pull root carries exactly one build manifest; this one carries {len(builds)}",
+            f"a pull root carries at most one build manifest; this one carries {len(builds)}",
+        )
+    if builds and (build_cache is None or recipe_cache is None):
+        raise DistError(
+            "manifest-invalid",
+            "this closure carries a build manifest, which needs the builds and recipe caches",
+        )
+    if artifacts[ARTIFACT_RECIPE_BUNDLE] and recipe_cache is None:
+        raise DistError(
+            "manifest-invalid",
+            "this closure carries recipe bundles, which need the recipe cache",
         )
 
     fetched: list[str] = []
@@ -240,6 +267,7 @@ def materialize_closure(
             sidecar_first=False,
             fetched=fetched,
             present=present,
+            replace=replace_images,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2
@@ -253,6 +281,7 @@ def materialize_closure(
             sidecar_first=True,
             fetched=fetched,
             present=present,
+            replace=replace_images,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2
@@ -267,6 +296,7 @@ def materialize_closure(
             sidecar_first=False,
             fetched=fetched,
             present=present,
+            replace=replace_images,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2
@@ -275,12 +305,18 @@ def materialize_closure(
 
     landed_recipes: dict[str, str] = {}
     for manifest in artifacts[ARTIFACT_RECIPE_BUNDLE]:
+        assert recipe_cache is not None  # refused above when absent
         landed = _land_recipe(
             store, manifest, recipe_cache, fetched=fetched, present=present
         )
         landed_recipes[landed] = _annotation(manifest, ANN_RECIPE_DIGEST)
 
+    if not builds:
+        return MaterializeResult(
+            range_name=None, fetched=tuple(fetched), present=tuple(present)
+        )
     build = builds[0]
+    assert build_cache is not None  # refused above when absent
     manifest_bytes = store.read_blob(_layer(build, LAYER_BUILD_MANIFEST))
     try:
         build_manifest = BuildManifest.model_validate_json(manifest_bytes)
