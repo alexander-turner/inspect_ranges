@@ -164,6 +164,19 @@ def test_boot_script_starts_cloud_hypervisor_unprivileged(
     assert "--api-socket" not in script  # no VMM control surface nothing uses
     assert "virsh -c qemu:///system start web" not in script
     assert "virsh -c qemu:///system start db" in script
+    # qemu guests get the same pre-own treatment (issue #5): the DAC seclabel
+    # runs each QEMU as its own uid, so root hands it its files first
+    from inspect_ranges._compiler.plan import guest_uid
+
+    db_cid = guests["db"]["cid"]
+    assert (
+        f"chown {guest_uid(db_cid)}:kvm /scratch/db.qcow2 /scratch/db-seed.iso"
+        in script
+    )
+    assert (
+        f"install -o {guest_uid(db_cid)} -g kvm -m 0640 /dev/null /scratch/console/db.log"
+        in script
+    )
     # the tap exists before the VMM that opens it, and the VMM's 0700 socket
     # is opened to the host-side dialer only after the VMM created it
     assert script.index(f"ip tuntap add dev ch{cid}n0") < script.index("setpriv")

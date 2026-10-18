@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
+from .._compiler.plan import GUEST_UID_BASE, guest_uid
 from .ownership import (
     PROJECT_PREFIX,
     StageLog,
@@ -291,8 +292,8 @@ def load_boot(bundle: Path) -> BootPlan:
         ) from error
 
 
-CH_UID_BASE = 1_000_000
-"""Each Cloud Hypervisor runs as its own uid, `CH_UID_BASE + cid`: CIDs are leased host-unique, so no two VMMs (and no QEMU, which runs as `libvirt-qemu`) share a uid, and a host-side dialer's `SO_PEERCRED` check names exactly one VMM."""
+CH_UID_BASE = GUEST_UID_BASE
+"""Alias of `GUEST_UID_BASE` (the per-guest uid scheme now covers QEMU guests too, via the DAC seclabel): a host-side dialer's `SO_PEERCRED` check names exactly one VMM."""
 CH_BINARY = "/usr/local/bin/cloud-hypervisor"
 CH_FIRMWARE = "/usr/local/share/cloud-hypervisor/firmware.fd"
 CH_VSOCK_MOUNT = "/run/ch-vsock"
@@ -300,8 +301,8 @@ CH_VSOCK_MOUNT = "/run/ch-vsock"
 
 
 def ch_uid(cid: int) -> int:
-    """The uid the Cloud Hypervisor of the guest with this CID runs as (see `CH_UID_BASE`)."""
-    return CH_UID_BASE + cid
+    """The uid the guest's VMM runs as (`guest_uid`; the name predates QEMU joining the scheme)."""
+    return guest_uid(cid)
 
 
 def boot_script(boot: BootPlan) -> str:
@@ -324,6 +325,15 @@ def boot_script(boot: BootPlan) -> str:
             f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
         )
         if guest.vmm == "qemu":
+            # the DAC seclabel runs this QEMU as its own uid with relabel off
+            # (issue #5): root pre-owns the files the unprivileged VMM opens
+            uid = guest_uid(guest.cid)
+            lines.append(
+                f"chown {uid}:kvm /scratch/{name}.qcow2 /scratch/{name}-seed.iso"
+            )
+            lines.append(
+                f"install -o {uid} -g kvm -m 0640 /dev/null /scratch/console/{name}.log"
+            )
             lines.append(
                 f"virsh -c qemu:///system define /render/guests/{name}/domain.xml >/dev/null"
             )

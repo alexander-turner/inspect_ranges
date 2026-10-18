@@ -280,3 +280,32 @@ def test_render_refuses_nonempty_directory(cache: Path, tmp_path: Path) -> None:
     (out / "stale").write_text("x")
     with pytest.raises(FileExistsError):
         render_bundle(two_segment_spec(), out, options(cache))
+
+
+def test_every_qemu_domain_carries_its_own_dac_principal(
+    cache: Path, tmp_path: Path
+) -> None:
+    """Issue #5: sVirt AppArmor cannot load profiles inside the hardened container, so per-VM confinement is per-VM identity: each QEMU runs as GUEST_UID_BASE+cid, relabel off (the boot script pre-owns the files)."""
+    from xml.etree import ElementTree
+
+    from inspect_ranges._compiler.plan import guest_uid
+
+    out = tmp_path / "bundle"
+    plan = resolve_plan(chained_spec(), options(cache))
+    render_bundle(chained_spec(), out, options(cache))
+    uids: set[int] = set()
+    for guest in plan.guests:
+        if guest.vmm != "qemu":
+            continue
+        domain = ElementTree.fromstring(
+            (out / "guests" / guest.name / "domain.xml").read_text()
+        )
+        seclabel = domain.find("seclabel")
+        assert seclabel is not None
+        assert seclabel.get("model") == "dac"
+        assert seclabel.get("type") == "static"
+        assert seclabel.get("relabel") == "no"
+        label = seclabel.find("label")
+        assert label is not None and label.text == f"+{guest_uid(guest.cid)}:kvm"
+        uids.add(guest_uid(guest.cid))
+    assert len(uids) == sum(1 for g in plan.guests if g.vmm == "qemu")  # all distinct
