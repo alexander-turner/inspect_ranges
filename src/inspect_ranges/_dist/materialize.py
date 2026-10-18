@@ -44,6 +44,7 @@ from .oci import (
     ContentStore,
     Descriptor,
     OciManifest,
+    ProgressFn,
     atomic_write,
 )
 
@@ -123,6 +124,7 @@ def _land_image(
     fetched: list[str],
     present: list[str],
     replace: bool = False,
+    progress: "ProgressFn | None" = None,
 ) -> None:
     """Land one image artifact (and its sidecar) under the cache's lock and write-order conventions."""
     name = _annotation(manifest, ANN_NAME)
@@ -158,6 +160,8 @@ def _land_image(
                 # image and sidecar must not become permanent (round-1 N4)
                 write_sidecar(heal=True)
                 present.append(name)
+                if progress is not None:
+                    progress(blob.digest, "exists", 0, 0)
                 return
             if not replace:
                 raise DistError(
@@ -176,9 +180,13 @@ def _land_image(
             return
         if sidecar_first:
             write_sidecar()
-            store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+            store.copy_blob_to(
+                blob, target, temp_prefix=f".{name}.pulling-", progress=progress
+            )
         else:
-            store.copy_blob_to(blob, target, temp_prefix=f".{name}.pulling-")
+            store.copy_blob_to(
+                blob, target, temp_prefix=f".{name}.pulling-", progress=progress
+            )
             write_sidecar()
         fetched.append(name)
 
@@ -220,6 +228,7 @@ def materialize_closure(
     require_manifest: bool = False,
     expect_range: str | None = None,
     expect_spec: str | None = None,
+    progress: "ProgressFn | None" = None,
 ) -> MaterializeResult:
     """Materialize a pull root's closure into the local caches, verified end to end; returns what was fetched versus already present.
 
@@ -320,6 +329,7 @@ def materialize_closure(
             fetched=fetched,
             present=present,
             replace=replace_images,
+            progress=progress,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2
@@ -334,6 +344,7 @@ def materialize_closure(
             fetched=fetched,
             present=present,
             replace=replace_images,
+            progress=progress,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2
@@ -349,6 +360,7 @@ def materialize_closure(
             fetched=fetched,
             present=present,
             replace=replace_images,
+            progress=progress,
         )
         landed_digests[_annotation(manifest, ANN_NAME)] = _layer(
             manifest, LAYER_QCOW2

@@ -13,6 +13,7 @@ from .._build.recipes import default_recipe_cache
 from .._compiler.plan import spec_sha256
 from .._dist import DistError
 from .._dist.location import parse_location, registry_locations
+from .._dist.progress import TransferDisplay
 from .._dist.resolve import PullReport, pull_pinned, pull_range, push_range
 from .._runtime.images import default_image_cache
 from ..schema import load_range
@@ -88,6 +89,7 @@ def push(
             build_cache=builds,
             range_dir=spec_path.parent,
             recipe_cache=recipes,
+            progress=TransferDisplay(),
         )
         click.echo(f"push OK   {manifest.range_name}@{root.digest}")
     except DistError as error:
@@ -134,6 +136,7 @@ def pull(
                 image_cache=images,
                 build_cache=builds,
                 recipe_cache=recipes,
+                progress=TransferDisplay(),
             )
             click.echo(f"resolve   {name}@{report.root} ({report.location})")
             _echo_fetch(report)
@@ -147,6 +150,7 @@ def pull(
             build_cache=builds,
             recipe_cache=recipes,
             pin=pin,
+            progress=TransferDisplay(),
         )
         click.echo(
             f"resolve   spec sha256:{spec_sha256(validated)[:6]}... -> "

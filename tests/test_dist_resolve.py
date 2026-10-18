@@ -435,3 +435,77 @@ def test_push_cli_refuses_without_destination(
     result = runner.invoke(push_cmd, [str(spec_path)])
     assert result.exit_code != 0
     assert "no-push-location" in result.output
+
+
+def test_ensure_build_available_warm_cold_and_never_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 4: the provider's implicit fetch. Warm = matching local manifest, zero network (a broken search path proves nothing was consulted); cold = pull through the search path; never-pull = coded refusal before any network."""
+    from inspect_ranges._build.manifest import load_manifest
+    from inspect_ranges._dist.resolve import NEVER_PULL_ENV, ensure_build_available
+
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "mirror"))
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    # warm: the builder's own caches hold the matching manifest; a search path
+    # pointing at a BROKEN location proves no network/location is consulted
+    monkeypatch.setenv(REGISTRY_ENV, "/nonexistent-mirror-path")
+    assert (
+        ensure_build_available(
+            spec,  # type: ignore[arg-type]
+            image_cache=fixture.image_cache,
+            build_cache=fixture.build_cache,
+            recipe_cache=tmp_path / "rc",
+        )
+        is None
+    )
+    # never-pull: a cold consumer refuses with the knob named
+    images, builds, recipes = fresh_dirs(tmp_path)
+    monkeypatch.setenv(NEVER_PULL_ENV, "1")
+    with pytest.raises(DistError, match="never-pull"):
+        ensure_build_available(
+            spec,  # type: ignore[arg-type]
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+    monkeypatch.delenv(NEVER_PULL_ENV)
+    # cold: the fetch runs through the search path with progress events
+    monkeypatch.setenv(REGISTRY_ENV, str(tmp_path / "mirror"))
+    events: list[tuple[str, str]] = []
+
+    def record(digest: str, state: str, done: int, total: int) -> None:
+        events.append((digest[:19], state))
+
+    report = ensure_build_available(
+        spec,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+        progress=record,
+    )
+    assert report is not None and report.location == str(tmp_path / "mirror")
+    assert load_manifest(builds, "distfix") is not None
+    states = {state for _, state in events}
+    assert "downloading" in states and "done" in states
+    # a content-free spec never pulls
+    free = load_range(spec_file(tmp_path, extra=""))
+    stripped = free.model_copy(
+        update={"hosts": [h.model_copy(update={"services": None}) for h in free.hosts]}
+    )
+    assert (
+        ensure_build_available(
+            stripped,
+            image_cache=images,
+            build_cache=tmp_path / "other-builds",
+            recipe_cache=recipes,
+        )
+        is None
+    )

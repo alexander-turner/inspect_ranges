@@ -47,7 +47,7 @@ from .admission import default_max_sandboxes
 from .evidence import EvidenceSession, resolve_evidence_session
 from .naming import sample_project
 from .ops import provider_exec, provider_read_file, provider_write_file
-from .state import ProviderRuntime, SampleHandle, provider_runtime
+from .state import ProviderRuntime, SampleHandle, ensure_pulled, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
 
@@ -145,6 +145,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
             )
         else:
             spec = _resolve_spec(config)
+            ensure_pulled(spec, image_cache=runtime.image_cache)
             spec, sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,
@@ -194,6 +195,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
             )
         else:
             spec = _resolve_spec(config)
+            ensure_pulled(spec, image_cache=runtime.image_cache)
             spec, realized_sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,

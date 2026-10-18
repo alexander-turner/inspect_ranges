@@ -27,6 +27,7 @@ from .oci import (
     Descriptor,
     OciIndex,
     OciManifest,
+    ProgressFn,
 )
 
 __all__ = ["RegistryRepo", "docker_auth_for", "docker_config_uses_helper"]
@@ -371,7 +372,13 @@ class RegistryRepo:
             return digest
         return self._upload(lambda: data, digest, len(data))
 
-    def put_blob_file(self, source: Path, *, expected: str | None = None) -> str:
+    def put_blob_file(
+        self,
+        source: Path,
+        *,
+        expected: str | None = None,
+        progress: "ProgressFn | None" = None,
+    ) -> str:
         digest = expected
         if digest is None:
             hasher = hashlib.sha256()
@@ -382,17 +389,24 @@ class RegistryRepo:
         if DIGEST_PATTERN.fullmatch(digest) is None:
             raise DistError("unsupported-digest", f"{digest!r} is not a sha256 digest")
         if self.has_blob(digest):
+            if progress is not None:
+                progress(digest, "exists", 0, 0)
             return digest
         bound = digest
+        total = source.stat().st_size
 
         def fresh_body() -> _StreamBody:
             # file-backed uploads replay freely: each attempt streams the file
             # again with its own verifying hasher (round-2 review B1)
             def verified_chunks() -> Iterator[bytes]:
                 hasher = hashlib.sha256()
+                done = 0
                 with source.open("rb") as handle:
                     for chunk in iter(lambda: handle.read(_CHUNK), b""):
                         hasher.update(chunk)
+                        done += len(chunk)
+                        if progress is not None:
+                            progress(bound, "uploading", done, total)
                         yield chunk
                 if f"sha256:{hasher.hexdigest()}" != bound:
                     raise DistError(
@@ -402,7 +416,10 @@ class RegistryRepo:
 
             return _StreamBody(verified_chunks())
 
-        return self._upload(fresh_body, digest, source.stat().st_size)
+        uploaded = self._upload(fresh_body, digest, total)
+        if progress is not None:
+            progress(uploaded, "done", total, total)
+        return uploaded
 
     def put_blob_stream(
         self, chunks: Iterator[bytes], *, expected: str, size: int
@@ -484,10 +501,12 @@ class RegistryRepo:
         destination: Path,
         *,
         temp_prefix: str | None = None,
+        progress: "ProgressFn | None" = None,
     ) -> None:
         digest = descriptor.require_sha256()
         destination.parent.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
+        done = 0
         fd, temp_name = tempfile.mkstemp(
             dir=destination.parent, prefix=temp_prefix or ".incoming-"
         )
@@ -497,6 +516,9 @@ class RegistryRepo:
                 for chunk in self.blob_chunks(descriptor):
                     hasher.update(chunk)
                     out.write(chunk)
+                    done += len(chunk)
+                    if progress is not None:
+                        progress(digest, "downloading", done, descriptor.size or done)
             actual = f"sha256:{hasher.hexdigest()}"
             if actual != digest:
                 raise DistError(
@@ -504,6 +526,8 @@ class RegistryRepo:
                 )
             temp.chmod(0o644)
             os.replace(temp, destination)
+            if progress is not None:
+                progress(digest, "done", done, done)
         finally:
             temp.unlink(missing_ok=True)
 

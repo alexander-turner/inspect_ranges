@@ -105,6 +105,24 @@ class SampleHandle:
     """The sample's plant store, created lazily by the oracle factory; plant VALUES live only here, in memory (`challenges-v1.md`)."""
 
 
+def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
+    """The implicit resolve-verify-fetch at init (Journey B): once per distinct sandbox config, before the eval UI comes up, with docker-pull-shaped progress; the warm path costs one spec hash and zero network. Failures are coded refusals that abort the run before any sample starts."""
+    from .._build.recipes import default_recipe_cache
+    from .._dist.progress import TransferDisplay
+    from .._dist.resolve import ensure_build_available
+
+    display = TransferDisplay()
+    report = ensure_build_available(
+        spec,
+        image_cache=image_cache,
+        build_cache=default_build_cache(),
+        recipe_cache=default_recipe_cache(),
+        progress=display,
+    )
+    if report is not None:
+        display.final(f"pull OK   {spec.meta.name}@{report.root} ({report.location})")
+
+
 class ProviderRuntime:
     """One eval batch's provider state (seams, config, registry); default-constructible for `SandboxLifecycleState.get`."""
 
@@ -201,6 +219,7 @@ class ProviderRuntime:
         if cached is not None:
             return cached
         spec = resolver()
+        ensure_pulled(spec, image_cache=self.image_cache)
         spec, realized_sections, consumed = apply_build_manifest(
             spec, image_cache=self.image_cache, build_cache=default_build_cache()
         )

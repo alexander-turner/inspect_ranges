@@ -11,13 +11,16 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import DistError
+
+ProgressFn = Callable[[str, str, int, int], None]
+"""`(digest, state, done, total)`: the `BlobProgress` surface (progress.py owns rendering)."""
 
 __all__ = [
     "DIGEST_PATTERN",
@@ -31,6 +34,7 @@ __all__ = [
     "OciIndex",
     "OciLayout",
     "OciManifest",
+    "ProgressFn",
     "atomic_write",
     "blob_sha256",
 ]
@@ -288,7 +292,13 @@ class OciLayout:
             atomic_write(target, data)
         return digest
 
-    def put_blob_file(self, source: Path, *, expected: str | None = None) -> str:
+    def put_blob_file(
+        self,
+        source: Path,
+        *,
+        expected: str | None = None,
+        progress: "ProgressFn | None" = None,
+    ) -> str:
         """Store a file as a blob, streaming and hashing in one pass; returns its digest.
 
         With `expected`, the copy refuses on mismatch and nothing lands under the blob path (verify-while-copy: a corrupt source is caught before it is ever addressable). Without it, the digest is computed and trusted as the content's identity, which is only correct for content this process produced or already verified.
@@ -301,9 +311,13 @@ class OciLayout:
                 "unsupported-digest", f"{expected!r} is not a sha256 digest"
             )
         if expected is not None and self.has_blob(expected):
+            if progress is not None:
+                progress(expected, "exists", 0, 0)
             return expected
         blobs = self.root / "blobs" / "sha256"
         blobs.mkdir(parents=True, exist_ok=True)
+        total = source.stat().st_size
+        done = 0
         hasher = hashlib.sha256()
         fd, temp_name = tempfile.mkstemp(dir=blobs, prefix=".incoming-")
         temp = Path(temp_name)
@@ -312,6 +326,9 @@ class OciLayout:
                 for chunk in iter(lambda: handle.read(_BLOB_CHUNK), b""):
                     hasher.update(chunk)
                     out.write(chunk)
+                    done += len(chunk)
+                    if progress is not None and expected is not None:
+                        progress(expected, "uploading", done, total)
             digest = f"sha256:{hasher.hexdigest()}"
             if expected is not None and digest != expected:
                 raise DistError(
@@ -359,6 +376,7 @@ class OciLayout:
         destination: Path,
         *,
         temp_prefix: str | None = None,
+        progress: "ProgressFn | None" = None,
     ) -> None:
         """Stream a blob to `destination` with verify-while-copy; the file appears atomically.
 
@@ -377,11 +395,16 @@ class OciLayout:
             dir=destination.parent, prefix=temp_prefix or ".incoming-"
         )
         temp = Path(temp_name)
+        total = source.stat().st_size
+        done = 0
         try:
             with os.fdopen(fd, "wb") as out, source.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(_BLOB_CHUNK), b""):
                     hasher.update(chunk)
                     out.write(chunk)
+                    done += len(chunk)
+                    if progress is not None:
+                        progress(digest, "downloading", done, total)
             actual = f"sha256:{hasher.hexdigest()}"
             if actual != digest:
                 raise DistError(
@@ -389,6 +412,8 @@ class OciLayout:
                 )
             temp.chmod(0o644)
             os.replace(temp, destination)
+            if progress is not None:
+                progress(digest, "done", total, total)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -541,7 +566,13 @@ class ContentStore(Protocol):
 
     def put_blob_bytes(self, data: bytes) -> str: ...
 
-    def put_blob_file(self, source: Path, *, expected: str | None = None) -> str: ...
+    def put_blob_file(
+        self,
+        source: Path,
+        *,
+        expected: str | None = None,
+        progress: "ProgressFn | None" = None,
+    ) -> str: ...
 
     def read_blob(
         self, descriptor: Descriptor, *, cap: int = 64 * 1024 * 1024
@@ -553,6 +584,7 @@ class ContentStore(Protocol):
         destination: Path,
         *,
         temp_prefix: str | None = None,
+        progress: "ProgressFn | None" = None,
     ) -> None: ...
 
     def blob_chunks(self, descriptor: Descriptor) -> Iterator[bytes]: ...
