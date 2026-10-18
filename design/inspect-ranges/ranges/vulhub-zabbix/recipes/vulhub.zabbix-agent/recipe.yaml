@@ -1,0 +1,7 @@
+name: vulhub.zabbix-agent
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  server_host:
+    default: server

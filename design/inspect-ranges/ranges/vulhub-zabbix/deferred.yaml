@@ -19,3 +19,11 @@ lifecycle:
   isolation: per-sample network
   reset: rebuild (stateless images; MySQL reseeds from init scripts)
   clock_sync: none
+
+# Returned here at build-v1 slice 6: the defense section gates at planning
+# until its realization lands (build-v1 realizes provisioning/services/
+# vulnerabilities only). D0 declares the absence of defenders, so nothing is
+# lost at runtime; it rejoins range.yaml when the defense section realizes.
+defense:
+  tier: D0
+  description: No defenders, no telemetry.

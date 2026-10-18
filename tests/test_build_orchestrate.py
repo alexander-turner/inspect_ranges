@@ -660,3 +660,140 @@ def test_manifest_records_the_committed_inputs(tmp_path: Path, cache: Path) -> N
     assert {"web", "db", "attacker"} <= base
     assert all(record.digest for record in manifest.base_images)
     assert manifest.verification.behavioral_checks == ()
+
+
+def declare_checks(range_dir: Path) -> None:
+    """Make `checks_declared` true for the fixture range (contents never parsed; the seam is faked)."""
+    (range_dir / "challenges.yaml").write_text("challenges: []\n")
+    (range_dir / "checks" / "demo").mkdir(parents=True, exist_ok=True)
+
+
+def test_behavioral_records_land_in_the_manifest(tmp_path: Path, cache: Path) -> None:
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+    records = (
+        BehavioralCheckRecord(
+            challenge="demo", check="reference", status="pass", detail="value=1.00"
+        ),
+    )
+    calls: list[str] = []
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, *, project: str, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        # the phase runs against the captured artifacts: the build range must
+        # already be down when the checks boot
+        assert fakes.down_calls == [project]
+        calls.append(project)
+        return records
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert calls == [result.project]
+    manifest = load_manifest(tmp_path / "builds", "buildme")
+    assert manifest is not None
+    assert manifest.verification.behavioral_checks == records
+
+
+def test_failing_behavioral_check_deletes_the_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        raise BuildError(
+            "behavioral", "challenge 'demo' check 'reference' failed: value=0.00"
+        )
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            behavioral_fn=behavioral_fn,
+        )
+    assert "manifest deleted; the build is unproven" in str(excinfo.value)
+    assert load_manifest(tmp_path / "builds", "buildme") is None
+
+
+def test_keep_skips_the_behavioral_phase(tmp_path: Path, cache: Path) -> None:
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        raise AssertionError("behavioral checks must not run while the range is kept")
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache, keep=True),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert result.kept
+
+
+def test_behavioral_infra_failure_also_deletes_the_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        raise RuntimeError("compose up failed: capture sidecar exited")
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            behavioral_fn=behavioral_fn,
+        )
+    assert excinfo.value.stage == "behavioral"
+    assert "manifest deleted; the build is unproven" in str(excinfo.value)
+    assert load_manifest(tmp_path / "builds", "buildme") is None
