@@ -216,6 +216,14 @@ def test_domain_turns_off_q35_legacy_devices(cache: Path, tmp_path: Path) -> Non
     render_bundle(chained_spec(), out, options(cache))
     qemu = "{http://libvirt.org/schemas/domain/qemu/1.0}"
     domains = sorted(out.glob("guests/*/domain.xml"))
+    # the attacker defaults to cloud-hypervisor (no domain XML), so the glob
+    # covers the qemu guests; assert they are exactly the ones expected rather
+    # than silently shrinking (round-2 review)
+    assert [path.parent.name for path in domains] == sorted(
+        guest.name
+        for guest in resolve_plan(chained_spec(), options(cache)).guests
+        if guest.vmm == "qemu"
+    )
     assert domains
     for xml in domains:
         domain = ElementTree.fromstring(xml.read_text())

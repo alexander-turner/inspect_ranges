@@ -45,6 +45,15 @@ def tiny_spec() -> RangeSpec:
     )
 
 
+@pytest.fixture(autouse=True)
+def isolated_ch_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The updown spec's attacker defaults to cloud-hypervisor now, so up() prepares a vsock dir under tempfile.gettempdir(): keep unit tests off the real /tmp (round-2 review)."""
+    import tempfile as tempfile_module
+
+    monkeypatch.setattr(tempfile_module, "gettempdir", lambda: str(tmp_path / "chtmp"))
+    (tmp_path / "chtmp").mkdir(exist_ok=True)
+
+
 @pytest.fixture()
 def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"

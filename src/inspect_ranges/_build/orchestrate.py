@@ -63,6 +63,7 @@ from .manifest import (
     now_iso,
     realized_file_name,
     save_manifest,
+    save_refused_manifest,
     validate_range_name,
     vars_hash,
 )
@@ -402,7 +403,7 @@ def build_range(
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
-    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project (known limit, round-2 review: the check sees compose containers, so the behavioral phase's `-bx` window is not covered and two same-spec builds can interleave there; the identity-matched retraction keeps a sibling's green manifest safe), and each run renders into its own staging directory so concurrent attempts can never destroy each other's bundles. On any failure after boot the range tears down (unless `keep`), the failure names its stage, guest, and recipe with a log path, and a teardown error is appended to the diagnosed failure, never substituted for it.
+    The build is an ordinary project named `ir-<range>-<build spec digest>`; a second build of the same spec while one runs refuses through `up`'s existing project check, naming the running project (known limit, round-2 review: the check sees compose containers, so the behavioral phase's `-bx` window is not covered and two same-spec builds can interleave there; the identity-guarded refused save replaces only the revision this build loaded, keeping a sibling's green manifest safe), and each run renders into its own staging directory so concurrent attempts can never destroy each other's bundles. On any failure after boot the range tears down (unless `keep`), the failure names its stage, guest, and recipe with a log path, and a teardown error is appended to the diagnosed failure, never substituted for it.
 
     Raises:
         IssueError: spec, recipe-resolution, build-variant, or planning refusals (all collected, house codes).
@@ -894,6 +895,7 @@ def build_range(
                     ),
                     build_cache,
                     tee,
+                    prior.built_at if prior is not None else None,
                 )
                 raise BuildError(
                     error.stage,
@@ -913,6 +915,7 @@ def build_range(
                     ),
                     build_cache,
                     tee,
+                    prior.built_at if prior is not None else None,
                 )
                 raise BuildError(
                     "behavioral",
@@ -930,7 +933,13 @@ def build_range(
                     check=verdict.check,
                     error=verdict.detail,
                 )
-                _save_refused(manifest, behavioral_records, build_cache, tee)
+                _save_refused(
+                    manifest,
+                    behavioral_records,
+                    build_cache,
+                    tee,
+                    prior.built_at if prior is not None else None,
+                )
                 raise BuildError(
                     "behavioral",
                     f"challenge {verdict.challenge!r} check {verdict.check!r} "
@@ -1233,8 +1242,9 @@ def _save_refused(
     records: tuple[BehavioralCheckRecord, ...],
     build_cache: Path,
     tee: "_BuildTee",
+    supersedes_built_at: str | None,
 ) -> None:
-    """Record the failed proof on the build's own manifest (atomically replacing any prior revision under the per-range lock); a save failure is logged, never masks the verdict."""
+    """Record the failed proof, identity-guarded: the refused manifest replaces only the revision this build loaded at resolve, never a concurrent sibling's fresh save (round-2 review); a save failure is logged, never masks the verdict."""
     refused = manifest.model_copy(
         update={
             "verification": manifest.verification.model_copy(
@@ -1243,8 +1253,15 @@ def _save_refused(
         }
     )
     try:
-        path = save_manifest(refused, build_cache)
-        tee.log("manifest", "ok", path=str(path), refused=True)
+        path = save_refused_manifest(refused, build_cache, supersedes_built_at)
+        if path is not None:
+            tee.log("manifest", "ok", path=str(path), refused=True)
+        else:
+            tee.log(
+                "manifest",
+                "fail",
+                error="a newer manifest exists (concurrent build); the refused verdict was not recorded",
+            )
     except Exception as error:  # the verdict is the primary diagnosis
         tee.log("manifest", "fail", error=f"refused-manifest write failed: {error}")
 

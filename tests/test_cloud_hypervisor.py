@@ -6,7 +6,7 @@ import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from inspect_ranges._channel.channel import (
@@ -468,3 +468,45 @@ def test_guesttool_socket_env_round_trip() -> None:
         with pytest.raises(ValueError):
             sockets_from_env({"IR_GUEST_SOCKETS": bad})
     assert json_module.loads(env["IR_GUEST_CIDS"]) == {"web": 3100}
+
+
+def test_foothold_attacker_refuses_even_a_redundant_qemu_vmm() -> None:
+    """Round-2 gap: the flip changed the refusal from `!= qemu` to `is not None`; the previously-valid redundant declaration is the edge that moved."""
+    with pytest.raises(ValidationError, match="must not also declare vmm"):
+        Attacker.model_validate({"entry": "external", "host": "web", "vmm": "qemu"})
+
+
+def test_down_removes_the_ch_vsock_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 gap: down's dir removal is the only barrier against per-sample socket-dir accumulation; crash-recovery paths rely on it."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    from inspect_ranges._runtime.down import down
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    directory = prepare_ch_vsock_dir("ir-chdir-test")
+    (directory / "attacker.sock").touch()
+    state = tmp_path / "state"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    write_owner(state, owner_record("ir-chdir-test", "chdir", "0" * 64, bundle))
+
+    def no_docker(argv: list[str], **_: Any) -> Any:
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    down("ir-chdir-test", state_dir=state, runner=no_docker, keep_state=False)
+    assert not directory.exists()
+
+
+def test_provider_channel_factory_receives_the_hybrid_map() -> None:
+    """Round-2 gap: the provider must thread UpResult's hybrid endpoints into the sample channel, or oracle/sandbox execs dial a CH attacker by dead CID."""
+    from inspect_ranges._provider.state import _default_channel_factory
+
+    endpoint = HybridEndpoint(Path("/run/ch-vsock/attacker.sock"), 1_003_900)
+    channel = _default_channel_factory(
+        {"attacker": 3900}, "test", {"attacker": endpoint}
+    )
+    transport = cast(VsockTransport, channel._transport)  # pyright: ignore[reportPrivateUsage]
+    assert transport._hybrid == {"attacker": endpoint}  # pyright: ignore[reportPrivateUsage]

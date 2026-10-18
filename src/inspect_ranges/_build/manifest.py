@@ -285,6 +285,33 @@ def stamp_bundle_sha256(
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def save_refused_manifest(
+    refused: "BuildManifest", build_cache: Path, supersedes_built_at: str | None
+) -> Path | None:
+    """Record a failed proof WITHOUT clobbering a concurrent sibling's manifest (round-2 review).
+
+    Under the per-range lock: the refused manifest lands only when the slot is empty or still holds the revision this build loaded at resolve (`supersedes_built_at`); a manifest a sibling build saved since then stays untouched (the old identity-matched retraction's guarantee, carried into the refused-save shape). Returns the path, or None when a newer manifest was preserved.
+    """
+    path = manifest_path(build_cache, refused.range_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / ".manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = load_manifest(build_cache, refused.range_name)
+            allowed = {refused.built_at}
+            if supersedes_built_at is not None:
+                allowed.add(supersedes_built_at)
+            if current is not None and current.built_at not in allowed:
+                return None
+            temp = path.with_suffix(".json.writing")
+            temp.write_text(refused.model_dump_json(indent=2) + "\n")
+            temp.replace(path)
+            return path
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def load_manifest(build_cache: Path, range_name: str) -> BuildManifest | None:
     """The recorded manifest for `range_name`, or None when absent or unreadable (treated as never built)."""
     path = manifest_path(build_cache, range_name)
@@ -353,7 +380,7 @@ def apply_build_manifest(
     if not manifest_matches_spec(manifest, _spec_sha256(spec)):
         raise refuse(
             "the recorded build is for a different spec revision",
-            "the spec changed since the last build; run `inspect-ranges build` again",
+            "the spec, or a schema default affecting its normalized form, changed since the last build; run `inspect-ranges build` again",
         )
     failed_checks = [
         record
@@ -369,8 +396,8 @@ def apply_build_manifest(
                     path=("range", "name"),
                     message=(
                         f"range {spec.meta.name!r} is built but its behavioral proof "
-                        f"failed ({verdict.challenge or 'phase'}/{verdict.check}: "
-                        f"{verdict.detail})"
+                        f"failed ({(verdict.challenge + '/') if verdict.challenge else ''}"
+                        f"{verdict.check}: {verdict.detail})"
                     ),
                     hint="fix the failing check or chain and run `inspect-ranges build` again (guests are reused; only the proof re-runs)",
                 )

@@ -1357,3 +1357,64 @@ def test_build_success_collects_superseded_generations_keeping_one(
     assert not (gen1 & generations[2])
     # web never changed: exactly one generation throughout
     assert len({p.name for p in cache.glob("buildme-web-*.qcow2")}) == 1
+
+
+def test_refused_save_never_clobbers_a_sibling_green_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-2: the refused save is identity-guarded, replacing only the revision this build loaded at resolve; a concurrent sibling's fresh green manifest stays untouched."""
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord, save_manifest
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+    sibling_saved: list[bool] = []
+
+    def failing_behavioral(
+        spec: RangeSpec, range_dir: Path, *, manifest: Any, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        # a sibling build lands its GREEN manifest while this build's
+        # behavioral phase runs (the -bx window the project check misses)
+        sibling = manifest.model_copy(
+            update={
+                "built_at": "2099-01-01T00:00:00Z",
+                "verification": manifest.verification.model_copy(
+                    update={
+                        "behavioral_checks": (
+                            BehavioralCheckRecord(
+                                challenge="demo",
+                                check="reference",
+                                status="pass",
+                                detail="value=1.00",
+                            ),
+                        )
+                    }
+                ),
+            }
+        )
+        save_manifest(sibling, tmp_path / "builds")
+        sibling_saved.append(True)
+        return (
+            BehavioralCheckRecord(
+                challenge="demo", check="reference", status="fail", detail="value=0.00"
+            ),
+        )
+
+    with pytest.raises(BuildError):
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            behavioral_fn=failing_behavioral,
+        )
+    assert sibling_saved
+    survivor = load_manifest(tmp_path / "builds", "buildme")
+    assert survivor is not None
+    assert survivor.built_at == "2099-01-01T00:00:00Z"
+    assert survivor.verification.behavioral_checks[0].status == "pass"

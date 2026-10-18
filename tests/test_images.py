@@ -350,3 +350,24 @@ def test_list_cmd_labels_unparseable_recipe_version(
     assert result.exit_code == 0
     assert "RECIPE UNPARSEABLE" in result.output
     assert "STALE RECIPE" not in result.output
+
+
+def test_prune_reporters_apply_the_live_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 gap: images list/doctor/prune must agree on one liveness definition (recorded manifests UNION running projects' boot.json files)."""
+    import json
+
+    from inspect_ranges._build.capture import live_project_files
+    from inspect_ranges._build.manifest import recorded_realized_files
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    state = tmp_path / "state"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "boot.json").write_text(
+        json.dumps({"guests": [{"name": "web", "image_file": "live-web-abc.qcow2"}]})
+    )
+    write_owner(state, owner_record("ir-live-x", "live", "0" * 64, bundle))
+    live = recorded_realized_files(tmp_path / "no-builds") | live_project_files(state)
+    assert "live-web-abc.qcow2" in live
