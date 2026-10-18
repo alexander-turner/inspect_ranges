@@ -264,12 +264,21 @@ def images_refresh(
     is_flag=True,
     help="Prune even while registered projects exist (their referenced files are still excluded).",
 )
+@click.option(
+    "--chains",
+    is_flag=True,
+    help="Also reclaim goldens and vendor bases nothing references (the distribution tier): eviction is by whole chain, never a backing out from under a dependent.",
+)
 def prune(
-    image_cache: Path | None, build_cache: Path | None, yes: bool, force: bool
+    image_cache: Path | None,
+    build_cache: Path | None,
+    yes: bool,
+    force: bool,
+    chains: bool,
 ) -> None:
-    """Reclaim realized images no manifest references, plus capture temps and orphan sidecars.
+    """Reclaim realized images no manifest references, plus capture temps and orphan sidecars; `--chains` extends to unreferenced goldens and vendor bases (pulled chains accounted exactly like built ones).
 
-    Build success already garbage-collects its own range (keeping the previous generation for rollback); prune covers the rest: generations stranded by refused manifests or crashes, ranges whose builds are gone, `.capturing` temps, and sidecars whose image vanished. Reports by default; `--yes` deletes. Refuses while registered projects exist unless `--force` (running projects' files are excluded either way).
+    Build success already garbage-collects its own range (keeping the previous generation for rollback); prune covers the rest: generations stranded by refused manifests or crashes, ranges whose builds are gone, `.capturing` and `.pulling` temps, and sidecars whose image vanished. The chain tier's liveness scan: a golden survives while any realized sidecar names it, any build manifest records it, or a live project boots it; a vendor base survives while any surviving golden's provenance names it. Reports by default; `--yes` deletes. Refuses while registered projects exist unless `--force` (running projects' files are excluded either way).
     """
     from .._build.capture import live_project_files
     from .._runtime.ownership import default_state_dir, list_projects
@@ -308,6 +317,18 @@ def prune(
     for temp in sorted(image_cache.glob("*.capturing")):
         if temp.is_file():
             victims.append((temp, temp.stat().st_size, "stranded capture temp"))
+    for temp in sorted(image_cache.glob("*.pulling-*")):
+        if temp.is_file():
+            victims.append((temp, temp.stat().st_size, "stranded pull temp"))
+    if chains:
+        from .._dist.gc import unreferenced_chain_files
+
+        for path, kind in unreferenced_chain_files(
+            image_cache,
+            build_cache if build_cache is not None else default_build_cache(),
+            live,
+        ):
+            victims.append((path, path.stat().st_size, kind))
     if not victims:
         click.echo("nothing to prune")
         return

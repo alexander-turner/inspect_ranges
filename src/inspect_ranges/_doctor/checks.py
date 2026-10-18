@@ -18,6 +18,7 @@ EVIDENCE = "Evidence"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
+DISTRIBUTION = "Distribution"
 IMAGE_TOOLING = "Image tooling"
 BUILD = "Build"
 
@@ -58,6 +59,7 @@ def run_checks() -> list[CheckResult]:
     from .._build.recipes import default_recipe_cache
 
     results += check_build(default_build_cache(), default_recipe_cache())
+    results += check_distribution(_provider_image_cache())
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
     else:
@@ -78,6 +80,95 @@ def run_checks() -> list[CheckResult]:
                 else None
             ),
         )
+    return results
+
+
+def check_distribution(image_cache: Path) -> list[CheckResult]:
+    """The distribution rows: configured locations parse (directory forms exist and are valid layouts), and the cache's provenance chains are whole (every realized image's golden present, every golden's vendor present)."""
+    from .._dist.errors import DistError
+    from .._dist.location import REGISTRY_ENV, registry_locations
+
+    results: list[CheckResult] = []
+    configured = os.environ.get(REGISTRY_ENV)
+    try:
+        locations = registry_locations(configured)
+        broken: list[str] = []
+        for location in locations:
+            if location.directory is not None:
+                try:
+                    from .._dist.oci import OciLayout
+
+                    OciLayout(location.directory).open()
+                except DistError as error:
+                    broken.append(f"{location.describe()}: {error}")
+        if broken:
+            results.append(
+                CheckResult(
+                    DISTRIBUTION,
+                    "locations",
+                    "fail",
+                    "; ".join(broken),
+                    fix="fix or remove the broken location from INSPECT_RANGES_REGISTRY (a broken first location aborts pulls rather than de-shadowing)",
+                )
+            )
+        else:
+            source = "INSPECT_RANGES_REGISTRY" if configured else "default"
+            results.append(
+                CheckResult(
+                    DISTRIBUTION,
+                    "locations",
+                    "ok",
+                    f"{', '.join(location.describe() for location in locations)} ({source})",
+                )
+            )
+    except DistError as error:
+        results.append(
+            CheckResult(
+                DISTRIBUTION,
+                "locations",
+                "fail",
+                str(error),
+                fix="fix INSPECT_RANGES_REGISTRY (comma-separated locations)",
+            )
+        )
+    import json as json_module
+
+    missing: list[str] = []
+    for sidecar in sorted(image_cache.glob("*.realized.json")):
+        try:
+            golden = json_module.loads(sidecar.read_text()).get("golden_file")
+        except (OSError, ValueError):
+            continue
+        if isinstance(golden, str) and not (image_cache / golden).is_file():
+            missing.append(f"{sidecar.name} -> {golden}")
+    for sidecar in sorted(image_cache.glob("*.json")):
+        if sidecar.name.endswith(".realized.json"):
+            continue
+        try:
+            meta = json_module.loads(sidecar.read_text())
+        except (OSError, ValueError):
+            continue
+        vendor = meta.get("vendor_file")
+        file = meta.get("file")
+        if (
+            isinstance(vendor, str)
+            and isinstance(file, str)
+            and (image_cache / file).is_file()
+            and not (image_cache / vendor).is_file()
+        ):
+            missing.append(f"{file} -> {vendor}")
+    if missing:
+        results.append(
+            CheckResult(
+                DISTRIBUTION,
+                "cache chains",
+                "warn",
+                f"{len(missing)} broken backing reference(s): {'; '.join(missing[:3])}",
+                fix="re-pull or re-derive the named chains (up refuses mixed chains either way)",
+            )
+        )
+    else:
+        results.append(CheckResult(DISTRIBUTION, "cache chains", "ok", "whole"))
     return results
 
 

@@ -5,7 +5,7 @@ from .._devbox import devbox_group
 from .appliercmd import applier
 from .buildcmd import build
 from .daemonbundle import daemon_bundle
-from .distcmd import pull, push
+from .distcmd import mirror, pull, push
 from .doctor import doctor
 from .evidencecmd import evidence
 from .imagescmd import images
@@ -29,6 +29,7 @@ ranges.add_command(devbox_group)
 ranges.add_command(doctor)
 ranges.add_command(evidence)
 ranges.add_command(images)
+ranges.add_command(mirror)
 ranges.add_command(plan)
 ranges.add_command(pull)
 ranges.add_command(push)

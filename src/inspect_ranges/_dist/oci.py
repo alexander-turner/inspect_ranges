@@ -514,7 +514,12 @@ class OciLayout:
             yield from iter(lambda: handle.read(_BLOB_CHUNK), b"")
 
     def put_blob_stream(
-        self, chunks: Iterator[bytes], *, expected: str, size: int
+        self,
+        chunks: Iterator[bytes],
+        *,
+        expected: str,
+        size: int,
+        progress: "ProgressFn | None" = None,
     ) -> str:
         """Store a chunk stream as a blob with verify-while-write; nothing is addressable on mismatch.
 
@@ -541,6 +546,8 @@ class OciLayout:
                     hasher.update(chunk)
                     written += len(chunk)
                     out.write(chunk)
+                    if progress is not None:
+                        progress(expected, "downloading", written, size)
             digest = f"sha256:{hasher.hexdigest()}"
             if digest != expected or written != size:
                 raise DistError(
@@ -592,7 +599,12 @@ class ContentStore(Protocol):
     def blob_chunks(self, descriptor: Descriptor) -> Iterator[bytes]: ...
 
     def put_blob_stream(
-        self, chunks: Iterator[bytes], *, expected: str, size: int
+        self,
+        chunks: Iterator[bytes],
+        *,
+        expected: str,
+        size: int,
+        progress: "ProgressFn | None" = None,
     ) -> str: ...
 
     def put_manifest(self, manifest: OciManifest) -> Descriptor: ...

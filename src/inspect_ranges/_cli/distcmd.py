@@ -190,3 +190,84 @@ def _echo_fetch(report: PullReport) -> None:
             f"supersede local manifest built {report.result.superseded_built_at}"
         )
     click.echo("pull OK")
+
+
+@click.command()
+@click.argument("target", required=False)
+@click.option("--from", "from_location", required=True, help="Source location.")
+@click.option("--to", "to_location", required=True, help="Destination location.")
+@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
+@click.option("--build-cache", type=click.Path(path_type=Path), default=None)
+def mirror(
+    target: str | None,
+    from_location: str,
+    to_location: str,
+    image_cache: Path | None,
+    build_cache: Path | None,
+) -> None:
+    """Mirror between locations: bare (whole source, the seed/sync move), a NAME, a `name@sha256:` pin, or a spec path/directory (the cross-group move: the local range.yaml selects the source build exactly)."""
+    from .._dist.mirror import mirror_names, mirror_one, source_names
+
+    display = TransferDisplay()
+    try:
+        source = parse_location(from_location)
+        destination = parse_location(to_location)
+        pinned = _parse_pinned(target)
+        if pinned is not None:
+            name, digest = pinned
+            from .._dist.oci import MEDIA_TYPE_INDEX, Descriptor
+
+            result = mirror_one(
+                name,
+                source,
+                destination,
+                root=Descriptor(media_type=MEDIA_TYPE_INDEX, digest=digest, size=0),
+                progress=display,
+            )
+            display.close()
+            click.echo(
+                f"mirror    {name}: {len(result.copied)} copied, "
+                f"{len(result.present)} already present (verified) root {result.root}"
+            )
+            return
+        if target is not None and (
+            target.endswith(".yaml") or Path(target).is_dir() or "/" in target
+        ):
+            # the cross-group move: the local spec selects the source build
+            spec_path = resolve_spec_path(Path(target))
+            validated = load_range(spec_path)
+            name = validated.meta.name
+            store = source.store_for(name)
+            root = store.ref(source.spec_ref(name, spec_sha256(validated)))
+            result = mirror_one(name, source, destination, root=root, progress=display)
+            display.close()
+            click.echo(
+                f"resolve   spec sha256:{spec_sha256(validated)[:6]}... -> "
+                f"{name}@{result.root}"
+            )
+            click.echo(
+                f"mirror    {name}: {len(result.copied)} copied, "
+                f"{len(result.present)} already present (verified)"
+            )
+            return
+        if target is not None:
+            result = mirror_one(target, source, destination, progress=display)
+            display.close()
+            click.echo(
+                f"mirror    {target}: {len(result.copied)} copied, "
+                f"{len(result.present)} already present (verified)"
+            )
+            return
+        names = source_names(source)
+        report = mirror_names(names, source, destination, progress=display)
+        display.close()
+        click.echo(
+            f"mirror    {len(names)} artifacts: {report.present} blobs already "
+            f"present, {report.copied} copied (verified)"
+        )
+    except DistError as error:
+        display.close()
+        raise click.ClickException(str(error)) from error
+    except IssueError as error:
+        display.close()
+        raise click.ClickException(str(error)) from error
