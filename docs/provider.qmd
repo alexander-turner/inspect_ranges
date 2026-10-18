@@ -63,7 +63,7 @@ attacker:
 
 ## Virtual machine monitors
 
-Guests run under QEMU via libvirt by default. A host or router may opt into Cloud Hypervisor with `vmm: cloud-hypervisor` (and the attack box with `attacker.vmm`): a smaller, rust-vmm userspace device model, started directly by the boot script as its own unprivileged per-guest uid (derived from the leased vsock CID, so no two VMMs — and no QEMU, which runs as `libvirt-qemu` — share one) with no capabilities and Cloud Hypervisor's default seccomp filter. The binary and its firmware are sha256-pinned into the range image.
+Hosts and routers run under QEMU via libvirt by default; the dedicated attack box defaults to Cloud Hypervisor (declare `attacker.vmm: qemu` to keep QEMU), and any host or router may opt in with `vmm: cloud-hypervisor`. Cloud Hypervisor is a smaller, rust-vmm userspace device model, started directly by the boot script as its own unprivileged per-guest uid (derived from the leased vsock CID, so no two VMMs share one, and none shares QEMU's `libvirt-qemu`) with no capabilities and Cloud Hypervisor's default seccomp filter. The binary and its firmware are sha256-pinned into the range image. The security rationale lives in the agent-containment record: the attack box is where the VM-escape surface matters most.
 
 Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control plane reaches them through the VMM's hybrid-vsock Unix socket, and every dialer checks the socket peer's credentials (`SO_PEERCRED`) against the VMM's uid before sending a byte, refusing anything else without retry. The sockets live in a private per-user host directory that `up` prepares and `down` removes.
 
