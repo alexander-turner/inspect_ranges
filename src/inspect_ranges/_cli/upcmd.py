@@ -5,6 +5,7 @@ from pathlib import Path
 
 import click
 
+from .._build.manifest import apply_build_manifest, default_build_cache
 from .._compiler import PlanOptions, render_bundle
 from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
@@ -88,10 +89,19 @@ def up(
                 prefix="ir-bundle-", dir=staging_root
             ) as temp:
                 spec = load_range(from_spec)
+                spec, realized_sections, _ = apply_build_manifest(
+                    spec,
+                    image_cache=image_cache,
+                    build_cache=default_build_cache(),
+                )
                 render_bundle(
                     spec,
                     Path(temp) / "bundle",
-                    PlanOptions(image_cache=image_cache, cid_base=cid_base),
+                    PlanOptions(
+                        image_cache=image_cache,
+                        cid_base=cid_base,
+                        realized_sections=realized_sections,
+                    ),
                 )
                 result = run_up(Path(temp) / "bundle", options)
         else:

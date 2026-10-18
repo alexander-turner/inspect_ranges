@@ -16,7 +16,7 @@ Existing and load-bearing: the compiler's plan/render pipeline with byte-determi
 
 ## Module layout
 
-New code lives in `src/inspect_ranges/_build/` (`recipes.py`, `orchestrate.py`, `verify.py`, `manifest.py`; no leading underscores inside the private package). Import rules: `_build/` may import `_compiler/`, `_runtime/`, and `_channel/` (it renders, boots via the realizer's machinery, and talks to guests over the channel client); nothing imports `_build/` except `_cli/`. The build is a consumer of `up`/`down`, never a reimplementation: build-time ranges are ordinary projects with ordinary ownership records, so crash cleanup is inherited, not rebuilt.
+New code lives in `src/inspect_ranges/_build/` (`recipes.py`, `orchestrate.py`, `verify.py`, `manifest.py`; no leading underscores inside the private package). Import rules: `_build/` may import `_compiler/`, `_runtime/`, and `_channel/` (it renders, boots via the realizer's machinery, and talks to guests over the channel client); nothing imports `_build/` except `_cli/` and `_provider/` (amended at slice 6: the build-aware runtime gate consumes manifests from the provider's resolve path and the spec-taking verbs). The build is a consumer of `up`/`down`, never a reimplementation: build-time ranges are ordinary projects with ordinary ownership records, so crash cleanup is inherited, not rebuilt.
 
 ## Build-time egress (decided 2026-10-17)
 

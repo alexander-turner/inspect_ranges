@@ -15,6 +15,7 @@ from inspect_ai.util._sandbox.lifecycle import (
     sandbox_lifecycle_state,
 )
 
+from .._build.manifest import apply_build_manifest, default_build_cache
 from .._channel.channel import MessageChannel
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
@@ -107,7 +108,9 @@ class ProviderRuntime:
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None
         self._host_provider: HostProvider | None = None
-        self._resolved: dict[str | RangeSpec, tuple[RangeSpec, ResolvedPlan]] = {}
+        self._resolved: dict[
+            str | RangeSpec, tuple[RangeSpec, ResolvedPlan, frozenset[str]]
+        ] = {}
         if self.host_backend.startswith("uds:"):
             # the derived seams install at construction, not lazily: paths
             # that never touch host_provider (cli_cleanup foremost) must
@@ -174,36 +177,44 @@ class ProviderRuntime:
 
     def resolve_config(
         self, config: "str | RangeSpec", resolver: Callable[[], RangeSpec]
-    ) -> tuple[RangeSpec, ResolvedPlan]:
-        """The validated spec and base plan for one config, resolved once per batch.
+    ) -> tuple[RangeSpec, ResolvedPlan, frozenset[str]]:
+        """The validated spec, base plan, and realized sections for one config, resolved once per batch.
 
-        Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample.
+        Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample. The build-aware gate applies here (build-v1 slice 6): a spec with guest content consumes its build manifest (hosts swap to the captured realized images; the manifest's sections count as realized at planning) or refuses `range-not-built` before anything boots.
         """
         cached = self._resolved.get(config)
         if cached is not None:
             return cached
         spec = resolver()
-        plan = resolve_plan(spec, self.plan_options())
-        self._resolved[config] = (spec, plan)
-        return spec, plan
+        spec, realized_sections, _ = apply_build_manifest(
+            spec, image_cache=self.image_cache, build_cache=default_build_cache()
+        )
+        plan = resolve_plan(
+            spec, self.plan_options(realized_sections=realized_sections)
+        )
+        self._resolved[config] = (spec, plan, realized_sections)
+        return spec, plan, realized_sections
 
     def plan_options(
         self,
         cid_base: int | None = None,
         evidence_capture: bool = False,
         probe_segments: tuple[str, ...] = (),
+        realized_sections: frozenset[str] = frozenset(),
     ) -> PlanOptions:
         if cid_base is None:
             return PlanOptions(
                 image_cache=self.image_cache,
                 evidence_capture=evidence_capture,
                 probe_segments=probe_segments,
+                realized_sections=realized_sections,
             )
         return PlanOptions(
             image_cache=self.image_cache,
             cid_base=cid_base,
             evidence_capture=evidence_capture,
             probe_segments=probe_segments,
+            realized_sections=realized_sections,
         )
 
 

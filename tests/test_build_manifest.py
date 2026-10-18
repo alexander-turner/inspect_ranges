@@ -147,3 +147,122 @@ def test_slashed_range_names_flatten_in_file_names_and_nest_in_builds() -> None:
 
     path = manifest_path(Path("/builds"), "acme/payroll")
     assert path == Path("/builds/acme/payroll/manifest.json")
+
+
+def test_apply_build_manifest_gate(tmp_path: Path) -> None:
+    import hashlib
+
+    from inspect_ranges._build.manifest import apply_build_manifest
+    from inspect_ranges._compiler.plan import spec_sha256
+    from inspect_ranges.types import (
+        Attacker,
+        IssueError,
+        Network,
+        RangeMeta,
+        RangeSpec,
+    )
+    from inspect_ranges.types import (
+        Interface as I,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="gated", description="x"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[make_host(name="web", image="focal-guest")],
+        attacker=Attacker(
+            image="focal-guest", interfaces=[I(network="lab")], entry="external"
+        ),
+    )
+    image_cache = tmp_path / "images"
+    image_cache.mkdir()
+    builds = tmp_path / "builds"
+
+    # no manifest: refuse range-not-built
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert error.issues[0].code == "range-not-built"
+        assert "inspect-ranges build" in (error.issues[0].hint or "")
+
+    # a matching manifest with a verifiable realized image: swap + realized sections
+    realized = image_cache / "gated-web-abcdefabcdef.qcow2"
+    realized.write_bytes(b"realized-bytes")
+    manifest = BuildManifest(
+        range_name="gated",
+        schema_version="0.3",
+        spec_sha256=spec_sha256(spec),
+        built_at=now_iso(),
+        project="ir-gated-x",
+        guests=(
+            GuestRecord(
+                name="web",
+                golden_reference="focal-guest",
+                golden_digest="sha256:g",
+                realized_file=realized.name,
+                realized_sha256=hashlib.sha256(b"realized-bytes").hexdigest(),
+                build_key="k" * 64,
+                recipes=(),
+            ),
+        ),
+        verification=VerificationRecord(verified_at=now_iso(), declarations=()),
+    )
+    save_manifest(manifest, builds)
+    swapped, sections, consumed = apply_build_manifest(
+        spec, image_cache=image_cache, build_cache=builds
+    )
+    assert swapped.hosts[0].image == realized.name
+    assert "services" in sections and "provisioning" in sections
+    assert consumed is not None and consumed.project == "ir-gated-x"
+    # the original spec is untouched
+    assert spec.hosts[0].image == "focal-guest"
+
+    # spec edited after the build: refuse with the revision hint
+    spec.meta.description = "edited"
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "different spec revision" in error.issues[0].message
+
+    # tampered realized image: refuse
+    spec.meta.description = "x"
+    realized.write_bytes(b"tampered")
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "does not match the manifest's digest" in error.issues[0].message
+
+
+def test_apply_build_manifest_passthrough_without_content(tmp_path: Path) -> None:
+    from inspect_ranges._build.manifest import apply_build_manifest
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Network,
+        Os,
+        RangeMeta,
+        RangeSpec,
+    )
+    from inspect_ranges.types import (
+        Interface as I,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="plain", description="x"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="g",
+                interfaces=[I(network="lab")],
+            )
+        ],
+        attacker=Attacker(image="g", interfaces=[I(network="lab")], entry="external"),
+    )
+    same, sections, consumed = apply_build_manifest(
+        spec, image_cache=tmp_path, build_cache=tmp_path / "builds"
+    )
+    assert same is spec and sections == frozenset() and consumed is None

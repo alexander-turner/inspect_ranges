@@ -1,6 +1,6 @@
 """Build phase: recipe bundles, the build orchestration, verification, and the build manifest (build-v1).
 
-Import boundaries: `_build` may import `_compiler`, `_runtime`, and `_channel`; nothing imports `_build` except `_cli`. The build is a consumer of `up`/`down`, never a reimplementation.
+Import boundaries: `_build` may import `_compiler`, `_runtime`, and `_channel`; nothing imports `_build` except `_cli` and `_provider` (the build-aware gate's manifest consumption). The build is a consumer of `up`/`down`, never a reimplementation.
 """
 
 from .capture import RealizedImageMeta, capture_guest, shutdown_guest, wait_shutoff
