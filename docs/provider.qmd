@@ -21,11 +21,11 @@ def my_task() -> Task:
     )
 ```
 
-Before the first eval on a machine, derive a golden image and check the host (see [CLI](cli.qmd)): `inspect-ranges doctor` verifies the host end to end, and `inspect-ranges images derive` bakes the guest control daemon into a golden the range definition references.
+Before the first eval on a machine, derive a golden image and check the host (see [Running Ranges](cli.qmd)): `inspect-ranges doctor` verifies the host end to end, and `inspect-ranges images derive` bakes the guest control daemon into a golden the range definition references.
 
 ## Configuration
 
-The sandbox config is a range definition (see [Defining Ranges](ranges.qmd)), in either form:
+The sandbox config is a range definition (see [Ranges](ranges.qmd)), in either form:
 
 - **A `range.yaml` path**: `sandbox=("range", "range.yaml")`. A bare `sandbox="range"` picks up a `range.yaml` next to the task file.
 - **A typed spec**: pass a `RangeSpec` constructed with the Python API, via `SandboxEnvironmentSpec("range", spec)`. The spec round-trips through the eval log typed.
