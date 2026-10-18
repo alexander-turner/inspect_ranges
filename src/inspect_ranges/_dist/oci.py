@@ -5,6 +5,7 @@ This module is deliberately artifact-agnostic: it implements the OCI image-spec 
 Integrity contract (image-distribution.md): blobs are canonical bytes addressed by sha256 and are never edited after write; writes land under temporary names and move in atomically, so concurrent writers converge by digest and a partial write is never observable under a blob path; every read path verifies the digest before the caller sees the content (small blobs by hashing in memory, large blobs by streaming verification on copy).
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -28,6 +29,7 @@ __all__ = [
     "OciIndex",
     "OciLayout",
     "OciManifest",
+    "atomic_write",
     "blob_sha256",
 ]
 
@@ -169,12 +171,18 @@ class OciLayout:
             self._check_marker(marker)
         else:
             (self.root / "blobs" / "sha256").mkdir(parents=True, exist_ok=True)
-            _atomic_write(
+            atomic_write(
                 marker, json.dumps({"imageLayoutVersion": OCI_LAYOUT_VERSION}).encode()
             )
         if not (self.root / "index.json").exists():
-            _atomic_write(self.root / "index.json", OciIndex().canonical_bytes())
-        (self.root / "blobs" / "sha256").mkdir(parents=True, exist_ok=True)
+            atomic_write(self.root / "index.json", OciIndex().canonical_bytes())
+        blobs = self.root / "blobs" / "sha256"
+        blobs.mkdir(parents=True, exist_ok=True)
+        # a hard-killed writer strands randomly-named temps nothing else would
+        # ever reclaim; blobs land atomically, so anything matching the temp
+        # prefix is debris by definition
+        for stale in blobs.glob(".incoming-*"):
+            stale.unlink(missing_ok=True)
         return self
 
     def open(self) -> "OciLayout":
@@ -223,7 +231,18 @@ class OciLayout:
             ) from error
 
     def set_ref(self, name: str, descriptor: Descriptor) -> None:
-        """Point `name` at `descriptor` in the index (replacing an existing entry of the same name)."""
+        """Point `name` at `descriptor` in the index (replacing an existing entry of the same name).
+
+        The read-modify-write runs under the layout's `.index.lock`, so concurrent pushes into one layout never drop each other's refs (slice-5 mirror relies on this).
+        """
+        with open(self.root / ".index.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                self._set_ref_locked(name, descriptor)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _set_ref_locked(self, name: str, descriptor: Descriptor) -> None:
         index = self.index()
         annotations = dict(descriptor.annotations or {})
         annotations[REF_NAME_ANNOTATION] = name
@@ -234,7 +253,7 @@ class OciLayout:
             if (manifest.annotations or {}).get(REF_NAME_ANNOTATION) != name
         ]
         index.manifests = [*kept, entry]
-        _atomic_write(self.root / "index.json", index.canonical_bytes())
+        atomic_write(self.root / "index.json", index.canonical_bytes())
 
     def ref(self, name: str) -> Descriptor:
         """The index entry named `name`.
@@ -264,7 +283,7 @@ class OciLayout:
         digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
         target = self.blob_path(digest)
         if not target.exists():
-            _atomic_write(target, data)
+            atomic_write(target, data)
         return digest
 
     def put_blob_file(self, source: Path, *, expected: str | None = None) -> str:
@@ -332,8 +351,16 @@ class OciLayout:
             )
         return data
 
-    def copy_blob_to(self, descriptor: Descriptor, destination: Path) -> None:
+    def copy_blob_to(
+        self,
+        descriptor: Descriptor,
+        destination: Path,
+        *,
+        temp_prefix: str | None = None,
+    ) -> None:
         """Stream a blob to `destination` with verify-while-copy; the file appears atomically.
+
+        `temp_prefix` names the in-flight temp (default `.incoming-`); callers landing into a shared cache pass a per-name prefix so a crash's debris is attributable and reclaimable by the next attempt on that name.
 
         Raises:
             DistError: `missing-blob` or `blob-digest-mismatch` (nothing lands at `destination` on failure).
@@ -344,7 +371,9 @@ class OciLayout:
             raise DistError("missing-blob", f"{self.root} has no blob {digest}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         hasher = hashlib.sha256()
-        fd, temp_name = tempfile.mkstemp(dir=destination.parent, prefix=".incoming-")
+        fd, temp_name = tempfile.mkstemp(
+            dir=destination.parent, prefix=temp_prefix or ".incoming-"
+        )
         temp = Path(temp_name)
         try:
             with os.fdopen(fd, "wb") as out, source.open("rb") as handle:
@@ -397,7 +426,8 @@ class OciLayout:
         )
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def atomic_write(path: Path, data: bytes) -> None:
+    """Write bytes with the cache discipline: temp in the same directory, atomic replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=".incoming-")
     temp = Path(temp_name)

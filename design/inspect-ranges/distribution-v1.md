@@ -62,7 +62,7 @@ Accumulated in [distribution-v1-parked-decisions.md](distribution-v1-parked-deci
 
 | Slice | Status |
 |---|---|
-| 1 OCI encoding + directory form | |
+| 1 OCI encoding + directory form | done 2026-10-18: battery 16/16 ([dist-oci](../spikes/dist-oci/README.md)), the real vulhub build round-tripped through a layout directory into fresh caches (re-push pure dedup, tar sneakernet, REAL qemu-img chain validation, byte-identical pulls, converge, tamper and missing-blob refusals with no manifest landing, pulled caches boot and serve); fresh-context review: 9 findings (3 blocking: a digest-valid root missing referenced artifacts materialized as success, fixed with the completeness gate before the manifest lands; concurrent recipe pullers could poison the shared cache via a fixed staging path with no lock, fixed with the per-name lock discipline plus private verified tar copies; a truncated root index escaped as a raw ValidationError and two of the plan's four named refusal cases were unproven, fixed and all four now pinned by tests plus the D8b live leg; 6 non-blocking: sidecar healing on converge with atomic writes, attributable and swept pull temps surfaced by `images list`, the bare-vendor embedded-backing closed-world check, the push TOCTOU guard, the recipe-size cap asymmetry dissolved, locked `set_ref`), all fixed and re-batteried 16/16; 23 unit tests; suite 1634 |
 | 2 registry client | |
 | 3 resolution + spec-driven pull | |
 | 4 provider auto-pull + UX | |

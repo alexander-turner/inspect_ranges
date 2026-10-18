@@ -1,6 +1,7 @@
 """Push/materialize closure round trips over a synthetic cache (no VMs; the qcow2 backing probe is faked here, proven real by the dist-oci battery)."""
 
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from inspect_ranges._build.manifest import (
 )
 from inspect_ranges._build.recipes import recipe_digest, resolve_recipe
 from inspect_ranges._dist import (
+    Descriptor,
     DistError,
     OciLayout,
     materialize_closure,
@@ -285,3 +287,208 @@ def test_pull_supersedes_a_different_manifest(tmp_path: Path) -> None:
     assert result.superseded_built_at == "2026-01-01T00:00:00Z"
     pulled = load_manifest(builds, "distfix")
     assert pulled is not None and pulled.spec_sha256 == "77ab"
+
+
+def _rebuilt_root(layout: OciLayout, keep: "Callable[[object], bool]") -> "object":
+    """A new digest-valid root index keeping only the members `keep` accepts."""
+    from inspect_ranges._dist.oci import OciIndex
+
+    original = layout.ref("distfix")
+    index = OciIndex.model_validate_json(layout.read_blob(original))
+    index.manifests = [m for m in index.manifests if keep(m)]
+    data = index.canonical_bytes()
+    digest = layout.put_blob_bytes(data)
+    return Descriptor(media_type=index.media_type, digest=digest, size=len(data))
+
+
+def test_pruned_closure_refuses_before_the_manifest_lands(tmp_path: Path) -> None:
+    """Round-1 B1: a digest-valid root missing a referenced artifact must refuse, never report success over a partial publication."""
+    from inspect_ranges._dist.encode import ARTIFACT_REALIZED
+
+    fixture = Fixture(tmp_path)
+    layout, _ = fixture.push(tmp_path)
+    root = _rebuilt_root(
+        layout, lambda m: getattr(m, "artifact_type", None) != ARTIFACT_REALIZED
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="closure-incomplete"):
+        materialize_closure(
+            layout,
+            root,  # type: ignore[arg-type]
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+    assert load_manifest(builds, "distfix") is None
+
+
+def test_garbage_root_index_is_a_coded_refusal(tmp_path: Path) -> None:
+    """Round-1 B3: a digest-valid but unparseable root index refuses with manifest-invalid, never a raw ValidationError."""
+    from inspect_ranges._dist.oci import MEDIA_TYPE_INDEX
+
+    fixture = Fixture(tmp_path)
+    layout, _ = fixture.push(tmp_path)
+    garbage = b'{"schemaVersion": 2, "manifests": "truncated...'
+    digest = layout.put_blob_bytes(garbage)
+    root = Descriptor(media_type=MEDIA_TYPE_INDEX, digest=digest, size=len(garbage))
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="manifest-invalid"):
+        materialize_closure(
+            layout,
+            root,
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+
+
+def test_missing_blob_is_a_coded_refusal(tmp_path: Path) -> None:
+    fixture = Fixture(tmp_path)
+    layout, root = fixture.push(tmp_path)
+    layout.blob_path(f"sha256:{_hex(VENDOR)}").unlink()
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="missing-blob"):
+        materialize_closure(
+            layout,
+            root,  # type: ignore[arg-type]
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+    assert load_manifest(builds, "distfix") is None
+
+
+def test_drifted_backing_digest_annotation_refuses(tmp_path: Path) -> None:
+    """Round-1 B3: an annotation declaring a different backing digest than the blob that landed refuses chain-invalid."""
+    from inspect_ranges._dist.encode import ANN_BACKING_DIGEST, ARTIFACT_GOLDEN
+    from inspect_ranges._dist.oci import OciIndex
+
+    fixture = Fixture(tmp_path)
+    layout, _ = fixture.push(tmp_path)
+    original = layout.ref("distfix")
+    index = OciIndex.model_validate_json(layout.read_blob(original))
+    members: list[Descriptor] = []
+    for member in index.manifests:
+        if member.artifact_type == ARTIFACT_GOLDEN:
+            manifest = layout.manifest(member)
+            annotations = dict(manifest.annotations or {})
+            annotations[ANN_BACKING_DIGEST] = "sha256:" + "e" * 64
+            member = layout.put_manifest(
+                manifest.model_copy(update={"annotations": annotations})
+            )
+        members.append(member)
+    index.manifests = members
+    data = index.canonical_bytes()
+    root = Descriptor(
+        media_type=index.media_type,
+        digest=layout.put_blob_bytes(data),
+        size=len(data),
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    with pytest.raises(DistError, match="chain-invalid"):
+        materialize_closure(
+            layout,
+            root,
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+
+
+def test_converge_heals_a_missing_sidecar(tmp_path: Path) -> None:
+    """Round-1 N4: the crash window between image and sidecar must not become a permanent fully-present-but-unmanaged state."""
+    fixture = Fixture(tmp_path)
+    layout, root = fixture.push(tmp_path)
+    images, builds, recipes = fresh_dirs(tmp_path)
+    materialize_closure(
+        layout,
+        root,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    sidecar = images / (fixture.realized_file.removesuffix(".qcow2") + ".realized.json")
+    sidecar.unlink()
+    result = materialize_closure(
+        layout,
+        root,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert sidecar.is_file()
+    assert sidecar.name in result.fetched
+
+
+def test_stale_pulling_temp_is_swept(tmp_path: Path) -> None:
+    """Round-1 N5: a hard-killed pull's temp is reclaimed by the next attempt on that name."""
+    fixture = Fixture(tmp_path)
+    layout, root = fixture.push(tmp_path)
+    images, builds, recipes = fresh_dirs(tmp_path)
+    stale = images / f".{fixture.realized_file}.pulling-dead"
+    stale.write_bytes(b"x" * 100)
+    materialize_closure(
+        layout,
+        root,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert not stale.exists()
+    assert not list(images.glob(".*.pulling-*"))
+
+
+def test_push_refuses_a_concurrently_rebuilt_manifest(tmp_path: Path) -> None:
+    """Round-1 N7: the pull root's manifest bytes must belong to the closure that was just encoded."""
+    from inspect_ranges._build.manifest import save_manifest as save
+
+    fixture = Fixture(tmp_path)
+    rebuilt = fixture.manifest.model_copy(update={"built_at": "2099-01-01T00:00:00Z"})
+    save(rebuilt, fixture.build_cache)
+    layout = OciLayout(tmp_path / "layout").ensure()
+    with pytest.raises(DistError, match="manifest-changed"):
+        push_build(
+            fixture.manifest,
+            layout,
+            image_cache=fixture.image_cache,
+            build_cache=fixture.build_cache,
+            range_dir=fixture.range_dir,
+        )
+
+
+def test_sidecarless_image_with_embedded_backing_refuses_at_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-1 N6: a bare vendor base must be chainless; an embedded backing with no sidecar would publish a chain that cannot boot."""
+    from inspect_ranges._build.manifest import BaseImageRecord as Base
+
+    fixture = Fixture(tmp_path)
+    (fixture.image_cache / "plain.qcow2").write_bytes(b"orphan overlay")
+
+    def fake_backing(path: Path) -> str | None:
+        return "lost-parent.qcow2" if path.name == "plain.qcow2" else None
+
+    monkeypatch.setattr("inspect_ranges._dist.encode.qcow2_backing_name", fake_backing)
+    manifest = fixture.manifest.model_copy(
+        update={
+            "base_images": (
+                *fixture.manifest.base_images,
+                Base(
+                    guest="router",
+                    kind="router",
+                    reference="plain",
+                    file="plain.qcow2",
+                    digest="",
+                ),
+            )
+        }
+    )
+    layout = OciLayout(tmp_path / "layout").ensure()
+    with pytest.raises(DistError, match="chain-invalid"):
+        push_build(
+            manifest,
+            layout,
+            image_cache=fixture.image_cache,
+            build_cache=fixture.build_cache,
+            range_dir=fixture.range_dir,
+        )
