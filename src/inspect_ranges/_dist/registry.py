@@ -353,7 +353,9 @@ class RegistryRepo:
                 "registry-unreachable", f"{method} {url} failed: {error}"
             ) from error
         status = response.status
-        response_headers = {k: v for k, v in response.headers.items()}
+        # header names normalize to lowercase: real registries (the hub's LB
+        # among them) emit lowercase headers, and a plain dict is case-blind
+        response_headers = {k.lower(): v for k, v in response.headers.items()}
         if status not in ok:
             unexpected = _read_capped(response, _ERROR_BODY_CAP, "error body")
             response.close()
@@ -438,7 +440,7 @@ class RegistryRepo:
             actions="pull,push",
             ok=(202,),
         )
-        location = headers.get("Location")
+        location = headers.get("location")
         if not location:
             raise DistError(
                 "registry-protocol", f"{self._host} started an upload with no Location"
@@ -676,7 +678,7 @@ class RegistryRepo:
                     "blob-digest-mismatch",
                     f"manifest {reference} reads back as {actual}",
                 )
-        return body, headers.get("Content-Type", MEDIA_TYPE_MANIFEST)
+        return body, headers.get("content-type", MEDIA_TYPE_MANIFEST)
 
     def manifest_bytes(self, descriptor: Descriptor) -> bytes:
         """A manifest's verified RAW bytes (the transfer path reads these, never a re-serialization)."""
