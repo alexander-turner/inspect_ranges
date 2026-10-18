@@ -35,7 +35,7 @@ from .._runtime.ownership import (
 from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..schema import revalidate_range
 from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
-from .behavioral import checks_declared
+from .behavioral import checks_declared, checks_digest
 from .capture import (
     RealizedImageMeta,
     capture_guest,
@@ -446,6 +446,8 @@ def build_range(
         raise IssueError(missing)
 
     spec_hash = spec_sha256(spec)
+    checks = checks_declared(range_dir)
+    current_checks_sha = checks_digest(range_dir) if checks else ""
     prior = load_manifest(build_cache, spec.meta.name)
     reusable: dict[str, GuestRecord] = {}
     if prior is not None:
@@ -464,10 +466,14 @@ def build_range(
         and not options.reverify
         and manifest_matches_spec(prior, spec_hash)
         and all(host.name in reusable for host in content_hosts)
+        and prior.checks_sha256 == current_checks_sha
     ):
-        # the no-op fast path: every key matches and the verification is
-        # recorded, so nothing boots (all-or-nothing caching, ratified); the
-        # stage record lands in the project that produced the verification
+        # the no-op fast path: every key matches, the verification is
+        # recorded, and the behavioral-check inputs are the ones that were
+        # proven, so nothing boots (all-or-nothing caching, ratified); a new
+        # or edited check script re-runs the pass (slice 6 review: proof
+        # tools are build inputs even though they are not guest content);
+        # the stage record lands in the project that produced the verification
         project = prior.project
         tee = _BuildTee(StageLog(state_dir, project), on_stage)
         tee.log(
@@ -698,22 +704,32 @@ def build_range(
                     spec=spec.model_dump(mode="json", by_alias=True),
                     project=project,
                     built_at=verified_at,
+                    checks_sha256=current_checks_sha,
                     base_images=_base_images(spec, image_cache),
                     guests=tuple(guest_records),
                     verification=VerificationRecord(
                         verified_at=verified_at, declarations=tuple(verifications)
                     ),
                 )
-                saved_manifest = save_manifest(manifest, build_cache)
+                if not checks:
+                    # with checks declared the save is DEFERRED past the
+                    # behavioral phase: a manifest on disk is consumable by the
+                    # gate, and nothing unproven may ever be consumable, under
+                    # any exit (teardown failure, Ctrl-C, a crash mid-phase)
+                    saved_manifest = save_manifest(manifest, build_cache)
             except Exception as error:
                 tee.log("manifest", "fail", error=str(error))
                 disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
                 raise BuildError(
                     "manifest", f"manifest write failed: {error} ({disposition})"
                 ) from error
-            tee.log(
-                "manifest", "ok", path=str(saved_manifest), guests=len(guest_records)
-            )
+            if saved_manifest is not None:
+                tee.log(
+                    "manifest",
+                    "ok",
+                    path=str(saved_manifest),
+                    guests=len(guest_records),
+                )
 
         if not options.keep:
             try:
@@ -727,13 +743,11 @@ def build_range(
             tee.log("teardown", "ok", after="success")
             kept = False
 
-        if (
-            not options.keep
-            and saved_manifest is not None
-            and checks_declared(range_dir)
-        ):
+        if not options.keep and manifest is not None and checks:
             # behavioral checks run against the CAPTURED artifacts: the exact
-            # images samples boot, after the build range is down (slice 6)
+            # images samples boot, after the build range is down (slice 6);
+            # the manifest is handed over in memory and lands on disk only
+            # when every check has passed
             behavioral = (
                 behavioral_fn if behavioral_fn is not None else _run_behavioral_phase
             )
@@ -741,6 +755,7 @@ def build_range(
                 behavioral_records = behavioral(
                     spec,
                     range_dir,
+                    manifest=manifest,
                     image_cache=image_cache,
                     build_cache=build_cache,
                     state_dir=state_dir,
@@ -751,23 +766,21 @@ def build_range(
                     down_fn=down_fn,
                 )
             except BuildError as error:
-                saved_manifest.unlink(missing_ok=True)
                 tee.log("behavioral", "fail", error=str(error))
                 raise BuildError(
                     error.stage,
-                    f"{_strip_stage(error)} (manifest deleted; the build is unproven)",
+                    f"{_strip_stage(error)} (no manifest was written; the build is unproven)",
                 ) from error
             except Exception as error:
                 # an infra failure (the -bx boot, evidence plumbing) leaves the
                 # checks unrun, which is just as unproven as a failing check: no
                 # consumer may boot a range whose challenge was never exercised
-                saved_manifest.unlink(missing_ok=True)
                 tee.log("behavioral", "fail", error=str(error))
                 raise BuildError(
                     "behavioral",
-                    f"behavioral phase failed: {error} (manifest deleted; the build is unproven)",
+                    f"behavioral phase failed: {error} (no manifest was written; the build is unproven)",
                 ) from error
-            assert manifest is not None  # saved_manifest set iff manifest built
+            tee.log("behavioral", "ok", checks=len(behavioral_records))
             manifest = manifest.model_copy(
                 update={
                     "verification": manifest.verification.model_copy(
@@ -775,8 +788,20 @@ def build_range(
                     )
                 }
             )
-            saved_manifest = save_manifest(manifest, build_cache)
-            tee.log("behavioral", "ok", checks=len(behavioral_records))
+            try:
+                saved_manifest = save_manifest(manifest, build_cache)
+            except Exception as error:
+                # the build range is already down; nothing to dispose
+                tee.log("manifest", "fail", error=str(error))
+                raise BuildError(
+                    "manifest", f"manifest write failed: {error}"
+                ) from error
+            tee.log(
+                "manifest",
+                "ok",
+                path=str(saved_manifest),
+                guests=len(manifest.guests),
+            )
     finally:
         if not kept:
             shutil.rmtree(staging, ignore_errors=True)
@@ -804,6 +829,7 @@ class BehavioralFn(Protocol):
         spec: RangeSpec,
         range_dir: Path,
         *,
+        manifest: BuildManifest,
         image_cache: Path,
         build_cache: Path,
         state_dir: Path,
@@ -819,6 +845,7 @@ def _run_behavioral_phase(
     spec: RangeSpec,
     range_dir: Path,
     *,
+    manifest: BuildManifest,
     image_cache: Path,
     build_cache: Path,
     state_dir: Path,
@@ -828,13 +855,14 @@ def _run_behavioral_phase(
     up_fn: UpFn,
     down_fn: DownFn,
 ) -> tuple[BehavioralCheckRecord, ...]:
-    """Boot the just-captured realized artifacts (the exact things samples boot) and run the checks against them; exploit debris dirties only this boot's overlays."""
-    from .behavioral import run_behavioral_checks
-    from .manifest import apply_build_manifest
+    """Boot the just-captured realized artifacts (the exact things samples boot) and run the checks against them; exploit debris dirties only this boot's overlays.
 
-    swapped, sections, _ = apply_build_manifest(
-        spec, image_cache=image_cache, build_cache=build_cache
-    )
+    The manifest arrives in memory, not from disk: it is saved only after this phase passes, so an unproven build is never consumable (slice 6 review).
+    """
+    from .behavioral import run_behavioral_checks
+    from .manifest import swap_realized_spec
+
+    swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
     staging_root = state_dir.parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=staging_root, prefix=f"{project}-bx-"))
@@ -882,7 +910,12 @@ def _run_behavioral_phase(
             try:
                 down_fn(bx_project, state_dir=state_dir, keep_state=True)
             except Exception as error:  # the primary diagnosis stays primary
-                stage_log.log("teardown", "fail", error=str(error), project=bx_project)
+                stage_log.log(
+                    "teardown",
+                    "fail",
+                    error=f"{error}; retry with: inspect-ranges down {bx_project}",
+                    project=bx_project,
+                )
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

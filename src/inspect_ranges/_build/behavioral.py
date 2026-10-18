@@ -1,11 +1,12 @@
 """Challenge behavioral checks at build time (build-v1 slice 6).
 
-The ratified verification structure puts exploitability proof in exactly one place: the challenge's behavioral checks (the reference solution passes, an insufficient attempt fails, a forged submission fails). The build runs them against the range's CAPTURED artifacts: after capture and manifest write, the realized images boot once more through the same `apply_build_manifest` path samples use, the checks run, and their results land in the manifest's `behavioral_checks` slot; a failing check deletes the manifest and fails the build, so no consumer ever boots a range whose challenge is unproven. Running against the captured artifacts rather than the build range is deliberate: it proves the thing that ships, and exploit debris dirties only ephemeral per-boot overlays.
+The ratified verification structure puts exploitability proof in exactly one place: the challenge's behavioral checks (the reference solution passes, an insufficient attempt fails, a forged submission fails). The build runs them against the range's CAPTURED artifacts: after capture and the build range's teardown, the realized images boot once more through the gate's own `swap_realized_spec` consumption step, the checks run, and only then does the manifest land on disk with the results in its `behavioral_checks` slot. The save is deferred past this phase deliberately (slice 6 review): a manifest on disk is consumable by the gate, so under ANY exit short of full proof (a failing check, an infra failure, a teardown error, Ctrl-C, a crash) no manifest exists and no consumer can boot a range whose challenge is unproven. Running against the captured artifacts rather than the build range proves the thing that ships, and exploit debris dirties only ephemeral per-boot overlays. A declared checks tree must be complete (`_validate_checks`): proof that silently does not run is indistinguishable from proof, so a misnamed directory or a missing trio script refuses instead of skipping. Check scripts and `challenges.yaml` participate in the build's cached fast path through `checks_digest`, never in guest build keys.
 
 Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script run ON THE ATTACKER GUEST via the oracle (outside an eval there is no `sandbox()`; the foothold-only property is held by construction here and enforced by the eval path), with `IR_ATTACKER_IP` exported. Scripts emit `SUBMIT <goal-id> <value>` lines (the refchains contract); `reference` must score 1.0 with validity `valid`, `insufficient` and `forged` must score 0.0. Per-check plants are fresh: `run_setup` runs per check with a fresh `PlantStore`, and each check's planted files are removed afterward (the plant script refuses an existing target, and this runner reuses one boot across checks where a sample plants once per boot). Runtime samples re-plant, so nothing a check planted survives as a valid secret.
 """
 
 import asyncio
+import hashlib
 import re
 import time
 from pathlib import Path
@@ -37,6 +38,54 @@ def checks_declared(range_dir: Path) -> bool:
     return (range_dir / "challenges.yaml").is_file() and (
         range_dir / CHECKS_DIR_NAME
     ).is_dir()
+
+
+def checks_digest(range_dir: Path) -> str:
+    """Content digest over the range's behavioral-check inputs: `challenges.yaml` plus every file under `checks/` (relative path, exec bit, bytes).
+
+    Check scripts are proof tools, not guest content, so they never enter a guest build key; this digest is what invalidates the build's cached fast path when a check is authored or edited after a green build (slice 6 review: without it, new or changed checks silently never ran).
+    """
+    hasher = hashlib.sha256()
+    hasher.update((range_dir / "challenges.yaml").read_bytes())
+    root = range_dir / CHECKS_DIR_NAME
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        exec_bit = b"x" if path.stat().st_mode & 0o111 else b"-"
+        hasher.update(path.relative_to(root).as_posix().encode() + b"\0" + exec_bit)
+        hasher.update(b"\0" + path.read_bytes() + b"\0")
+    return hasher.hexdigest()
+
+
+def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
+    """A declared checks tree must be complete: proof that silently does not run is indistinguishable from proof (slice 6 review).
+
+    Raises:
+        BuildError: stage `behavioral`, naming the misnamed directory or the missing script.
+    """
+    root = range_dir / CHECKS_DIR_NAME
+    declared = {challenge.id for challenge in challenges.challenges}
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and entry.name not in declared:
+            raise BuildError(
+                "behavioral",
+                f"checks directory {entry.name!r} matches no declared challenge "
+                f"(declared: {sorted(declared)})",
+            )
+    for challenge in challenges.challenges:
+        check_dir = root / challenge.id
+        if not check_dir.is_dir():
+            raise BuildError(
+                "behavioral",
+                f"challenge {challenge.id!r} has no checks directory under "
+                f"{CHECKS_DIR_NAME}/ (this range declares behavioral checks; "
+                "every challenge needs the full trio)",
+            )
+        for name in CHECK_NAMES:
+            if not (check_dir / f"{name}.sh").is_file():
+                raise BuildError(
+                    "behavioral",
+                    f"challenge {challenge.id!r} is missing check "
+                    f"{CHECKS_DIR_NAME}/{challenge.id}/{name}.sh",
+                )
 
 
 def load_challenges(range_dir: Path) -> "Challenges":
@@ -72,6 +121,7 @@ async def run_behavioral_checks(
     from .._provider.state import SampleHandle
 
     challenges = load_challenges(range_dir)
+    _validate_checks(challenges, range_dir)
     attacker_ip = _attacker_ip(plan)
     session = EvidenceSession(
         str(evidence_dir), sample_id=f"build-{project}", capture_local=True
@@ -90,17 +140,14 @@ async def run_behavioral_checks(
         channel=channel,
         evidence=session,
         plan=plan,
+        spec=spec,
     )
     records: list[BehavioralCheckRecord] = []
     try:
         for challenge in challenges.challenges:
             check_dir = range_dir / CHECKS_DIR_NAME / challenge.id
-            if not check_dir.is_dir():
-                continue
             for name in CHECK_NAMES:
                 script = check_dir / f"{name}.sh"
-                if not script.is_file():
-                    continue
                 # plant keys are write-once per store and the pcap/evidence
                 # memo must not leak across checks: fresh store and oracle
                 # per check (fresh plants are the per-check contract)

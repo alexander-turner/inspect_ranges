@@ -140,6 +140,9 @@ class BuildManifest(BaseModel):
     """Reproducibility seeds (topology randomization); empty until the generation layer draws any. Never proof material."""
 
     built_at: str
+    checks_sha256: str = ""
+    """Content digest over the range's behavioral-check inputs (`challenges.yaml` plus everything under `checks/`), or empty when the range declares none. Check scripts are proof tools, not guest content, so they participate in the build's cached-path decision through this digest rather than in any guest build key (slice 6 review)."""
+
     build_egress: bool = True
     """Whether build-time egress was granted (it always is today; recorded per the build-v1 decision)."""
 
@@ -254,7 +257,6 @@ def apply_build_manifest(
         IssueError: `range-not-built` when content is declared and no matching, verifiable build exists.
     """
     from ..types import IssueError  # local: keep module import-light
-    from ..types import RangeSpec as _RangeSpec
 
     content_hosts = [
         host
@@ -289,7 +291,39 @@ def apply_build_manifest(
             "the recorded build is for a different spec revision",
             "the spec changed since the last build; run `inspect-ranges build` again",
         )
+    swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
+    return swapped, sections, manifest
+
+
+def swap_realized_spec(
+    spec: "RangeSpec",
+    manifest: "BuildManifest",
+    *,
+    image_cache: Path,
+) -> "tuple[RangeSpec, frozenset[str]]":
+    """The gate's consumption step on an already-matched manifest: every content host boots its digest-verified realized image.
+
+    Also used by the build's behavioral phase on the not-yet-saved manifest (the checks must prove the captured artifacts before any manifest becomes consumable), which is why this takes the manifest object rather than loading one.
+
+    Raises:
+        IssueError: `range-not-built` when a content host has no record, or a realized image is missing from the cache or fails its digest.
+    """
     import hashlib as _hashlib
+
+    from ..types import IssueError
+    from ..types import RangeSpec as _RangeSpec
+
+    def refuse(reason: str, hint: str) -> "IssueError":
+        return IssueError(
+            [
+                Issue(
+                    code="range-not-built",
+                    path=("range", "name"),
+                    message=f"range {spec.meta.name!r} declares guest content but {reason}",
+                    hint=hint,
+                )
+            ]
+        )
 
     swapped = spec.model_copy(deep=True)
     for host in swapped.hosts:
@@ -318,4 +352,4 @@ def apply_build_manifest(
             )
         host.image = record.realized_file
     assert isinstance(swapped, _RangeSpec)
-    return swapped, frozenset(manifest.realized_sections), manifest
+    return swapped, frozenset(manifest.realized_sections)
