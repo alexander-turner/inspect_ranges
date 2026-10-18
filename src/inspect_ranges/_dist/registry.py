@@ -422,7 +422,12 @@ class RegistryRepo:
         return uploaded
 
     def put_blob_stream(
-        self, chunks: Iterator[bytes], *, expected: str, size: int
+        self,
+        chunks: Iterator[bytes],
+        *,
+        expected: str,
+        size: int,
+        progress: "ProgressFn | None" = None,
     ) -> str:
         if DIGEST_PATTERN.fullmatch(expected) is None:
             raise DistError(
@@ -449,6 +454,8 @@ class RegistryRepo:
                 for chunk in chunks:
                     hasher.update(chunk)
                     total += len(chunk)
+                    if progress is not None:
+                        progress(expected, "uploading", total, size)
                     yield chunk
                 if f"sha256:{hasher.hexdigest()}" != expected or total != size:
                     raise DistError(

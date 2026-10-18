@@ -6,7 +6,7 @@ A closure copies by walking the root index: every member manifest, every layer a
 from pydantic import BaseModel, ConfigDict
 
 from .errors import DistError
-from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor
+from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor, ProgressFn
 
 __all__ = ["TransferResult", "copy_closure"]
 
@@ -32,6 +32,7 @@ def copy_closure(
     root: Descriptor,
     *,
     name: str,
+    progress: "ProgressFn | None" = None,
 ) -> TransferResult:
     """Copy a pull root's whole closure from `source` to `destination` and name it `name` there.
 
@@ -54,9 +55,14 @@ def copy_closure(
             return
         if destination.has_blob(digest):
             present.append(digest)
+            if progress is not None:
+                progress(digest, "exists", 0, 0)
             return
         destination.put_blob_stream(
-            source.blob_chunks(descriptor), expected=digest, size=descriptor.size
+            source.blob_chunks(descriptor),
+            expected=digest,
+            size=descriptor.size,
+            progress=progress,
         )
         copied.append(digest)
 

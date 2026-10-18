@@ -50,6 +50,18 @@ class Location:
     def is_directory(self) -> bool:
         return self._directory is not None
 
+    @property
+    def directory(self) -> Path | None:
+        return self._directory
+
+    def registry_base_and_prefix(self) -> tuple[str, str]:
+        """The registry origin and path prefix (registry forms only)."""
+        if self._registry_url is None:
+            raise DistError(
+                "location-invalid", f"{self.raw!r} is a directory, not a registry"
+            )
+        return self._registry_url, self._prefix
+
     def store_for(self, name: str, *, create: bool = False) -> ContentStore:
         """The store serving `name` at this location.
 
