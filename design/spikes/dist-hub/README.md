@@ -1,4 +1,4 @@
-# Spike: dist-hub (distribution v1, slice 6) — run and recorded 2026-10-18
+# Spike: dist-hub (distribution v1, slice 6): run and recorded 2026-10-18
 
 *The production path against the real Docker Hub, the s3-pull discipline (one credentialed run, results recorded here). A tiny REAL qcow2 chain (qemu-img created, so backing validation runs for real) published as the range `ir-dist-test` to the private test repo `docker.io/meridianlabsai/ir-dist-test` using the org access token logged into this devbox, pulled back into fresh caches, and probed for the hub behaviors no local `registry:2` exhibits.*
 
@@ -6,7 +6,7 @@
 
 1. **H1** push over the production bearer-token flow: `auth.docker.io` challenge answered with the docker-config Basic credential, scoped `pull,push`, root `sha256:103d19ba6449...`. One live finding fixed during the run: the hub's load balancer emits LOWERCASE response headers (`location:`), which the client's plain-dict header lookup missed; response headers now normalize case (`registry.py`), and the local batteries never showed it because `registry:2` capitalizes.
 2. **H2** spec-driven pull resolved the hub's `spec-<sha256>` tag to the pushed root exactly.
-3. **H3** pulled bytes byte-identical THROUGH the hub's blob-storage redirects: the origin-bound redirect handler (round-2 B3) proven live — the bearer token stays on `registry-1.docker.io`, the presigned storage GET succeeds, and real qemu-img chain validation ran on the materialized chain.
+3. **H3** pulled bytes byte-identical THROUGH the hub's blob-storage redirects: the origin-bound redirect handler (round-2 B3) proven live: the bearer token stays on `registry-1.docker.io`, the presigned storage GET succeeds, and real qemu-img chain validation ran on the materialized chain.
 4. **H4** the `name@sha256:` pin form works against the hub.
 5. **H5** anonymous access to the private repo denies cleanly (`registry-denied`, no traceback, the credential-helper hint machinery intact).
 

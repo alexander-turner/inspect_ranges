@@ -231,7 +231,8 @@ def mirror(
             )
             return
         if target is not None and (
-            target.endswith((".yaml", ".yml"))
+            target == "."
+            or target.endswith((".yaml", ".yml"))
             or target.startswith(("/", "./", "../", "~"))
         ):
             # path-looking targets only (never cwd-dependent, the round-3 N4

@@ -15,4 +15,4 @@
 
 ## Files
 
-- `run.sh` — the whole arc under the battery lock; the fixture is dist-registry's `minirange`.
+- `run.sh`: the whole arc under the battery lock; the fixture is dist-registry's `minirange`.

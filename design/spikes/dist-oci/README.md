@@ -16,5 +16,5 @@
 
 ## Files
 
-- `run.sh` — build vulhub, then the push/ship/pull/tamper/boot legs under the battery lock.
-- `dist.py` — drives `push_build`/`materialize_closure` (the CLI verbs arrive with Q8 in slice 3).
+- `run.sh`: build vulhub, then the push/ship/pull/tamper/boot legs under the battery lock.
+- `dist.py`: drives `push_build`/`materialize_closure` (the CLI verbs arrive with Q8 in slice 3).
