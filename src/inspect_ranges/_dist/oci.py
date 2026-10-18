@@ -560,6 +560,8 @@ class OciLayout:
             else:
                 temp.chmod(0o644)
                 os.replace(temp, target)
+            if progress is not None:
+                progress(expected, "done", size, size)
             return digest
         finally:
             temp.unlink(missing_ok=True)

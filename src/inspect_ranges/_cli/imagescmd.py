@@ -317,18 +317,27 @@ def prune(
     for temp in sorted(image_cache.glob("*.capturing")):
         if temp.is_file():
             victims.append((temp, temp.stat().st_size, "stranded capture temp"))
-    for temp in sorted(image_cache.glob("*.pulling-*")):
-        if temp.is_file():
-            victims.append((temp, temp.stat().st_size, "stranded pull temp"))
-    if chains:
-        from .._dist.gc import unreferenced_chain_files
+    import time as time_module
 
-        for path, kind in unreferenced_chain_files(
-            image_cache,
-            build_cache if build_cache is not None else default_build_cache(),
-            live,
-        ):
+    for temp in sorted(image_cache.glob("*.pulling-*")):
+        # in-flight pulls own fresh temps under their name locks; only aged
+        # debris is reclaimable here (round-5 N8)
+        if temp.is_file() and time_module.time() - temp.stat().st_mtime > 3600:
+            victims.append((temp, temp.stat().st_size, "stranded pull temp"))
+    frozen_reasons: list[str] = []
+    if chains:
+        from .._dist.gc import chains_lock, unreferenced_chain_files
+
+        with chains_lock(image_cache, exclusive=True):
+            chain_victims, frozen_reasons = unreferenced_chain_files(
+                image_cache,
+                build_cache if build_cache is not None else default_build_cache(),
+                live,
+            )
+        for path, kind in chain_victims:
             victims.append((path, path.stat().st_size, kind))
+    for reason in frozen_reasons:
+        click.echo(f"chain tier frozen: {reason} (fix or remove it to unfreeze)")
     if not victims:
         click.echo("nothing to prune")
         return
@@ -341,9 +350,31 @@ def prune(
         )
         return
     seen: set[Path] = set()
-    for path, _, _ in victims:
-        if path in seen:
-            continue
-        seen.add(path)
-        path.unlink(missing_ok=True)
+    if chains:
+        from .._dist.gc import chains_lock, unreferenced_chain_files
+
+        # re-scan under the exclusive lock at delete time: the report-mode
+        # window (operator reading the list) must not turn stale state into
+        # an eviction (round-5 B2)
+        with chains_lock(image_cache, exclusive=True):
+            fresh, _ = unreferenced_chain_files(
+                image_cache,
+                build_cache if build_cache is not None else default_build_cache(),
+                live,
+            )
+            still = {path for path, _ in fresh}
+            for path, _, kind in victims:
+                if path in seen:
+                    continue
+                if "golden" in kind or "vendor" in kind:
+                    if path not in still:
+                        continue  # the world moved; keep it
+                seen.add(path)
+                path.unlink(missing_ok=True)
+    else:
+        for path, _, _ in victims:
+            if path in seen:
+                continue
+            seen.add(path)
+            path.unlink(missing_ok=True)
     click.echo(f"pruned {len(seen)} file(s), {total / (1024 * 1024):.0f} MB reclaimed")

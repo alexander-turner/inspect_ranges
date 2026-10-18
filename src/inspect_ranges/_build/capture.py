@@ -188,18 +188,23 @@ def capture_guest(
     staging = image_cache / f".{realized_name}.capturing"
     sidecar = image_cache / f"{realized_name.removesuffix('.qcow2')}.realized.json"
     try:
-        with _name_lock(image_cache, realized_name):
-            return _capture_locked(
-                runner,
-                container,
-                guest,
-                image_cache,
-                golden_file,
-                realized_name,
-                staging,
-                sidecar,
-                meta,
-            )
+        from .._dist.gc import chains_lock
+
+        # shared with the GC's exclusive scan (distribution round-5 B2): a
+        # landing realized image must never look like an orphan mid-flight
+        with chains_lock(image_cache, exclusive=False):
+            with _name_lock(image_cache, realized_name):
+                return _capture_locked(
+                    runner,
+                    container,
+                    guest,
+                    image_cache,
+                    golden_file,
+                    realized_name,
+                    staging,
+                    sidecar,
+                    meta,
+                )
     finally:
         staging.unlink(missing_ok=True)
 

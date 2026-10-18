@@ -263,7 +263,11 @@ def derive_golden(
     golden_path = cache / file
     metadata_path = _metadata_path(cache, file)
 
-    with _name_lock(cache, file):
+    from .._dist.gc import chains_lock
+
+    # shared with the GC's exclusive scan (distribution round-5 B2): a derive
+    # landing vendor-then-golden must never look like an orphan mid-flight
+    with chains_lock(cache, exclusive=False), _name_lock(cache, file):
         return _derive_locked(
             run,
             vendor,

@@ -30,7 +30,12 @@ from .oci import (
     ProgressFn,
 )
 
-__all__ = ["RegistryRepo", "docker_auth_for", "docker_config_uses_helper"]
+__all__ = [
+    "RegistryRepo",
+    "docker_auth_for",
+    "docker_config_uses_helper",
+    "registry_catalog",
+]
 
 _CHUNK = 1 << 20
 _MANIFEST_CAP = 16 * 1024 * 1024
@@ -90,6 +95,94 @@ def docker_config_uses_helper(host: str, config_path: Path | None = None) -> boo
         helper_map = cast("dict[str, object]", helpers)
         return any(key in helper_map for key in _host_keys(host))
     return False
+
+
+def registry_catalog(
+    base_url: str, prefix: str, *, docker_config: Path | None = None
+) -> list[str]:
+    """A registry's repository names under `prefix`, through the same bearer-auth flow as every other request (round-5 N4), paginated via `last` (round-5 N3)."""
+    host = urllib.parse.urlparse(base_url).netloc
+    token: str | None = None
+    names: list[str] = []
+    last = ""
+    while True:
+        url = f"{base_url}/v2/_catalog?n=1000" + (
+            f"&last={urllib.parse.quote(last)}" if last else ""
+        )
+        request = urllib.request.Request(url)
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        try:
+            response = _OPENER.open(request, timeout=60)
+        except urllib.error.HTTPError as error:
+            if error.code == 401 and token is None:
+                challenge = error.headers.get("WWW-Authenticate", "")
+                error.close()
+                token = _catalog_token(challenge, host, docker_config)
+                continue
+            body = error.read()[:200]
+            error.close()
+            raise DistError(
+                "location-unenumerable",
+                f"{host} did not answer the catalog listing ({error.code}): "
+                f"{body.decode(errors='replace')}; mirror explicit names instead",
+            ) from None
+        except (urllib.error.URLError, OSError) as error:
+            raise DistError(
+                "location-unenumerable",
+                f"{host} did not answer the catalog listing: {error}; "
+                "mirror explicit names instead",
+            ) from error
+        try:
+            payload = json.loads(_read_capped(response, _MANIFEST_CAP, "catalog"))
+        finally:
+            response.close()
+        raw = payload.get("repositories")
+        if not isinstance(raw, list):
+            raise DistError(
+                "location-unenumerable", f"{host} returned no repository list"
+            )
+        page = [repo for repo in cast("list[object]", raw) if isinstance(repo, str)]
+        wanted = f"{prefix}/" if prefix else ""
+        names.extend(
+            repo.removeprefix(wanted)
+            for repo in page
+            if not wanted or repo.startswith(wanted)
+        )
+        if len(page) < 1000:
+            return names
+        last = page[-1]
+
+
+def _catalog_token(challenge: str, host: str, docker_config: Path | None) -> str:
+    if not challenge.startswith("Bearer "):
+        raise DistError(
+            "location-unenumerable",
+            f"{host} denied the catalog with no bearer challenge",
+        )
+    params = dict(re.findall(r'(\w+)="([^"]*)"', challenge.removeprefix("Bearer ")))
+    realm = params.get("realm")
+    if not realm:
+        raise DistError("location-unenumerable", f"{host} sent no token realm")
+    query = {"scope": params.get("scope", "registry:catalog:*")}
+    if "service" in params:
+        query["service"] = params["service"]
+    request = urllib.request.Request(f"{realm}?{urllib.parse.urlencode(query)}")
+    auth = docker_auth_for(host, docker_config)
+    if auth:
+        request.add_header("Authorization", f"Basic {auth}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            token = json.loads(_read_capped(response, _MANIFEST_CAP, "token")).get(
+                "token"
+            )
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise DistError(
+            "location-unenumerable", f"catalog token fetch failed: {error}"
+        ) from error
+    if not isinstance(token, str) or not token:
+        raise DistError("location-unenumerable", f"{realm} returned no token")
+    return token
 
 
 class _OneShotDrained(Exception):
@@ -634,6 +727,32 @@ class RegistryRepo:
                 "manifest-invalid",
                 f"manifest {descriptor.digest} is not a valid OCI index: {error}",
             ) from error
+
+    def tags(self) -> list[str]:
+        """Every tag in this repository (paginated via `last`, so large repos enumerate completely)."""
+        tags: list[str] = []
+        last = ""
+        while True:
+            suffix = "tags/list?n=1000" + (
+                f"&last={urllib.parse.quote(last)}" if last else ""
+            )
+            _, _, body = self._request("GET", self._url(suffix), ok=(200,))
+            assert isinstance(body, bytes)
+            try:
+                payload = json.loads(body)
+            except ValueError as error:
+                raise DistError(
+                    "registry-protocol", f"{self.repo} tags/list did not parse: {error}"
+                ) from error
+            raw_tags = payload.get("tags")
+            page_source = cast(
+                "list[object]", raw_tags if isinstance(raw_tags, list) else []
+            )
+            page = [tag for tag in page_source if isinstance(tag, str)]
+            tags.extend(page)
+            if len(page) < 1000:
+                return tags
+            last = page[-1]
 
     def ref(self, name: str) -> Descriptor:
         data, media_type = self._get_manifest_bytes(name)

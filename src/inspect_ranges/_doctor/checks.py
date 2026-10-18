@@ -118,7 +118,8 @@ def check_distribution(image_cache: Path) -> list[CheckResult]:
                     DISTRIBUTION,
                     "locations",
                     "ok",
-                    f"{', '.join(location.describe() for location in locations)} ({source})",
+                    f"{', '.join(location.describe() for location in locations)} "
+                    f"({source}; parse-only, registry reachability surfaces on first use)",
                 )
             )
     except DistError as error:

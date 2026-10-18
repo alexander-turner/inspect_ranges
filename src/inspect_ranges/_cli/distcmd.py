@@ -231,8 +231,12 @@ def mirror(
             )
             return
         if target is not None and (
-            target.endswith(".yaml") or Path(target).is_dir() or "/" in target
+            target.endswith((".yaml", ".yml"))
+            or target.startswith(("/", "./", "../", "~"))
         ):
+            # path-looking targets only (never cwd-dependent, the round-3 N4
+            # principle): `mirror distmini` is NAME semantics even when a
+            # ./distmini checkout exists; the spec form is `mirror ./distmini`
             # the cross-group move: the local spec selects the source build
             spec_path = resolve_spec_path(Path(target))
             validated = load_range(spec_path)
