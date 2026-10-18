@@ -19,6 +19,7 @@ from .registry import RegistryRepo
 from .resolve import (
     PullReport,
     pull_image,
+    pull_pinned,
     pull_range,
     push_image_artifact,
     push_range,
@@ -43,6 +44,7 @@ __all__ = [
     "materialize_closure",
     "parse_location",
     "pull_image",
+    "pull_pinned",
     "pull_range",
     "push_build",
     "push_image_artifact",
