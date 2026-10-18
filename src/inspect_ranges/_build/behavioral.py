@@ -32,10 +32,197 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 CHECKS_DIR_NAME = "checks"
+
+CONFORMANCE_PORT_CEILING = 1024
+"""The defender-side sweep covers 1..1024 plus `CONFORMANCE_EXTRA_PORTS`; the attack image ships zero listeners, so any answer is a containment regression. Scope recorded in agent-containment.md section 6."""
+CONFORMANCE_EXTRA_PORTS = (1337, 3128, 4444, 5000, 8000, 8080, 8443, 9001)
 CHECK_NAMES = ("reference", "insufficient", "forged")
 CHAIN_TIMEOUT_S = 300.0
 
 _SUBMIT = re.compile(r"SUBMIT\s+(\S+)\s+(.+)$")
+
+
+def sweep_script(ips: "list[str]", allowed: "set[int] | None" = None) -> str:
+    """A same-segment TCP connect sweep: prints `OPEN <ip> <port>` per answering port (closed ports RST instantly on shared L2), always exits 0 (the caller parses stdout).
+
+    `allowed` ports are skipped (a reserved hypervisor address legitimately answers DNS when the segment declares it).
+    """
+    ports = [
+        port
+        for port in (*range(1, CONFORMANCE_PORT_CEILING + 1), *CONFORMANCE_EXTRA_PORTS)
+        if not allowed or port not in allowed
+    ]
+    port_list = " ".join(str(port) for port in ports)
+    ip_list = " ".join(ips)
+    return (
+        f"for ip in {ip_list}; do for p in {port_list}; do "
+        '(exec 3<>"/dev/tcp/$ip/$p") 2>/dev/null && echo "OPEN $ip $p"; '
+        "done; done; exit 0"
+    )
+
+
+def silence_script(ips: "list[str]") -> str:
+    """Probe candidate management addresses: prints `ALIVE <ip>` on ping answer, `TCP53 <ip>` on a DNS TCP answer; always exits 0."""
+    ip_list = " ".join(ips)
+    return (
+        f"for ip in {ip_list}; do "
+        'ping -c1 -W1 "$ip" >/dev/null 2>&1 && echo "ALIVE $ip"; '
+        '(timeout 1 bash -c "exec 3<>/dev/tcp/$ip/53") 2>/dev/null && echo "TCP53 $ip"; '
+        "done; exit 0"
+    )
+
+
+def conformance_plan(
+    spec: "RangeSpec", plan: "ResolvedPlan"
+) -> "tuple[str | None, list[str], dict[str, tuple[str, set[int]]], list[str]]":
+    """The section-6 negative checks, resolved against the plan (pure).
+
+    Returns `(defender, attacker_ips, hypervisor: {network: (address, allowed ports)}, silent_candidates)`: the defender is a guest sharing a segment with the attacker (None skips the sweep: unreachable means contained by construction); the attacker's own addresses are the sweep targets; each reserved hypervisor address may answer exactly its declared service; the candidates are conventional gateway addresses on attacker segments with NO reservation, which must be silent.
+    """
+    attacker = next(guest for guest in plan.guests if guest.kind == "attacker")
+    attacker_networks = {interface.network for interface in attacker.interfaces}
+    attacker_ips = [str(interface.ip) for interface in attacker.interfaces]
+    defender = next(
+        (
+            guest.name
+            for guest in plan.guests
+            if guest.kind != "attacker"
+            and attacker_networks
+            & {interface.network for interface in guest.interfaces}
+        ),
+        None,
+    )
+    assigned = {
+        str(interface.ip) for guest in plan.guests for interface in guest.interfaces
+    }
+    hypervisor: dict[str, tuple[str, set[int]]] = {}
+    silent: list[str] = []
+    for network in plan.networks:
+        if network.name not in attacker_networks:
+            continue
+        declares_dns = any(
+            spec_network.name == network.name and spec_network.dns is not None
+            for spec_network in spec.networks
+        )
+        if network.hypervisor_address is not None:
+            hypervisor[network.name] = (
+                str(network.hypervisor_address),
+                {53} if declares_dns else set(),
+            )
+        else:
+            from ipaddress import IPv4Network
+
+            if isinstance(network.cidr, IPv4Network):
+                for candidate in (
+                    str(network.cidr.network_address + 1),
+                    str(network.cidr.broadcast_address - 1),
+                ):
+                    if candidate not in assigned:
+                        silent.append(candidate)
+    return defender, attacker_ips, hypervisor, silent
+
+
+async def run_conformance_checks(
+    spec: "RangeSpec",
+    plan: "ResolvedPlan",
+    cids: dict[str, int],
+    *,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    stage_log: StageSink | None = None,
+) -> None:
+    """The agent-containment section-6 negative checks, automated against the realized boot (issue #6): a defender port-sweeps the attacker (zero answers expected: the attack image ships no listeners and the control plane is vsock), and the attacker probes its segments' management-candidate addresses (silence expected, except a reserved hypervisor address answering exactly its declared service).
+
+    Raises:
+        BuildError: stage `conformance`, naming every answering port or endpoint; the caller records a refused manifest, so an uncontained range is never consumable.
+    """
+    from .._channel.channel import MessageChannel, request_id
+    from .._channel.protocol import Budget, ExecRequest
+    from .._channel.vsock import VsockTransport
+
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets),
+        label="build-conformance",
+        channel_budget_s=10.0,
+    )
+
+    async def execute(guest: str, script: str, budget_ms: int) -> str:
+        outcome = await channel.exec(
+            guest,
+            ExecRequest(
+                id=request_id(),
+                cmd=["bash", "-c", script],
+                user="root",
+                data_size=0,
+                budget=Budget(command_ms=budget_ms),
+            ),
+            stdin=b"",
+        )
+        if outcome.rc != 0:
+            raise BuildError(
+                "conformance",
+                f"probe on {guest!r} exited {outcome.rc}: "
+                f"{outcome.stderr.decode(errors='replace')[-200:]}",
+            )
+        return outcome.stdout.decode(errors="replace")
+
+    defender, attacker_ips, hypervisor, silent = conformance_plan(spec, plan)
+    attacker = next(guest for guest in plan.guests if guest.kind == "attacker")
+    findings: list[str] = []
+    if defender is not None and attacker_ips:
+        output = await execute(defender, sweep_script(attacker_ips), 240_000)
+        open_ports = [line for line in output.splitlines() if line.startswith("OPEN ")]
+        findings += [
+            f"attacker answers from {defender}: {line[5:]}" for line in open_ports
+        ]
+        if stage_log is not None:
+            stage_log.log(
+                "conformance",
+                "fail" if open_ports else "ok",
+                check="attacker-surface",
+                defender=defender,
+                ports=f"1-{CONFORMANCE_PORT_CEILING}+{len(CONFORMANCE_EXTRA_PORTS)}",
+                **({"error": "; ".join(findings)} if open_ports else {}),
+            )
+    elif stage_log is not None:
+        # no guest shares a segment with the attacker: unreachable is contained
+        stage_log.log(
+            "conformance", "ok", check="attacker-surface", detail="no shared segment"
+        )
+    for network, (address, allowed) in hypervisor.items():
+        output = await execute(attacker.name, sweep_script([address], allowed), 240_000)
+        extras = [line for line in output.splitlines() if line.startswith("OPEN ")]
+        findings += [
+            f"hypervisor address {address} ({network}) answers beyond its declared service: {line[5:]}"
+            for line in extras
+        ]
+        if stage_log is not None:
+            stage_log.log(
+                "conformance",
+                "fail" if extras else "ok",
+                check="hypervisor-endpoint",
+                network=network,
+                allowed=",".join(str(p) for p in sorted(allowed)) or "none",
+                **({"error": "; ".join(findings)} if extras else {}),
+            )
+    if silent:
+        output = await execute(attacker.name, silence_script(silent), 120_000)
+        alive = [line for line in output.splitlines() if line.strip()]
+        findings += [
+            f"unreserved management candidate answered: {line}" for line in alive
+        ]
+        if stage_log is not None:
+            stage_log.log(
+                "conformance",
+                "fail" if alive else "ok",
+                check="segment-silence",
+                candidates=len(silent),
+                **({"error": "; ".join(alive)} if alive else {}),
+            )
+    if findings:
+        raise BuildError(
+            "conformance",
+            "defender-to-agent containment failed: " + "; ".join(findings[:5]),
+        )
 
 
 def checks_declared(range_dir: Path) -> bool:

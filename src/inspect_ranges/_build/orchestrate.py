@@ -1047,7 +1047,7 @@ def _run_behavioral_phase(
 
     The manifest arrives in memory, not from disk: it is saved only after this phase passes, so an unproven build is never consumable (slice 6 review).
     """
-    from .behavioral import run_behavioral_checks
+    from .behavioral import run_behavioral_checks, run_conformance_checks
     from .manifest import realized_backings, swap_realized_spec
 
     swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
@@ -1128,6 +1128,15 @@ def _run_behavioral_phase(
             "behavioral-settle",
             "ok",
             seconds=round(time.monotonic() - settle_started, 1),
+        )
+        # agent-containment section 6, automated (issue #6): the converged
+        # realized boot proves its defender-to-agent containment before the
+        # challenge proof runs; a finding refuses the manifest like any
+        # failed proof
+        asyncio.run(
+            run_conformance_checks(
+                spec, plan, cids, hybrid_sockets=bx_hybrid, stage_log=stage_log
+            )
         )
         try:
             return asyncio.run(
