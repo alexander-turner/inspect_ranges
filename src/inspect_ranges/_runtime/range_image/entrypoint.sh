@@ -9,8 +9,10 @@ set -euo pipefail
 chown root:kvm /dev/kvm /dev/vhost-net /dev/vhost-vsock
 chmod 660 /dev/kvm /dev/vhost-net /dev/vhost-vsock
 
+# no multicast snooping: a snooping bridge joins 224.0.0.106 and sends an
+# IGMP report from its own MAC onto the segment
 while read -r name; do
-  ip link add "$name" type bridge
+  ip link add "$name" type bridge mcast_snooping 0
   ip link set "$name" up
 done < /render/netns/bridges.txt
 # no IPs on bridges except where the allocator reserved a hypervisor address
