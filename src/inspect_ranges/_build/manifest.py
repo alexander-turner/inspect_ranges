@@ -184,12 +184,18 @@ def guest_build_key(
     golden_digest: str,
     host: Host,
     recipes: list[tuple[ResolvedRecipe, dict[str, VarValue]]],
+    *,
+    range_name: str = "",
 ) -> str:
-    """The guest's build key: golden digest, realized-spec projection, ordered recipe digests and vars.
+    """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars.
 
-    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes.
+    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes. Identity participates so two ranges (or guests) with byte-identical content never share a key or a realized file name, whose collisions caused last-writer-wins captures and digest-refusal ping-pong (round-1 review); a rename rebuilds, which is correct, names are identity.
     """
-    parts = [f"golden:{golden_digest}", f"spec:{spec_projection(host)}"]
+    parts = [
+        f"identity:{range_name}/{host.name}",
+        f"golden:{golden_digest}",
+        f"spec:{spec_projection(host)}",
+    ]
     for recipe, step_vars in recipes:
         parts.append(f"recipe:{recipe.digest}+vars:{vars_hash(step_vars)}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
@@ -219,6 +225,36 @@ def save_manifest(manifest: BuildManifest, build_cache: Path) -> Path:
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     return path
+
+
+def stamp_bundle_sha256(
+    build_cache: Path, range_name: str, spec_sha256: str, digest: str
+) -> bool:
+    """Record a rendered runtime bundle's digest on the manifest it was rendered from (wraps-by-reference), atomically.
+
+    The load-compare-save runs under the same per-range lock as `save_manifest`, and the stamp lands only when the on-disk manifest is still the spec revision the render consumed: a concurrent rebuild must never be clobbered by a stale read-modify-write (round-1 review). Returns whether the stamp landed.
+    """
+    path = manifest_path(build_cache, range_name)
+    if not path.parent.is_dir():
+        return False
+    lock_path = path.parent / ".manifest.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            current = load_manifest(build_cache, range_name)
+            if current is None or current.spec_sha256 != spec_sha256:
+                return False
+            temp = path.with_suffix(".json.writing")
+            temp.write_text(
+                current.model_copy(update={"bundle_sha256": digest}).model_dump_json(
+                    indent=2
+                )
+                + "\n"
+            )
+            temp.replace(path)
+            return True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def load_manifest(build_cache: Path, range_name: str) -> BuildManifest | None:
@@ -326,6 +362,7 @@ def swap_realized_spec(
         )
 
     swapped = spec.model_copy(deep=True)
+    golden_digests: dict[str, str | None] = {}
     for host in swapped.hosts:
         record = manifest.guest(host.name)
         if record is None:
@@ -335,6 +372,28 @@ def swap_realized_spec(
                     "run `inspect-ranges build` again",
                 )
             continue
+        # the realized image is an overlay whose backing is the golden BY NAME,
+        # and goldens re-derive in place under the same cache name (recipe
+        # bumps, daemon updates), so the chain of trust must re-check the
+        # golden too or an unverified composition boots under a proven claim
+        # (round-1 review)
+        if record.golden_reference not in golden_digests:
+            from .._compiler.plan import resolve_image_reference
+
+            golden_digests[record.golden_reference] = resolve_image_reference(
+                record.golden_reference, image_cache
+            ).digest
+        golden_digest = golden_digests[record.golden_reference]
+        if golden_digest is None:
+            raise refuse(
+                f"the golden image {record.golden_reference!r} backing guest {host.name!r} is not in the image cache",
+                "re-derive the golden, or pull the build artifacts into the cache",
+            )
+        if golden_digest != record.golden_digest:
+            raise refuse(
+                f"the golden image {record.golden_reference!r} backing guest {host.name!r} changed since the build",
+                "the realized overlay would boot over a composition that was never verified; rebuild",
+            )
         realized = image_cache / record.realized_file
         if not realized.is_file():
             raise refuse(

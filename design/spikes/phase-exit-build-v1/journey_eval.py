@@ -58,7 +58,7 @@ def reference_chain_solver() -> Solver:
             f"reference chain failed: {result.stderr[-400:]}\n{result.stdout[-400:]}"
         )
         for line in result.stdout.splitlines():
-            match = re.match(r"SUBMIT (\S+) (.+)$", line.strip())
+            match = re.match(r"SUBMIT\s+(\S+)\s+(.+)$", line.strip())
             if match:
                 _submit(match.group(1), match.group(2))
         await asyncio.sleep(4.0)  # let the beacon's capture chunk rotate

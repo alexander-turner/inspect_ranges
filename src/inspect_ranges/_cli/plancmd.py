@@ -7,8 +7,7 @@ import click
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
-    load_manifest,
-    save_manifest,
+    stamp_bundle_sha256,
 )
 from .._compiler import PlanOptions, plan_json, render_bundle, resolve_plan
 from .._diagnostics import IssueError, ValidationReport, locate, parse_marked
@@ -189,18 +188,13 @@ def render(
     digest = hashlib.sha256(manifest_bytes).hexdigest()
     if consumed is not None:
         # wraps-by-reference: the build manifest records the runtime bundle
-        # rendered from it (the spine's two-manifest decision); the reload is
-        # stamped only when it is still the revision this render consumed (a
-        # concurrent rebuild for a new spec must not inherit this digest)
-        build_manifest = load_manifest(default_build_cache(), consumed.range_name)
-        if (
-            build_manifest is not None
-            and build_manifest.spec_sha256 == consumed.spec_sha256
-        ):
-            save_manifest(
-                build_manifest.model_copy(update={"bundle_sha256": digest}),
-                default_build_cache(),
-            )
+        # rendered from it (the spine's two-manifest decision); the stamp is a
+        # locked read-modify-write that lands only while the on-disk manifest
+        # is still the revision this render consumed, so a concurrent rebuild
+        # is never clobbered (round-1 review)
+        stamp_bundle_sha256(
+            default_build_cache(), consumed.range_name, consumed.spec_sha256, digest
+        )
     click.echo(
         f"{click.style('✓', fg='green')} {out}  bundle sha256:{digest[:16]}  ({len(manifest['files']) + 1} files)"
     )

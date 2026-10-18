@@ -332,6 +332,29 @@ def validate_vars(
     issues: list[Issue] = []
     env: dict[str, str] = {}
     for key, value in step_vars.items():
+        rendered = _env_value(value)
+        if "\x00" in key or "=" in key or not key:
+            issues.append(
+                Issue(
+                    code="recipe-var-invalid",
+                    path=(*path, "vars", key),
+                    message=f"recipe input name {key!r} cannot be an environment variable name",
+                    hint="input names must be non-empty and free of '=' and NUL",
+                )
+            )
+            continue
+        if "\x00" in rendered:
+            # YAML can author a NUL directly; Popen would raise a raw
+            # ValueError minutes later, mid-build (round-1 review)
+            issues.append(
+                Issue(
+                    code="recipe-var-invalid",
+                    path=(*path, "vars", key),
+                    message=f"recipe input {key!r} carries a NUL byte, which cannot cross the environment",
+                    hint="remove the NUL from the value",
+                )
+            )
+            continue
         if key not in recipe.spec.inputs:
             issues.append(
                 Issue(
@@ -342,7 +365,7 @@ def validate_vars(
                 )
             )
             continue
-        env[key] = _env_value(value)
+        env[key] = rendered
     for key, declared in recipe.spec.inputs.items():
         if key in env:
             continue
@@ -356,7 +379,18 @@ def validate_vars(
                 )
             )
         else:
-            env[key] = _env_value(declared.default)
+            default_rendered = _env_value(declared.default)
+            if "\x00" in key or "=" in key or "\x00" in default_rendered:
+                issues.append(
+                    Issue(
+                        code="recipe-var-invalid",
+                        path=(*path, "vars", key),
+                        message=f"recipe {recipe.name!r} declares input {key!r} whose name or default cannot cross the environment",
+                        hint="input names must be free of '=' and NUL; defaults free of NUL",
+                    )
+                )
+            else:
+                env[key] = default_rendered
     if issues:
         raise IssueError(issues)
     return env
@@ -456,7 +490,9 @@ def run_recipe(
                     env=env,
                     start_new_session=True,
                 )
-            except OSError as error:
+            except (OSError, ValueError) as error:
+                # ValueError: an env key/value that slipped past validation
+                # (defense in depth; the raw escape skipped disposal, round-1)
                 message = f"could not launch entrypoint {recipe.spec.entrypoint!r}: {error}; log: {log_path}"
                 if stage_log is not None:
                     stage_log.log(

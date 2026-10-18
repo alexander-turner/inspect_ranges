@@ -637,7 +637,11 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
     ]
     if build_cache.is_dir():
         broken: list[str] = []
-        for manifest_file in sorted(build_cache.glob("*/manifest.json")):
+        # slashed range names nest one level deeper (builds/org/name/manifest.json)
+        manifest_files = sorted(build_cache.glob("*/manifest.json")) + sorted(
+            build_cache.glob("*/*/manifest.json")
+        )
+        for manifest_file in manifest_files:
             try:
                 from .._build.manifest import BuildManifest
 
@@ -660,7 +664,7 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
                     BUILD,
                     "manifests",
                     "ok",
-                    f"{len(list(build_cache.glob('*/manifest.json')))} recorded build(s) parse",
+                    f"{len(manifest_files)} recorded build(s) parse",
                 )
             )
     if recipe_cache.is_dir():

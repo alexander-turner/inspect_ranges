@@ -71,6 +71,13 @@ async def _run_exec(args: argparse.Namespace) -> int:
     budget = Budget(command_ms=int(args.budget_ms))
     script: str | None = args.script
     if script is not None:
+        if args.argv:
+            # silently ignoring trailing argv hid authoring mistakes (round-1)
+            print("ir-exec: --script and argv are mutually exclusive", file=sys.stderr)
+            return EXIT_USAGE
+        # the staged script is written by the daemon file plane (agent user,
+        # 0700), so --script runs as root or the agent only; other --user
+        # principals cannot read it (documented restriction)
         remote = f"/tmp/.ir-recipe-{request_id()}.sh"
         body = b'rm -f -- "$0"\n' + Path(script).read_bytes()
         await channel.write_file(guest, remote, body, mode=0o700)
@@ -130,7 +137,11 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry: `exec [--user U] [--budget-ms N] [--cwd DIR] (--script FILE | -- ARGV...)` or `push LOCAL REMOTE [--mode 644]`."""
     parser = argparse.ArgumentParser(prog="ir-guesttool", add_help=True)
     commands = parser.add_subparsers(dest="verb", required=True)
-    default_budget = int(os.environ.get("IR_EXEC_BUDGET_MS", "600000"))
+    from .recipes import DEFAULT_EXEC_BUDGET_MS
+
+    default_budget = int(
+        os.environ.get("IR_EXEC_BUDGET_MS", str(DEFAULT_EXEC_BUDGET_MS))
+    )
     run = commands.add_parser("exec", help="run a command in the target guest")
     run.add_argument("--user", default="root")
     run.add_argument("--budget-ms", dest="budget_ms", type=int, default=default_budget)
@@ -155,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ir-guesttool: channel failure: {error}", file=sys.stderr)
         return EXIT_CHANNEL
     except ValueError as error:
+        print(f"ir-guesttool: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    except OSError as error:
+        # a typoed local path (--script, push LOCAL) must not traceback into
+        # the pass-through rc space where it reads as a guest failure (round-1)
         print(f"ir-guesttool: {error}", file=sys.stderr)
         return EXIT_USAGE
 

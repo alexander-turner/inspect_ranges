@@ -92,8 +92,11 @@ else
     && ok "J2 the Journey A refusal: coded, declared-vs-observed, log path" \
     || { bad "J2 refusal shape"; grep -A1 "verify" "$SPIKE/tmp/logs/j2.txt" | tail -6; }
 fi
-grep -q "manifest" "$SPIKE/tmp/builds/vulhub-zabbix/manifest.json" 2>/dev/null \
-  && bad "J2b failed build must mint no manifest" || ok "J2b failed build minted no manifest"
+if [[ -e "$SPIKE/tmp/builds/vulhub-zabbix/manifest.json" ]]; then
+  bad "J2b failed build must mint no manifest"
+else
+  ok "J2b failed build minted no manifest"
+fi
 
 sed -i 's/{ name: php, version: "7.0", package: php7.4,/{ name: php, version: "7.4", package: php7.4,/' "$JR/range.yaml"
 T0=$(date +%s)

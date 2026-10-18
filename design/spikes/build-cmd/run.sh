@@ -12,6 +12,7 @@ ROOT="$(cd ../../.. && pwd)"
 
 VENDOR="${VENDOR:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"
+export INSPECT_RANGES_BUILD_CACHE="$SPIKE/tmp/builds"
 IR="uv run inspect-ranges"
 IRBIN="$ROOT/.venv/bin/inspect-ranges"   # for bare invocations from inside a range dir
 C() { (cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --cid "$1" --user root exec "$2"); }
@@ -88,13 +89,15 @@ else
 fi
 [[ "$(ir_containers)" == "0" ]] && ok "C6 failed build left no containers" || bad "C6 teardown after failure ($(ir_containers) left)"
 STAGES=$(ls "$XDG_STATE_HOME"/inspect-ranges/projects/ir-failme-*/stages.jsonl 2>/dev/null | head -1)
-[[ -n "$STAGES" ]] && grep -q '"recipe"' "$STAGES" && grep -q '"fail"' "$STAGES" \
+[[ -n "$STAGES" ]] && grep -q '"stage": "recipe", "status": "fail"' "$STAGES" \
   && ok "C6b stage log records the recipe failure" || bad "C6b stage log"
 
 echo "=== C7 kill -9 during boot, then down --all cleans ==="
 (cd "$SPIKE/fixtures/buildrange" && "$IRBIN" build "${BUILD_FLAGS[@]}" >"$SPIKE/tmp/c7.txt" 2>&1) &
 BUILD_PID=$!
-for _ in $(seq 1 60); do [[ "$(ir_containers)" != "0" ]] && break; sleep 1; done
+C7_ARMED=0
+for _ in $(seq 1 60); do [[ "$(ir_containers)" != "0" ]] && { C7_ARMED=1; break; }; sleep 1; done
+[[ "$C7_ARMED" == "1" ]] || bad "C7 build never reached boot within 60 s (the kill would test nothing)"
 kill -9 "$BUILD_PID" 2>/dev/null || true
 pkill -9 -f "inspect-ranges build" 2>/dev/null || true
 wait "$BUILD_PID" 2>/dev/null || true
@@ -107,11 +110,12 @@ echo "=== C8 kill -9 during a recipe, then down --all cleans ==="
 (cd "$SPIKE/fixtures/slowrange" && "$IRBIN" build "${BUILD_FLAGS[@]}" >"$SPIKE/tmp/c8.txt" 2>&1) &
 BUILD_PID=$!
 SLOWLOG="$XDG_STATE_HOME/inspect-ranges/projects"
+C8_ARMED=0
 for _ in $(seq 1 180); do
-  grep -qs '"stage": "recipe", "status": "start"' "$SLOWLOG"/ir-slowme-*/stages.jsonl 2>/dev/null && break
-  grep -qs '"recipe"' "$SLOWLOG"/ir-slowme-*/stages.jsonl 2>/dev/null && break
+  grep -qs '"stage": "recipe", "status": "start"' "$SLOWLOG"/ir-slowme-*/stages.jsonl 2>/dev/null && { C8_ARMED=1; break; }
   sleep 1
 done
+[[ "$C8_ARMED" == "1" ]] || bad "C8 build never reached a recipe within 180 s (the kill would test nothing)"
 kill -9 "$BUILD_PID" 2>/dev/null || true
 pkill -9 -f "inspect-ranges build" 2>/dev/null || true
 pkill -9 -f "bc.sleep" 2>/dev/null || true

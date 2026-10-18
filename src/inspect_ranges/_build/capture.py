@@ -53,13 +53,16 @@ def default_capture_runner(argv: list[str]) -> str:
     return completed.stdout.decode(errors="replace")
 
 
-def shutdown_guest(cids: dict[str, int], guest: str) -> None:
-    """Ask the guest to power off cleanly; the channel dying mid-call is the expected outcome."""
+def shutdown_guest(cids: dict[str, int], guest: str) -> str | None:
+    """Ask the guest to power off cleanly; the channel dying mid-call is the expected outcome.
 
-    async def poweroff() -> None:
+    Returns a short diagnosis when the poweroff visibly did NOT take (a nonzero exit from `systemctl poweroff`), else None; `wait_shutoff` folds it into its timeout error so a never-delivered poweroff is not reported as a slow one (round-1 review).
+    """
+
+    async def poweroff() -> str | None:
         channel = MessageChannel(VsockTransport(cids), label="build-capture")
         try:
-            await channel.exec(
+            outcome = await channel.exec(
                 guest,
                 ExecRequest(
                     id=request_id(),
@@ -69,9 +72,15 @@ def shutdown_guest(cids: dict[str, int], guest: str) -> None:
                 ),
             )
         except Exception:
-            return  # the daemon dies with the guest; silence is success here
+            return None  # the daemon dies with the guest; silence is success here
+        if outcome.rc != 0:
+            return (
+                f"systemctl poweroff exited {outcome.rc}: "
+                f"{outcome.stderr.decode(errors='replace')[-120:]}"
+            )
+        return None
 
-    asyncio.run(poweroff())
+    return asyncio.run(poweroff())
 
 
 def wait_shutoff(
@@ -79,11 +88,13 @@ def wait_shutoff(
     project: str,
     guest: str,
     timeout_s: float = SHUTOFF_TIMEOUT_S,
+    *,
+    shutdown_diagnosis: str | None = None,
 ) -> None:
     """Poll the domain state inside the range container until the guest is shut off.
 
     Raises:
-        BuildError: stage `capture` when the guest does not reach `shut off` within the bound.
+        BuildError: stage `capture` when the guest does not reach `shut off` within the bound; carries `shutdown_diagnosis` when the poweroff itself visibly failed.
     """
     container = f"{project}-range-1"
     deadline = time.monotonic() + timeout_s
@@ -106,9 +117,10 @@ def wait_shutoff(
         if "shut off" in state:
             return
         time.sleep(2.0)
+    detail = f" ({shutdown_diagnosis})" if shutdown_diagnosis else ""
     raise BuildError(
         "capture",
-        f"guest did not reach 'shut off' within {timeout_s:.0f} s after poweroff",
+        f"guest did not reach 'shut off' within {timeout_s:.0f} s after poweroff{detail}",
         guest=guest,
     )
 
@@ -171,8 +183,10 @@ def _capture_locked(
         sidecar_temp.write_text(
             meta.model_copy(update={"sha256": digest}).model_dump_json(indent=2) + "\n"
         )
-        sidecar_temp.replace(sidecar)
+        # the image lands first: a crash between the two placements must
+        # never leave a sidecar describing a file that is not there (round-1)
         staging.replace(image_cache / realized_name)
+        sidecar_temp.replace(sidecar)
         return digest
     finally:
         staging.unlink(missing_ok=True)

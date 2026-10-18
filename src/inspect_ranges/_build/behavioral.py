@@ -7,6 +7,7 @@ Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
 from pathlib import Path
@@ -26,11 +27,13 @@ if TYPE_CHECKING:
     from .._compiler.plan import ResolvedPlan
     from ..types import RangeSpec
 
+logger = logging.getLogger(__name__)
+
 CHECKS_DIR_NAME = "checks"
 CHECK_NAMES = ("reference", "insufficient", "forged")
 CHAIN_TIMEOUT_S = 300.0
 
-_SUBMIT = re.compile(r"SUBMIT (\S+) (.+)$")
+_SUBMIT = re.compile(r"SUBMIT\s+(\S+)\s+(.+)$")
 
 
 def checks_declared(range_dir: Path) -> bool:
@@ -133,7 +136,7 @@ async def run_behavioral_checks(
     handle = SampleHandle(
         project=project,
         task_name=f"build-{spec.meta.name}",
-        staging=bundle.parent,
+        staging=bundle,
         totals=plan.totals,
         cid_base=min(cids.values()),
         guest_cids=cids,
@@ -209,12 +212,26 @@ async def _run_one(
         # the plant script refuses an existing target (it never truncates real
         # guest content), and samples plant exactly once per boot; this runner
         # reuses ONE boot across checks, so each check's plants are removed
-        # here to keep the next `run_setup` fresh
+        # here to keep the next `run_setup` fresh; removal failures are logged
+        # and never mask the primary diagnosis (round-1 review)
         for key in planted:
             plant = oracle.store.plant(key)
-            if plant.path.startswith("/"):
-                await oracle.exec(
+            if not plant.path.startswith("/"):
+                continue
+            try:
+                removal = await oracle.exec(
                     plant.guest, ["rm", "-f", "--", plant.path], user="root"
+                )
+                if removal.rc != 0:
+                    logger.warning(
+                        "check plant removal: %s:%s exited %d",
+                        plant.guest,
+                        plant.path,
+                        removal.rc,
+                    )
+            except Exception:
+                logger.warning(
+                    "check plant removal failed: %s:%s", plant.guest, plant.path
                 )
 
 
@@ -239,6 +256,14 @@ async def _execute_and_score(
         # chains are authoring errors too (they must run and score zero)
         return BehavioralCheckRecord(
             challenge=challenge.id, check=name, status="fail", detail=detail
+        )
+    if getattr(outcome, "stdout_truncated", False):
+        # dropped SUBMIT lines would degrade a check into a vacuous pass
+        return BehavioralCheckRecord(
+            challenge=challenge.id,
+            check=name,
+            status="fail",
+            detail="chain stdout truncated; SUBMIT lines may be lost",
         )
     entries: list[dict[str, object]] = []
     for line in outcome.stdout.decode(errors="replace").splitlines():
@@ -275,7 +300,10 @@ async def _execute_and_score(
     if name == "reference":
         ok = value == 1.0 and validity == "valid"
     else:
-        ok = value == 0.0
+        # the negative half of the trio must FAIL FOR REAL: an indeterminate
+        # scorer (validity not valid) or a chain that submitted nothing scores
+        # 0.0 without ever testing whether the forgery fools scoring (round-1)
+        ok = value == 0.0 and validity == "valid" and len(entries) >= 1
     return BehavioralCheckRecord(
         challenge=challenge.id,
         check=name,

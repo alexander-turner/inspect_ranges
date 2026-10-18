@@ -98,12 +98,19 @@ def parse_ss(output: str, proto: Literal["tcp", "udp"]) -> list[Listener]:
 
 
 def parse_packages(output: str) -> dict[str, str]:
-    r"""Parse `dpkg-query -W -f '${Package}\t${Version}\n'` output."""
+    r"""Parse `dpkg-query -W -f '${Package}\t${Version}\t${Status}\n'` output, keeping installed packages only.
+
+    dpkg-query lists removed-but-not-purged packages (`deinstall ok config-files`) with full version strings; counting those as installed false-passes a version declaration against files that are gone (round-1 review). Status-less lines (the pre-review probe shape) stay accepted so recorded probe logs re-parse.
+    """
     packages: dict[str, str] = {}
     for line in output.splitlines():
-        name, _, version = line.partition("\t")
-        if name and version:
-            packages[name.strip()] = version.strip()
+        name, _, rest = line.partition("\t")
+        version, _, status = rest.partition("\t")
+        if not (name and version):
+            continue
+        if status and status.strip() != "install ok installed":
+            continue
+        packages[name.strip()] = version.strip()
     return packages
 
 
@@ -120,16 +127,23 @@ def parse_pid_packages(output: str) -> dict[int, str]:
 def version_matches(declared: str, observed: str) -> bool:
     """Component-prefix match on the upstream version, epochs stripped from both sides.
 
-    `"1.18"` matches `1.18.0-6ubuntu14` and `1:1.18.0+dfsg-1`, but not `1.180` (the next character must not extend a numeric component) and not `1.18~rc1-1` (a `~` suffix orders strictly below the declared version in dpkg semantics, so a pre-release never satisfies a release declaration).
+    `"1.18"` matches `1.18.0-6ubuntu14` and `1:1.18.0+dfsg-1`, but not `1.180` (the next character must not extend a numeric component) and not pre-releases: a `~` ANYWHERE in the remaining upstream component (`3.0.3~rc1` against a declared `3.0`) orders strictly below the declared release in dpkg semantics, while `~` inside the Debian revision (backport suffixes like `-1ubuntu1~20.04`) stays matchable. The Debian `+really` downgrade convention binds the match to what actually ships: `1.18.0+really1.16.1-1` is version 1.16.1 (round-1 review closed both fail-open shapes).
     """
     upstream = observed.split(":", 1)[-1]
     wanted = declared.split(":", 1)[-1]
+    if "+really" in upstream:
+        upstream = upstream.split("+really", 1)[1]
     if not upstream.startswith(wanted):
         return False
     if len(upstream) == len(wanted):
         return True
     following = upstream[len(wanted)]
-    return not following.isdigit() and following != "~"
+    if following.isdigit() or following == "~":
+        return False
+    component = upstream.split("-", 1)[0]
+    if component.startswith(wanted) and "~" in component[len(wanted) :]:
+        return False
+    return True
 
 
 def evaluate_host(host: Host, facts: GuestFacts) -> list[DeclarationResult]:
@@ -302,7 +316,7 @@ async def _collect_facts(
     channel = MessageChannel(VsockTransport(cids), label="build-verify")
     probe = (
         "echo ===TCP===; ss -tlnpH; echo ===UDP===; ss -ulnpH; "
-        "echo ===PKGS===; dpkg-query -W -f '${Package}\\t${Version}\\n'"
+        "echo ===PKGS===; dpkg-query -W -f '${Package}\\t${Version}\\t${Status}\\n'"
     )
     outcome = await channel.exec(
         guest,

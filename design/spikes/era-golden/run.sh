@@ -19,6 +19,7 @@ ROOT="$(cd ../../.. && pwd)"
 NOBLE="${NOBLE:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
 ERA="${ERA:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"
+export INSPECT_RANGES_BUILD_CACHE="$SPIKE/tmp/builds"
 IR="uv run inspect-ranges"
 IRBIN="$ROOT/.venv/bin/inspect-ranges"
 C() { (cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --cid 3400 --user root exec "$1"); }
