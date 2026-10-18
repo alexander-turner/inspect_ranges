@@ -200,7 +200,9 @@ class RangeSandboxEnvironment(SandboxEnvironment):
             )
         else:
             spec = _resolve_spec(config)
-            ensure_pulled(spec, image_cache=runtime.image_cache)
+            await asyncio.to_thread(
+                ensure_pulled, spec, image_cache=runtime.image_cache
+            )
             spec, realized_sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,

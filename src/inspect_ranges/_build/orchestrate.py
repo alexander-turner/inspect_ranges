@@ -1240,12 +1240,16 @@ def _fetch_image_tier(name: str, image_cache: Path) -> "ImageRef | None":
 
     if _os.environ.get(NEVER_PULL_ENV):
         return None  # pinned hosts skip the implicit tier; the refusal's hint names the pull
-    pulled = pull_image(
-        name,
-        registry_locations(),
-        image_cache=image_cache,
-        progress=TransferDisplay(),
-    )
+    display = TransferDisplay()
+    try:
+        pulled = pull_image(
+            name,
+            registry_locations(),
+            image_cache=image_cache,
+            progress=display,
+        )
+    finally:
+        display.close()
     if pulled is None:
         return None
     return resolve_image_reference(name, image_cache)

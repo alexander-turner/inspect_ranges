@@ -547,7 +547,9 @@ def test_transfer_display_tty_shape() -> None:
     assert out.buffer.endswith("pull OK   r@sha256:feed\n")
 
 
-def test_warm_path_heals_pruned_artifacts(tmp_path: Path) -> None:
+def test_warm_path_heals_pruned_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Round-4 N2: a matching manifest whose artifacts were pruned falls through to the pull (seamless healing), never a range-not-built dead end."""
     from inspect_ranges._build.manifest import load_manifest
     from inspect_ranges._dist.resolve import ensure_build_available
@@ -563,27 +565,22 @@ def test_warm_path_heals_pruned_artifacts(tmp_path: Path) -> None:
         range_dir=fixture.range_dir,
     )
     images, builds, recipes = fresh_dirs(tmp_path)
-    import os as os_module
-
-    os_module.environ[REGISTRY_ENV] = str(tmp_path / "mirror")
-    try:
-        first = ensure_build_available(
-            spec,  # type: ignore[arg-type]
-            image_cache=images,
-            build_cache=builds,
-            recipe_cache=recipes,
-        )
-        assert first is not None
-        # prune the realized image; the manifest still matches the spec
-        (images / fixture.realized_file).unlink()
-        healed = ensure_build_available(
-            spec,  # type: ignore[arg-type]
-            image_cache=images,
-            build_cache=builds,
-            recipe_cache=recipes,
-        )
-        assert healed is not None
-        assert (images / fixture.realized_file).is_file()
-        assert load_manifest(builds, "distfix") is not None
-    finally:
-        os_module.environ.pop(REGISTRY_ENV, None)
+    monkeypatch.setenv(REGISTRY_ENV, str(tmp_path / "mirror"))
+    first = ensure_build_available(
+        spec,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert first is not None
+    # prune the realized image; the manifest still matches the spec
+    (images / fixture.realized_file).unlink()
+    healed = ensure_build_available(
+        spec,  # type: ignore[arg-type]
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert healed is not None
+    assert (images / fixture.realized_file).is_file()
+    assert load_manifest(builds, "distfix") is not None

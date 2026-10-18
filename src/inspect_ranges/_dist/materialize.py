@@ -6,8 +6,10 @@ Backing-chain validation runs at materialization: the qcow2 header's embedded ba
 """
 
 import fcntl
+import glob as glob_module
 import hashlib
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -94,6 +96,16 @@ def _name_lock(cache: Path, file: str) -> "Generator[None]":
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+_CACHE_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+
+def _validated_cache_name(name: str) -> str:
+    """Untrusted annotation names reach filesystem paths and glob patterns: an allowlisted grammar (no separators, no glob metacharacters) plus a ban on the temp marker closes traversal, cross-name temp sweeps, and prune-bait names (phase round-1 N3)."""
+    if _CACHE_NAME.fullmatch(name) is None or ".pulling-" in name:
+        raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
+    return name
+
+
 def _annotation(manifest: OciManifest, key: str) -> str:
     value = (manifest.annotations or {}).get(key)
     if not value:
@@ -144,15 +156,13 @@ def _land_image(
     progress: "ProgressFn | None" = None,
 ) -> None:
     """Land one image artifact (and its sidecar) under the cache's lock and write-order conventions."""
-    name = _annotation(manifest, ANN_NAME)
-    if "/" in name or name.startswith("."):
-        raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
+    name = _validated_cache_name(_annotation(manifest, ANN_NAME))
     blob = _layer(manifest, LAYER_QCOW2)
     target = image_cache / name
     with _name_lock(image_cache, name):
         # a hard-killed pull of this name strands a `.{name}.pulling-*` temp;
         # under the lock it is debris by definition (the derive/capture lesson)
-        for stale in image_cache.glob(f".{name}.pulling-*"):
+        for stale in image_cache.glob(f".{glob_module.escape(name)}.pulling-*"):
             stale.unlink(missing_ok=True)
 
         def write_sidecar(*, heal: bool = False) -> None:
@@ -293,6 +303,10 @@ def materialize_closure(
 
     from .gc import chains_lock
 
+    # the shared hold spans the WHOLE materialization including the recipe
+    # tail and the manifest landing (phase round-1 B1): until the manifest
+    # exists, the landed realized images are referenced by nothing, and a
+    # concurrent prune must not observe that window
     with chains_lock(image_cache, exclusive=False):
         _land_images(
             store,
@@ -304,18 +318,18 @@ def materialize_closure(
             landed_digests=landed_digests,
             progress=progress,
         )
-    return _finish_closure(
-        store,
-        artifacts,
-        landed_digests,
-        build_cache=build_cache,
-        recipe_cache=recipe_cache,
-        require_manifest=require_manifest,
-        expect_range=expect_range,
-        expect_spec=expect_spec,
-        fetched=fetched,
-        present=present,
-    )
+        return _finish_closure(
+            store,
+            artifacts,
+            landed_digests,
+            build_cache=build_cache,
+            recipe_cache=recipe_cache,
+            require_manifest=require_manifest,
+            expect_range=expect_range,
+            expect_spec=expect_spec,
+            fetched=fetched,
+            present=present,
+        )
 
 
 def _land_images(
@@ -424,16 +438,14 @@ def _replace_chain(
 
     plans: list[tuple[str, OciManifest, str | None, bool]] = []
     for manifest, suffix, sidecar_first in members:
-        name = _annotation(manifest, ANN_NAME)
-        if "/" in name or name.startswith("."):
-            raise DistError("manifest-invalid", f"{name!r} is not a cache file name")
+        name = _validated_cache_name(_annotation(manifest, ANN_NAME))
         plans.append((name, manifest, suffix, sidecar_first))
     with ExitStack() as stack:
         for name, _, _, _ in sorted(plans):  # sorted: one lock order, no deadlock
             stack.enter_context(_name_lock(image_cache, name))
         staged: list[tuple[Path, Path, OciManifest, str | None, bool]] = []
         for name, manifest, suffix, sidecar_first in plans:
-            for stale in image_cache.glob(f".{name}.pulling-*"):
+            for stale in image_cache.glob(f".{glob_module.escape(name)}.pulling-*"):
                 stale.unlink(missing_ok=True)
             blob = _layer(manifest, LAYER_QCOW2)
             target = image_cache / name
@@ -601,14 +613,12 @@ def _land_recipe(
 
     Concurrency follows the image cache's discipline: a per-name advisory lock (`.{name}.lock` in the recipe cache) serializes pullers of one bundle, staging directories are uniquely named and swept under the lock, and the tar bytes are verified into a private copy before anything parses them.
     """
-    name = _annotation(manifest, ANN_NAME)
+    name = _validated_cache_name(_annotation(manifest, ANN_NAME))
     declared = _annotation(manifest, ANN_RECIPE_DIGEST)
-    if "/" in name or name.startswith("."):
-        raise DistError("manifest-invalid", f"{name!r} is not a recipe name")
     recipe_cache.mkdir(parents=True, exist_ok=True)
     target = recipe_cache / name
     with _name_lock(recipe_cache, name):
-        for stale in recipe_cache.glob(f".{name}.pulling-*"):
+        for stale in recipe_cache.glob(f".{glob_module.escape(name)}.pulling-*"):
             _rmtree(stale)
         if target.is_dir():
             try:

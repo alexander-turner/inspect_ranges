@@ -196,14 +196,10 @@ def _echo_fetch(report: PullReport) -> None:
 @click.argument("target", required=False)
 @click.option("--from", "from_location", required=True, help="Source location.")
 @click.option("--to", "to_location", required=True, help="Destination location.")
-@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
-@click.option("--build-cache", type=click.Path(path_type=Path), default=None)
 def mirror(
     target: str | None,
     from_location: str,
     to_location: str,
-    image_cache: Path | None,
-    build_cache: Path | None,
 ) -> None:
     """Mirror between locations: bare (whole source, the seed/sync move), a NAME, a `name@sha256:` pin, or a spec path/directory (the cross-group move: the local range.yaml selects the source build exactly)."""
     from .._dist.mirror import mirror_names, mirror_one, source_names

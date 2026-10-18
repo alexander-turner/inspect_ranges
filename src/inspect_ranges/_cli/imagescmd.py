@@ -350,31 +350,40 @@ def prune(
         )
         return
     seen: set[Path] = set()
-    if chains:
-        from .._dist.gc import chains_lock, unreferenced_chain_files
+    from .._dist.gc import chains_lock, unreferenced_chain_files
 
-        # re-scan under the exclusive lock at delete time: the report-mode
-        # window (operator reading the list) must not turn stale state into
-        # an eviction (round-5 B2)
-        with chains_lock(image_cache, exclusive=True):
+    # EVERY deleting pass holds the exclusive chains lock and recomputes
+    # liveness inside it (phase round-1 B1): the report-mode window, and any
+    # landing that finished since, must not turn stale state into an eviction;
+    # realized images re-check against fresh manifests, chain victims against
+    # a fresh scan
+    with chains_lock(image_cache, exclusive=True):
+        fresh_live = recorded_realized_files(
+            build_cache if build_cache is not None else default_build_cache()
+        ) | live_project_files(state_dir)
+        still: set[Path] = set()
+        if chains:
             fresh, _ = unreferenced_chain_files(
                 image_cache,
                 build_cache if build_cache is not None else default_build_cache(),
-                live,
+                fresh_live,
             )
             still = {path for path, _ in fresh}
-            for path, _, kind in victims:
-                if path in seen:
-                    continue
-                if "golden" in kind or "vendor" in kind:
-                    if path not in still:
-                        continue  # the world moved; keep it
-                seen.add(path)
-                path.unlink(missing_ok=True)
-    else:
-        for path, _, _ in victims:
+        for path, _, kind in victims:
             if path in seen:
                 continue
+            if "golden" in kind or "vendor" in kind:
+                if path not in still:
+                    continue  # the world moved; keep it
+            elif "realized" in kind or "sidecar" in kind:
+                image_name = path.name.removesuffix(".realized.json")
+                image_name = (
+                    image_name
+                    if image_name.endswith(".qcow2")
+                    else image_name + ".qcow2"
+                )
+                if image_name in fresh_live:
+                    continue  # a landing finished; its manifest references this now
             seen.add(path)
             path.unlink(missing_ok=True)
     click.echo(f"pruned {len(seen)} file(s), {total / (1024 * 1024):.0f} MB reclaimed")
