@@ -473,6 +473,15 @@ def image_file_name(reference: str) -> str:
     return f"{normalized}.qcow2"
 
 
+GUEST_UID_BASE = 1_000_000
+"""Every guest VMM runs as its own uid, `GUEST_UID_BASE + cid`: CIDs are leased host-unique, so no two VMM processes (QEMU via the DAC seclabel, Cloud Hypervisor via setpriv) share a uid, and none shares `libvirt-qemu` or root."""
+
+
+def guest_uid(cid: int) -> int:
+    """The uid the guest's VMM process runs as (see `GUEST_UID_BASE`)."""
+    return GUEST_UID_BASE + cid
+
+
 def resolve_image_reference(reference: str, cache: Path | None) -> ImageRef:
     """Resolve a logical image reference against the cache (the shared file-name rule plus a content digest when present); the build pipeline's public entry to the same resolution planning uses."""
     return _resolve_image(reference, cache)

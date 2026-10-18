@@ -43,7 +43,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # directory it creates, leaving it untraversable by the unprivileged VMM)
 COPY --from=cloud-hypervisor /out/ /
 
-RUN printf 'user = "libvirt-qemu"\ngroup = "kvm"\nsecurity_driver = "none"\ndynamic_ownership = 1\nremember_owner = 0\ncgroup_controllers = []\nnamespaces = []\nseccomp_sandbox = 1\n' \
+# security_driver = "none" disables only the MAC slot (sVirt): per-VM AppArmor
+# profile loads need CAP_MAC_ADMIN and securityfs, which the outer jail denies
+# by design. The per-VM boundary is DAC instead, which libvirt stacks
+# regardless of the MAC choice: every domain's static seclabel runs its QEMU
+# as its own GUEST_UID_BASE+cid uid (issue #5), with QEMU's seccomp sandbox on
+# and docker-default AppArmor/seccomp confining the whole container.
+# dynamic_ownership stays off: the boot script pre-owns each guest's files, so
+# libvirt never chowns a shared backing golden.
+RUN printf 'user = "libvirt-qemu"\ngroup = "kvm"\nsecurity_driver = "none"\ndynamic_ownership = 0\nremember_owner = 0\ncgroup_controllers = []\nnamespaces = []\nseccomp_sandbox = 1\n' \
     >> /etc/libvirt/qemu.conf
 
 COPY entrypoint.sh /entrypoint.sh

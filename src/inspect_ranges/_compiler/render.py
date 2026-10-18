@@ -30,6 +30,7 @@ from .plan import (
     PlanOptions,
     ResolvedPlan,
     guest_allocation,
+    guest_uid,
     plan_json,
     resolve_plan,
 )
@@ -57,6 +58,14 @@ _DOMAIN_XML = """<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domai
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
+  <!-- per-guest DAC principal (issue #5): sVirt AppArmor cannot load profiles
+       inside the hardened container (CAP_MAC_ADMIN + securityfs are denied by
+       the outer jail), so per-VM confinement is per-VM IDENTITY instead: each
+       QEMU runs as its own uid, the same scheme Cloud Hypervisor guests use;
+       relabel stays off because the boot script pre-owns the guest's files -->
+  <seclabel type='static' model='dac' relabel='no'>
+    <label>+{uid}:kvm</label>
+  </seclabel>
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
@@ -349,6 +358,7 @@ def render_bundle(
                     cpus=guest.cpus,
                     cpu=cpu,
                     cid=guest.cid,
+                    uid=guest_uid(guest.cid),
                     interfaces=interfaces,
                 ),
             )
