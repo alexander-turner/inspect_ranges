@@ -5,11 +5,12 @@ The spec hash is the join (spine Q3): specs travel by git, artifacts by registry
 Resolution order is the spine's Q1 made operational: an explicit `name@sha256:` pin short-circuits everything; otherwise the local cache answers first (bare names are sticky; freezing is automatic), then the ordered search path, first match wins. Moving a cached bare name forward is the explicit `refresh` act, which lands the chain's staged bytes and renames them together under every member's lock; an interrupted refresh is re-run, and a mixed chain can never boot silently because `up` verifies the full backing chain including the golden-to-vendor edge (round-3 B4). The next build's keys change accordingly.
 """
 
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from .._build.manifest import BuildManifest
+from .._build.manifest import BuildManifest, load_manifest
 from .._compiler.plan import image_file_name, resolve_image_reference, spec_sha256
 from ..types import RangeSpec
 from .encode import (
@@ -19,12 +20,14 @@ from .encode import (
     push_build,
 )
 from .errors import DistError
-from .location import Location
+from .location import Location, registry_locations
 from .materialize import MaterializeResult, materialize_closure
-from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor, OciIndex
+from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor, OciIndex, ProgressFn
 
 __all__ = [
+    "NEVER_PULL_ENV",
     "PullReport",
+    "ensure_build_available",
     "pull_image",
     "pull_pinned",
     "pull_range",
@@ -52,6 +55,7 @@ def push_range(
     build_cache: Path,
     range_dir: Path | None = None,
     recipe_cache: Path | None = None,
+    progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     """Push a built range's closure to `location`, named under both the latest ref and the exact-spec ref."""
     store = location.store_for(manifest.range_name, create=True)
@@ -66,6 +70,7 @@ def push_range(
         range_dir=range_dir,
         recipe_cache=recipe_cache,
         ref=location.spec_ref(manifest.range_name, manifest.spec_sha256),
+        progress=progress,
     )
     index_bytes = store.manifest_bytes(root)
     store.put_index_bytes(location.latest_ref(manifest.range_name), index_bytes)
@@ -106,6 +111,7 @@ def pull_range(
     build_cache: Path,
     recipe_cache: Path,
     pin: str | None = None,
+    progress: "ProgressFn | None" = None,
 ) -> PullReport:
     """Resolve and materialize the published build matching this spec exactly (or an explicit `sha256:` root pin), first location wins.
 
@@ -120,6 +126,7 @@ def pull_range(
             image_cache=image_cache,
             build_cache=build_cache,
             recipe_cache=recipe_cache,
+            progress=progress,
         )
     name = spec.meta.name
     want = spec_sha256(spec)
@@ -144,6 +151,7 @@ def pull_range(
             require_manifest=True,
             expect_range=name,
             expect_spec=want,
+            progress=progress,
         )
         return PullReport(
             location=location.describe(), root=found.digest, result=result
@@ -166,6 +174,7 @@ def pull_pinned(
     image_cache: Path,
     build_cache: Path,
     recipe_cache: Path,
+    progress: "ProgressFn | None" = None,
 ) -> PullReport:
     """The `name@sha256:` form: pull an exact published root with no spec in hand (Journey B); the landed manifest must still be a build of `name`.
 
@@ -189,12 +198,55 @@ def pull_pinned(
             recipe_cache=recipe_cache,
             require_manifest=True,
             expect_range=name,
+            progress=progress,
         )
         return PullReport(location=location.describe(), root=root.digest, result=result)
     raise DistError(
         "no-build-for-spec",
         f"no configured location holds a root {pin} for {name!r} "
         f"(searched: {', '.join(location.describe() for location in locations)})",
+    )
+
+
+NEVER_PULL_ENV = "INSPECT_RANGES_NEVER_PULL"
+"""Set to pin a host to never-pull (strict offline posture): a content range with no matching local build refuses instead of touching the network."""
+
+
+def ensure_build_available(
+    spec: RangeSpec,
+    *,
+    image_cache: Path,
+    build_cache: Path,
+    recipe_cache: Path,
+    progress: "ProgressFn | None" = None,
+) -> PullReport | None:
+    """The provider's implicit resolve-verify-fetch (Journey B): `None` when nothing needed pulling (a content-free range, or the warm path: a local build manifest matching this exact spec, which costs one hash and zero network), else the pull report.
+
+    Raises:
+        DistError: `never-pull` when a pull is needed but the host is pinned offline; otherwise whatever `pull_range` refuses with (`no-build-for-spec` with the nearest builds, a named broken location, an unreachable registry).
+    """
+    content = any(
+        host.provisioning or host.services or host.vulnerabilities
+        for host in spec.hosts
+    )
+    if not content:
+        return None
+    manifest = load_manifest(build_cache, spec.meta.name)
+    if manifest is not None and manifest.spec_sha256 == spec_sha256(spec):
+        return None
+    if os.environ.get(NEVER_PULL_ENV):
+        raise DistError(
+            "never-pull",
+            f"no local build matches this range.yaml and {NEVER_PULL_ENV} is set; "
+            "build locally, or pull on a host that allows it",
+        )
+    return pull_range(
+        spec,
+        registry_locations(),
+        image_cache=image_cache,
+        build_cache=build_cache,
+        recipe_cache=recipe_cache,
+        progress=progress,
     )
 
 

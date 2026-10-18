@@ -16,7 +16,7 @@ from .._build.recipes import ResolvedRecipe, resolve_recipe
 from .._compiler.plan import image_file_name
 from .._runtime.images import ImageMetadata
 from .errors import DistError
-from .oci import ContentStore, Descriptor, OciIndex, OciManifest
+from .oci import ContentStore, Descriptor, OciIndex, OciManifest, ProgressFn
 
 __all__ = [
     "ANN_BACKING_DIGEST",
@@ -106,11 +106,15 @@ def _realized_sidecar_path(image_cache: Path, file: str) -> Path:
 
 
 def _qcow2_descriptor(
-    store: ContentStore, path: Path, *, expected: str | None
+    store: ContentStore,
+    path: Path,
+    *,
+    expected: str | None,
+    progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     if not path.is_file():
         raise DistError("artifact-missing", f"{path} is not in the image cache")
-    digest = store.put_blob_file(path, expected=expected)
+    digest = store.put_blob_file(path, expected=expected, progress=progress)
     return Descriptor(media_type=LAYER_QCOW2, digest=digest, size=path.stat().st_size)
 
 
@@ -149,6 +153,7 @@ def encode_image_chain(
     digest: str | None,
     *,
     config: Descriptor,
+    progress: "ProgressFn | None" = None,
 ) -> list[Descriptor]:
     """Encode one cache image's chain (golden with its vendor base via the provenance sidecar; a sidecar-less chainless image as a bare vendor base) and return the member manifest descriptors.
 
@@ -166,7 +171,9 @@ def encode_image_chain(
                 "chain-invalid",
                 f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
             )
-        blob = _qcow2_descriptor(store, image_cache / file, expected=digest)
+        blob = _qcow2_descriptor(
+            store, image_cache / file, expected=digest, progress=progress
+        )
         members.append(
             store.put_manifest(
                 OciManifest(
@@ -187,7 +194,10 @@ def encode_image_chain(
         ) from error
     vendor_path = image_cache / metadata.vendor_file
     vendor_blob = _qcow2_descriptor(
-        store, vendor_path, expected=_prefixed(metadata.vendor_sha256)
+        store,
+        vendor_path,
+        expected=_prefixed(metadata.vendor_sha256),
+        progress=progress,
     )
     members.append(
         store.put_manifest(
@@ -206,6 +216,7 @@ def encode_image_chain(
         store,
         image_cache / file,
         expected=_prefixed(digest or metadata.golden_sha256),
+        progress=progress,
     )
     members.append(
         store.put_manifest(
@@ -237,6 +248,7 @@ def push_build(
     range_dir: Path | None = None,
     recipe_cache: Path | None = None,
     ref: str | None = None,
+    progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     """Encode a built range's transitive closure into `store` and return the root index descriptor (the publishable identity).
 
@@ -256,7 +268,7 @@ def push_build(
 
     def encode_golden_chain(file: str, digest: str | None) -> None:
         for member in encode_image_chain(
-            store, image_cache, file, digest, config=config
+            store, image_cache, file, digest, config=config, progress=progress
         ):
             add(member)
 
@@ -274,7 +286,10 @@ def push_build(
                 f"{sidecar_path} is missing; a realized image publishes with its provenance sidecar",
             )
         realized_blob = _qcow2_descriptor(
-            store, realized_path, expected=_prefixed(guest.realized_sha256)
+            store,
+            realized_path,
+            expected=_prefixed(guest.realized_sha256),
+            progress=progress,
         )
         add(
             store.put_manifest(
