@@ -689,7 +689,12 @@ def test_check_build_absent_caches_are_healthy(tmp_path: Path) -> None:
     assert by_name["builds cache"].status == "ok"
     assert by_name["recipe cache"].status == "ok"
     assert "first use" in by_name["builds cache"].detail
+    # ok and warn are the only statuses the check emits; what this pins is
+    # that the row exists and the fallback case warns (round-1: the membership
+    # assert was tautological)
     assert by_name["build nameserver"].status in ("ok", "warn")
+    if by_name["build nameserver"].status == "warn":
+        assert "--build-nameserver" in (by_name["build nameserver"].fix or "")
 
 
 def test_check_build_flags_broken_recorded_state(tmp_path: Path) -> None:
@@ -741,3 +746,16 @@ def test_check_build_passes_healthy_recorded_state(tmp_path: Path) -> None:
     by_name = {r.name: r for r in results}
     assert by_name["manifests"].status == "ok"
     assert by_name["cached recipes"].status == "ok"
+
+
+def test_check_build_parses_nested_slashed_name_manifests(tmp_path: Path) -> None:
+    """Round-1: slashed range names nest manifests one level deeper, which the glob missed."""
+    from inspect_ranges._doctor.checks import check_build
+
+    builds = tmp_path / "builds"
+    (builds / "acme" / "payroll").mkdir(parents=True)
+    (builds / "acme" / "payroll" / "manifest.json").write_text("{broken")
+    results = check_build(builds, tmp_path / "recipes")
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "fail"
+    assert "payroll" in by_name["manifests"].detail

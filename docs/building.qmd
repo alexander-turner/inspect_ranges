@@ -21,7 +21,7 @@ Until a range has a matching build, every content-consuming verb refuses with `r
 2. **Recipes**, in declaration order per guest (see [Authoring recipes](#authoring-recipes)).
 3. **Verification** of every declared `services` and `vulnerabilities` entry against the live guests, independent of what the recipes claimed (see [Verification](#verification)).
 4. **Capture.** Each provisioned guest is cleanly shut down and its overlay captured into the image cache as a realized image (a qcow2 rebased onto its golden, digest-recorded, with a provenance sidecar).
-5. **The manifest.** The builds cache (`~/.cache/inspect-ranges/builds/<range>/manifest.json`, or `INSPECT_RANGES_BUILD_CACHE`) records the spec and its hash, every guest's build key and realized digest, recipe versions and digests, base-image digests, and the verification results.
+5. **The manifest.** The builds cache (`~/.cache/inspect-ranges/builds/<range>/manifest.json`, or `INSPECT_RANGES_BUILD_CACHE`; the consuming verbs and the provider resolve the cache the same way, so a non-default location is set through the environment variable, not per-verb flags) records the spec and its hash, every guest's build key and realized digest, recipe versions and digests, base-image digests, and the verification results.
 6. **Behavioral checks**, when the range declares them: the captured images boot once more and each challenge's reference/insufficient/forged chains run against the thing that ships (see [Behavioral checks](#behavioral-checks)). The manifest lands on disk only after this phase passes; a build interrupted or failed at any point before full proof leaves no consumable manifest.
 
 `--keep` preserves the build range (success or failure) for diagnosis; a kept build captures nothing and mints no manifest. On failure the error names the stage and guest and points at the recipe log; the range tears down unless kept.
@@ -57,7 +57,7 @@ The entrypoint runs **on the host**, with the bundle directory as working direct
 |---|---|
 | `IR_GUEST` | The target guest's name |
 | `IR_GUEST_CIDS` | JSON map of every guest name to its vsock CID |
-| `IR_EXEC` | Path to a wrapper that runs a command in the target guest as root (`--budget-ms` bounds it; `--user` switches principal) |
+| `IR_EXEC` | Path to a wrapper that runs a command in the target guest as root (`--budget-ms` bounds it; `--user` switches principal; `--script` uploads and runs a local file, as root or the agent user only, and takes no trailing argv) |
 | `IR_PUSH` | Path to a wrapper that pushes a local file to a guest path (`--mode` sets permissions) |
 | `IR_EXEC_BUDGET_MS` | The default per-exec budget |
 
@@ -111,9 +111,9 @@ Failures produce coded refusals (`service-not-verified`, `vulnerability-not-veri
 
 A range that carries challenges can prove them at build time. Convention: `checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script executed on the attacker guest with `IR_ATTACKER_IP` exported, emitting `SUBMIT <goal-id> <value>` lines. The contract:
 
-- `reference.sh` must exercise the real attack chain and score 1.0 with validity `valid` (beacons corroborated in the range's packet capture).
-- `insufficient.sh` must do real but incomplete work and score 0.0.
-- `forged.sh` must submit plausible fakes and score 0.0.
+- `reference.sh` must exercise the real attack chain and score 1.0 with validity `valid`. Beacons corroborate in the range's packet capture only when their capture chunk rotates before scoring (tcpdump rotates by size; scoring reads rotated chunks), so a corroborating chain pushes filler traffic after its beacons and the environment sets a small `CAPTURE_CHUNK_MB`; corroboration is recorded per goal but not required for the check to pass.
+- `insufficient.sh` must do real but incomplete work and score 0.0 with validity `valid` and at least one submission.
+- `forged.sh` must submit plausible fakes and score 0.0 with validity `valid` and at least one submission (a chain that submits nothing, or a scorer that never reached a verdict, would otherwise pass vacuously).
 
 The checks run against the **captured** realized images in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Each check gets fresh per-sample proof material (plants), removed afterward; nothing a check planted survives as a valid secret at runtime. A declared checks tree must be complete: a misnamed directory or missing script refuses rather than silently skipping, and any failure, of a check or of the phase's own infrastructure, leaves no manifest. The build reports `behavioral` stage lines per check and records the results in the manifest.
 

@@ -68,6 +68,16 @@ def test_parse_packages_and_attributions() -> None:
         ("8.0.39", "8.0.39-0ubuntu0.20.04.1", True),
         ("1.18", "1.18~rc1-1", False),
         ("1:3.0.3", "1:3.0.3+dfsg-1", True),
+        # round-1: a ~ deeper in the upstream component is still a pre-release
+        ("3.0", "3.0.3~rc1-1", False),
+        ("1.18", "1.18.0~rc1-1", False),
+        # ...but a backport suffix in the DEBIAN REVISION stays matchable
+        ("1.18", "1.18.0-1ubuntu1~20.04", True),
+        # a deliberately declared pre-release matches itself
+        ("1.18.0~rc1", "1.18.0~rc1-1", True),
+        # round-1: the +really downgrade convention binds to what ships
+        ("1.18.0", "1.18.0+really1.16.1-1", False),
+        ("1.16", "1.18.0+really1.16.1-1", True),
     ],
 )
 def test_version_matches(declared: str, observed: str, expected: bool) -> None:
@@ -168,3 +178,18 @@ def test_vulnerability_follows_its_linked_service() -> None:
     assert by_name(results, "cve-y").status == "ok"
     free = by_name(results, "free-vuln")
     assert free.status == "ok" and "no service linkage" in free.observed
+
+
+def test_parse_packages_filters_removed_but_not_purged() -> None:
+    """Round-1: rc-state packages print full versions; counting them installed false-passes version declarations against files that are gone."""
+    output = (
+        "nginx-core\t1.18.0-6ubuntu14.4\tinstall ok installed\n"
+        "oldpkg\t2.0-1\tdeinstall ok config-files\n"
+        "legacyline\t3.1-2\n"
+    )
+    packages = parse_packages(output)
+    assert packages == {
+        "nginx-core": "1.18.0-6ubuntu14.4",
+        # a status-less line (the pre-review probe shape) stays accepted
+        "legacyline": "3.1-2",
+    }

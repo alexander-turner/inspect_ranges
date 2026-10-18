@@ -359,3 +359,34 @@ def test_guesttool_exit_codes() -> None:
     assert exit_code(0) == 0
     assert exit_code(7) == 7
     assert exit_code(-9) == 137
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("msg", "a\x00b"),
+        ("a=b", "x"),
+        ("", "x"),
+    ],
+)
+def test_vars_that_cannot_cross_the_environment_refuse(
+    tmp_path: Path, key: str, value: str
+) -> None:
+    """Round-1 blocking: a NUL or '=' slipping into Popen's env raised a raw ValueError mid-build, past teardown."""
+    write_recipe(tmp_path, name="acme.env", inputs={key: {}} if key else {})
+    recipe = resolve_recipe("acme.env", range_dir=tmp_path, cache=tmp_path / "nocache")
+    with pytest.raises(IssueError) as excinfo:
+        validate_vars(recipe, {key: value})
+    assert any(
+        issue.code in ("recipe-var-invalid", "recipe-var-unknown")
+        for issue in excinfo.value.issues
+    )
+    assert any(issue.code == "recipe-var-invalid" for issue in excinfo.value.issues)
+
+
+def test_default_with_nul_refuses(tmp_path: Path) -> None:
+    write_recipe(tmp_path, name="acme.dflt", inputs={"msg": {"default": "a\x00b"}})
+    recipe = resolve_recipe("acme.dflt", range_dir=tmp_path, cache=tmp_path / "nocache")
+    with pytest.raises(IssueError) as excinfo:
+        validate_vars(recipe, {})
+    assert excinfo.value.issues[0].code == "recipe-var-invalid"

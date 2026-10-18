@@ -13,6 +13,7 @@ ROOT="$(cd ../../.. && pwd)"
 
 ERA="${ERA:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"
+export INSPECT_RANGES_BUILD_CACHE="$SPIKE/tmp/builds"
 IR="uv run inspect-ranges"
 IRBIN="$ROOT/.venv/bin/inspect-ranges"
 CACHE="$SPIKE/tmp/cache"

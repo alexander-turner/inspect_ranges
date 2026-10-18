@@ -185,9 +185,14 @@ def test_apply_build_manifest_gate(tmp_path: Path) -> None:
         assert error.issues[0].code == "range-not-built"
         assert "inspect-ranges build" in (error.issues[0].hint or "")
 
-    # a matching manifest with a verifiable realized image: swap + realized sections
+    # a matching manifest with a verifiable realized image AND its verified
+    # golden backing: swap + realized sections (the gate re-checks both ends
+    # of the chain since round-1: an overlay boots OVER the golden)
     realized = image_cache / "gated-web-abcdefabcdef.qcow2"
     realized.write_bytes(b"realized-bytes")
+    golden = image_cache / "focal-guest.qcow2"
+    golden.write_bytes(b"golden-bytes")
+    golden_digest = f"sha256:{hashlib.sha256(b'golden-bytes').hexdigest()}"
     manifest = BuildManifest(
         range_name="gated",
         schema_version="0.3",
@@ -198,7 +203,7 @@ def test_apply_build_manifest_gate(tmp_path: Path) -> None:
             GuestRecord(
                 name="web",
                 golden_reference="focal-guest",
-                golden_digest="sha256:g",
+                golden_digest=golden_digest,
                 realized_file=realized.name,
                 realized_sha256=hashlib.sha256(b"realized-bytes").hexdigest(),
                 build_key="k" * 64,
@@ -225,14 +230,55 @@ def test_apply_build_manifest_gate(tmp_path: Path) -> None:
     except IssueError as error:
         assert "different spec revision" in error.issues[0].message
 
-    # tampered realized image: refuse
+    # a re-derived golden under the same name: refuse (the overlay would boot
+    # over a composition that was never verified; round-1 blocking finding)
     spec.meta.description = "x"
+    golden.write_bytes(b"golden-v2")
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "changed since the build" in error.issues[0].message
+    golden.write_bytes(b"golden-bytes")
+
+    # a missing golden: refuse naming the pull/derive remedy
+    golden.unlink()
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "is not in the image cache" in error.issues[0].message
+    golden.write_bytes(b"golden-bytes")
+
+    # a missing realized image: refuse naming the pull remedy (round-1 gap)
+    realized_bytes = realized.read_bytes()
+    realized.unlink()
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "pull the build artifacts" in (error.issues[0].hint or "")
+    realized.write_bytes(realized_bytes)
+
+    # tampered realized image: refuse
     realized.write_bytes(b"tampered")
     try:
         apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
         raise AssertionError("should refuse")
     except IssueError as error:
         assert "does not match the manifest's digest" in error.issues[0].message
+
+    # a content host the manifest never recorded: refuse (round-1 gap)
+    realized.write_bytes(b"realized-bytes")
+    renamed = manifest.model_copy(
+        update={"guests": (manifest.guests[0].model_copy(update={"name": "other"}),)}
+    )
+    save_manifest(renamed, builds)
+    try:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+        raise AssertionError("should refuse")
+    except IssueError as error:
+        assert "has no record for guest" in error.issues[0].message
 
 
 def test_apply_build_manifest_passthrough_without_content(tmp_path: Path) -> None:
@@ -266,3 +312,50 @@ def test_apply_build_manifest_passthrough_without_content(tmp_path: Path) -> Non
         spec, image_cache=tmp_path, build_cache=tmp_path / "builds"
     )
     assert same is spec and sections == frozenset() and consumed is None
+
+
+def test_identity_participates_in_the_build_key() -> None:
+    """Round-1: two ranges (or guests) with byte-identical content must never share a key or a realized file name (collisions caused last-writer-wins captures)."""
+    host = make_host()
+    key_a = guest_build_key("sha-golden", host, [], range_name="range-a")
+    key_b = guest_build_key("sha-golden", host, [], range_name="range-b")
+    assert key_a != key_b
+    other = make_host(name="other")
+    assert guest_build_key("sha-golden", other, [], range_name="range-a") != key_a
+
+
+def test_stamp_bundle_sha256_is_guarded_and_locked(tmp_path: Path) -> None:
+    """Round-1: the render write-back must not clobber a concurrent rebuild (same or different spec); the stamp lands only on the revision the render consumed."""
+    from inspect_ranges._build.manifest import (
+        BuildManifest,
+        VerificationRecord,
+        load_manifest,
+        now_iso,
+        save_manifest,
+        stamp_bundle_sha256,
+    )
+
+    builds = tmp_path / "builds"
+
+    def manifest_for(spec_hash: str) -> BuildManifest:
+        return BuildManifest(
+            range_name="stamped",
+            schema_version="0.3",
+            spec_sha256=spec_hash,
+            built_at=now_iso(),
+            guests=(),
+            verification=VerificationRecord(verified_at=now_iso(), declarations=()),
+        )
+
+    assert not stamp_bundle_sha256(builds, "stamped", "a" * 64, "d1")  # nothing yet
+    save_manifest(manifest_for("a" * 64), builds)
+    assert stamp_bundle_sha256(builds, "stamped", "a" * 64, "d1")
+    loaded = load_manifest(builds, "stamped")
+    assert loaded is not None and loaded.bundle_sha256 == "d1"
+    # a rebuild landed a NEW revision between this render's gate check and its
+    # stamp: the stale stamp must not land
+    save_manifest(manifest_for("b" * 64), builds)
+    assert not stamp_bundle_sha256(builds, "stamped", "a" * 64, "d2")
+    loaded = load_manifest(builds, "stamped")
+    assert loaded is not None
+    assert loaded.spec_sha256 == "b" * 64 and loaded.bundle_sha256 is None

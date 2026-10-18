@@ -947,3 +947,203 @@ def test_incomplete_check_trio_refuses(tmp_path: Path) -> None:
     with pytest.raises(BuildError) as excinfo:
         _validate_checks(challenges, range_dir)
     assert "typo-dir" in str(excinfo.value)
+
+
+def test_failing_reproof_deletes_the_prior_same_spec_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-1 blocking: the deferred save covered first builds only; a rebuild whose checks fail must retract the prior manifest or the gate keeps serving artifacts that just failed their proof."""
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    good = (
+        BehavioralCheckRecord(
+            challenge="demo", check="reference", status="pass", detail="value=1.00"
+        ),
+    )
+    outcomes: list[str] = ["pass", "fail"]
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        if outcomes.pop(0) == "pass":
+            return good
+        raise BuildError("behavioral", "check 'reference' failed: value=0.00")
+
+    fakes = Fakes(["web", "db", "attacker"])
+    first = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert first.manifest_path is not None
+    assert load_manifest(tmp_path / "builds", "buildme") is not None
+    # the check is edited (digest moves, spec hash does not): the rebuild
+    # reuses every guest and the re-proof fails
+    (range_dir / "checks" / "demo" / "reference.sh").write_text(
+        "#!/bin/bash\necho SUBMIT g strengthened\n"
+    )
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            behavioral_fn=behavioral_fn,
+        )
+    assert "the prior manifest was deleted" in str(excinfo.value)
+    assert load_manifest(tmp_path / "builds", "buildme") is None
+
+
+def test_verify_failure_leaves_no_manifest(tmp_path: Path, cache: Path) -> None:
+    """Round-1: the only check of this property was an inert battery grep."""
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.verify import DeclarationResult
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def failing_verify(*args: Any, **kwargs: Any) -> list[DeclarationResult]:
+        raise BuildError("verify", "1 of 1 declarations failed")
+
+    with pytest.raises(BuildError):
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            verify_fn=failing_verify,
+        )
+    assert load_manifest(tmp_path / "builds", "buildme") is None
+
+
+def test_keep_boot_failure_preserves_the_staging_bundle(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-1 blocking: up keeps the range on a kept boot failure, so staging must survive (the running range mounts it and the bundle is the diagnostic)."""
+    from inspect_ranges._runtime.up import UpError
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    staged: list[Path] = []
+
+    def failing_up(bundle: Path, options: UpOptions, **_: Any) -> UpResult:
+        staged.append(bundle)
+        raise UpError("guest-boot", "qemu refused")
+
+    fakes = Fakes(["web", "db", "attacker"])
+    with pytest.raises(UpError):
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache, keep=True),
+            up_fn=failing_up,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert staged and staged[0].exists()
+    # without keep, up tears the range down itself and staging goes too
+    staged.clear()
+    with pytest.raises(UpError):
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=failing_up,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert staged and not staged[0].exists()
+
+
+def test_teardown_failure_preserves_the_staging_bundle(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-1 blocking: 'retry with: inspect-ranges down' is meaningless if the bundle the running range mounts was already destroyed."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    staged: list[Path] = []
+
+    def recording_up(bundle: Path, options: UpOptions, **_: Any) -> UpResult:
+        staged.append(bundle)
+        return fakes.up_fn(bundle, options)
+
+    def failing_down(project: str, **_: Any) -> None:
+        raise RuntimeError("libvirt wedged")
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=recording_up,
+            down_fn=failing_down,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert excinfo.value.stage == "teardown"
+    assert staged and staged[0].exists()
+
+
+def test_checks_dir_without_challenges_yaml_refuses(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-1 blocking: the root-level silent-skip (a misnamed metadata file) must refuse, not mint a manifest whose proof never ran."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    (range_dir / "checks" / "demo").mkdir(parents=True)
+    fakes = Fakes(["web", "db", "attacker"])
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert excinfo.value.stage == "behavioral"
+    assert "challenges.yaml is missing" in str(excinfo.value)
+
+
+def test_keep_bypasses_the_cached_fast_path(tmp_path: Path, cache: Path) -> None:
+    """Round-1: --keep exists to leave a running range, which the no-op cannot provide."""
+    fakes = Fakes(["web", "db", "attacker"])
+    full_build(tmp_path, cache, fakes)
+    again = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, again, keep=True)
+    assert not result.cached and result.kept
+    assert len(again.up_calls) == 1  # it really booted (all guests reused)
+
+
+def test_strip_stage_preserves_message_colons() -> None:
+    """Round-1: the old split-on-first-colon mangled challenge names and doubled guest prefixes."""
+    from inspect_ranges._build.orchestrate import _strip_stage
+
+    plain = BuildError(
+        "behavioral", "challenge 'demo' check 'forged' failed: value=0.00"
+    )
+    assert _strip_stage(plain) == "challenge 'demo' check 'forged' failed: value=0.00"
+    with_guest = BuildError("recipe", "exited 1: tail", guest="web", recipe="acme.web")
+    assert _strip_stage(with_guest) == "exited 1: tail"

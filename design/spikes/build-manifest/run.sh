@@ -86,7 +86,7 @@ if (cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" | tee "$SPIKE/tmp/m3.tx
 else
   bad "M3 incremental rebuild"
 fi
-grep -q "skipped=unchanged" "$SPIKE/tmp/m3.txt" && grep -q "recipe=bm.nginx" "$SPIKE/tmp/m3.txt" \
+grep -q "recipe=bm.nginx  skipped=unchanged" "$SPIKE/tmp/m3.txt" \
   && ok "M4 web's nginx recipe skipped (guest reused from its realized image)" || bad "M4 skip line"
 grep -q "verify    ok  service web/nginx" "$SPIKE/tmp/m3.txt" \
   && ok "M5 nginx verifies on the REUSED guest: captured content survived reboot" || bad "M5 reused-guest verification"
@@ -107,7 +107,9 @@ echo "=== M7 --reverify forces the full pass ==="
 if (cd "$SPIKE/tmp/incr" && "$IRBIN" build --reverify "${FLAGS[@]}" | tee "$SPIKE/tmp/m7.txt"); then
   grep -q "build OK (cached" "$SPIKE/tmp/m7.txt" && bad "M7 reverify must not report cached" || true
   grep -q "verify    ok  service web/nginx" "$SPIKE/tmp/m7.txt" && grep -q "build OK (" "$SPIKE/tmp/m7.txt" \
-    && ok "M7 --reverify boots and re-verifies despite matching keys" || bad "M7 reverify output"
+    && [ "$(grep -c "skipped=unchanged" "$SPIKE/tmp/m7.txt")" -ge 2 ] \
+    && ! grep -q "^capture" "$SPIKE/tmp/m7.txt" \
+    && ok "M7 --reverify boots and re-verifies despite matching keys (recipes skipped, nothing recaptured)" || bad "M7 reverify output"
 else
   bad "M7 reverify build"
 fi

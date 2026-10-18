@@ -35,7 +35,7 @@ from .._runtime.ownership import (
 from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..schema import revalidate_range
 from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
-from .behavioral import checks_declared, checks_digest
+from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
 from .capture import (
     RealizedImageMeta,
     capture_guest,
@@ -174,8 +174,8 @@ def _capture_realized(
     realized_name: str,
     meta: RealizedImageMeta,
 ) -> str:
-    shutdown_guest(cids, guest)
-    wait_shutoff(default_capture_runner, project, guest)
+    diagnosis = shutdown_guest(cids, guest)
+    wait_shutoff(default_capture_runner, project, guest, shutdown_diagnosis=diagnosis)
     return capture_guest(
         default_capture_runner,
         project,
@@ -278,9 +278,21 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
     router_networks = {
         interface.network for router in build.routers for interface in router.interfaces
     }
-    nameserver = ip_address(
-        nameserver_ip if nameserver_ip is not None else default_build_nameserver()
-    )
+    try:
+        nameserver = ip_address(
+            nameserver_ip if nameserver_ip is not None else default_build_nameserver()
+        )
+    except ValueError as error:
+        raise IssueError(
+            [
+                Issue(
+                    code="build-nameserver-invalid",
+                    path=("range", "name"),
+                    message=f"build nameserver {nameserver_ip!r} is not an IP address",
+                    hint="pass --build-nameserver with a literal resolver IP",
+                )
+            ]
+        ) from error
     for network in build.networks:
         if network.name in router_networks or network.mode == "routed":
             continue
@@ -441,11 +453,24 @@ def build_range(
             reference.digest,
             host,
             [(s.recipe, s.vars) for s in steps_by_host.get(host.name, [])],
+            range_name=spec.meta.name,
         )
     if missing:
         raise IssueError(missing)
 
     spec_hash = spec_sha256(spec)
+    if (range_dir / CHECKS_DIR_NAME).is_dir() and not (
+        range_dir / "challenges.yaml"
+    ).is_file():
+        # the root-level silent-skip guard (round-1 review): a checks tree
+        # whose metadata file is missing or misnamed must refuse, not mint a
+        # manifest whose proof never ran
+        raise BuildError(
+            "behavioral",
+            f"{CHECKS_DIR_NAME}/ exists but challenges.yaml is missing; "
+            "behavioral checks declare through both files, so a misnamed "
+            "metadata file would otherwise silently skip the proof",
+        )
     checks = checks_declared(range_dir)
     current_checks_sha = checks_digest(range_dir) if checks else ""
     prior = load_manifest(build_cache, spec.meta.name)
@@ -464,6 +489,9 @@ def build_range(
     if (
         prior is not None
         and not options.reverify
+        and not options.keep
+        # a keep build exists to leave a running range for diagnosis, which
+        # the no-op path cannot provide (round-1 review)
         and manifest_matches_spec(prior, spec_hash)
         and all(host.name in reusable for host in content_hosts)
         and prior.checks_sha256 == current_checks_sha
@@ -544,19 +572,28 @@ def build_range(
         uplink = ensure_uplink if ensure_uplink is not None else _ensure_uplink_network
         uplink(options.uplink_network)
 
-        result = up_fn(
-            staging,
-            UpOptions(
-                project=project,
-                image_cache=image_cache,
-                state_dir=state_dir,
-                readiness_timeout=options.readiness_timeout,
-                keep_on_failure=options.keep,
-                uplink_network=options.uplink_network,
-            ),
-            on_stage=on_stage,
-        )
-        kept = options.keep  # from here the range is running; keep governs staging too
+        try:
+            result = up_fn(
+                staging,
+                UpOptions(
+                    project=project,
+                    image_cache=image_cache,
+                    state_dir=state_dir,
+                    readiness_timeout=options.readiness_timeout,
+                    keep_on_failure=options.keep,
+                    uplink_network=options.uplink_network,
+                ),
+                on_stage=on_stage,
+            )
+        except BaseException:
+            # up disposes the range itself per keep_on_failure; the staging
+            # bundle must survive exactly when the range does (round-1 review:
+            # a kept boot failure is precisely when plan.json matters)
+            kept = options.keep
+            raise
+        # the range is running from here: staging survives (the running range
+        # mounts it) until a teardown actually succeeds or _dispose rules
+        kept = True
 
         cids = {guest.name: guest.cid for guest in result.guests}
         log_dir = project_dir(state_dir, project) / "recipes"
@@ -767,18 +804,20 @@ def build_range(
                 )
             except BuildError as error:
                 tee.log("behavioral", "fail", error=str(error))
+                clause = _retract_unproven(spec.meta.name, spec_hash, build_cache, tee)
                 raise BuildError(
                     error.stage,
-                    f"{_strip_stage(error)} (no manifest was written; the build is unproven)",
+                    f"{_strip_stage(error)} ({clause}; the build is unproven)",
                 ) from error
             except Exception as error:
                 # an infra failure (the -bx boot, evidence plumbing) leaves the
                 # checks unrun, which is just as unproven as a failing check: no
                 # consumer may boot a range whose challenge was never exercised
                 tee.log("behavioral", "fail", error=str(error))
+                clause = _retract_unproven(spec.meta.name, spec_hash, build_cache, tee)
                 raise BuildError(
                     "behavioral",
-                    f"behavioral phase failed: {error} (no manifest was written; the build is unproven)",
+                    f"behavioral phase failed: {error} ({clause}; the build is unproven)",
                 ) from error
             tee.log("behavioral", "ok", checks=len(behavioral_records))
             manifest = manifest.model_copy(
@@ -985,10 +1024,32 @@ def _dispose(
     return "range torn down", False
 
 
+def _retract_unproven(
+    range_name: str, spec_hash: str, build_cache: Path, tee: "_BuildTee"
+) -> str:
+    """A failed behavioral phase must leave nothing consumable (round-1 review).
+
+    On a first build the deferred save means nothing was written. On a rebuild a PRIOR manifest may still match the current spec hash (every guest reused, or a checks-only edit): the gate would keep serving the exact artifacts that just failed their proof, so that manifest is deleted. Returns the clause for the raised error, naming which state held.
+    """
+    prior = load_manifest(build_cache, range_name)
+    if prior is not None and manifest_matches_spec(prior, spec_hash):
+        manifest_path(build_cache, range_name).unlink(missing_ok=True)
+        tee.log(
+            "manifest",
+            "fail",
+            error="prior same-spec manifest deleted: its artifacts failed the current checks",
+        )
+        return "the prior manifest was deleted"
+    return "no manifest was written"
+
+
 def _strip_stage(error: BuildError) -> str:
-    """The message portion of a `BuildError` without its `[stage]`/context prefix (for re-wrapping)."""
+    """The message portion of a `BuildError` without its exact `[stage] guest .. recipe ..:` prefix (for re-wrapping); colons INSIDE the message (challenge names, command detail) are preserved verbatim, which the old split-on-first-colon mangled (round-1 review)."""
     text = str(error)
-    return text.split(": ", 1)[1] if ": " in text else text
+    detail = f" guest {error.guest!r}" if error.guest else ""
+    detail += f" recipe {error.recipe!r}" if error.recipe else ""
+    prefix = f"[{error.stage}]{detail}: " if detail else f"[{error.stage}] "
+    return text[len(prefix) :] if text.startswith(prefix) else text
 
 
 def _settle_network(
@@ -1056,6 +1117,13 @@ def _ensure_uplink_network(name: str) -> None:
             "uplink", f"docker did not answer within 60 s while ensuring {name!r}"
         ) from error
     if create.returncode != 0:
+        # two concurrent first builds can race create; the loser's failure is
+        # benign iff the network now exists (round-1 review)
+        recheck = subprocess.run(
+            ["docker", "network", "inspect", name], capture_output=True, timeout=60
+        )
+        if recheck.returncode == 0:
+            return
         stderr = create.stderr.decode(errors="replace").strip()[-300:]
         raise BuildError(
             "uplink",

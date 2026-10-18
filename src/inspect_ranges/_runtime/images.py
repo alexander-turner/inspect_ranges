@@ -507,7 +507,12 @@ def list_images(
         for path in cache.iterdir()
         if path.is_file()
         and (
-            path.suffix in (".qcow2", ".img", ".iso") or path.name.endswith(".deriving")
+            path.suffix in (".qcow2", ".img", ".iso")
+            or path.name.endswith(".deriving")
+            # a crash mid-capture strands a multi-GB `.capturing` temp that the
+            # next capture of the SAME name would clean, but a post-crash fix
+            # usually changes the build key, so listing must surface it (round-1)
+            or path.name.endswith(".capturing")
         )
         and path.name not in managed_files
     )

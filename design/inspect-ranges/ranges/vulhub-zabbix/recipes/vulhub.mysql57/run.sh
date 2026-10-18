@@ -61,5 +61,13 @@ exec_guest 'cd /opt && wget -nv -t 5 --waitretry=15 --retry-connrefused -O zabbi
 exec_guest 'cd /opt/zabbix-3.0.3/database/mysql && for f in schema.sql images.sql data.sql; do /opt/mysql-dist/bin/mysql -uroot -proot zabbix < "$f"; done'
 
 # the seeded "Zabbix server" host monitors the agent guest; retarget its
-# interface from 127.0.0.1 to the agent so remote commands land there
-exec_guest "/opt/mysql-dist/bin/mysql -uroot -proot zabbix -e \"UPDATE interface SET ip='${agent_ip}', useip=1 WHERE interfaceid=1; UPDATE hosts SET status=0 WHERE host='Zabbix server';\""
+# interface from 127.0.0.1 to the agent so remote commands land there. The
+# agent_ip value expands HOST-side into pushed SQL, never spliced into a
+# guest shell string (the injection-safe pattern from docs/building.qmd)
+cat > /tmp/retarget.sql.$$ <<SQL
+UPDATE interface SET ip='${agent_ip}', useip=1 WHERE interfaceid=1;
+UPDATE hosts SET status=0 WHERE host='Zabbix server';
+SQL
+"$IR_PUSH" /tmp/retarget.sql.$$ /tmp/ir-retarget.sql --mode 644
+rm -f /tmp/retarget.sql.$$
+exec_guest '/opt/mysql-dist/bin/mysql -uroot -proot zabbix < /tmp/ir-retarget.sql && rm -f /tmp/ir-retarget.sql'

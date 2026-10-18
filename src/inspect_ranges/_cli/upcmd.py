@@ -15,6 +15,7 @@ from .._runtime.up import UpError, UpOptions
 from .._runtime.up import up as run_up
 from ..schema import load_range
 from ..types import IssueError
+from .specpath import resolve_spec_path
 
 
 @click.command()
@@ -88,7 +89,7 @@ def up(
             with tempfile.TemporaryDirectory(
                 prefix="ir-bundle-", dir=staging_root
             ) as temp:
-                spec = load_range(from_spec)
+                spec = load_range(resolve_spec_path(from_spec))
                 spec, realized_sections, _ = apply_build_manifest(
                     spec,
                     image_cache=image_cache,
