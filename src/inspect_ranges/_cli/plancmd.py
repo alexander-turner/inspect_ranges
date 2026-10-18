@@ -189,9 +189,14 @@ def render(
     digest = hashlib.sha256(manifest_bytes).hexdigest()
     if consumed is not None:
         # wraps-by-reference: the build manifest records the runtime bundle
-        # rendered from it (the spine's two-manifest decision)
+        # rendered from it (the spine's two-manifest decision); the reload is
+        # stamped only when it is still the revision this render consumed (a
+        # concurrent rebuild for a new spec must not inherit this digest)
         build_manifest = load_manifest(default_build_cache(), consumed.range_name)
-        if build_manifest is not None:
+        if (
+            build_manifest is not None
+            and build_manifest.spec_sha256 == consumed.spec_sha256
+        ):
             save_manifest(
                 build_manifest.model_copy(update={"bundle_sha256": digest}),
                 default_build_cache(),

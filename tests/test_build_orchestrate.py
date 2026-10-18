@@ -665,7 +665,10 @@ def test_manifest_records_the_committed_inputs(tmp_path: Path, cache: Path) -> N
 def declare_checks(range_dir: Path) -> None:
     """Make `checks_declared` true for the fixture range (contents never parsed; the seam is faked)."""
     (range_dir / "challenges.yaml").write_text("challenges: []\n")
-    (range_dir / "checks" / "demo").mkdir(parents=True, exist_ok=True)
+    demo = range_dir / "checks" / "demo"
+    demo.mkdir(parents=True, exist_ok=True)
+    for name in ("reference", "insufficient", "forged"):
+        (demo / f"{name}.sh").write_text("#!/bin/bash\necho SUBMIT g v\n")
 
 
 def test_behavioral_records_land_in_the_manifest(tmp_path: Path, cache: Path) -> None:
@@ -708,7 +711,7 @@ def test_behavioral_records_land_in_the_manifest(tmp_path: Path, cache: Path) ->
     assert manifest.verification.behavioral_checks == records
 
 
-def test_failing_behavioral_check_deletes_the_manifest(
+def test_failing_behavioral_check_leaves_no_manifest(
     tmp_path: Path, cache: Path
 ) -> None:
     from inspect_ranges._build import load_manifest
@@ -737,7 +740,7 @@ def test_failing_behavioral_check_deletes_the_manifest(
             capture_fn=fakes.capture_fn,
             behavioral_fn=behavioral_fn,
         )
-    assert "manifest deleted; the build is unproven" in str(excinfo.value)
+    assert "no manifest was written; the build is unproven" in str(excinfo.value)
     assert load_manifest(tmp_path / "builds", "buildme") is None
 
 
@@ -767,7 +770,7 @@ def test_keep_skips_the_behavioral_phase(tmp_path: Path, cache: Path) -> None:
     assert result.kept
 
 
-def test_behavioral_infra_failure_also_deletes_the_manifest(
+def test_behavioral_infra_failure_also_leaves_no_manifest(
     tmp_path: Path, cache: Path
 ) -> None:
     from inspect_ranges._build import load_manifest
@@ -795,5 +798,152 @@ def test_behavioral_infra_failure_also_deletes_the_manifest(
             behavioral_fn=behavioral_fn,
         )
     assert excinfo.value.stage == "behavioral"
-    assert "manifest deleted; the build is unproven" in str(excinfo.value)
+    assert "no manifest was written; the build is unproven" in str(excinfo.value)
     assert load_manifest(tmp_path / "builds", "buildme") is None
+
+
+def test_teardown_failure_with_checks_declared_leaves_no_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Slice 6 review finding 1a: the checks never ran, so nothing consumable may exist."""
+    from inspect_ranges._build import load_manifest
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def failing_down(project: str, **_: Any) -> None:
+        raise RuntimeError("libvirt wedged")
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        raise AssertionError(
+            "the behavioral phase must not run after a failed teardown"
+        )
+
+    with pytest.raises(BuildError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=failing_down,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+            behavioral_fn=behavioral_fn,
+        )
+    assert excinfo.value.stage == "teardown"
+    assert load_manifest(tmp_path / "builds", "buildme") is None
+
+
+def test_check_edit_invalidates_the_cached_fast_path(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Slice 6 review finding 2: proof tools are build inputs; a new or edited check re-runs the pass."""
+    from inspect_ranges._build.manifest import BehavioralCheckRecord
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    declare_checks(range_dir)
+    records = (
+        BehavioralCheckRecord(
+            challenge="demo", check="reference", status="pass", detail="value=1.00"
+        ),
+    )
+    calls: list[str] = []
+
+    def behavioral_fn(
+        spec: RangeSpec, range_dir: Path, *, project: str, **_: Any
+    ) -> tuple[BehavioralCheckRecord, ...]:
+        calls.append(project)
+        return records
+
+    fakes = Fakes(["web", "db", "attacker"])
+    first = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert not first.cached and calls == [first.project]
+    # unchanged inputs: the no-op fast path, no behavioral re-run
+    again = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert again.cached and len(calls) == 1
+    # an edited check script moves the checks digest: not cached, guests
+    # reused, the behavioral phase re-proves
+    (range_dir / "checks" / "demo" / "reference.sh").write_text(
+        "#!/bin/bash\necho SUBMIT g other\n"
+    )
+    edited = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        behavioral_fn=behavioral_fn,
+    )
+    assert not edited.cached and len(calls) == 2
+
+
+def test_incomplete_check_trio_refuses(tmp_path: Path) -> None:
+    """Slice 6 review finding 3: proof that silently does not run must refuse instead."""
+    import yaml as yaml_module
+    from inspect_ranges._build.behavioral import _validate_checks
+
+    range_dir = tmp_path / "range"
+    (range_dir / "checks" / "demo").mkdir(parents=True)
+    (range_dir / "challenges.yaml").write_text(
+        yaml_module.safe_dump(
+            {
+                "challenges": [
+                    {
+                        "id": "demo",
+                        "prompt": "p",
+                        "goals": [
+                            {
+                                "id": "g",
+                                "type": "execute",
+                                "host": "web",
+                                "service_user": "svc",
+                                "token_path": "/tmp/t",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    from inspect_ranges._build.behavioral import load_challenges
+
+    challenges = load_challenges(range_dir)
+    for name in ("reference", "insufficient"):
+        (range_dir / "checks" / "demo" / f"{name}.sh").write_text("#!/bin/bash\n")
+    with pytest.raises(BuildError) as excinfo:
+        _validate_checks(challenges, range_dir)
+    assert "forged.sh" in str(excinfo.value)
+    (range_dir / "checks" / "demo" / "forged.sh").write_text("#!/bin/bash\n")
+    _validate_checks(challenges, range_dir)  # complete trio passes
+    (range_dir / "checks" / "typo-dir").mkdir()
+    with pytest.raises(BuildError) as excinfo:
+        _validate_checks(challenges, range_dir)
+    assert "typo-dir" in str(excinfo.value)

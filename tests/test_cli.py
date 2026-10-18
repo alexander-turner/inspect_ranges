@@ -38,8 +38,11 @@ def test_validate_unreadable_path_is_a_clean_error(tmp_path: Path) -> None:
     assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
-def test_spec_verbs_accept_a_range_directory(tmp_path: Path) -> None:
+def test_spec_verbs_accept_a_range_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A directory argument means its range.yaml (Journey A); one without range.yaml is a usage error."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
     range_dir = Path(EXAMPLE).parent
     ok = CliRunner().invoke(ranges, ["validate", str(range_dir)])
     assert ok.exit_code == 0 and "vulhub-zabbix" in ok.output
@@ -87,8 +90,11 @@ def test_plan_json_contract(tmp_path: Path) -> None:
     assert plan["totals"]["guests"] == len(plan["guests"])
 
 
-def test_plan_gates_migrated_guest_content() -> None:
+def test_plan_gates_migrated_guest_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The build-aware gate (slice 6): unbuilt content refuses range-not-built, pointing at build."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
     result = CliRunner().invoke(ranges, ["plan", EXAMPLE])
     assert result.exit_code == 1
     assert "declares guest content but" in result.output
@@ -111,8 +117,11 @@ def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
     assert "plan.json" in manifest["files"]
 
 
-def test_plan_refuses_windows_examples() -> None:
+def test_plan_refuses_windows_examples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Content-carrying Windows examples hit the build-aware gate first (build itself still refuses Windows render; unit-covered in test_plan.py)."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
     goad = str(
         Path(__file__).parent.parent
         / "design/inspect-ranges/ranges/goad-light/range.yaml"
