@@ -405,6 +405,15 @@ class OciLayout:
             artifact_type=manifest.artifact_type,
         )
 
+    def put_manifest_bytes(self, data: bytes, media_type: str) -> Descriptor:
+        """Store manifest bytes VERBATIM (the transfer path: foreign manifests must keep their digests)."""
+        digest = self.put_blob_bytes(data)
+        return Descriptor(media_type=media_type, digest=digest, size=len(data))
+
+    def manifest_bytes(self, descriptor: Descriptor) -> bytes:
+        """A manifest's verified RAW bytes (the transfer path reads these, never a re-serialization)."""
+        return self.read_blob(descriptor)
+
     def manifest(self, descriptor: Descriptor) -> OciManifest:
         """A manifest's verified, parsed content.
 
@@ -429,18 +438,23 @@ class OciLayout:
 
     # -- the index as a store surface (shared with registries) ---------------------
 
-    def put_index(self, name: str, index: OciIndex) -> Descriptor:
-        """Store an index and name it `name`; returns its descriptor (a layout stores it as a blob plus an index.json ref; a registry tags it)."""
-        data = index.canonical_bytes()
+    def put_index_bytes(self, name: str, data: bytes) -> Descriptor:
+        """Store index bytes VERBATIM and name them `name` (a layout stores a blob plus an index.json ref; a registry tags)."""
         digest = self.put_blob_bytes(data)
         descriptor = Descriptor(
-            media_type=index.media_type,
-            digest=digest,
-            size=len(data),
-            annotations=dict(index.annotations or {}) or None,
+            media_type=MEDIA_TYPE_INDEX, digest=digest, size=len(data)
         )
         self.set_ref(name, descriptor)
         return descriptor
+
+    def put_index(self, name: str, index: OciIndex) -> Descriptor:
+        """Store an index and name it `name`; returns its descriptor."""
+        descriptor = self.put_index_bytes(name, index.canonical_bytes())
+        annotated = descriptor.model_copy(
+            update={"annotations": dict(index.annotations or {}) or None}
+        )
+        self.set_ref(name, annotated)
+        return annotated
 
     def read_index(self, descriptor: Descriptor) -> OciIndex:
         """A named or digest-addressed index's verified, parsed content.
@@ -549,11 +563,17 @@ class ContentStore(Protocol):
 
     def put_manifest(self, manifest: OciManifest) -> Descriptor: ...
 
+    def put_manifest_bytes(self, data: bytes, media_type: str) -> Descriptor: ...
+
     def manifest(self, descriptor: Descriptor) -> OciManifest: ...
+
+    def manifest_bytes(self, descriptor: Descriptor) -> bytes: ...
 
     def ensure_empty_config(self) -> Descriptor: ...
 
     def put_index(self, name: str, index: OciIndex) -> Descriptor: ...
+
+    def put_index_bytes(self, name: str, data: bytes) -> Descriptor: ...
 
     def read_index(self, descriptor: Descriptor) -> OciIndex: ...
 
