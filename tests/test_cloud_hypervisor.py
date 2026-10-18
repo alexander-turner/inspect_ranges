@@ -110,8 +110,33 @@ def test_render_without_cloud_hypervisor_guests_mounts_no_vsock_dir(
     cache: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "bundle"
-    render(two_segment_spec(), cache, out)
+    # the attacker box defaults to cloud-hypervisor, so pin it back to qemu for
+    # an all-qemu range
+    spec = two_segment_spec()
+    spec.attacker.vmm = "qemu"
+    render(spec, cache, out)
     assert "CH_VSOCK_DIR" not in (out / "compose.yaml").read_text()
+
+
+def test_dedicated_attacker_defaults_to_cloud_hypervisor(cache: Path) -> None:
+    # the agent box defaults to cloud-hypervisor while hosts and routers stay qemu
+    plan = resolve_plan(
+        two_segment_spec(), PlanOptions(image_cache=cache, cid_base=3000)
+    )
+    vmm_by_name = {guest.name: guest.vmm for guest in plan.guests}
+    assert vmm_by_name["attacker"] == "cloud-hypervisor"
+    assert vmm_by_name["web"] == "qemu"  # host
+    assert vmm_by_name["router"] == "qemu"  # router
+
+
+def test_declared_attacker_vmm_wins_over_the_cloud_hypervisor_default(
+    cache: Path,
+) -> None:
+    spec = two_segment_spec()
+    spec.attacker.vmm = "qemu"
+    plan = resolve_plan(spec, PlanOptions(image_cache=cache, cid_base=3000))
+    attacker = next(guest for guest in plan.guests if guest.name == "attacker")
+    assert attacker.vmm == "qemu"
 
 
 def test_boot_script_starts_cloud_hypervisor_unprivileged(
@@ -146,17 +171,20 @@ def test_boot_script_starts_cloud_hypervisor_unprivileged(
 
 
 def test_cloud_hypervisor_guests_refuse_a_pinned_cpu_model(cache: Path) -> None:
-    # CH has no CPU model setting: a pinned model would silently not apply
+    # CH has no CPU model setting: a pinned model would silently not apply. The
+    # declared-CH host and the default-CH attacker box both refuse.
     with pytest.raises(IssueError) as refused:
         resolve_plan(
             ch_spec("web"), PlanOptions(image_cache=cache, cpu_model="Skylake-Server")
         )
     assert [(issue.code, issue.path) for issue in refused.value.issues] == [
-        ("cloud-hypervisor-cpu-model", ("hosts", 0, "vmm"))
+        ("cloud-hypervisor-cpu-model", ("hosts", 0, "vmm")),
+        ("cloud-hypervisor-cpu-model", ("attacker", "vmm")),
     ]
-    resolve_plan(
-        two_segment_spec(), PlanOptions(image_cache=cache, cpu_model="Skylake-Server")
-    )
+    # an all-qemu range (attacker pinned back to qemu) accepts a pinned model
+    qemu_spec = two_segment_spec()
+    qemu_spec.attacker.vmm = "qemu"
+    resolve_plan(qemu_spec, PlanOptions(image_cache=cache, cpu_model="Skylake-Server"))
 
 
 @pytest.mark.parametrize(
