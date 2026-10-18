@@ -103,8 +103,11 @@ class Segment:
         self.generation += 1
         base = os.path.join(self.dir, "g%d.pcap" % self.generation)
         stderr = open(os.path.join(self.dir, "stderr.log"), "ab")
+        # -U: packet-buffered output, so the active chunk holds every packet
+        # captured so far (readable mid-run, and a killed tcpdump loses no
+        # buffered tail)
         self.proc = subprocess.Popen(
-            [TCPDUMP, "-Z", "root", "-B", "8192", "-s", "0",
+            [TCPDUMP, "-Z", "root", "-B", "8192", "-s", "0", "-U",
              "-i", self.bridge, "-C", str(CHUNK_MB), "-w", base],
             stdout=subprocess.DEVNULL, stderr=stderr,
         )
