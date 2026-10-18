@@ -93,7 +93,7 @@ SNOOP=$(docker exec "$RC" ip -d link show br-lab 2>/dev/null | grep -o 'mcast_sn
 [[ "$V6" == "0" && "$SNOOP" == "mcast_snooping 0" ]] \
   && ok "Z7c segment silence: the lab bridge has no IPv6 address and snooping is off (PR #9 live)" \
   || bad "Z7c segment silence (inet6=$V6 snoop=$SNOOP)"
-FRONT=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --guest attacker --user root exec \
+FRONT=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
   "wget -q -O- http://web/index.php 2>/dev/null | grep -io 'zabbix' | head -1" || true)
 [[ "$FRONT" == *[Zz]abbix* ]] && ok "Z8 the frontend serves to the attacker over the range network" || bad "Z8 frontend (got: $FRONT)"
 BUILD_NS=$(cd "$ROOT" && uv run python -c "from inspect_ranges._build.orchestrate import default_build_nameserver; print(default_build_nameserver())")
