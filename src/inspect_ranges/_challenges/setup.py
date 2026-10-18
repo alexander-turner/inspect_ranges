@@ -210,8 +210,12 @@ async def run_setup(
             # (shielded), not leave the half-planted state (review finding)
             await _unwind_shielded(oracle, planted)
             if isinstance(error, Exception):
+                # the cause rides the message: callers that surface only str()
+                # (stage logs, build refusals) must still name the failure;
+                # plant values never appear in exception text (scrubbed above)
                 raise RuntimeError(
-                    f"challenge {challenge.id!r} setup failed at goal {goal.id!r}"
+                    f"challenge {challenge.id!r} setup failed at goal "
+                    f"{goal.id!r}: {type(error).__name__}: {error}"
                 ) from error
             raise
         planted.extend(keys)

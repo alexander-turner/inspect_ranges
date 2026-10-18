@@ -35,6 +35,7 @@ from .._runtime.ownership import (
 from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..schema import revalidate_range
 from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
+from .behavioral import checks_declared
 from .capture import (
     RealizedImageMeta,
     capture_guest,
@@ -45,6 +46,7 @@ from .capture import (
 from .errors import BuildError
 from .manifest import (
     BaseImageRecord,
+    BehavioralCheckRecord,
     BuildManifest,
     GuestRecord,
     RecipeRecord,
@@ -372,6 +374,7 @@ def build_range(
     settle_fn: SettleFn | None = None,
     verify_fn: VerifyFn = verify_range,
     capture_fn: CaptureFn | None = None,
+    behavioral_fn: "BehavioralFn | None" = None,
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
 
@@ -617,6 +620,7 @@ def build_range(
             tee.log("verified", "ok", declarations=len(verifications))
 
         saved_manifest: Path | None = None
+        manifest: BuildManifest | None = None
         verified_at: str | None = None
         if options.keep:
             tee.log("capture", "ok", skipped="--keep (diagnostic build; no manifest)")
@@ -722,6 +726,57 @@ def build_range(
                 ) from error
             tee.log("teardown", "ok", after="success")
             kept = False
+
+        if (
+            not options.keep
+            and saved_manifest is not None
+            and checks_declared(range_dir)
+        ):
+            # behavioral checks run against the CAPTURED artifacts: the exact
+            # images samples boot, after the build range is down (slice 6)
+            behavioral = (
+                behavioral_fn if behavioral_fn is not None else _run_behavioral_phase
+            )
+            try:
+                behavioral_records = behavioral(
+                    spec,
+                    range_dir,
+                    image_cache=image_cache,
+                    build_cache=build_cache,
+                    state_dir=state_dir,
+                    options=options,
+                    project=project,
+                    stage_log=tee,
+                    up_fn=up_fn,
+                    down_fn=down_fn,
+                )
+            except BuildError as error:
+                saved_manifest.unlink(missing_ok=True)
+                tee.log("behavioral", "fail", error=str(error))
+                raise BuildError(
+                    error.stage,
+                    f"{_strip_stage(error)} (manifest deleted; the build is unproven)",
+                ) from error
+            except Exception as error:
+                # an infra failure (the -bx boot, evidence plumbing) leaves the
+                # checks unrun, which is just as unproven as a failing check: no
+                # consumer may boot a range whose challenge was never exercised
+                saved_manifest.unlink(missing_ok=True)
+                tee.log("behavioral", "fail", error=str(error))
+                raise BuildError(
+                    "behavioral",
+                    f"behavioral phase failed: {error} (manifest deleted; the build is unproven)",
+                ) from error
+            assert manifest is not None  # saved_manifest set iff manifest built
+            manifest = manifest.model_copy(
+                update={
+                    "verification": manifest.verification.model_copy(
+                        update={"behavioral_checks": behavioral_records}
+                    )
+                }
+            )
+            saved_manifest = save_manifest(manifest, build_cache)
+            tee.log("behavioral", "ok", checks=len(behavioral_records))
     finally:
         if not kept:
             shutil.rmtree(staging, ignore_errors=True)
@@ -739,6 +794,97 @@ def build_range(
         manifest_path=saved_manifest,
         verified_at=verified_at,
     )
+
+
+class BehavioralFn(Protocol):
+    """The behavioral-check seam: boot the captured artifacts and run the declared checks."""
+
+    def __call__(
+        self,
+        spec: RangeSpec,
+        range_dir: Path,
+        *,
+        image_cache: Path,
+        build_cache: Path,
+        state_dir: Path,
+        options: "BuildOptions",
+        project: str,
+        stage_log: StageSink,
+        up_fn: UpFn,
+        down_fn: DownFn,
+    ) -> tuple[BehavioralCheckRecord, ...]: ...
+
+
+def _run_behavioral_phase(
+    spec: RangeSpec,
+    range_dir: Path,
+    *,
+    image_cache: Path,
+    build_cache: Path,
+    state_dir: Path,
+    options: "BuildOptions",
+    project: str,
+    stage_log: StageSink,
+    up_fn: UpFn,
+    down_fn: DownFn,
+) -> tuple[BehavioralCheckRecord, ...]:
+    """Boot the just-captured realized artifacts (the exact things samples boot) and run the checks against them; exploit debris dirties only this boot's overlays."""
+    from .behavioral import run_behavioral_checks
+    from .manifest import apply_build_manifest
+
+    swapped, sections, _ = apply_build_manifest(
+        spec, image_cache=image_cache, build_cache=build_cache
+    )
+    staging_root = state_dir.parent / "staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=staging_root, prefix=f"{project}-bx-"))
+    # mkdtemp creates 0700; the capture sidecar runs with cap_drop ALL (no
+    # CAP_DAC_OVERRIDE), so container root cannot traverse a 0700 bundle mount
+    staging.chmod(0o755)
+    bx_project = f"{project}-bx"
+    try:
+        plan = render_bundle(
+            swapped,
+            staging,
+            PlanOptions(
+                image_cache=image_cache,
+                cid_base=options.cid_base,
+                realized_sections=sections,
+                evidence_capture=True,
+            ),
+        )
+        result = up_fn(
+            staging,
+            UpOptions(
+                project=bx_project,
+                image_cache=image_cache,
+                state_dir=state_dir,
+                readiness_timeout=options.readiness_timeout,
+                keep_on_failure=False,
+            ),
+            on_stage=None,
+        )
+        cids = {guest.name: guest.cid for guest in result.guests}
+        try:
+            return asyncio.run(
+                run_behavioral_checks(
+                    spec,
+                    plan,
+                    range_dir,
+                    project=bx_project,
+                    bundle=staging,
+                    cids=cids,
+                    evidence_dir=project_dir(state_dir, bx_project) / "evidence",
+                    stage_log=stage_log,
+                )
+            )
+        finally:
+            try:
+                down_fn(bx_project, state_dir=state_dir, keep_state=True)
+            except Exception as error:  # the primary diagnosis stays primary
+                stage_log.log("teardown", "fail", error=str(error), project=bx_project)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:
