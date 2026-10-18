@@ -106,21 +106,38 @@ class SampleHandle:
 
 
 def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
-    """The implicit resolve-verify-fetch at init (Journey B): once per distinct sandbox config, before the eval UI comes up, with docker-pull-shaped progress; the warm path costs one spec hash and zero network. Failures are coded refusals that abort the run before any sample starts."""
+    """The implicit resolve-verify-fetch at init (Journey B): once per distinct sandbox config, before the eval UI comes up, with docker-pull-shaped progress; the warm path costs one spec hash plus artifact-presence checks and zero network. Failures surface as inspect's clean prerequisite refusals (the coded message, never a traceback) and abort the run before any sample starts."""
     from .._build.recipes import default_recipe_cache
+    from .._dist.errors import DistError
     from .._dist.progress import TransferDisplay
     from .._dist.resolve import ensure_build_available
 
     display = TransferDisplay()
-    report = ensure_build_available(
-        spec,
-        image_cache=image_cache,
-        build_cache=default_build_cache(),
-        recipe_cache=default_recipe_cache(),
-        progress=display,
-    )
+    try:
+        report = ensure_build_available(
+            spec,
+            image_cache=image_cache,
+            build_cache=default_build_cache(),
+            recipe_cache=default_recipe_cache(),
+            progress=display,
+        )
+    except DistError as error:
+        display.close()
+        raise _prerequisite(str(error)) from error
     if report is not None:
         display.final(f"pull OK   {spec.meta.name}@{report.root} ({report.location})")
+
+
+def _prerequisite(message: str) -> Exception:
+    """Inspect renders `PrerequisiteError` as the bare message (the docker provider's init precedent); the private-API pin is isolated with a fallback like the repo's other inspect pins."""
+    try:
+        from inspect_ai._util.error import PrerequisiteError
+
+        return PrerequisiteError(message)
+    except ImportError:  # the pin's fallback: the coded error still carries it all
+        from .._dist.errors import DistError
+
+        return DistError("init", message)
 
 
 class ProviderRuntime:

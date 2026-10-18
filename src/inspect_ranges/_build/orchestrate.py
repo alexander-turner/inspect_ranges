@@ -1232,10 +1232,20 @@ def _prove_realized_boot(
 
 def _fetch_image_tier(name: str, image_cache: Path) -> "ImageRef | None":
     """Try the registry search path for a bare image name; `None` only for a clean not-published miss. Integrity, auth, and reachability failures PROPAGATE (round-3 B3): a corruptly published or auth-denied chain must refuse loudly, never degrade into "not published"."""
-    from .._dist.location import registry_locations
-    from .._dist.resolve import pull_image
+    import os as _os
 
-    pulled = pull_image(name, registry_locations(), image_cache=image_cache)
+    from .._dist.location import registry_locations
+    from .._dist.progress import TransferDisplay
+    from .._dist.resolve import NEVER_PULL_ENV, pull_image
+
+    if _os.environ.get(NEVER_PULL_ENV):
+        return None  # pinned hosts skip the implicit tier; the refusal's hint names the pull
+    pulled = pull_image(
+        name,
+        registry_locations(),
+        image_cache=image_cache,
+        progress=TransferDisplay(),
+    )
     if pulled is None:
         return None
     return resolve_image_reference(name, image_cache)

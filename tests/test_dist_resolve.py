@@ -509,3 +509,81 @@ def test_ensure_build_available_warm_cold_and_never_pull(
         )
         is None
     )
+
+
+class FakeTty:
+    def __init__(self) -> None:
+        self.buffer = ""
+
+    def write(self, text: str) -> None:
+        self.buffer += text
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return True
+
+
+def test_transfer_display_tty_shape() -> None:
+    """Round-4 N6: the TTY renderer redraws in place, prints Already exists and Complete on their own lines, and close() never leaves a half-drawn bar."""
+    from inspect_ranges._dist.progress import TransferDisplay
+
+    out = FakeTty()
+    display = TransferDisplay(out=out)  # type: ignore[arg-type]
+    digest = "sha256:" + "ab" * 32
+    display(digest, "downloading", 512, 1024)
+    display(digest, "downloading", 1024, 1024)
+    assert out.buffer.count("\r") == 2 and "Downloading" in out.buffer
+    display(digest, "done", 1024, 1024)
+    assert out.buffer.endswith("abababababab: Complete\n")
+    display("sha256:" + "cd" * 32, "exists", 0, 0)
+    assert out.buffer.endswith("cdcdcdcdcdcd: Already exists\n")
+    # a half-drawn line closes cleanly on failure paths
+    display("sha256:" + "ef" * 32, "downloading", 1, 2)
+    display.close()
+    assert out.buffer.endswith("\n")
+    display.final("pull OK   r@sha256:feed")
+    assert out.buffer.endswith("pull OK   r@sha256:feed\n")
+
+
+def test_warm_path_heals_pruned_artifacts(tmp_path: Path) -> None:
+    """Round-4 N2: a matching manifest whose artifacts were pruned falls through to the pull (seamless healing), never a range-not-built dead end."""
+    from inspect_ranges._build.manifest import load_manifest
+    from inspect_ranges._dist.resolve import ensure_build_available
+
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "mirror"))
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    images, builds, recipes = fresh_dirs(tmp_path)
+    import os as os_module
+
+    os_module.environ[REGISTRY_ENV] = str(tmp_path / "mirror")
+    try:
+        first = ensure_build_available(
+            spec,  # type: ignore[arg-type]
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+        assert first is not None
+        # prune the realized image; the manifest still matches the spec
+        (images / fixture.realized_file).unlink()
+        healed = ensure_build_available(
+            spec,  # type: ignore[arg-type]
+            image_cache=images,
+            build_cache=builds,
+            recipe_cache=recipes,
+        )
+        assert healed is not None
+        assert (images / fixture.realized_file).is_file()
+        assert load_manifest(builds, "distfix") is not None
+    finally:
+        os_module.environ.pop(REGISTRY_ENV, None)
