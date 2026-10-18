@@ -39,9 +39,27 @@ def _caches(
     default=None,
     help="Destination location (registry or OCI-layout directory). Default: the first configured registry (INSPECT_RANGES_REGISTRY). Pushing to the public org is the project publisher's job, not a user move.",
 )
-@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
-@click.option("--build-cache", type=click.Path(path_type=Path), default=None)
-@click.option("--recipe-cache", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache holding the build's artifacts.",
+)
+@click.option(
+    "--build-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/builds (or INSPECT_RANGES_BUILD_CACHE)",
+    help="Builds cache holding the manifest to publish.",
+)
+@click.option(
+    "--recipe-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/recipes (or INSPECT_RANGES_RECIPE_CACHE)",
+    help="Recipe cache for resolving the manifest's recipe bundles.",
+)
 def push(
     spec: Path | None,
     to_location: str | None,
@@ -115,9 +133,27 @@ def push(
     default=None,
     help="Location override; default is the configured search path (INSPECT_RANGES_REGISTRY, first match wins).",
 )
-@click.option("--image-cache", type=click.Path(path_type=Path), default=None)
-@click.option("--build-cache", type=click.Path(path_type=Path), default=None)
-@click.option("--recipe-cache", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache artifacts materialize into.",
+)
+@click.option(
+    "--build-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/builds (or INSPECT_RANGES_BUILD_CACHE)",
+    help="Builds cache the pulled manifest lands in.",
+)
+@click.option(
+    "--recipe-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/recipes (or INSPECT_RANGES_RECIPE_CACHE)",
+    help="Recipe cache pulled bundles extract into.",
+)
 def pull(
     target: str | None,
     pin: str | None,
@@ -133,6 +169,10 @@ def pull(
         locations = registry_locations(from_location)
         pinned = _parse_pinned(target)
         if pinned is not None:
+            if pin is not None:
+                raise click.UsageError(
+                    "pass EITHER the name@sha256 form OR --pin, not both"
+                )
             name, digest = pinned
             report = pull_pinned(
                 name,
@@ -147,6 +187,13 @@ def pull(
             click.echo(f"resolve   {name}@{report.root} ({report.location})")
             _echo_fetch(report)
             return
+        if target is not None and "@sha256:" in target:
+            # pin intent is unambiguous; a malformed pin must not fall through
+            # to spec-path semantics with a misleading remedy (round-2 N8)
+            raise click.ClickException(
+                f"[malformed-pin] {target!r} is not a valid name@sha256 form "
+                "(lowercase name, full 64-hex digest)"
+            )
         spec_path = resolve_spec_path(Path(target) if target else None)
         validated = load_range(spec_path)
         report = pull_range(
@@ -201,7 +248,7 @@ def mirror(
     from_location: str,
     to_location: str,
 ) -> None:
-    """Mirror between locations: bare (whole source, the seed/sync move), a NAME, a `name@sha256:` pin, or a spec path/directory (the cross-group move: the local range.yaml selects the source build exactly)."""
+    """Mirror between locations: bare (whole source, the seed/sync move), a NAME, a `name@sha256:` pin, or a spec path (the cross-group move: the local range.yaml selects the source build exactly). A spec target must LOOK like a path (`.`, `./dir`, `/abs`, or `*.yaml`); a bare word is always a name, never a local directory, so dispatch is identical in every working directory."""
     from .._dist.mirror import mirror_names, mirror_one, source_names
 
     display = TransferDisplay()

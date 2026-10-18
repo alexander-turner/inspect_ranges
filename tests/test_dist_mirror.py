@@ -230,3 +230,55 @@ def test_explicit_root_never_regresses_latest(tmp_path: Path) -> None:
     newest = destination.store_for("distfix").ref("distfix").digest
     mirror_one("distfix", origin, destination, root=old_root)
     assert destination.store_for("distfix").ref("distfix").digest == newest
+
+
+def test_prune_delete_pass_routing(tmp_path: Path) -> None:
+    """Phase round-2 B1: provenance sidecars are chain victims (they live or die with the fresh scan), and realized victims re-check fresh liveness."""
+    from inspect_ranges._cli.imagescmd import prune_delete_pass
+
+    golden = tmp_path / "g.qcow2"
+    sidecar = tmp_path / "g.json"
+    realized = tmp_path / "r-web-abc.qcow2"
+    realized_sidecar = tmp_path / "r-web-abc.realized.json"
+    for path in (golden, sidecar, realized, realized_sidecar):
+        path.write_bytes(b"x")
+    victims = [
+        (golden, 1, "unreferenced golden"),
+        (sidecar, 1, "its provenance sidecar"),
+        (realized, 1, "superseded realized image"),
+        (realized_sidecar, 1, "its sidecar"),
+    ]
+    # the world moved: the golden became referenced (not in `still`) and the
+    # realized image's manifest landed (fresh_live) between scan and delete
+    deleted = prune_delete_pass(victims, still=set(), fresh_live={"r-web-abc.qcow2"})
+    assert deleted == set()
+    assert golden.exists() and sidecar.exists()
+    assert realized.exists() and realized_sidecar.exists()
+    # nothing moved: everything goes, the provenance sidecar WITH its golden
+    deleted = prune_delete_pass(victims, still={golden, sidecar}, fresh_live=set())
+    assert deleted == {golden, sidecar, realized, realized_sidecar}
+
+
+def test_push_refuses_unpublishable_names(tmp_path: Path) -> None:
+    """Phase round-2 N2: a name outside the cache grammar fails at PUBLISH with the named value, not at every consumer."""
+    from inspect_ranges._dist import OciLayout, push_build
+
+    fixture = Fixture(tmp_path)
+    bad = fixture.manifest.model_copy(
+        update={
+            "guests": (
+                fixture.manifest.guests[0].model_copy(
+                    update={"realized_file": "evil *glob*.qcow2"}
+                ),
+            )
+        }
+    )
+    layout = OciLayout(tmp_path / "layout").ensure()
+    with pytest.raises(DistError, match="not a cache file name"):
+        push_build(
+            bad,
+            layout,
+            image_cache=fixture.image_cache,
+            build_cache=fixture.build_cache,
+            range_dir=fixture.range_dir,
+        )

@@ -495,7 +495,7 @@ def swap_realized_spec(
         if golden_digest != record.golden_digest:
             raise refuse(
                 f"the golden image {record.golden_reference!r} backing guest {host.name!r} changed since the build",
-                "the realized overlay would boot over a composition that was never verified; rebuild",
+                "the realized overlay would boot over a composition that was never verified; rebuild, or finish/revert the golden's move (an interrupted images refresh re-runs; a deliberate one wants a rebuild against the new golden)",
             )
         realized = image_cache / record.realized_file
         if not realized.is_file():

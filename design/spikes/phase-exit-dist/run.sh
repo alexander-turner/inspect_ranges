@@ -1,8 +1,10 @@
 #!/bin/bash
 # distribution-v1 PHASE EXIT: the Journey B transcripts, command for command,
-# on the real vulhub-zabbix range. The public org's role is played by local
-# registries and the private hub test repo per the plan (canonical publishes
-# are catalog-phase work). Sessions: publishing (push), consuming connected
+# on the real vulhub-zabbix range. The public org's role is played by LOCAL
+# registries here; the real-hub half of the exit (production auth, presigned
+# redirects, rate limits) is discharged by the separate recorded dist-hub
+# spike, so the exit is a composite proof (canonical publishes are
+# catalog-phase work). Sessions: publishing (push), consuming connected
 # (pull + a real inspect eval solving the pulled range on a machine that
 # built nothing, incl. the edited-spec refusal), mirroring (whole location,
 # and a single build to a directory for the air gap), consuming a range built
