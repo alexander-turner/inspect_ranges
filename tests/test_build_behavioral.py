@@ -1,6 +1,7 @@
 """The behavioral runner's own logic (SUBMIT parsing, trio expectations), no VMs (round-1 review: the enforcement of the trio contract had zero unit coverage and two vacuous-pass shapes hid in it)."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -140,13 +141,12 @@ def test_reference_requires_corroborated_beacon_goals(
     assert "uncorroborated=execute-web" in failing.detail
 
 
-def test_conformance_plan_resolves_the_section6_targets() -> None:
-    """Issue #6: the pure resolution picks a shared-segment defender, the attacker's addresses, the reserved hypervisor endpoints with their allowed ports, and the silent candidates."""
-    from inspect_ranges._build.behavioral import conformance_plan
-    from inspect_ranges._compiler import resolve_plan
+def _section6_spec() -> Any:
+    """A dedicated attacker multi-homed on `lab` (shared with `web`, range-served DNS) and `mgmt` (attacker-only, no reservation)."""
     from inspect_ranges.types import (
         Attacker,
         DnsConfig,
+        DnsRecord,
         Host,
         Interface,
         Network,
@@ -155,15 +155,16 @@ def test_conformance_plan_resolves_the_section6_targets() -> None:
         RangeSpec,
     )
 
-    spec = RangeSpec(
+    return RangeSpec(
         meta=RangeMeta(name="conf", description="conformance targets"),
         networks=[
             Network(
                 name="lab",
                 cidr="10.44.0.0/24",
                 mode="isolated",
-                dns=DnsConfig(nameservers=["10.44.0.2"]),
-            )
+                dns=DnsConfig(records=[DnsRecord(name="web")]),
+            ),
+            Network(name="mgmt", cidr="10.45.0.0/24", mode="isolated"),
         ],
         hosts=[
             Host(
@@ -174,19 +175,156 @@ def test_conformance_plan_resolves_the_section6_targets() -> None:
             )
         ],
         attacker=Attacker(
-            image="tiny-golden", interfaces=[Interface(network="lab")], entry="external"
+            image="tiny-golden",
+            interfaces=[
+                Interface(network="lab"),
+                Interface(network="mgmt", ip="10.45.0.9"),
+            ],
+            entry="external",
         ),
     )
+
+
+def test_conformance_plan_resolves_the_section6_targets() -> None:
+    """Issue #6: the pure resolution picks a shared-segment defender, the attacker's SHARED-SEGMENT addresses only (round-3 B2: a non-shared address would only measure the segment's drop policy), the reserved hypervisor endpoints with their allowed ports, and the silent candidates."""
+    from inspect_ranges._build.behavioral import conformance_plan
+    from inspect_ranges._compiler import resolve_plan
+
+    spec = _section6_spec()
     plan = resolve_plan(spec)
     defender, attacker_ips, hypervisor, silent = conformance_plan(spec, plan)
     assert defender == "web"
+    # only the lab address: web does not share mgmt, so 10.45.0.9 is excluded
     assert len(attacker_ips) == 1 and attacker_ips[0].startswith("10.44.0.")
-    if hypervisor:
-        address, allowed = hypervisor["lab"]
-        assert allowed == {53}
-        assert address.startswith("10.44.0.")
-    assigned = {g_if for g_if in attacker_ips} | {"10.44.0.10"}
+    # range-served DNS reserves the bridge address, allowed to answer port 53
+    address, allowed = hypervisor["lab"]
+    assert allowed == {53}
+    assert address.startswith("10.44.0.")
+    # mgmt has no reservation: its conventional gateway candidates must be silent
+    assert any(candidate.startswith("10.45.0.") for candidate in silent)
+    assigned = set(attacker_ips) | {"10.44.0.10", "10.45.0.9"}
     assert all(candidate not in assigned for candidate in silent)
+
+
+def test_conformance_plan_is_empty_for_foothold_ranges() -> None:
+    """N1 (round-3): a foothold range has no dedicated attack box; the plan must be empty rather than StopIteration, and the executor must skip cleanly."""
+    from inspect_ranges._build.behavioral import (
+        conformance_plan,
+        run_conformance_checks,
+    )
+    from inspect_ranges._compiler import resolve_plan
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Interface,
+        Network,
+        Os,
+        RangeMeta,
+        RangeSpec,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="foothold", description="assumed breach"),
+        networks=[Network(name="lab", cidr="10.44.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="tiny-golden",
+                interfaces=[Interface(network="lab", ip="10.44.0.10")],
+            )
+        ],
+        attacker=Attacker(host="web", entry="assumed-breach"),
+    )
+    plan = resolve_plan(spec)
+    assert conformance_plan(spec, plan) == (None, [], {}, [])
+    recorder = StageRecorder()
+    # no channel is ever constructed: the skip happens before any exec
+    asyncio.run(run_conformance_checks(spec, plan, {"web": 100}, stage_log=recorder))
+    assert recorder.entries == [
+        (
+            "conformance",
+            "ok",
+            {
+                "check": "attacker-surface",
+                "detail": "foothold range: no dedicated attack box",
+            },
+        )
+    ]
+
+
+class StageRecorder:
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, dict[str, Any]]] = []
+
+    def log(self, stage: str, status: str, **fields: Any) -> None:
+        self.entries.append((stage, status, fields))
+
+
+def _run_conformance(
+    monkeypatch: pytest.MonkeyPatch,
+    replies: "Callable[[str, str], str]",
+) -> "tuple[StageRecorder, Exception | None]":
+    """Run the section-6 executor against `_section6_spec` with a fake channel answering `(guest, script) -> stdout`."""
+    from inspect_ranges._build.behavioral import run_conformance_checks
+    from inspect_ranges._build.errors import BuildError
+    from inspect_ranges._compiler import resolve_plan
+
+    spec = _section6_spec()
+    plan = resolve_plan(spec)
+
+    class FakeChannel:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def exec(self, guest: str, request: Any, stdin: bytes) -> FakeOutcome:
+            return FakeOutcome(stdout=replies(guest, request.cmd[2]).encode())
+
+    monkeypatch.setattr("inspect_ranges._channel.channel.MessageChannel", FakeChannel)
+    recorder = StageRecorder()
+    cids = {guest.name: 100 + index for index, guest in enumerate(plan.guests)}
+    error: Exception | None = None
+    try:
+        asyncio.run(run_conformance_checks(spec, plan, cids, stage_log=recorder))
+    except BuildError as raised:
+        error = raised
+    return recorder, error
+
+
+def test_conformance_executor_passes_on_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder, error = _run_conformance(monkeypatch, lambda guest, script: "")
+    assert error is None
+    assert [entry[1] for entry in recorder.entries] == ["ok"] * len(recorder.entries)
+    assert {entry[2].get("check") for entry in recorder.entries} == {
+        "attacker-surface",
+        "hypervisor-endpoint",
+        "segment-silence",
+    }
+
+
+def test_conformance_executor_refuses_and_logs_per_arm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hypervisor-endpoint finding refuses the build, and its stage line carries ONLY its own findings, not the earlier arms' (round-3 N2)."""
+
+    def replies(guest: str, script: str) -> str:
+        if guest == "web":
+            return "OPEN 10.44.0.20 22\n"  # defender sees the attacker answer
+        if "ALIVE" in script:
+            return ""  # silence probe: quiet
+        return "OPEN 10.44.0.1 80\n"  # hypervisor address answers beyond :53
+
+    recorder, error = _run_conformance(monkeypatch, replies)
+    assert error is not None and "conformance" in str(error)
+    assert "10.44.0.20 22" in str(error) and "10.44.0.1 80" in str(error)
+    by_check = {entry[2].get("check"): entry for entry in recorder.entries}
+    hypervisor_entry = by_check["hypervisor-endpoint"]
+    assert hypervisor_entry[1] == "fail"
+    assert "10.44.0.1 80" in hypervisor_entry[2]["error"]
+    assert "10.44.0.20" not in hypervisor_entry[2]["error"]
+    assert by_check["segment-silence"][1] == "ok"
 
 
 def test_sweep_and_silence_scripts_are_falsifiable() -> None:
@@ -198,6 +336,9 @@ def test_sweep_and_silence_scripts_are_falsifiable() -> None:
 
     script = sweep_script(["10.44.0.9"], allowed={53})
     assert "/dev/tcp/$ip/$p" in script
+    # round-3 B2: every connect is bounded, or a drop-policy address costs the
+    # kernel's ~130 s connect timeout per port and exhausts the exec budget
+    assert "timeout 1" in script
     assert " 53 " not in f" {script.split('do for p in ', 1)[1].split(';')[0]} "
     assert str(CONFORMANCE_EXTRA_PORTS[0]) in script
     assert script.rstrip().endswith("exit 0")

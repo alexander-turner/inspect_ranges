@@ -344,7 +344,7 @@ def boot_script(boot: BootPlan) -> str:
         ch_guests.append(name)
         uid = ch_uid(guest.cid)
         lines.append(f"chown {uid}:kvm /scratch/{name}.qcow2 /scratch/{name}-seed.iso")
-        # the VMM cannot create files in the libvirt-qemu console dir: hand it its log
+        # the VMM cannot create files in the root-owned console dir: hand it its log
         lines.append(
             f"install -o {uid} -g kvm -m 0640 /dev/null /scratch/console/{name}.log"
         )

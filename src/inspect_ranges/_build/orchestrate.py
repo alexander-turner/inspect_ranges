@@ -22,7 +22,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
-from .._compiler.plan import ImageRef, PlanOptions, resolve_image_reference, spec_sha256
+from .._compiler.plan import (
+    ImageRef,
+    PlanOptions,
+    ResolvedPlan,
+    resolve_image_reference,
+    spec_sha256,
+)
 from .._compiler.render import render_bundle
 from .._diagnostics import issues_from_validation_error
 from .._runtime.down import down
@@ -1047,7 +1053,6 @@ def _run_behavioral_phase(
 
     The manifest arrives in memory, not from disk: it is saved only after this phase passes, so an unproven build is never consumable (slice 6 review).
     """
-    from .behavioral import run_behavioral_checks, run_conformance_checks
     from .manifest import realized_backings, swap_realized_spec
 
     swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
@@ -1094,63 +1099,21 @@ def _run_behavioral_phase(
             for guest in result.guests
             if guest.hybrid_vsock is not None
         }
-        # the realized boot must CONVERGE before the proof runs: readiness
-        # covers the control plane, not the app stack (a fresh-instance boot
-        # re-seeds, and era daemons reconnect to their databases on their own
-        # schedule), and the declared services are exactly the convergence
-        # contract, so the slice-4 engine gates the checks (vulhub live
-        # finding: zabbix-server listens only once mysqld accepts)
-        from .verify import verify_range
-
-        settle_dir = project_dir(state_dir, bx_project) / "settle"
-        settle_started = time.monotonic()
-        deadline = settle_started + options.readiness_timeout
-        while True:
-            failing = [
-                result_
-                for result_ in verify_range(
-                    spec, cids, log_dir=settle_dir, hybrid_sockets=bx_hybrid
-                )
-                if result_.status != "ok"
-            ]
-            if not failing:
-                break
-            if time.monotonic() > deadline:
-                first = failing[0]
-                raise BuildError(
-                    "behavioral",
-                    f"the realized boot did not converge within "
-                    f"{options.readiness_timeout:.0f} s: {first.kind} "
-                    f"{first.guest}/{first.name} ({first.observed})",
-                )
-            time.sleep(5.0)
-        stage_log.log(
-            "behavioral-settle",
-            "ok",
-            seconds=round(time.monotonic() - settle_started, 1),
-        )
-        # agent-containment section 6, automated (issue #6): the converged
-        # realized boot proves its defender-to-agent containment before the
-        # challenge proof runs; a finding refuses the manifest like any
-        # failed proof
-        asyncio.run(
-            run_conformance_checks(
-                spec, plan, cids, hybrid_sockets=bx_hybrid, stage_log=stage_log
-            )
-        )
+        # from here the bx range is RUNNING: every exit, including the
+        # conformance stage's designed refusal and a convergence timeout,
+        # must pass through the teardown finally (round-3 review B1)
         try:
-            return asyncio.run(
-                run_behavioral_checks(
-                    spec,
-                    plan,
-                    range_dir,
-                    project=bx_project,
-                    bundle=staging,
-                    cids=cids,
-                    evidence_dir=project_dir(state_dir, bx_project) / "evidence",
-                    stage_log=stage_log,
-                    hybrid_sockets=bx_hybrid,
-                )
+            return _prove_realized_boot(
+                spec,
+                plan,
+                range_dir,
+                cids=cids,
+                bx_hybrid=bx_hybrid,
+                bx_project=bx_project,
+                staging=staging,
+                state_dir=state_dir,
+                options=options,
+                stage_log=stage_log,
             )
         finally:
             try:
@@ -1172,6 +1135,79 @@ def _run_behavioral_phase(
         # retry hint to make sense
         if bx_down:
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _prove_realized_boot(
+    spec: RangeSpec,
+    plan: ResolvedPlan,
+    range_dir: Path,
+    *,
+    cids: dict[str, int],
+    bx_hybrid: "HybridSockets",
+    bx_project: str,
+    staging: Path,
+    state_dir: Path,
+    options: "BuildOptions",
+    stage_log: StageSink,
+) -> tuple[BehavioralCheckRecord, ...]:
+    """Convergence, conformance, and the behavioral checks against the booted bx range (the caller owns the teardown finally)."""
+    from .behavioral import run_behavioral_checks, run_conformance_checks
+
+    # the realized boot must CONVERGE before the proof runs: readiness
+    # covers the control plane, not the app stack (a fresh-instance boot
+    # re-seeds, and era daemons reconnect to their databases on their own
+    # schedule), and the declared services are exactly the convergence
+    # contract, so the slice-4 engine gates the checks (vulhub live
+    # finding: zabbix-server listens only once mysqld accepts)
+    settle_dir = project_dir(state_dir, bx_project) / "settle"
+    settle_started = time.monotonic()
+    deadline = settle_started + options.readiness_timeout
+    while True:
+        failing = [
+            result_
+            for result_ in verify_range(
+                spec, cids, log_dir=settle_dir, hybrid_sockets=bx_hybrid
+            )
+            if result_.status != "ok"
+        ]
+        if not failing:
+            break
+        if time.monotonic() > deadline:
+            first = failing[0]
+            raise BuildError(
+                "behavioral",
+                f"the realized boot did not converge within "
+                f"{options.readiness_timeout:.0f} s: {first.kind} "
+                f"{first.guest}/{first.name} ({first.observed})",
+            )
+        time.sleep(5.0)
+    stage_log.log(
+        "behavioral-settle",
+        "ok",
+        seconds=round(time.monotonic() - settle_started, 1),
+    )
+    # agent-containment section 6, automated (issue #6): the converged
+    # realized boot proves its defender-to-agent containment before the
+    # challenge proof runs; a finding refuses the manifest like any
+    # failed proof
+    asyncio.run(
+        run_conformance_checks(
+            spec, plan, cids, hybrid_sockets=bx_hybrid, stage_log=stage_log
+        )
+    )
+    return asyncio.run(
+        run_behavioral_checks(
+            spec,
+            plan,
+            range_dir,
+            project=bx_project,
+            bundle=staging,
+            cids=cids,
+            evidence_dir=project_dir(state_dir, bx_project) / "evidence",
+            stage_log=stage_log,
+            hybrid_sockets=bx_hybrid,
+        )
+    )
 
 
 def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:
