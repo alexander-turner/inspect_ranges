@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.plan import ImageRef, PlanOptions, resolve_image_reference, spec_sha256
 from .._compiler.render import render_bundle
 from .._diagnostics import issues_from_validation_error
@@ -148,8 +148,12 @@ class RecipeFn(Protocol):
     ) -> RecipeRun: ...
 
 
-SettleFn = Callable[[dict[str, int], str, str, float], float]
+SettleFn = Callable[[dict[str, int], str, str, float, "HybridSockets"], float]
 """The network-settle seam: `(cids, guest, probe, timeout_s) -> seconds waited`."""
+
+
+HybridSockets = dict[str, HybridEndpoint]
+"""Guest name to the hybrid-vsock endpoint of its Cloud Hypervisor VMM; empty for all-QEMU ranges. Collected from `UpResult.guests` and threaded through every build-side channel (recipes, settle, verify, capture, behavioral), since CH guests have no `AF_VSOCK` listener."""
 
 
 class CaptureFn(Protocol):
@@ -165,6 +169,7 @@ class CaptureFn(Protocol):
         golden_file: str,
         realized_name: str,
         meta: RealizedImageMeta,
+        hybrid_sockets: "HybridSockets | None" = None,
     ) -> str: ...
 
 
@@ -177,9 +182,10 @@ def _capture_realized(
     golden_file: str,
     realized_name: str,
     meta: RealizedImageMeta,
+    hybrid_sockets: "HybridSockets | None" = None,
 ) -> str:
-    scrub_guest(cids, guest)
-    diagnosis = shutdown_guest(cids, guest)
+    scrub_guest(cids, guest, hybrid_sockets)
+    diagnosis = shutdown_guest(cids, guest, hybrid_sockets)
     wait_shutoff(default_capture_runner, project, guest, shutdown_diagnosis=diagnosis)
     return capture_guest(
         default_capture_runner,
@@ -202,6 +208,7 @@ class VerifyFn(Protocol):
         *,
         log_dir: Path,
         stage_log: StageSink | None,
+        hybrid_sockets: "HybridSockets | None" = None,
     ) -> list[DeclarationResult]: ...
 
 
@@ -632,6 +639,11 @@ def build_range(
         kept = True
 
         cids = {guest.name: guest.cid for guest in result.guests}
+        hybrid: HybridSockets = {
+            guest.name: guest.hybrid_vsock
+            for guest in result.guests
+            if guest.hybrid_vsock is not None
+        }
         log_dir = project_dir(state_dir, project) / "recipes"
         runs: list[RecipeRun] = []
         settle = settle_fn if settle_fn is not None else _settle_network
@@ -640,7 +652,11 @@ def build_range(
             for step in run_steps:
                 if options.settle_probe is not None and step.guest not in settled:
                     seconds = settle(
-                        cids, step.guest, options.settle_probe, options.settle_timeout_s
+                        cids,
+                        step.guest,
+                        options.settle_probe,
+                        options.settle_timeout_s,
+                        hybrid,
                     )
                     tee.log(
                         "network-settle",
@@ -652,7 +668,14 @@ def build_range(
                 run = recipe_fn(
                     step.recipe,
                     step_vars=step.vars,
-                    target=RecipeTarget(guest=step.guest, cids=cids),
+                    target=RecipeTarget(
+                        guest=step.guest,
+                        cids=cids,
+                        hybrid_sockets={
+                            name: (str(endpoint.path), endpoint.peer_uid)
+                            for name, endpoint in hybrid.items()
+                        },
+                    ),
                     log_dir=log_dir,
                     stage_log=tee,
                     budget_s=options.recipe_budget_s,
@@ -690,7 +713,9 @@ def build_range(
 
         verify_dir = project_dir(state_dir, project) / "verify"
         try:
-            verifications = verify_fn(spec, cids, log_dir=verify_dir, stage_log=tee)
+            verifications = verify_fn(
+                spec, cids, log_dir=verify_dir, stage_log=tee, hybrid_sockets=hybrid
+            )
         except Exception as error:
             tee.log("verify", "fail", error=str(error))
             disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
@@ -735,6 +760,7 @@ def build_range(
                         image_cache=image_cache,
                         golden_file=golden.file,
                         realized_name=realized_name,
+                        hybrid_sockets=hybrid,
                         meta=RealizedImageMeta(
                             range_name=spec.meta.name,
                             guest=host.name,
@@ -1054,6 +1080,11 @@ def _run_behavioral_phase(
             on_stage=None,
         )
         cids = {guest.name: guest.cid for guest in result.guests}
+        bx_hybrid: HybridSockets = {
+            guest.name: guest.hybrid_vsock
+            for guest in result.guests
+            if guest.hybrid_vsock is not None
+        }
         # the realized boot must CONVERGE before the proof runs: readiness
         # covers the control plane, not the app stack (a fresh-instance boot
         # re-seeds, and era daemons reconnect to their databases on their own
@@ -1068,7 +1099,9 @@ def _run_behavioral_phase(
         while True:
             failing = [
                 result_
-                for result_ in verify_range(spec, cids, log_dir=settle_dir)
+                for result_ in verify_range(
+                    spec, cids, log_dir=settle_dir, hybrid_sockets=bx_hybrid
+                )
                 if result_.status != "ok"
             ]
             if not failing:
@@ -1098,6 +1131,7 @@ def _run_behavioral_phase(
                     cids=cids,
                     evidence_dir=project_dir(state_dir, bx_project) / "evidence",
                     stage_log=stage_log,
+                    hybrid_sockets=bx_hybrid,
                 )
             )
         finally:
@@ -1225,7 +1259,11 @@ def _strip_stage(error: BuildError) -> str:
 
 
 def _settle_network(
-    cids: dict[str, int], guest: str, probe: str, timeout_s: float
+    cids: dict[str, int],
+    guest: str,
+    probe: str,
+    timeout_s: float,
+    hybrid_sockets: "HybridSockets | None" = None,
 ) -> float:
     """Block until the guest resolves `probe` (the build-egress DNS warm-up gate); returns the wait.
 
@@ -1234,7 +1272,9 @@ def _settle_network(
     """
 
     async def wait() -> float:
-        channel = MessageChannel(VsockTransport(cids), label="build-settle")
+        channel = MessageChannel(
+            VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-settle"
+        )
         started = time.monotonic()
         deadline = started + timeout_s
         last_cause = "resolution never succeeded"

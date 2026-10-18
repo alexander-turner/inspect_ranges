@@ -383,3 +383,60 @@ def test_vsock_dir_is_private_sticky_and_refuses_a_foreign_root(
     os.chmod(directory.parent, 0o755)
     with pytest.raises(PermissionError, match="mode 0700"):
         prepare_ch_vsock_dir("ir-other")
+
+
+def test_cloud_hypervisor_guests_with_content_refuse_at_planning(cache: Path) -> None:
+    """The build captures provisioned guests through virsh domstate, which cannot see CH guests: fail closed until CH capture lands."""
+    from inspect_ranges.types import ProvisioningStep, Service
+
+    spec = ch_spec()
+    spec.hosts[0].vmm = "cloud-hypervisor"
+    spec.hosts[0].provisioning = [ProvisioningStep(recipe="acme.web")]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, PlanOptions(image_cache=cache))
+    assert any(
+        issue.code == "cloud-hypervisor-content-unsupported"
+        for issue in excinfo.value.issues
+    )
+    # declarations alone (services) refuse the same way
+    spec = ch_spec()
+    spec.hosts[0].vmm = "cloud-hypervisor"
+    spec.hosts[0].services = [Service(name="web", port=80)]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, PlanOptions(image_cache=cache))
+    assert any(
+        issue.code == "cloud-hypervisor-content-unsupported"
+        for issue in excinfo.value.issues
+    )
+    # a content-free CH guest (the attacker shape) plans fine
+    spec = ch_spec()
+    spec.hosts[0].vmm = "cloud-hypervisor"
+    plan = resolve_plan(spec, PlanOptions(image_cache=cache))
+    assert next(g for g in plan.guests if g.name == spec.hosts[0].name).vmm == (
+        "cloud-hypervisor"
+    )
+
+
+def test_guesttool_socket_env_round_trip() -> None:
+    """IR_GUEST_SOCKETS round-trips through the contract env into HybridEndpoints."""
+    import json as json_module
+
+    from inspect_ranges._build.guesttool import sockets_from_env
+    from inspect_ranges._build.recipes import RecipeTarget, _contract_env
+    from inspect_ranges._channel.vsock import HybridEndpoint
+
+    target = RecipeTarget(
+        guest="web",
+        cids={"web": 3100},
+        hybrid_sockets={"attacker": ("/run/ch-vsock/attacker.sock", 1003104)},
+    )
+    env = _contract_env(target, Path("/tmp"), "acme.web", 1000)
+    parsed = sockets_from_env({"IR_GUEST_SOCKETS": env["IR_GUEST_SOCKETS"]})
+    assert parsed == {
+        "attacker": HybridEndpoint(Path("/run/ch-vsock/attacker.sock"), 1003104)
+    }
+    assert sockets_from_env({}) == {}
+    for bad in ("[1]", '{"a": ["p"]}', '{"a": [1, 2]}'):
+        with pytest.raises(ValueError):
+            sockets_from_env({"IR_GUEST_SOCKETS": bad})
+    assert json_module.loads(env["IR_GUEST_CIDS"]) == {"web": 3100}

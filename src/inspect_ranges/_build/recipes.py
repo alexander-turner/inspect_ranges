@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -405,6 +405,10 @@ class RecipeTarget:
 
     guest: str
     cids: Mapping[str, int]
+    hybrid_sockets: Mapping[str, tuple[str, int]] = field(
+        default_factory=dict[str, tuple[str, int]]
+    )
+    """Cloud Hypervisor guests' hybrid-vsock endpoints as (socket path, VMM uid); QEMU guests are reached by CID. Serialized to the entrypoint as `IR_GUEST_SOCKETS`."""
 
 
 class RecipeError(RuntimeError):
@@ -575,6 +579,10 @@ def _contract_env(
         **helpers,
         "IR_GUEST": target.guest,
         "IR_GUEST_CIDS": json.dumps(dict(target.cids), sort_keys=True),
+        "IR_GUEST_SOCKETS": json.dumps(
+            {name: list(endpoint) for name, endpoint in target.hybrid_sockets.items()},
+            sort_keys=True,
+        ),
         "IR_RECIPE": recipe_name,
         "IR_EXEC_BUDGET_MS": str(exec_budget_ms),
     }

@@ -239,6 +239,24 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
+    for section, declared_list in (("hosts", spec.hosts), ("routers", spec.routers)):
+        for index, guest_decl in enumerate(declared_list):
+            content = any(
+                getattr(guest_decl, section_field, None)
+                for section_field in ("provisioning", "services", "vulnerabilities")
+            )
+            if guest_decl.vmm == "cloud-hypervisor" and content:
+                # the build captures provisioned guests through virsh domstate,
+                # which cannot see Cloud Hypervisor guests: fail closed until
+                # CH capture lands (parked with the CH follow-ups)
+                issues.append(
+                    Issue(
+                        code="cloud-hypervisor-content-unsupported",
+                        path=(section, index, "vmm"),
+                        message=f"guest {guest_decl.name!r} runs on cloud-hypervisor and declares guest content, which the build cannot capture yet",
+                        hint="run this guest on qemu, or drop its content sections",
+                    )
+                )
     if options.cpu_model != "host-passthrough":
         # Cloud Hypervisor takes no CPU model: its guests always see the host
         # CPU, so a pinned model would silently not apply to them

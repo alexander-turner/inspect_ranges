@@ -10,6 +10,7 @@ import hashlib
 import logging
 import re
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
     from .._challenges.oracle import RangeOracle
     from .._challenges.schema import Challenge, Challenges
+    from .._channel.vsock import HybridEndpoint
     from .._compiler.plan import ResolvedPlan
     from ..types import RangeSpec
 
@@ -109,6 +111,7 @@ async def run_behavioral_checks(
     cids: dict[str, int],
     evidence_dir: Path,
     stage_log: StageSink | None = None,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
 ) -> tuple[BehavioralCheckRecord, ...]:
     """Run every declared check against the live (realized-image) range; a failing check ENDS the run and is returned as its record (the caller saves a refused manifest), while infra and authoring failures raise.
 
@@ -131,7 +134,9 @@ async def run_behavioral_checks(
     )
     await session.open(lease_id=None, project=project, bundle=bundle, plan=plan)
     channel = MessageChannel(
-        VsockTransport(cids), label="build-behavioral", channel_budget_s=10.0
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets),
+        label="build-behavioral",
+        channel_budget_s=10.0,
     )
     handle = SampleHandle(
         project=project,
