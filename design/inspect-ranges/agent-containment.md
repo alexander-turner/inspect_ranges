@@ -88,7 +88,7 @@ Alternatives weighed (2026-10-01), and why Docker stays:
 
 **Open question (not an action): libvirtd itself.** The heavyweight surface inside the range container is libvirtd, of which we use a thin slice (domain lifecycle, console, screenshot, hotplug). Driving QEMU directly would shrink the container's daemon surface at the cost of reimplementing that slice. Same trade-off structure as the Docker question; park until the sandbox provider's real libvirt usage is known. *Partially resolved for the attack box (below): the most adversarial guest no longer has libvirtd or QEMU in its path at all.*
 
-## The attack box runs on Cloud Hypervisor by default (2026-10-19)
+## The attack box runs on Cloud Hypervisor by default (2026-10-18)
 
 The guest whose VM-escape surface matters most is the attack box: it runs the adversarial workload, takes the heaviest exec/file traffic, and is the one guest an agent drives directly. It now defaults to Cloud Hypervisor instead of QEMU/libvirt (contributed as PR #10, reworked for the build pipeline and flipped in-tree), which changes the escape calculus in four ways:
 
