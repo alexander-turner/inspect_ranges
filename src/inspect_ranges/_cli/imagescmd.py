@@ -97,10 +97,10 @@ def list_cmd(image_cache: Path | None) -> None:
     if image_cache is None:
         image_cache = default_image_cache()
     try:
-        managed, unmanaged = list_images(image_cache)
+        managed, realized, unmanaged = list_images(image_cache)
     except OSError as error:
         raise click.ClickException(f"cannot read image cache: {error}") from error
-    if not managed and not unmanaged:
+    if not managed and not realized and not unmanaged:
         click.echo(f"image cache {image_cache} is empty")
         return
     for metadata in managed:
@@ -126,6 +126,10 @@ def list_cmd(image_cache: Path | None) -> None:
             f"{metadata.file}  sha256:{metadata.golden_sha256[:12]}  "
             f"vendor={metadata.vendor_file}  daemon={metadata.daemon.name} v{metadata.daemon.version}  "
             f"recipe=v{metadata.recipe_version}  created={metadata.created}{flags}"
+        )
+    for listing in realized:
+        click.echo(
+            f"  {listing.file}  realized {listing.range_name}/{listing.guest}  key {listing.build_key[:12]}  ({listing.created})"
         )
     for file in unmanaged:
         if file.endswith(".deriving"):

@@ -3,7 +3,7 @@
 import hashlib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from inspect_ranges._build import (
@@ -579,3 +579,84 @@ def test_keep_builds_are_diagnostic_and_mint_no_manifest(
     fakes = Fakes(["web", "db", "attacker"])
     result = full_build(tmp_path, cache, fakes, keep=True)
     assert result.kept and result.manifest_path is None and fakes.captures == []
+
+
+def test_invalid_range_name_refuses_before_anything(
+    tmp_path: Path, cache: Path
+) -> None:
+    spec, range_dir = build_spec_fixture(tmp_path)
+    spec.meta.name = "../etc"
+    fakes = Fakes(["web", "db", "attacker"])
+    with pytest.raises(IssueError) as excinfo:
+        full_build_spec(spec, range_dir, tmp_path, cache, fakes)
+    assert excinfo.value.issues[0].code == "range-name-invalid"
+    assert fakes.up_calls == []
+
+
+def full_build_spec(
+    spec: RangeSpec, range_dir: Path, tmp_path: Path, cache: Path, fakes: Fakes
+) -> Any:
+    return build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+    )
+
+
+def test_spec_only_edit_reuses_guests_and_rewrites_the_manifest(
+    tmp_path: Path, cache: Path
+) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    first = full_build(tmp_path, cache, fakes)
+    from inspect_ranges._build import load_manifest
+
+    before = load_manifest(tmp_path / "builds", "buildme")
+    assert before is not None
+    spec, range_dir = build_spec_fixture(tmp_path)
+    spec.meta.description = "edited description, guest content untouched"
+    again = Fakes(["web", "db", "attacker"])
+    result = full_build_spec(spec, range_dir, tmp_path, cache, again)
+    # not the cached fast path (the spec hash moved), but every guest reused
+    assert not result.cached
+    assert again.recipe_calls == [] and again.captures == []
+    assert len(again.up_calls) == 1
+    assert result.manifest_path == first.manifest_path
+    from inspect_ranges._build import load_manifest
+
+    manifest = load_manifest(tmp_path / "builds", "buildme")
+    assert manifest is not None
+    assert manifest.spec_sha256 != before.spec_sha256  # the new spec hash recorded
+    assert manifest.guest("web") is not None
+
+
+def test_golden_change_rebuilds_everything(tmp_path: Path, cache: Path) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    full_build(tmp_path, cache, fakes)
+    (cache / "tiny-golden.qcow2").write_bytes(b"golden-v2")
+    again = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, again)
+    assert not result.cached
+    assert [guest for guest, _, _ in again.captures] == ["web", "db"]
+    assert {guest for _, guest, _ in again.recipe_calls} == {"web", "db"}
+
+
+def test_manifest_records_the_committed_inputs(tmp_path: Path, cache: Path) -> None:
+    fakes = Fakes(["web", "db", "attacker"])
+    result = full_build(tmp_path, cache, fakes)
+    from inspect_ranges._build import load_manifest
+
+    manifest = load_manifest(tmp_path / "builds", "buildme")
+    assert manifest is not None
+    assert manifest.project == result.project
+    spec_range = manifest.spec.get("range")
+    assert isinstance(spec_range, dict)
+    assert cast(dict[str, object], spec_range).get("name") == "buildme"
+    base = {record.guest for record in manifest.base_images}
+    assert {"web", "db", "attacker"} <= base
+    assert all(record.digest for record in manifest.base_images)
+    assert manifest.verification.behavioral_checks == ()

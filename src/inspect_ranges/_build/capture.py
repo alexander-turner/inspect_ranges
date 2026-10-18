@@ -6,9 +6,11 @@ Clean shutdown before capture is the slice-5 decision's crash-consistency rule: 
 """
 
 import asyncio
+import fcntl
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -129,6 +131,37 @@ def capture_guest(
     staging = image_cache / f".{realized_name}.capturing"
     sidecar = image_cache / f"{realized_name.removesuffix('.qcow2')}.realized.json"
     try:
+        with _name_lock(image_cache, realized_name):
+            return _capture_locked(
+                runner,
+                container,
+                guest,
+                image_cache,
+                golden_file,
+                realized_name,
+                staging,
+                sidecar,
+                meta,
+            )
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _capture_locked(
+    runner: CaptureRunner,
+    container: str,
+    guest: str,
+    image_cache: Path,
+    golden_file: str,
+    realized_name: str,
+    staging: Path,
+    sidecar: Path,
+    meta: RealizedImageMeta,
+) -> str:
+    # a crashed prior capture may have left temps; we hold the lock
+    staging.unlink(missing_ok=True)
+    sidecar.with_suffix(".json.capturing").unlink(missing_ok=True)
+    try:
         runner(["docker", "cp", f"{container}:/scratch/{guest}.qcow2", str(staging)])
         runner(
             ["qemu-img", "rebase", "-u", "-F", "qcow2", "-b", golden_file, str(staging)]
@@ -143,3 +176,15 @@ def capture_guest(
         return digest
     finally:
         staging.unlink(missing_ok=True)
+
+
+@contextmanager
+def _name_lock(cache: Path, file: str) -> Generator[None]:
+    """Per-name advisory lock (the images.py cache discipline): concurrent captures of one realized name serialize."""
+    lock_path = cache / f".{file}.lock"
+    with open(lock_path, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)

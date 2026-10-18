@@ -48,7 +48,11 @@ def cids_from_env(environ: dict[str, str]) -> tuple[str, dict[str, int]]:
         raise ValueError("IR_GUEST_CIDS must map guest names to integer CIDs")
     cids: dict[str, int] = {}
     for name, cid in cast(dict[object, object], parsed).items():
-        if not isinstance(name, str) or isinstance(cid, bool) or not isinstance(cid, int):
+        if (
+            not isinstance(name, str)
+            or isinstance(cid, bool)
+            or not isinstance(cid, int)
+        ):
             raise ValueError("IR_GUEST_CIDS must map guest names to integer CIDs")
         cids[name] = cid
     if guest not in cids:
@@ -116,7 +120,9 @@ async def _run_push(args: argparse.Namespace) -> int:
     )
     if outcome.rc != 0:
         sys.stderr.buffer.write(outcome.stderr)
-        print(f"ir-push: install to {args.remote!r} exited {outcome.rc}", file=sys.stderr)
+        print(
+            f"ir-push: install to {args.remote!r} exited {outcome.rc}", file=sys.stderr
+        )
     return exit_code(outcome.rc)
 
 
@@ -129,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--user", default="root")
     run.add_argument("--budget-ms", dest="budget_ms", type=int, default=default_budget)
     run.add_argument("--cwd", default=None)
-    run.add_argument("--script", default=None, help="upload and run a local script file")
+    run.add_argument(
+        "--script", default=None, help="upload and run a local script file"
+    )
     run.add_argument("argv", nargs="*", help="command argv (after --)")
     push = commands.add_parser("push", help="write a local file into the target guest")
     push.add_argument("local")

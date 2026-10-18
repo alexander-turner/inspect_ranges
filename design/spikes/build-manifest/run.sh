@@ -112,6 +112,29 @@ else
   bad "M7 reverify build"
 fi
 
+echo "=== M9 spec-only edit: all guests reused, recipes skipped, verify runs ==="
+sed -i 's/Incremental build and manifest fixture./Incremental build and manifest fixture (edited)./' "$SPIKE/tmp/incr/range.yaml"
+if (cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" | tee "$SPIKE/tmp/m9.txt"); then
+  grep -q "build OK (" "$SPIKE/tmp/m9.txt" && ! grep -q "build OK (cached" "$SPIKE/tmp/m9.txt" \
+    && grep -q "rebuilt_guests=0" "$SPIKE/tmp/m9.txt" \
+    && grep -q "verify    ok  service web/nginx" "$SPIKE/tmp/m9.txt" \
+    && ok "M9 spec-only edit re-verifies on fully reused guests" || { bad "M9 output"; tail -4 "$SPIKE/tmp/m9.txt"; }
+else
+  bad "M9 spec-only edit build"
+fi
+
+echo "=== M10 golden change: everything downstream rebuilds ==="
+docker ps -aq --filter name=ir- | xargs -r docker rm -f >/dev/null 2>&1 || true
+qemu-img resize "$CACHE/focal-guest.qcow2" +1M >/dev/null
+if (cd "$SPIKE/tmp/incr" && "$IRBIN" build "${FLAGS[@]}" | tee "$SPIKE/tmp/m10.txt"); then
+  grep -q "rebuilt_guests=2" "$SPIKE/tmp/m10.txt" \
+    && grep -qE "recipe .*recipe=bm.nginx.*seconds" "$SPIKE/tmp/m10.txt" \
+    && grep -qE "recipe .*recipe=bm.marker.*seconds" "$SPIKE/tmp/m10.txt" \
+    && ok "M10 golden change cascades: both guests rebuilt from the new golden" || { bad "M10 cascade"; tail -4 "$SPIKE/tmp/m10.txt"; }
+else
+  bad "M10 golden-change rebuild"
+fi
+
 echo "=== M8 stale bundle refuses at up with the re-render hint ==="
 $IR render "$SPIKE/fixtures/plain" -o "$SPIKE/tmp/bundle" --image-cache "$CACHE" --cid-base 3600
 truncate -s +1 "$CACHE/focal-guest.qcow2"   # the cache copy changes after render

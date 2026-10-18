@@ -28,14 +28,6 @@ from .orchestrate import (
     egress_build_spec,
     resolve_provisioning,
 )
-from .verify import (
-    DeclarationResult,
-    GuestFacts,
-    Listener,
-    evaluate_host,
-    verify_range,
-    version_matches,
-)
 from .recipes import (
     DEFAULT_EXEC_BUDGET_MS,
     DEFAULT_RECIPE_BUDGET_S,
@@ -53,6 +45,14 @@ from .recipes import (
     resolve_recipe,
     run_recipe,
     validate_vars,
+)
+from .verify import (
+    DeclarationResult,
+    GuestFacts,
+    Listener,
+    evaluate_host,
+    verify_range,
+    version_matches,
 )
 
 __all__ = [

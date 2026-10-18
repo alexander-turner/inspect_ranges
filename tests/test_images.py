@@ -190,7 +190,7 @@ def test_corrupt_sidecar_is_unmanaged_to_both_list_and_derive(
     )
     sidecar = cache / "noble-server-cloudimg-amd64-golden.json"
     sidecar.write_text("{not json")
-    managed, unmanaged = list_images(cache)
+    managed, _, unmanaged = list_images(cache)
     assert managed == []
     assert metadata.file in unmanaged
     with pytest.raises(DeriveError, match=r"\[prepare\].*not a valid provenance"):
@@ -275,7 +275,7 @@ def test_dotted_names_map_to_distinct_files_and_sidecars(
     assert second.file == "ubuntu-24.10.qcow2"
     assert (cache / "ubuntu-24.04.json").is_file()
     assert (cache / "ubuntu-24.10.json").is_file()
-    managed, _ = list_images(cache)
+    managed, _, _ = list_images(cache)
     assert {m.file for m in managed} >= {"ubuntu-24.04.qcow2", "ubuntu-24.10.qcow2"}
 
 
@@ -286,7 +286,7 @@ def test_list_images_separates_managed_and_unmanaged(
     cache = tmp_path / "cache"
     derive_golden(image, digest, cache, runner=fake_runner, artifact_dir=artifact)
     (cache / "handmade.qcow2").write_bytes(b"x")
-    managed, unmanaged = list_images(cache)
+    managed, _, unmanaged = list_images(cache)
     assert [m.file for m in managed] == ["noble-server-cloudimg-amd64-golden.qcow2"]
     assert unmanaged == ["handmade.qcow2"]
 
