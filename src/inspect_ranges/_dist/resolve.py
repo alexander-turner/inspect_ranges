@@ -209,7 +209,7 @@ def pull_pinned(
 
 
 NEVER_PULL_ENV = "INSPECT_RANGES_NEVER_PULL"
-"""Set to pin a host to never-pull (strict offline posture): a content range with no matching local build refuses instead of touching the network."""
+"""Set to pin a host against IMPLICIT transfers: the provider's auto-pull and the build path's registry tier refuse/skip instead of touching the network. Scope recorded (round-4 N4): explicit verbs (`pull`, `images pull`, `images refresh`) still work on a pinned host, because typing them IS the operator's explicit intent; a fully offline host simply configures no reachable locations."""
 
 
 def ensure_build_available(
@@ -232,7 +232,13 @@ def ensure_build_available(
     if not content:
         return None
     manifest = load_manifest(build_cache, spec.meta.name)
-    if manifest is not None and manifest.spec_sha256 == spec_sha256(spec):
+    if (
+        manifest is not None
+        and manifest.spec_sha256 == spec_sha256(spec)
+        and _artifacts_present(manifest, image_cache)
+    ):
+        # warm: one hash plus presence checks, zero network; a pruned artifact
+        # falls through to the pull, which heals it (round-4 N2)
         return None
     if os.environ.get(NEVER_PULL_ENV):
         raise DistError(
@@ -248,6 +254,17 @@ def ensure_build_available(
         recipe_cache=recipe_cache,
         progress=progress,
     )
+
+
+def _artifacts_present(manifest: BuildManifest, image_cache: Path) -> bool:
+    """Whether every image the manifest references exists in the cache (presence only; the gate's sidecar discipline and boot's verify-images own the digests)."""
+    from .._compiler.plan import image_file_name
+
+    files = {base.file for base in manifest.base_images}
+    for guest in manifest.guests:
+        files.add(guest.realized_file)
+        files.add(image_file_name(guest.golden_reference))
+    return all((image_cache / file).is_file() for file in files)
 
 
 def push_image_artifact(
@@ -272,6 +289,7 @@ def pull_image(
     *,
     image_cache: Path,
     replace: bool = False,
+    progress: "ProgressFn | None" = None,
 ) -> tuple[str, MaterializeResult] | None:
     """Fetch a catalog image's chain from the first location holding it; `None` when no location does.
 
@@ -283,17 +301,27 @@ def pull_image(
         if root is None:
             continue
         result = materialize_closure(
-            store, root, image_cache=image_cache, replace_images=replace
+            store,
+            root,
+            image_cache=image_cache,
+            replace_images=replace,
+            progress=progress,
         )
         return location.describe(), result
     return None
 
 
 def refresh_image(
-    name: str, locations: list[Location], *, image_cache: Path
+    name: str,
+    locations: list[Location],
+    *,
+    image_cache: Path,
+    progress: "ProgressFn | None" = None,
 ) -> tuple[str, MaterializeResult] | None:
     """The explicit move-forward act: re-resolve `name` against the search path and replace the cached chain when the registry moved on; the next build's keys change accordingly (freezing is automatic, moving forward is explicit)."""
-    pulled = pull_image(name, locations, image_cache=image_cache, replace=True)
+    pulled = pull_image(
+        name, locations, image_cache=image_cache, replace=True, progress=progress
+    )
     if pulled is None:
         raise DistError(
             "image-not-published",

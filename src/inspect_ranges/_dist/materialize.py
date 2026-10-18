@@ -114,6 +114,23 @@ def _layer(manifest: OciManifest, media_type: str) -> Descriptor:
     )
 
 
+def _cache_converges(target: Path, blob: Descriptor) -> bool:
+    """Whether an existing cache file converges with the incoming blob WITHOUT re-hashing multi-GB bytes at init (round-4 N3): size must match, and byte integrity is re-verified on every boot by up's verify-images, so a same-size divergent file still refuses at boot with a named cause rather than booting."""
+    if target.stat().st_size != blob.size:
+        return False
+    if blob.size <= _SMALL_CONVERGE_CAP:
+        hasher = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                hasher.update(chunk)
+        return f"sha256:{hasher.hexdigest()}" == blob.digest
+    return True
+
+
+_SMALL_CONVERGE_CAP = 64 * 1024 * 1024
+"""Files up to this size still hash at converge (cheap and exact); above it, size plus the boot-time verification carry the contract."""
+
+
 def _land_image(
     store: ContentStore,
     manifest: OciManifest,
@@ -151,11 +168,7 @@ def _land_image(
             fetched.append(sidecar_path.name)
 
         if target.is_file():
-            hasher = hashlib.sha256()
-            with target.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1 << 20), b""):
-                    hasher.update(chunk)
-            if f"sha256:{hasher.hexdigest()}" == blob.digest:
+            if _cache_converges(target, blob):
                 # converge, but HEAL a missing sidecar: a crash window between
                 # image and sidecar must not become permanent (round-1 N4)
                 write_sidecar(heal=True)
@@ -298,6 +311,7 @@ def materialize_closure(
             image_cache,
             fetched=fetched,
             present=present,
+            progress=progress,
         )
         for kind in (ARTIFACT_VENDOR_BASE, ARTIFACT_GOLDEN, ARTIFACT_REALIZED):
             for manifest in artifacts[kind]:
@@ -388,6 +402,7 @@ def _replace_chain(
     *,
     fetched: list[str],
     present: list[str],
+    progress: "ProgressFn | None" = None,
 ) -> None:
     """The refresh barrier: hold every member's name lock, stage every changed image fully, then rename the whole set together (sidecars with their kind's order)."""
     from contextlib import ExitStack
@@ -407,16 +422,13 @@ def _replace_chain(
                 stale.unlink(missing_ok=True)
             blob = _layer(manifest, LAYER_QCOW2)
             target = image_cache / name
-            if target.is_file():
-                hasher = hashlib.sha256()
-                with target.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1 << 20), b""):
-                        hasher.update(chunk)
-                if f"sha256:{hasher.hexdigest()}" == blob.digest:
-                    present.append(name)
-                    continue
+            if target.is_file() and _cache_converges(target, blob):
+                present.append(name)
+                continue
             stage = image_cache / f".{name}.pulling-staged"
-            store.copy_blob_to(blob, stage, temp_prefix=f".{name}.pulling-")
+            store.copy_blob_to(
+                blob, stage, temp_prefix=f".{name}.pulling-", progress=progress
+            )
             staged.append((stage, target, manifest, suffix, sidecar_first))
         try:
             for stage, target, manifest, suffix, sidecar_first in staged:

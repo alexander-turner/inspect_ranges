@@ -424,15 +424,18 @@ def test_provider_resolve_config_applies_the_gate(
     # first (slice 4): an empty hermetic search path refuses no-build-for-spec
     # (never the public-org default inside a test), and the never-pull knob
     # refuses before any network with its own code
-    from inspect_ranges._dist import DistError, OciLayout
+    from inspect_ai._util.error import PrerequisiteError
+    from inspect_ranges._dist import OciLayout
 
     empty_location = tmp_path / "empty-registry"
     OciLayout(empty_location).ensure()
     monkeypatch.setenv("INSPECT_RANGES_REGISTRY", str(empty_location))
-    with pytest.raises(DistError, match="no-build-for-spec"):
+    # the refusal surfaces as inspect's clean prerequisite error (round-4 B1):
+    # the coded message, which inspect renders without a traceback
+    with pytest.raises(PrerequisiteError, match="no-build-for-spec"):
         runtime.resolve_config("provgate.yaml", lambda: spec)
     monkeypatch.setenv("INSPECT_RANGES_NEVER_PULL", "1")
-    with pytest.raises(DistError, match="never-pull"):
+    with pytest.raises(PrerequisiteError, match="never-pull"):
         runtime.resolve_config("provgate.yaml", lambda: spec)
     monkeypatch.delenv("INSPECT_RANGES_NEVER_PULL")
 

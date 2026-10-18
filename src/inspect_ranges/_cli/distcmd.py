@@ -82,15 +82,19 @@ def push(
             f"manifest  {manifest.range_name} (spec sha256:{manifest.spec_sha256[:6]}...) "
             f"-> {location.describe()}"
         )
-        root = push_range(
-            manifest,
-            location,
-            image_cache=images,
-            build_cache=builds,
-            range_dir=spec_path.parent,
-            recipe_cache=recipes,
-            progress=TransferDisplay(),
-        )
+        display = TransferDisplay()
+        try:
+            root = push_range(
+                manifest,
+                location,
+                image_cache=images,
+                build_cache=builds,
+                range_dir=spec_path.parent,
+                recipe_cache=recipes,
+                progress=display,
+            )
+        finally:
+            display.close()
         click.echo(f"push OK   {manifest.range_name}@{root.digest}")
     except DistError as error:
         raise click.ClickException(str(error)) from error
@@ -123,6 +127,7 @@ def pull(
     recipe_cache: Path | None,
 ) -> None:
     """Resolve and fetch a published build: bare (this directory's range.yaml, matched by its exact normalized-spec hash), a spec path, or the no-spec `name@sha256:...` form (Journey B's pulling-without-a-spec-in-hand)."""
+    display = TransferDisplay()
     try:
         images, builds, recipes = _caches(image_cache, build_cache, recipe_cache)
         locations = registry_locations(from_location)
@@ -136,8 +141,9 @@ def pull(
                 image_cache=images,
                 build_cache=builds,
                 recipe_cache=recipes,
-                progress=TransferDisplay(),
+                progress=display,
             )
+            display.close()
             click.echo(f"resolve   {name}@{report.root} ({report.location})")
             _echo_fetch(report)
             return
@@ -150,16 +156,19 @@ def pull(
             build_cache=builds,
             recipe_cache=recipes,
             pin=pin,
-            progress=TransferDisplay(),
+            progress=display,
         )
+        display.close()
         click.echo(
             f"resolve   spec sha256:{spec_sha256(validated)[:6]}... -> "
             f"{validated.meta.name}@{report.root} ({report.location})"
         )
         _echo_fetch(report)
     except DistError as error:
+        display.close()
         raise click.ClickException(str(error)) from error
     except IssueError as error:
+        display.close()
         raise click.ClickException(str(error)) from error
 
 

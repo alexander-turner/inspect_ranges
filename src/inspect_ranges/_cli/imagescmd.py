@@ -180,13 +180,22 @@ def images_pull(name: str, from_location: str | None, image_cache: Path | None) 
     """Fetch a published catalog image's chain into the cache (sticky thereafter: later builds keep resolving the cached artifact until an explicit refresh)."""
     from .._dist import DistError
     from .._dist.location import registry_locations
+    from .._dist.progress import TransferDisplay
     from .._dist.resolve import pull_image
 
     cache = image_cache or default_image_cache()
+    display = TransferDisplay()
     try:
-        pulled = pull_image(name, registry_locations(from_location), image_cache=cache)
+        pulled = pull_image(
+            name,
+            registry_locations(from_location),
+            image_cache=cache,
+            progress=display,
+        )
     except DistError as error:
+        display.close()
         raise click.ClickException(str(error)) from error
+    display.close()
     if pulled is None:
         raise click.ClickException(
             f"[image-not-published] no configured location publishes {name!r}"
@@ -213,15 +222,21 @@ def images_refresh(
     """The explicit move-forward act: re-resolve bare names against the search path and replace cached chains that moved; the next build's keys change accordingly."""
     from .._dist import DistError
     from .._dist.location import registry_locations
+    from .._dist.progress import TransferDisplay
     from .._dist.resolve import refresh_image
 
     cache = image_cache or default_image_cache()
     locations = registry_locations(from_location)
     for name in names:
+        display = TransferDisplay()
         try:
-            refreshed = refresh_image(name, locations, image_cache=cache)
+            refreshed = refresh_image(
+                name, locations, image_cache=cache, progress=display
+            )
         except DistError as error:
+            display.close()
             raise click.ClickException(str(error)) from error
+        display.close()
         assert refreshed is not None
         location, result = refreshed
         state = "updated" if result.fetched else "already current"

@@ -83,6 +83,10 @@ class TransferDisplay:
             self._out.write("\n")
             self._line_open = False
 
+    def close(self) -> None:
+        """Close any half-drawn line (failure paths call this before the coded refusal prints)."""
+        self._finish_line()
+
     def final(self, line: str) -> None:
         """The closing `name@digest` line."""
         self._finish_line()

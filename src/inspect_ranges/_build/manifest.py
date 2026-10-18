@@ -407,6 +407,35 @@ def apply_build_manifest(
     return swapped, sections, manifest
 
 
+def _realized_sidecar_digest(image_cache: Path, realized_file: str) -> str | None:
+    """The `.realized.json` sidecar's recorded digest, or `None` (absent/unreadable sidecars fall back to a full hash)."""
+    sidecar = image_cache / (realized_file.removesuffix(".qcow2") + ".realized.json")
+    try:
+        recorded = json.loads(sidecar.read_text()).get("sha256")
+    except (OSError, ValueError):
+        return None
+    return recorded if isinstance(recorded, str) else None
+
+
+def _golden_digest_sidecar_first(
+    reference: str, image_cache: Path | None
+) -> str | None:
+    """A golden's digest by its provenance sidecar when present (boot re-verifies bytes), else the full-hash resolution."""
+    from .._compiler.plan import image_file_name, resolve_image_reference
+
+    if image_cache is not None:
+        file = image_file_name(reference)
+        if (image_cache / file).is_file():
+            sidecar = image_cache / (file.removesuffix(".qcow2") + ".json")
+            try:
+                recorded = json.loads(sidecar.read_text()).get("golden_sha256")
+            except (OSError, ValueError):
+                recorded = None
+            if isinstance(recorded, str) and recorded:
+                return f"sha256:{recorded}"
+    return resolve_image_reference(reference, image_cache).digest
+
+
 def swap_realized_spec(
     spec: "RangeSpec",
     manifest: "BuildManifest",
@@ -454,11 +483,9 @@ def swap_realized_spec(
         # golden too or an unverified composition boots under a proven claim
         # (round-1 review)
         if record.golden_reference not in golden_digests:
-            from .._compiler.plan import resolve_image_reference
-
-            golden_digests[record.golden_reference] = resolve_image_reference(
+            golden_digests[record.golden_reference] = _golden_digest_sidecar_first(
                 record.golden_reference, image_cache
-            ).digest
+            )
         golden_digest = golden_digests[record.golden_reference]
         if golden_digest is None:
             raise refuse(
@@ -476,15 +503,23 @@ def swap_realized_spec(
                 f"the realized image {record.realized_file!r} for guest {host.name!r} is not in the image cache",
                 "rebuild, or pull the build artifacts into the cache",
             )
-        hasher = _hashlib.sha256()
-        with open(realized, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 22), b""):
-                hasher.update(chunk)
-        if hasher.hexdigest() != record.realized_sha256:
-            raise refuse(
-                f"the realized image for guest {host.name!r} does not match the manifest's digest",
-                "the cache copy changed since the build; rebuild",
-            )
+        # the sidecar discipline (Journey B, slice-4 round-4 B2): the gate
+        # checks presence and the sidecar's recorded digest against the
+        # manifest instead of re-hashing multi-GB bytes per eval; BYTE
+        # integrity is still verified on every boot by up's verify-images,
+        # which hashes the actual files against these same digests, so a
+        # corrupt cache refuses at boot with a named cause either way
+        sidecar_digest = _realized_sidecar_digest(image_cache, record.realized_file)
+        if sidecar_digest != record.realized_sha256:
+            hasher = _hashlib.sha256()
+            with open(realized, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 22), b""):
+                    hasher.update(chunk)
+            if hasher.hexdigest() != record.realized_sha256:
+                raise refuse(
+                    f"the realized image for guest {host.name!r} does not match the manifest's digest",
+                    "the cache copy changed since the build; rebuild",
+                )
         host.image = record.realized_file
     assert isinstance(swapped, _RangeSpec)
     return swapped, frozenset(manifest.realized_sections)

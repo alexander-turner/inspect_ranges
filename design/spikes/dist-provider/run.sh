@@ -95,9 +95,11 @@ if (cd "$ROOT" && env INSPECT_RANGES_IMAGE_CACHE="$SPIKE/tmp/offline/images" \
   uv run python "$SPIKE/dist_eval.py" "$RANGE" x) >"$SPIKE/tmp/p4.txt" 2>&1; then
   bad "P4 never-pull eval was accepted"
 else
-  grep -q "never-pull" "$SPIKE/tmp/p4.txt" \
+  grep -q "INSPECT_RANGES_NEVER_PULL is set" "$SPIKE/tmp/p4.txt" \
     && ! grep -q "guest-boot\|readiness" "$SPIKE/tmp/p4.txt" \
-    && ok "P4 never-pull refuses with the knob named, before any sample boots" || { bad "P4 refusal"; tail -10 "$SPIKE/tmp/p4.txt"; }
+    && ! grep -q "Traceback" "$SPIKE/tmp/p4.txt" \
+    && [[ "$(wc -l < "$SPIKE/tmp/p4.txt")" -le 10 ]] \
+    && ok "P4 never-pull refuses CLEANLY (the knob named, no traceback, a handful of lines), before any sample boots" || { bad "P4 refusal"; tail -10 "$SPIKE/tmp/p4.txt"; }
 fi
 
 stop_registry

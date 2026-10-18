@@ -140,12 +140,17 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         """Validate the config once and resolve the plan so a broken range fails at startup, not per sample."""
         runtime = provider_runtime()
         if isinstance(config, (str, RangeSpec)):
-            spec, plan, _, _ = runtime.resolve_config(
-                config, lambda: _resolve_spec(config)
+            # off the event loop (round-4 N5): a cold pull is a possibly
+            # minutes-long transfer, and inspect's control surfaces (the
+            # resizable sandbox limiter among them) need the loop alive
+            spec, plan, _, _ = await asyncio.to_thread(
+                runtime.resolve_config, config, lambda: _resolve_spec(config)
             )
         else:
             spec = _resolve_spec(config)
-            ensure_pulled(spec, image_cache=runtime.image_cache)
+            await asyncio.to_thread(
+                ensure_pulled, spec, image_cache=runtime.image_cache
+            )
             spec, sections, consumed = apply_build_manifest(
                 spec,
                 image_cache=runtime.image_cache,
