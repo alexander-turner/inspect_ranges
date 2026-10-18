@@ -43,6 +43,7 @@ def copy_closure(
             "manifest-invalid",
             f"a transfer root is an OCI index, not {root.media_type}",
         )
+    index_bytes = source.manifest_bytes(root)
     index = source.read_index(root)
     copied: list[str] = []
     present: list[str] = []
@@ -60,12 +61,21 @@ def copy_closure(
         copied.append(digest)
 
     for member in index.manifests:
+        # manifests move as RAW verified bytes, never a re-serialization: a
+        # foreign manifest's digest must survive the copy or the transferred
+        # index references members that do not exist (round-2 review B2)
+        member_bytes = source.manifest_bytes(member)
         manifest = source.manifest(member)
         move_blob(manifest.config)
         for layer in manifest.layers:
             move_blob(layer)
-        destination.put_manifest(manifest)
-    destination.put_index(name, index)
+        landed = destination.put_manifest_bytes(member_bytes, member.media_type)
+        if landed.digest != member.require_sha256():
+            raise DistError(
+                "manifest-digest-mismatch",
+                f"member {member.digest} landed as {landed.digest}; the destination altered manifest bytes",
+            )
+    destination.put_index_bytes(name, index_bytes)
     return TransferResult(
         root=root.require_sha256(), copied=tuple(copied), present=tuple(present)
     )
