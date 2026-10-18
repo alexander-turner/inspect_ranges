@@ -591,13 +591,6 @@ def up(
     # the hardened image is hard-required: no environment override survives
     env["RANGE_IMAGE"] = range_image
     env["IMAGE_CACHE"] = str(options.image_cache)
-    ch_dir: Path | None = None
-    if any(guest.vmm == "cloud-hypervisor" for guest in guests):
-        try:
-            ch_dir = prepare_ch_vsock_dir(project)
-        except OSError as error:
-            raise UpError("range-container", str(error)) from error
-        env["CH_VSOCK_DIR"] = str(ch_dir)
     if options.uplink_network is not None:
         env["UPLINK_NETWORK"] = options.uplink_network
 
@@ -628,6 +621,19 @@ def up(
                     f"{teardown_error}; retry with: inspect-ranges down {project})"
                 )
         return UpError(stage, message, guest=guest)
+
+    ch_dir: Path | None = None
+    if any(guest.vmm == "cloud-hypervisor" for guest in guests):
+        try:
+            ch_dir = prepare_ch_vsock_dir(project)
+        except OSError as error:
+            # through fail(): the stage-log line and the owner-record teardown
+            # match every other post-ownership failure (round-1 review)
+            raise fail(
+                "range-container",
+                f"cannot prepare the cloud-hypervisor vsock dir: {error}",
+            ) from error
+        env["CH_VSOCK_DIR"] = str(ch_dir)
 
     log.log("range-container", "start")
     result = run(
