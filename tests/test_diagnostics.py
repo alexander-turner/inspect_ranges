@@ -761,6 +761,29 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
         pytest.param(
             """
             attacker:
+              provider: glovebox
+              vmm: cloud-hypervisor
+              interfaces: [{ network: lab }]
+              entry: external
+            """,
+            "provider-vmm-conflict",
+            "attacker",
+            id="provider-vmm-conflict",
+        ),
+        pytest.param(
+            """
+            attacker:
+              provider: glovebox
+              host: web
+              entry: assumed-breach
+            """,
+            "provider-foothold-conflict",
+            "attacker",
+            id="provider-foothold-conflict",
+        ),
+        pytest.param(
+            """
+            attacker:
               interfaces: [{ network: lab }]
               entry: external
               egress: open

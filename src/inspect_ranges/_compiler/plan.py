@@ -14,7 +14,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..types import AnyIPNetwork, Attacker, Issue, IssueError, RangeSpec, Route, Vmm
+from ..types import (
+    AnyIPNetwork,
+    Attacker,
+    Issue,
+    IssueError,
+    Provider,
+    RangeSpec,
+    Route,
+    Vmm,
+)
 from .allocate import (
     Allocation,
     GuestAllocation,
@@ -121,6 +130,8 @@ class PlannedGuest(BaseModel):
     """Device-model profile (min-devices strict; richer profiles arrive with a schema field)."""
     vmm: Vmm = "qemu"
     """Virtual machine monitor: `qemu` boots from the guest's domain XML via libvirt; `cloud-hypervisor` is started directly by the boot script."""
+    provider: Provider = "ranges"
+    """Who realizes this guest. `ranges` renders and boots it; `glovebox` means an external cell is the box, so this guest holds a reserved IP/MAC allocation but is not rendered, booted, or listed in `boot.json`."""
 
 
 class Requirements(BaseModel):
@@ -477,6 +488,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 readiness="daemon" if windows else "cloud-init",
                 profile="strict",
                 vmm=vmm,
+                provider=getattr(declared, "provider", "ranges"),
             )
         )
 

@@ -449,6 +449,22 @@ class RangeSandboxEnvironment(SandboxEnvironment):
             handle.booted = True
             try:
                 handle.guest_cids = {state.name: state.cid for state in result.guests}
+                # A `provider: glovebox` guest is NOT booted by Ranges (render
+                # skips it; `result.guests` omits it), so it is absent from the
+                # cids above and `sandbox("attacker")` would have no environment.
+                # Register it at its plan-reserved cid so it (a) becomes a named
+                # sandbox under the all-guest opt-out and (b) is pinged and
+                # routed below. Routing only resolves through the applier's
+                # `glovebox_connector` (the uds backend); the local vsock
+                # transport cannot reach a cell, so a glovebox guest is only
+                # registered when an applier is in front of us.
+                if runtime.host_backend.startswith("uds:"):
+                    for guest in rendered_plan.guests:
+                        if (
+                            guest.provider == "glovebox"
+                            and guest.name not in handle.guest_cids
+                        ):
+                            handle.guest_cids[guest.name] = guest.cid
                 handle.guest_sockets = {
                     state.name: state.hybrid_vsock
                     for state in result.guests

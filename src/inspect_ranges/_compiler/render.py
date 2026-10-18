@@ -267,6 +267,10 @@ def render_bundle(
         raise FileExistsError(f"bundle directory {out} is not empty")
     allocation = guest_allocation(plan)
     networks = {network.name: network for network in plan.networks}
+    # Guests Ranges itself renders and boots. A `provider: glovebox` guest keeps
+    # its reserved IP/MAC allocation (so its segment address is not reused) but is
+    # supplied by an external manager, so it gets no domain, seed, or boot entry.
+    bootable = [guest for guest in plan.guests if guest.provider == "ranges"]
 
     files: dict[str, str] = {}
 
@@ -311,7 +315,7 @@ def render_bundle(
     compose = template.replace("__CAPS__", ", ".join(caps)).replace(
         "__SYSCTLS__", ", ".join(sysctls)
     )
-    if any(guest.vmm == "cloud-hypervisor" for guest in plan.guests):
+    if any(guest.vmm == "cloud-hypervisor" for guest in bootable):
         # Cloud Hypervisor exposes guest vsock as a Unix socket per guest, not
         # through the host kernel's vhost-vsock: the sockets land in a host
         # directory the applier supplies, so host-side dialers can reach them
@@ -362,7 +366,7 @@ def render_bundle(
         if conf is not None:
             write(f"netns/dnsmasq/{network.name}.conf", conf)
 
-    for guest in plan.guests:
+    for guest in bootable:
         cpu = (
             "<cpu mode='host-passthrough'/>"
             if plan.requirements.cpu_model == "host-passthrough"
@@ -437,7 +441,7 @@ def render_bundle(
                         backings,
                         options.image_cache if options is not None else None,
                     )
-                    for guest in plan.guests
+                    for guest in bootable
                 ],
                 "verify": {"reserved": True},
             },
@@ -534,7 +538,7 @@ def _require_cached_images(spec: RangeSpec, plan: ResolvedPlan) -> None:
             hint="pull or build the image into the cache (pass --image-cache / PlanOptions.image_cache)",
         )
         for guest in plan.guests
-        if guest.image.digest is None
+        if guest.provider == "ranges" and guest.image.digest is None
     ]
     if issues:
         raise IssueError(issues)

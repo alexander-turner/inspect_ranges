@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from .._host.applier import Applier
+from .._host.glovebox import GloveboxHost
 from .._host.local import HostNotReadyError
 from .._runtime.images import default_image_cache
 from .._runtime.ownership import default_state_dir
@@ -32,13 +33,34 @@ from .._runtime.ownership import default_state_dir
     default=None,
     show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
 )
+@click.option(
+    "--glovebox-cell",
+    "glovebox_cells",
+    multiple=True,
+    metavar="GUEST=CONTAINER_ID",
+    help="Bind a `provider: glovebox` guest to the CRI container id of its cell; "
+    "the applier routes that guest's exec/read/write into the cell and stitches "
+    "its segment bridge to the node netns at realize. Repeatable.",
+)
 def applier(
-    socket_path: Path, state_dir: Path | None, image_cache: Path | None
+    socket_path: Path,
+    state_dir: Path | None,
+    image_cache: Path | None,
+    glovebox_cells: tuple[str, ...],
 ) -> None:
     """Serve realize/teardown/heartbeat and the guest relay for driver processes on this host.
 
     Runs the doctor-readiness subset at startup and refuses to serve unhealthy. A restart loses the replay log, relay map, and admission charges (recorded v1 limitation); disk-driven teardown (the reaper, `inspect-ranges down`) is the recovery.
     """
+    containers: dict[str, str] = {}
+    for pair in glovebox_cells:
+        guest, _, container_id = pair.partition("=")
+        if not guest or not container_id:
+            raise click.BadParameter(
+                f"--glovebox-cell expects GUEST=CONTAINER_ID, got {pair!r}"
+            )
+        containers[guest] = container_id
+    glovebox = GloveboxHost(containers=containers) if containers else None
 
     async def serve() -> None:
         endpoint = Applier(
@@ -47,6 +69,7 @@ def applier(
             image_cache=image_cache
             if image_cache is not None
             else default_image_cache(),
+            glovebox=glovebox,
         )
         # SIGTERM must reach the finally, and from BEFORE start(): the
         # readiness gate plus bind is a multi-second window, and a killed

@@ -827,6 +827,146 @@ def test_slow_capture_stop_still_lands_the_shutdown_gaps_and_checkpoint(
     asyncio.run(scenario())
 
 
+# -- the glovebox attacker on the uds backend ---------------------------------------
+
+
+def _glovebox_bundle(out: Path) -> str:
+    """A bundle whose plan carries a `provider: glovebox` attacker (reserved, not booted), the shape the uds backend routes into a cell. Returns the manifest digest the realize gate checks."""
+    import hashlib
+    import json
+
+    from inspect_ranges._compiler.plan import PlanOptions, plan_json, resolve_plan
+
+    from tests.test_provider_glovebox import glovebox_spec
+
+    plan = resolve_plan(
+        glovebox_spec(), PlanOptions(image_cache=out / "cache", cid_base=20_500)
+    )
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "plan.json").write_text(plan_json(plan))
+    manifest = (
+        json.dumps(
+            {
+                "range": plan.range.name,
+                "spec_sha256": plan.range.spec_sha256,
+                "files": {},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    (out / "manifest.json").write_text(manifest)
+    return hashlib.sha256(manifest.encode()).hexdigest()
+
+
+def _glovebox_up(bundle: Path, options: UpOptions, on_stage: OnStage) -> UpResult:
+    """The honest up flow, OMITTING `provider: glovebox` guests from the result (Ranges reserves but never boots them), exactly as render does — so the applier's own glovebox branch is what registers the attacker's reserved cid."""
+    from inspect_ranges._compiler.plan import ResolvedPlan
+    from inspect_ranges._runtime.up import GuestState
+
+    from tests.applier_fixture import HONEST_UP_EVENTS
+
+    plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
+    for stage, status in HONEST_UP_EVENTS:
+        on_stage(stage, status, {})
+    return UpResult(
+        project=options.project or "fixture",
+        range_name=plan.range.name,
+        guests=[
+            GuestState(name=guest.name, cid=guest.cid, ready=True)
+            for guest in plan.guests
+            if guest.provider != "glovebox"
+        ],
+        seconds=0.01,
+    )
+
+
+def test_uds_backend_routes_the_glovebox_attacker_exec_through_the_connector(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """On the uds/applier backend, a `provider: glovebox` guest's reserved cid is registered in the relay map at realize and its `exec` is served by `glovebox_connector` against the bound cell — `sandbox("attacker").exec` lands in the cell, not the vsock fallback."""
+    from inspect_ranges._host.glovebox import CellExecResult, GloveboxHost
+
+    from tests.test_glovebox_connector import FakeExecutor
+
+    # a short root (not the long per-test tmp_path) keeps the socket path inside
+    # the AF_UNIX length limit, as the uds conformance fixture does
+    tmp_path = tmp_path_factory.mktemp("gb-uds")
+
+    async def scenario() -> None:
+        executor = FakeExecutor()
+        executor.exec_result = CellExecResult(
+            rc=0, stdout=b"IN-CELL-MARKER", stderr=b""
+        )
+
+        async def noop_runner(commands: object) -> None:
+            return None
+
+        async def netns_pid(project: str) -> int:
+            return 4321
+
+        glovebox = GloveboxHost(
+            containers={"attacker": "ctr-cell"},
+            root_runner=noop_runner,  # pyright: ignore[reportArgumentType]
+            netns_pid_fn=netns_pid,
+            executor_factory=lambda _container: executor,
+        )
+        state = tmp_path / "state"
+        socket_path = tmp_path / "sock" / "applier.sock"
+        applier = Applier(
+            socket_path,
+            state,
+            image_cache=tmp_path / "cache",
+            up_fn=_glovebox_up,
+            down_fn=lambda project, state_dir: DownResult(
+                project=project, containers=0, volumes=0, networks=0
+            ),
+            glovebox=glovebox,  # no explicit guest_connector: the glovebox plane wins
+            capacity=HostCapacity(cpus=1024, memory_mb=1 << 22),
+            gate=lambda: [],
+        )
+        await applier.start()
+        try:
+            bundle = tmp_path / "gb-bundle"
+            digest = _glovebox_bundle(bundle)
+            lease = LeaseStore(state).acquire(
+                project="ir-glovebox",
+                task_name="task",
+                sample_id="s1",
+                isolation="shared",
+                origin=f"uds:{socket_path}",
+                bundle_path=str(bundle),
+                bundle_digest=digest,
+                staging=str(tmp_path / "staging"),
+                host_facts=facts(),
+                ttl_s=600,
+                evidence_location=None,
+            )
+            channel = MessageChannel(
+                UdsTransport(socket_path, lease.lease_id, ack_timeout_s=2.0),
+                label=lease.project,
+            )
+            async for _ in channel.realize(digest, []):
+                pass
+
+            # the reserved attacker cid is in the relay map (never booted by up)
+            relays = applier._relays[lease.lease_id]  # pyright: ignore[reportPrivateUsage]
+            assert "attacker" in relays
+
+            # and the attacker's exec is served by the cell executor, not vsock
+            outcome = await channel.exec(
+                "attacker",
+                ExecRequest(id="d" * 32, cmd=["/bin/echo", "marker"]),
+            )
+            assert outcome.rc == 0
+            assert outcome.stdout == b"IN-CELL-MARKER"
+            assert executor.runs[0]["cmd"] == ["/bin/echo", "marker"]
+        finally:
+            await applier.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_applier_shutdown_leaves_evidence_unsealed_with_gaps(tmp_path: Path) -> None:
     """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for an honest reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry)."""
     from inspect_ranges._evidence.reader import LocalDirStore, verify_location

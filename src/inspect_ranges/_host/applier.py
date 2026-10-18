@@ -56,6 +56,7 @@ from .._provider.evidence import evidence_buffer_bytes, evidence_max_bytes
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
 from .._runtime.up import OnStage, UpError, UpOptions, UpResult, up
+from .glovebox import GloveboxHost
 from .leases import HostLease, LeaseStore
 from .local import GateFn, HostNotReadyError
 from .stages import SeamStage, StageTranslator
@@ -151,6 +152,7 @@ class Applier:
         up_fn: ApplierUpFn = _default_up,
         down_fn: ApplierDownFn = _default_down,
         guest_connector: GuestConnector | None = None,
+        glovebox: GloveboxHost | None = None,
         store: LeaseStore | None = None,
         capacity: HostCapacity | None = None,
         gate: GateFn | None = None,
@@ -163,9 +165,18 @@ class Applier:
         self._down_fn = down_fn
         # CID -> hybrid-vsock socket of every realized Cloud Hypervisor guest
         self._ch_sockets: dict[int, HybridEndpoint] = {}
-        self._guest_connect = guest_connector or cloud_hypervisor_connector(
-            self._ch_sockets
-        )
+        # A `provider: glovebox` guest is not booted here; its exec rides a
+        # glovebox cell through the in-process `glovebox_connector`, which serves
+        # the cell's reserved cid and defers every other cid to the real vsock
+        # dial. An explicit `guest_connector` (CI) wins over both.
+        self._glovebox = glovebox
+        default_connect = cloud_hypervisor_connector(self._ch_sockets)
+        if guest_connector is not None:
+            self._guest_connect = guest_connector
+        elif glovebox is not None:
+            self._guest_connect = glovebox.connector(default_connect)
+        else:
+            self._guest_connect = default_connect
         self._store = store if store is not None else LeaseStore(state_dir)
         self._capacity = capacity if capacity is not None else HostCapacity.measure()
         self._gate = gate if gate is not None else readiness_failures
@@ -456,6 +467,8 @@ class Applier:
         if charge is not None:
             await self.admission.release(charge)
         self._plans.pop(lease.lease_id, None)
+        if self._glovebox is not None:
+            await self._glovebox.teardown(lease.project)
         for cid in self._relays.pop(lease.lease_id, {}).values():
             self._ch_sockets.pop(cid, None)
         self._guest_states.pop(lease.lease_id, None)
@@ -664,9 +677,25 @@ class Applier:
             if translated is not None:
                 await emit(translated.stage, translated.detail)
         else:
-            self._relays[lease.lease_id] = {
-                guest.name: guest.cid for guest in result.guests
-            }
+            relays = {guest.name: guest.cid for guest in result.guests}
+            # A `provider: glovebox` guest is absent from `result.guests` (Ranges
+            # reserves it but never boots it); register its plan-reserved cid so
+            # the relay routes `attacker` into the cell via the glovebox
+            # connector, then stitch its segment bridge out to the node netns.
+            if self._glovebox is not None and plan is not None:
+                for guest in plan.guests:
+                    if guest.provider == "glovebox":
+                        relays[guest.name] = guest.cid
+                try:
+                    await self._glovebox.realize(plan, lease.project)
+                except Exception:
+                    logger.exception(
+                        "glovebox realize (cell bind + stitch) failed for "
+                        "lease=%s project=%s; glovebox guests will not route",
+                        lease.lease_id,
+                        lease.project,
+                    )
+            self._relays[lease.lease_id] = relays
             for guest in result.guests:
                 if guest.hybrid_vsock is not None:
                     self._ch_sockets[guest.cid] = guest.hybrid_vsock

@@ -324,6 +324,9 @@ class Interface(_StrictModel):
 Vmm = Literal["qemu", "cloud-hypervisor"]
 """The virtual machine monitors a guest can run under."""
 
+Provider = Literal["ranges", "glovebox"]
+"""Who owns the attacker box. `ranges` (default) renders and boots it like any guest. `glovebox` (a.k.a. managed-external) means an external manager — glovebox's Kata/Cloud Hypervisor agent cell — brings its own box (its VMM, hardened image, exec witness, egress policy); Ranges does not render or boot it, but still reserves its segment IP/MAC and stands up the bridge, then reaches it over the agreed control channel."""
+
 
 class Os(_StrictModel):
     """Guest operating system."""
@@ -753,7 +756,10 @@ class Attacker(_StrictModel):
     """Attack box sizing."""
 
     vmm: Vmm | None = None
-    """Attack box virtual machine monitor (see `Host.vmm`); unset, a dedicated attack box resolves to `cloud-hypervisor` at planning (unlike hosts and routers, which default to `qemu`). With `host` set, the foothold host's own `vmm` applies and declaring one here is refused."""
+    """Attack box virtual machine monitor (see `Host.vmm`); unset, a dedicated attack box resolves to `cloud-hypervisor` at planning (unlike hosts and routers, which default to `qemu`). With `host` set, the foothold host's own `vmm` applies and declaring one here is refused. Mutually exclusive with `provider: glovebox`, which chooses its own VMM."""
+
+    provider: Provider = "ranges"
+    """Who provides the attack box. `ranges` (default) renders and boots it; `glovebox` means an external glovebox cell is the box, so Ranges reserves its IP/MAC and stands up the bridge but does not render or boot it. Requires a dedicated box (declare `interfaces`, not `host`), and is mutually exclusive with `vmm`."""
 
     interfaces: list[Interface] | None = None
     """Attack box network attachments (required unless `host` is set)."""
@@ -766,6 +772,28 @@ class Attacker(_StrictModel):
 
     @model_validator(mode="after")
     def _check_foothold(self) -> "Attacker":
+        if self.provider == "glovebox":
+            conflicts: list[str] = []
+            # main resolves an unset attacker vmm to cloud-hypervisor at
+            # planning (`vmm: Vmm | None = None`), so "declared a vmm" is
+            # not-None rather than != "qemu" here.
+            if self.vmm is not None:
+                conflicts.append("vmm")
+            if self.host is not None:
+                conflicts.append("host")
+            if conflicts:
+                raise IssueError(
+                    [
+                        Issue(
+                            code="provider-vmm-conflict"
+                            if "vmm" in conflicts
+                            else "provider-foothold-conflict",
+                            path=(),
+                            message=f"attacker with provider: glovebox must not also declare {', '.join(conflicts)}",
+                            hint="glovebox provides its own box and chooses its own VMM; declare a dedicated attack box (interfaces) with neither host nor vmm",
+                        )
+                    ]
+                )
         if self.host is not None:
             extras = [
                 field
