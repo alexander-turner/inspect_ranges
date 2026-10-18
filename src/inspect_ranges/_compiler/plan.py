@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route, Vmm
+from ..types import AnyIPNetwork, Attacker, Issue, IssueError, RangeSpec, Route, Vmm
 from .allocate import (
     Allocation,
     GuestAllocation,
@@ -198,6 +198,11 @@ def _evidence_name_issues(spec: RangeSpec) -> list[Issue]:
     return issues
 
 
+def _attacker_vmm(attacker: Attacker) -> Vmm:
+    """The attacker box's effective VMM: a declared value wins; a dedicated attack box with none declared defaults to `cloud-hypervisor` (hosts and routers default to `qemu`)."""
+    return attacker.vmm or "cloud-hypervisor"
+
+
 def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> ResolvedPlan:
     """Resolve a validated spec into the immutable plan.
 
@@ -239,23 +244,26 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     if options.cpu_model != "host-passthrough":
         # Cloud Hypervisor takes no CPU model: its guests always see the host
         # CPU, so a pinned model would silently not apply to them
-        pinned_cpu_guests: list[tuple[tuple[Any, ...], Any]] = [
-            (("hosts", index), host) for index, host in enumerate(spec.hosts)
+        pinned_cpu_guests: list[tuple[tuple[Any, ...], str, Any]] = [
+            (("hosts", index), host.name, host.vmm)
+            for index, host in enumerate(spec.hosts)
         ]
         pinned_cpu_guests += [
-            (("routers", index), r) for index, r in enumerate(spec.routers)
+            (("routers", index), r.name, r.vmm) for index, r in enumerate(spec.routers)
         ]
         if spec.attacker.host is None:
-            pinned_cpu_guests.append((("attacker",), spec.attacker))
+            pinned_cpu_guests.append(
+                (("attacker",), spec.attacker.name, _attacker_vmm(spec.attacker))
+            )
         issues.extend(
             Issue(
                 code="cloud-hypervisor-cpu-model",
                 path=(*path, "vmm"),
-                message=f"guest {guest.name!r} runs on cloud-hypervisor, which cannot apply the pinned CPU model {options.cpu_model!r}",
+                message=f"guest {name!r} runs on cloud-hypervisor, which cannot apply the pinned CPU model {options.cpu_model!r}",
                 hint="use cpu_model host-passthrough, or run this guest on qemu",
             )
-            for path, guest in pinned_cpu_guests
-            if guest.vmm == "cloud-hypervisor"
+            for path, name, vmm in pinned_cpu_guests
+            if vmm == "cloud-hypervisor"
         )
     for index, router in enumerate(spec.routers):
         if router.os is not None and router.os.type == "windows":
@@ -388,6 +396,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         if reference is None:
             reference = options.default_router_image
         resources = getattr(declared, "resources", None)
+        vmm = _attacker_vmm(spec.attacker) if guest.kind == "attacker" else declared.vmm
         guests.append(
             PlannedGuest(
                 name=guest.name,
@@ -403,7 +412,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 injector="cloud-init",
                 readiness="cloud-init",
                 profile="strict",
-                vmm=declared.vmm,
+                vmm=vmm,
             )
         )
 

@@ -744,8 +744,8 @@ class Attacker(_StrictModel):
     resources: Resources | None = None
     """Attack box sizing."""
 
-    vmm: Vmm = "qemu"
-    """Attack box virtual machine monitor (see `Host.vmm`); with `host` set, the foothold host's own `vmm` applies and declaring one here is refused."""
+    vmm: Vmm | None = None
+    """Attack box virtual machine monitor (see `Host.vmm`); unset, a dedicated attack box resolves to `cloud-hypervisor` at planning (unlike hosts and routers, which default to `qemu`). With `host` set, the foothold host's own `vmm` applies and declaring one here is refused."""
 
     interfaces: list[Interface] | None = None
     """Attack box network attachments (required unless `host` is set)."""
@@ -764,7 +764,7 @@ class Attacker(_StrictModel):
                 for field in ("image", "resources", "interfaces")
                 if getattr(self, field) is not None
             ]
-            if self.vmm != "qemu":
+            if self.vmm is not None:
                 extras.append("vmm")
             if extras:
                 raise IssueError(
