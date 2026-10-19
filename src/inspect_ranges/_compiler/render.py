@@ -508,10 +508,15 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                     else:
                         # a multi-homed guest (the build uplink shape) must
                         # elect its default deterministically: the NAT-mode
-                        # attachment wins, and a deprioritized router-gatewayed
-                        # attachment keeps explicit sibling-subnet routes so
-                        # cross-segment traffic still crosses the router
-                        default_metric = 50 if network.mode == "nat" else 200
+                        # attachment wins; deprioritized router-gatewayed
+                        # attachments tie-break by interface index and keep
+                        # explicit sibling-subnet routes so cross-segment
+                        # traffic still crosses the router. Siblings exclude
+                        # the guest's own attachments (connected routes win)
+                        # and, until multi-router plans exist (parked: router
+                        # provisioning), every non-NAT segment routes via this
+                        # gateway.
+                        default_metric = 50 if network.mode == "nat" else 200 + index
                         routes = [
                             {
                                 "to": "default",
@@ -520,13 +525,14 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                             }
                         ]
                         if network.mode != "nat":
+                            attached = {other.network for other in guest.interfaces}
                             routes.extend(
                                 {
                                     "to": str(sibling.cidr),
                                     "via": str(network.gateway),
                                 }
                                 for sibling in plan.networks
-                                if sibling.name != network.name
+                                if sibling.name not in attached
                                 and sibling.mode != "nat"
                             )
                         entry["routes"] = routes

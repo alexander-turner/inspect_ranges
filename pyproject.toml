@@ -80,6 +80,9 @@ exclude = [
     ".venv",
     "docs",
     "design",
+    # vendored upstream provenance under the examples is FROZEN: neither
+    # linted nor reformatted (linux-examples-v1 phase review round 1)
+    "examples/*/upstream",
 ]
 src = ["."]
 
