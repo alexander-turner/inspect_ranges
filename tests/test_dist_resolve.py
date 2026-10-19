@@ -585,3 +585,102 @@ def test_warm_path_heals_pruned_artifacts(
     assert healed is not None
     assert (images / fixture.realized_file).is_file()
     assert load_manifest(builds, "distfix") is not None
+
+
+def test_catalog_image_references_applies_defaults() -> None:
+    """The pre-plan reference sweep mirrors planning: content hosts excluded (the build closure owns them), router and attacker defaults applied, foothold attackers boot nothing, duplicates collapse."""
+    from inspect_ranges._dist.resolve import catalog_image_references
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Interface,
+        Network,
+        Os,
+        ProvisioningStep,
+        RangeMeta,
+        RangeSpec,
+        Router,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="refs", description="reference sweep"),
+        networks=[
+            Network(name="lab", cidr="10.0.0.0/24", mode="isolated"),
+            Network(name="dmz", cidr="10.0.1.0/24", mode="isolated"),
+        ],
+        routers=[
+            Router(
+                name="r",
+                interfaces=[Interface(network="lab"), Interface(network="dmz")],
+            )
+        ],
+        hosts=[
+            Host(
+                name="plain",
+                os=Os(type="linux"),
+                image="noble-range-guest",
+                interfaces=[Interface(network="lab")],
+            ),
+            Host(
+                name="built",
+                os=Os(type="linux"),
+                image="focal-guest",
+                interfaces=[Interface(network="lab")],
+                provisioning=[ProvisioningStep(recipe="acme.web")],
+            ),
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    assert catalog_image_references(spec) == ["noble-range-guest", "attack"]
+    foothold = spec.model_copy(
+        update={
+            "attacker": Attacker(host="plain", entry="assumed-breach"),
+            "routers": [],
+        }
+    )
+    assert catalog_image_references(foothold) == ["noble-range-guest"]
+
+
+def test_ensure_images_available_warm_cold_and_never_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog tier of the implicit fetch (slice 4): a clean machine's eval pulls bare-name images through the search path; warm costs zero network; never-pull refuses coded; an unpublished name names what was searched."""
+    from inspect_ranges._dist.errors import DistError
+    from inspect_ranges._dist.resolve import NEVER_PULL_ENV, ensure_images_available
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    from inspect_ranges._dist.catalog import publish_golden
+
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    spec = load_range(spec_file(tmp_path))
+    monkeypatch.setenv(REGISTRY_ENV, str(tmp_path / "catalog-loc"))
+
+    consumer = tmp_path / "consumer-images"
+    consumer.mkdir()
+    pulled = ensure_images_available(spec, image_cache=consumer)
+    assert pulled == ["focal-guest"]
+    assert (consumer / "focal-guest.qcow2").exists()
+
+    # warm: everything cached; a broken search path proves zero network
+    monkeypatch.setenv(REGISTRY_ENV, "/nonexistent-mirror-path")
+    assert ensure_images_available(spec, image_cache=consumer) == []
+
+    # never-pull: a missing image refuses before any location is consulted
+    cold = tmp_path / "cold-images"
+    cold.mkdir()
+    monkeypatch.setenv(NEVER_PULL_ENV, "1")
+    with pytest.raises(DistError) as excinfo:
+        ensure_images_available(spec, image_cache=cold)
+    assert excinfo.value.code == "never-pull"
+    monkeypatch.delenv(NEVER_PULL_ENV)
+
+    # an unpublished name: the refusal names the searched locations
+    monkeypatch.setenv(REGISTRY_ENV, str(tmp_path / "catalog-loc"))
+    ghost = spec.model_copy(
+        update={"attacker": spec.attacker.model_copy(update={"image": "ghost"})}
+    )
+    with pytest.raises(DistError) as excinfo:
+        ensure_images_available(ghost, image_cache=cold)
+    assert excinfo.value.code == "image-not-published"
+    assert "catalog-loc" in str(excinfo.value)

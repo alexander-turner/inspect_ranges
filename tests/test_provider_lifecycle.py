@@ -154,6 +154,11 @@ def rigged_runtime(tmp_path: Path) -> tuple[ProviderRuntime, FakeSeams]:
     runtime.state_dir = tmp_path / "projects"
     runtime.state_dir.mkdir(parents=True, exist_ok=True)
     runtime.image_cache = tmp_path / "images"
+    runtime.image_cache.mkdir(parents=True, exist_ok=True)
+    # init's implicit fetch reads the cache (slice 4): the fixture spec's
+    # host image and the defaulted attack image must be present, not pulled
+    for name in ("img.qcow2", "attack.qcow2"):
+        (runtime.image_cache / name).write_bytes(b"fake golden: " + name.encode())
     runtime.capacity = HostCapacity(cpus=8, memory_mb=16_384)
     seams = FakeSeams(runtime)
     runtime.up_fn = seams.up
