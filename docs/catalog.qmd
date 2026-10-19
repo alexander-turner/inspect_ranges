@@ -39,7 +39,7 @@ The range container publishes as a conventional Docker image (`meridianlabsai/in
 
 An eval needs no explicit fetch verbs: init pulls whatever the range resolves that is absent from the cache (the published build for a built range, catalog images otherwise), with docker-pull-shaped progress, and warm evals cost zero network. `INSPECT_RANGES_NEVER_PULL=1` turns every implicit transfer into a coded refusal for hosts that must stay offline.
 
-Fleets pin: `inspect-ranges images pin --from docker.io/meridianlabsai --out pins.json` records every catalog name's current root digest, and a host running with `INSPECT_RANGES_PIN_FILE` set lands exactly the pinned roots, refusing only when a pinned root is no longer served anywhere.
+Fleets pin: `inspect-ranges images pin --from docker.io/meridianlabsai --out pins.json` records every catalog name's current root digest, and a host running with `INSPECT_RANGES_PIN_FILE` set lands exactly the pinned roots, refusing `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through, the same posture as the search path).
 
 ## The republish discipline
 

@@ -45,7 +45,7 @@ def source_names(location: Location) -> list[str]:
     Raises:
         DistError: `location-unenumerable` for sources with no listing surface (the public hub), with the per-name form as the remedy.
     """
-    from .catalog import CATALOG_REF, catalog_names
+    from .catalog import CATALOG_REF, DAEMON_REF, catalog_names
 
     try:
         # the published name list is the first-class enumeration (it is what
@@ -64,6 +64,7 @@ def source_names(location: Location) -> list[str]:
                 name
                 and ":spec-" not in name
                 and name != CATALOG_REF
+                and name != DAEMON_REF
                 and name not in names
             ):
                 names.append(name)

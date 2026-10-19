@@ -22,6 +22,10 @@ timestamp: 2026-10-19
 - `design/spikes/cat-attack/run.sh`, `cat-publish/run.sh`, `cat-rimage/run.sh`, and `phase-exit-cat/run.sh` all green at the publishing commit.
 - Republish discipline ([standard-images-v1-parked-decisions.md](standard-images-v1-parked-decisions.md) entry 1): if this is a REpublish of `attack`, `catalog/attack/recipes/catalog.attack-tools/recipe.yaml` MUST have a bumped version, so the realized name re-keys and nothing silently replaces published bytes.
 
+## Vendor inputs
+
+The derives below consume the Ubuntu cloud images. On a machine that lacks them: fetch `noble-server-cloudimg-amd64.img` and `focal-server-cloudimg-amd64.img` from `https://cloud-images.ubuntu.com/<release>/current/`, verify each against Canonical's co-published `SHA256SUMS`, and use that verified value as the `--sha256` pin (the pin is the provenance record; `derive` refuses a mismatch before writing anything).
+
 ## The publish commands (in order)
 
 ```bash

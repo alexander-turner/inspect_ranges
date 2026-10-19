@@ -643,6 +643,11 @@ class Route(_StrictModel):
         ) -> None: ...
 
 
+def has_guest_content(host: "Host") -> bool:
+    """Whether a host declares buildable guest content (provisioning, services, or vulnerabilities): the one predicate the build gate, the push closure, and the provider's fetch tiers share."""
+    return bool(host.provisioning or host.services or host.vulnerabilities)
+
+
 class Router(_StrictModel):
     """A gateway guest joining two or more networks, carrying the inter-segment ACL."""
 

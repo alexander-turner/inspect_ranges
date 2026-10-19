@@ -41,7 +41,14 @@ from .._runtime.ownership import (
 )
 from .._runtime.up import OnStage, UpError, UpOptions, UpResult, up
 from ..schema import revalidate_range
-from ..types import DnsConfig, EgressPolicy, Issue, IssueError, RangeSpec
+from ..types import (
+    DnsConfig,
+    EgressPolicy,
+    Issue,
+    IssueError,
+    RangeSpec,
+    has_guest_content,
+)
 from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
 from .capture import (
     RealizedImageMeta,
@@ -445,11 +452,7 @@ def build_range(
     steps_by_host: dict[str, list[ResolvedStep]] = {}
     for step in steps:
         steps_by_host.setdefault(step.guest, []).append(step)
-    content_hosts = [
-        host
-        for host in spec.hosts
-        if host.provisioning or host.services or host.vulnerabilities
-    ]
+    content_hosts = [host for host in spec.hosts if has_guest_content(host)]
     goldens: dict[str, ImageRef] = {}
     keys: dict[str, str] = {}
     missing: list[Issue] = []

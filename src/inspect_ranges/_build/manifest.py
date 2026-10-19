@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from .._diagnostics import Issue
-from ..types import Host
+from ..types import Host, has_guest_content
 
 if TYPE_CHECKING:
     from ..types import RangeSpec
@@ -205,6 +205,11 @@ def realized_file_name(range_name: str, guest: str, build_key: str) -> str:
     return f"{range_name.replace('/', '-')}-{guest}-{build_key[:12]}.qcow2"
 
 
+def is_catalog_realized(range_name: str, guest: str, build_key: str, file: str) -> bool:
+    """Whether a realized sidecar describes a CATALOG-pulled image (standard-images-v1): a build's realized file is always `<range>-<guest>-<key12>.qcow2`, so a renamed landing (`attack.qcow2`) is a promoted catalog image, sticky by design and never the realized tier's reclaim bait (consumers hold no factory manifest to reference it)."""
+    return file != realized_file_name(range_name, guest, build_key)
+
+
 def realized_backings(manifest: "BuildManifest") -> dict[str, tuple[str, str]]:
     """Per-guest (golden cache file, recorded digest) for every realized guest.
 
@@ -349,11 +354,7 @@ def apply_build_manifest(
     """
     from ..types import IssueError  # local: keep module import-light
 
-    content_hosts = [
-        host
-        for host in spec.hosts
-        if host.provisioning or host.services or host.vulnerabilities
-    ]
+    content_hosts = [host for host in spec.hosts if has_guest_content(host)]
     if not content_hosts:
         return spec, frozenset(), None
 
@@ -471,7 +472,7 @@ def swap_realized_spec(
     for host in swapped.hosts:
         record = manifest.guest(host.name)
         if record is None:
-            if host.provisioning or host.services or host.vulnerabilities:
+            if has_guest_content(host):
                 raise refuse(
                     f"its build manifest has no record for guest {host.name!r}",
                     "run `inspect-ranges build` again",

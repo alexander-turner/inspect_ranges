@@ -27,17 +27,29 @@ from .._channel.bundle import BundleError, build_daemon_bundle
     default=None,
     help="Location override for --pull; default is the configured search path (INSPECT_RANGES_REGISTRY).",
 )
-def daemon_bundle(output: Path, pull: bool, from_location: str | None) -> None:
+@click.option(
+    "--sha256",
+    "expected_sha256",
+    default=None,
+    help="Out-of-band pin for --pull: the bundle digest publish day recorded; a served bundle that differs refuses.",
+)
+def daemon_bundle(
+    output: Path, pull: bool, from_location: str | None, expected_sha256: str | None
+) -> None:
     """Build the byte-deterministic daemon bundle the realizer bakes into goldens, or fetch the published one with `--pull`."""
-    if from_location is not None and not pull:
-        raise click.UsageError("--from only applies to --pull")
+    if (from_location is not None or expected_sha256 is not None) and not pull:
+        raise click.UsageError("--from/--sha256 only apply to --pull")
     if pull:
         from .._dist.catalog import fetch_daemon_bundle
         from .._dist.errors import DistError
         from .._dist.location import registry_locations
 
         try:
-            info = fetch_daemon_bundle(registry_locations(from_location), output)
+            info = fetch_daemon_bundle(
+                registry_locations(from_location),
+                output,
+                expected_sha256=expected_sha256,
+            )
         except DistError as error:
             raise click.ClickException(str(error)) from error
     else:

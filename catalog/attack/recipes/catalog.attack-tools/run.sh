@@ -34,7 +34,7 @@ exec_guest 'apt-get clean && rm -rf /var/lib/apt/lists/*'
 
 echo "step: record the image manifest (what the drifting feeds actually delivered)"
 exec_guest 'dpkg-query -W -f "\${Package} \${Version}\n" > /etc/attack-image.manifest \
-  && msfconsole --version >> /etc/attack-image.manifest 2>/dev/null || true'
+  && { msfconsole --version >> /etc/attack-image.manifest 2>/dev/null || true; }'
 
 echo "step: assert every tool present, metasploit major floor, and ZERO non-loopback listeners"
 exec_guest 'set -e; for t in nmap ncat socat curl wget tcpdump sqlmap hydra john \
