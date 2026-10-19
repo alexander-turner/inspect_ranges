@@ -236,6 +236,38 @@ def test_crictl_executor_read_file_decodes_base64() -> None:
     asyncio.run(scenario())
 
 
+def test_crictl_executor_read_file_caps_at_the_source() -> None:
+    async def scenario() -> None:
+        seen: dict[str, str] = {}
+
+        async def fake_run(argv: Sequence[str], stdin: bytes) -> CellExecResult:
+            seen["script"] = argv[2]
+            # a compliant cell `head -c 3 | base64` returns only the first 3 bytes
+            return CellExecResult(rc=0, stdout=base64.b64encode(b"hel"), stderr=b"")
+
+        executor = CrictlCellExecutor(container_id="ctr", run_command=fake_run)
+        data = await executor.read_file("/big", max_bytes=3)
+        assert data == b"hel"
+        # the cap and the missing-file guard are both at the source
+        assert "head -c 3 /big" in seen["script"]
+        assert "test -r /big" in seen["script"]
+
+    asyncio.run(scenario())
+
+
+def test_crictl_executor_read_file_missing_raises_even_when_capped() -> None:
+    async def scenario() -> None:
+        async def fake_run(argv: Sequence[str], stdin: bytes) -> CellExecResult:
+            # `test -r` fails before the pipeline, so rc is non-zero with no stdout
+            return CellExecResult(rc=1, stdout=b"", stderr=b"")
+
+        executor = CrictlCellExecutor(container_id="ctr", run_command=fake_run)
+        with pytest.raises(FileNotFoundError):
+            await executor.read_file("/nope", max_bytes=10)
+
+    asyncio.run(scenario())
+
+
 def test_crictl_executor_write_file_pipes_base64_stdin() -> None:
     async def scenario() -> None:
         captured: dict[str, bytes] = {}

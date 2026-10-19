@@ -142,8 +142,17 @@ class CrictlCellExecutor(CellExecutor):
         return CellExecResult(rc=rc, stdout=stdout, stderr=result.stderr)
 
     async def read_file(self, path: str, *, max_bytes: int | None) -> bytes:
-        argv = ["/bin/sh", "-c", f"base64 {shlex.quote(path)}"]
-        result = await self._run_argv(argv, b"")
+        quoted = shlex.quote(path)
+        if max_bytes is None:
+            script = f"base64 {quoted}"
+        else:
+            # Cap at the source so a large file isn't fully read, encoded and
+            # transferred just to be truncated here. `test -r` short-circuits
+            # before the pipeline, preserving the non-zero rc on a missing or
+            # unreadable file that a bare `head ... | base64` would mask (a
+            # pipeline's rc is its last command's, i.e. base64's success).
+            script = f"test -r {quoted} && head -c {max_bytes} {quoted} | base64"
+        result = await self._run_argv(["/bin/sh", "-c", script], b"")
         if result.rc != 0:
             raise FileNotFoundError(path)
         data = base64.b64decode(result.stdout)
