@@ -86,10 +86,16 @@ WANT="nmap sqlmap hydra john msfconsole msfvenom ncat socat gobuster ffuf smbcli
   && ok "A3c every ratified tool answers on the booted attack box" || bad "A3c tools (got: $TOOLS)"
 SCAN=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
   'nmap -p 22 -Pn 10.98.0.10 2>/dev/null | grep -E "^22/tcp" | head -1' || true)
-[[ -n "$SCAN" ]] && ok "A3d nmap scans the lab segment from the attack box (got: $SCAN)" || bad "A3d scan"
+[[ "$SCAN" =~ (closed|open) ]] && ok "A3d nmap gets an L3 answer from the lab host (got: $SCAN)" || bad "A3d scan (got: $SCAN)"
 MSF=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
   'msfvenom --list formats 2>/dev/null | grep -ci "elf" || true' || true)
 [[ "${MSF:-0}" -ge 1 ]] && ok "A3e the metasploit framework is functional (msfvenom enumerates formats)" || bad "A3e msf (got: $MSF)"
+LISTEN=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
+  'ss -H -tuln | awk "{split(\$5,a,\":\"); port=a[length(a)]+0; if (\$5 ~ /^127\\./ || \$5 ~ /^\\[::1\\]/) next; if (\$1==\"udp\" && (port>=32768 || port==68)) next; print}" | head -3' || true)
+[[ -z "$LISTEN" ]] && ok "A3f the booted attack box has ZERO non-loopback listeners (the containment invariant, live)" || bad "A3f listeners (got: $LISTEN)"
+MANIFEST=$(cd "$ROOT" && uv run python design/spikes/_shared/chexec.py --boot "$SPIKE/tmp/bundle/boot.json" --project "${RC%-range-1}" --guest attacker --user root exec \
+  'wc -l < /etc/attack-image.manifest' || true)
+[[ "${MANIFEST:-0}" -ge 100 ]] && ok "A3g the image carries its recorded package manifest ($MANIFEST lines)" || bad "A3g manifest (got: $MANIFEST)"
 $IR down --all >/dev/null 2>&1 || true
 
 echo
