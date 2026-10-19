@@ -12,6 +12,8 @@
 
 **Also noted (slice-1 review N3):** the realized attack image (~2.9 GB) carries dead qcow2 clusters from deleted package archives; a capture-time sparsify pass would shrink every consumer's pull. Parked as a nice-to-have for the publish-day sizing, not a correctness issue.
 
+**DECIDED (user, 2026-10-19): the digest discipline.** Drift accepted between publish days; every republish bumps the recipe version (re-keying the name); publish day records the dpkg manifest alongside the catalog entry. No apt snapshotting.
+
 
 ## 2. When the attacker's image default flips to `attack` (slice 2, 2026-10-19)
 
@@ -20,5 +22,7 @@
 **Recommendation:** flip HARD on publish day (slice 4), when `docker.io/meridianlabsai/attack` exists and the Q1 registry tier resolves it everywhere connected; offline hosts pull it once or keep declaring `image: noble-range-guest` explicitly. Until then the default stays as-is, and the battery-proven consumption path (`image: attack` after an `images pull attack`, or the realized file by name) is the opt-in.
 
 **Interim behavior in force:** the default is unchanged; `publish`/`images pull` make `attack` consumable by name on any host that fetched it.
+
+**DECIDED (user, 2026-10-19): ratified**, with publish day imminent and the ordering publish-before-push making the pre-publish window moot.
 
 **Executed (slice 4, 2026-10-19):** the flip landed per the recommendation, as part of the publish-day slice: a dedicated attack box with no `image:` resolves `attack` (routers unchanged), eval init pulls catalog images implicitly so a connected machine needs no explicit fetch, and `INSPECT_RANGES_NEVER_PULL` hosts refuse coded. Window to note: between this commit landing and the user running publish day, a no-image attacker resolves `attack` from a cache or a configured registry only (every in-repo range and battery declares its image, so nothing in the tree is affected); publish day closes the window for the public default path.

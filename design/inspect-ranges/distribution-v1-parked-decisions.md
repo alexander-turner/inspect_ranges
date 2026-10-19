@@ -11,3 +11,5 @@
 **Recommendation:** keep the org token; the arc's own registry client never uses docker's credential for public pulls (it only authenticates where it must), and docker-CLI public pulls are rare enough here to tolerate the dance. Either way this lands in the slice-6 docs as fleet guidance: a deployment host logged in with a scoped token must expect public docker-CLI pulls to fail, which is one more argument for mirroring the public org into the deployment registry.
 
 **Interim behavior in force:** org token stays logged in; batteries that need a public image pull do the backup/logout/pull/restore sequence explicitly.
+
+**DECIDED (user, 2026-10-19): keep the scoped token.** The dance stays; the fleet-guidance paragraph in the Distribution docs stands as written.

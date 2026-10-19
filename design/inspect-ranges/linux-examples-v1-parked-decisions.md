@@ -10,6 +10,8 @@
 
 **The decision parked:** whether and when to build the real generation layer (per-sample draws injected at realization, with build keys and challenge answers tracking the draw). Recommendation: not before a concrete consumer needs per-sample NON-SECRET variation; the plant layer covers secrets, and per-sample rebuilds of guest content would fight the build cache's whole design (sticky realized images). If training-variety randomization becomes a requirement, draw at BOOT (cloud-init consuming a draw file) rather than at build, so images stay shared.
 
+**DECIDED (user, 2026-10-19): stay deferred.** Defaults-resolution is the v1 semantic; the generation layer waits for a concrete consumer of non-secret per-sample variation, and draws at boot when it comes.
+
 
 ## 2. Router provisioning (and the firewall-pivot path it unlocks) (slice 2, 2026-10-19)
 
@@ -18,3 +20,5 @@
 **Interim behavior in force:** the firewall's account moved to cyris-basic's `deferred.yaml`; the cross-segment challenge revised to the recon the declared environment supports (measuring the 25/53 forwarding policy), with the revision rationale recorded in `challenges.yaml`.
 
 **The decision parked:** whether to build router provisioning (schema `routers[].provisioning`, the build loop including routers, capture/swap for router guests) so firewall-as-target ranges realize fully. Recommendation: yes, but as its own slice when a second consumer appears (GOAD-class ranges will want it); the machinery is a straight extension of the host path, and the gate already refuses honestly until then.
+
+**DECIDED (user, 2026-10-19): build it on the second consumer.** It becomes a planned slice of whichever phase first needs it (likely Windows/AD); cyris-basic's firewall-pivot challenge is restored in the same slice.
