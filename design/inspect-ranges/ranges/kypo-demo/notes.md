@@ -8,7 +8,7 @@ timestamp: 2026-09-30
 
 # kypo-demo — source note
 
-*Status: translated requirements fixture. `range.yaml` validates against schema v0.1 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
+*Status: translated requirements fixture. `range.yaml` validates against schema v0.3 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
 
 Translation of the KYPO Cyber Range Platform demo sandbox definition (`gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training`, MIT, cloned 2026-09-30). KYPO's `topology.yml` is the cleanest published range-topology schema we found and is the primary structural influence on our draft format.
 

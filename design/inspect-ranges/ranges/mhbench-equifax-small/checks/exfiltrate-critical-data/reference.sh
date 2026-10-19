@@ -6,6 +6,8 @@
 # UDP from the DATABASE across the critical segment (source-bound pcap
 # corroboration), then volume is pushed across the segment so the beacons
 # land in a harvested capture chunk. Must score 1.0, every goal corroborated.
+# The OGNL payload also lives in recipes/mh.webserver/payload/struts_probe.sh
+# and the sibling check scripts; change one, keep the others in step.
 set -euo pipefail
 python3 - <<'PY'
 from __future__ import annotations

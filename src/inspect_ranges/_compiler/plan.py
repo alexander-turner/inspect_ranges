@@ -305,6 +305,26 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
+    from .render import guest_hostname
+
+    hostnames: dict[str, str] = {}
+    for guest_name in (
+        [host.name for host in spec.hosts]
+        + [router.name for router in spec.routers]
+        + ([spec.attacker.name] if spec.attacker.host is None else [])
+    ):
+        sanitized = guest_hostname(guest_name)
+        if sanitized in hostnames and hostnames[sanitized] != guest_name:
+            issues.append(
+                Issue(
+                    code="hostname-collision",
+                    path=("hosts",),
+                    message=f"guests {hostnames[sanitized]!r} and {guest_name!r} both render the in-guest hostname {sanitized!r}",
+                    hint="hostname-invalid characters sanitize to hyphens; rename one guest so the sanitized forms differ",
+                )
+            )
+        else:
+            hostnames[sanitized] = guest_name
     _GUEST_CONTENT_HINT = "guest configuration is applied and verified at range build; the build pipeline is the next phase (see guest-config-v0.3)"
     for index, host in enumerate(spec.hosts):
         fields = [

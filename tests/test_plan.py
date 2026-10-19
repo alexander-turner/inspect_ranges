@@ -414,3 +414,16 @@ def test_guest_hostnames_sanitize_to_rfc_form() -> None:
     assert guest_hostname("router_external") == "router-external"
     assert guest_hostname("database_0") == "database-0"
     assert guest_hostname("web") == "web"
+    assert guest_hostname("web_") == "web"
+    assert guest_hostname("a.b_c") == "a-b-c"
+
+
+def test_colliding_sanitized_hostnames_refuse_at_planning(cache: Path) -> None:
+    """Two legal guest names that sanitize to one hostname would be agent-visible identity confusion; planning refuses."""
+    spec = two_segment_spec()
+    collided = spec.model_copy(deep=True)
+    collided.hosts[0].name = "web_0"
+    collided.hosts[1].name = "web.0"
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(collided, options(cache))
+    assert any(issue.code == "hostname-collision" for issue in excinfo.value.issues)

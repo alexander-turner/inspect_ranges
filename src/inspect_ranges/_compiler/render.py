@@ -544,8 +544,8 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
 
 
 def guest_hostname(name: str) -> str:
-    """The in-guest hostname for a guest name: hostname-invalid characters become hyphens. Spec names allow underscores (terraform-derived ranges use them heavily), RFC hostnames do not, and an unsanitized name makes cloud-init's set-hostname module fail — which noble's cloud-init reports as DEGRADED, so `cloud-init status --wait` exits 2 and readiness refuses the guest (linux-examples-v1 slice 3)."""
-    return re.sub(r"[^A-Za-z0-9-]", "-", name)
+    """The in-guest hostname for a guest name: hostname-invalid characters become hyphens and trailing separators drop. Spec names allow underscores and dots (terraform-derived ranges use them heavily), RFC hostnames do not, and an unsanitized name makes cloud-init's set-hostname module fail — which noble's cloud-init reports as DEGRADED, so `cloud-init status --wait` exits 2 and readiness refuses the guest (linux-examples-v1 slice 3). Planning refuses two guests whose names sanitize identically (`hostname-collision`)."""
+    return re.sub(r"[^a-z0-9-]", "-", name).rstrip("-")
 
 
 def _user_data(
