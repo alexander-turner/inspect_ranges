@@ -1,0 +1,4 @@
+name: kypo.client
+version: "1"
+entrypoint: run.sh
+mode: online

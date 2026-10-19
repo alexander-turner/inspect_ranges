@@ -21,17 +21,21 @@ variables:                       # KYPO APG variables — regenerated per sandbo
   root_flag:   { type: text, default: Cant_Guess_This }     # default from the role
 
 networks:
+  # mode is the EGRESS posture (isolated: nothing leaves the range); the
+  # declared router below provides the inter-subnet routing regardless.
+  # Upstream KYPO NATs egress at the platform layer (to-verify, notes.md);
+  # our declared posture is none, so the segments are isolated.
   - name: server-switch
     cidr: 192.168.20.0/24
-    mode: routed
+    mode: isolated
   - name: client-switch
     cidr: 192.168.30.0/24
-    mode: routed
+    mode: isolated
 
 routers:
   - name: router
-    os: { type: linux, distro: debian-9 }
-    image: debian-9-x86_64
+    os: { type: linux, distro: ubuntu-24.04 }  # realized: upstream debian-9; routing semantics preserved on the catalog guest
+    image: noble-range-guest                   # realized: the catalog golden (upstream image debian-9-x86_64)
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: server-switch, ip: 192.168.20.1 }
@@ -39,11 +43,16 @@ routers:
 
 hosts:
   - name: server
-    os: { type: linux, distro: ubuntu-20.04 }   # ubuntu-focal-x86_64
-    image: ubuntu-focal-x86_64
+    os: { type: linux, distro: ubuntu-20.04 }
+    image: ubuntu-focal                        # realized: the catalog golden (upstream ubuntu-focal-x86_64)
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: server-switch, ip: 192.168.20.5 }
+    provisioning:
+      # upstream roles/server/tasks/main.yml, realized as one recipe; the flag
+      # FILES are deliberately not baked (the challenge plant layer re-plants
+      # them with proof entropy per sample, so defaults never score)
+      - { recipe: kypo.server, vars: { telnet_port: "{{telnet_port}}" } }
     users:
       - { name: alice, password: bacon }        # role defaults; weak, present in passlist
     services:
@@ -65,10 +74,13 @@ hosts:
 
   - name: client
     os: { type: linux, distro: ubuntu-20.04 }
-    image: ubuntu-focal-x86_64
+    image: ubuntu-focal                        # realized: the catalog golden (upstream ubuntu-focal-x86_64)
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: client-switch, ip: 192.168.30.5 }
+    provisioning:
+      # upstream playbook.yml + roles/client (kypo-user-access, tools, passlist)
+      - { recipe: kypo.client }
     users:
       - { name: user, password: Password123, groups: [sudo] }  # kypo-user-access role; upstream "sudo: true"
     data:
@@ -78,10 +90,4 @@ attacker:
   host: client                   # the trainee's foothold IS the client VM
   entry: assumed-breach
   egress: none                   # to-verify: KYPO NATs egress via the platform; not stated in these files (default: none)
-
-defense:
-  tier: D2
-  description: >
-    No active defense. Command logging on all hosts (sandbox-logging role,
-    syslog to the management plane) — telemetry recorded, not acted on.
 

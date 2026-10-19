@@ -33,6 +33,17 @@ def render_router_nftables(
     """
     router = next(router for router in spec.routers if router.name == router_name)
     nics = router_nic_names(router)
+    if not router.acl:
+        # no declared ACL means a PLAIN router (the KYPO/CyRIS shape: routing,
+        # no filtering); declaring any rule flips to default-drop allowlisting
+        lines = [
+            "table inet fw {",
+            "  chain forward {",
+            "    type filter hook forward priority 0; policy accept;",
+            "  }",
+            "}",
+        ]
+        return "\n".join(lines) + "\n"
     lines = [
         "table inet fw {",
         "  chain forward {",

@@ -354,7 +354,7 @@ async def run_behavioral_checks(
 
     challenges = load_challenges(range_dir)
     _validate_checks(challenges, range_dir)
-    attacker_ip = _attacker_ip(plan)
+    attacker_name, attacker_ip = _attacker_guest(spec, plan)
     session = EvidenceSession(
         str(evidence_dir), sample_id=f"build-{project}", capture_local=True
     )
@@ -388,7 +388,12 @@ async def run_behavioral_checks(
                 handle.plants = None
                 oracle = RangeOracle(handle)
                 record = await _run_one(
-                    oracle, challenge, name, script.read_text(), attacker_ip
+                    oracle,
+                    challenge,
+                    name,
+                    script.read_text(),
+                    attacker_name,
+                    attacker_ip,
                 )
                 if stage_log is not None:
                     # stages.jsonl grammar is start|ok|fail; a failing check's
@@ -428,6 +433,7 @@ async def _run_one(
     challenge: "Challenge",
     name: str,
     script: str,
+    attacker_name: str,
     attacker_ip: str,
 ) -> BehavioralCheckRecord:
     from inspect_ai.util._store import Store
@@ -438,7 +444,7 @@ async def _run_one(
     planted = await run_setup(oracle, challenge, store)
     try:
         return await _execute_and_score(
-            oracle, challenge, name, script, attacker_ip, store
+            oracle, challenge, name, script, attacker_name, attacker_ip, store
         )
     finally:
         # the plant script refuses an existing target (it never truncates real
@@ -472,12 +478,16 @@ async def _execute_and_score(
     challenge: "Challenge",
     name: str,
     script: str,
+    attacker_name: str,
     attacker_ip: str,
     store: "Store",
 ) -> BehavioralCheckRecord:
     wrapped = f"export IR_ATTACKER_IP={attacker_ip}\n{script}"
     outcome = await oracle.exec(
-        "attacker", ["bash", "-c", wrapped], user="root", timeout_s=CHAIN_TIMEOUT_S
+        attacker_name,
+        ["bash", "-c", wrapped],
+        user="root",
+        timeout_s=CHAIN_TIMEOUT_S,
     )
     if outcome.rc != 0:
         detail = (
@@ -555,8 +565,18 @@ async def _execute_and_score(
     )
 
 
-def _attacker_ip(plan: "ResolvedPlan") -> str:
-    for guest in plan.guests:
-        if guest.kind == "attacker":
-            return str(guest.interfaces[0].ip)
-    raise BuildError("behavioral", "the plan has no attacker guest")
+def _attacker_guest(spec: "RangeSpec", plan: "ResolvedPlan") -> tuple[str, str]:
+    """The guest behavioral chains run on, and its first address: the dedicated attack box when one exists, else the foothold host (`attacker.host`, the assumed-breach shape).
+
+    Raises:
+        BuildError: Stage `behavioral`, when the plan has neither.
+    """
+    name = next((guest.name for guest in plan.guests if guest.kind == "attacker"), None)
+    if name is None:
+        name = spec.attacker.host
+    if name is None:
+        raise BuildError(
+            "behavioral", "the plan has no attacker guest and no foothold host"
+        )
+    guest = next(g for g in plan.guests if g.name == name)
+    return name, str(guest.interfaces[0].ip)

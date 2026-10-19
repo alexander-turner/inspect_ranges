@@ -163,16 +163,36 @@ def test_hostname_and_fqdn_gate_at_planning() -> None:
     assert ("hosts", 0, "hostname") in paths and ("hosts", 0, "fqdn") in paths
 
 
-def test_variables_gate_at_planning() -> None:
-    from inspect_ranges.types import Variable
+def test_variables_resolve_to_defaults_at_planning(cache: Path) -> None:
+    """Linux-examples-v1: declared variables no longer gate planning; loading already substituted their defaults, so a spec with variables plans concretely (per-sample secrets stay the plant layer's job; the generation layer is parked)."""
+    from inspect_ranges.schema import load_range
 
-    spec = two_segment_spec()
-    spec.variables = {"flag_hint": Variable(default="warm")}
-    with pytest.raises(IssueError) as excinfo:
-        resolve_plan(spec)
-    issue = excinfo.value.issues[0]
-    assert issue.code == "randomization-not-realized"
-    assert issue.path == ("variables",)
+    spec_yaml = """
+range:
+  name: vars-resolve
+  schema_version: "0.3"
+  description: variables resolve to defaults
+variables:
+  svc_port: { type: port, min: 1500, default: 2323 }
+networks:
+  - name: lab
+    cidr: 10.0.0.0/24
+    mode: isolated
+hosts:
+  - name: web
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.0.0.10 }]
+attacker:
+  image: noble-range-guest
+  interfaces: [{ network: lab }]
+  entry: external
+"""
+    spec_path = cache.parent / "vars-range.yaml"
+    spec_path.write_text(spec_yaml)
+    spec = load_range(spec_path)
+    plan = resolve_plan(spec, options(cache))
+    assert plan.range.name == "vars-resolve"
 
 
 def test_render_is_byte_deterministic(cache: Path, tmp_path: Path) -> None:
@@ -329,3 +349,59 @@ def test_every_qemu_domain_carries_its_own_dac_principal(
         assert label is not None and label.text == f"+{guest_uid(guest.cid)}:kvm"
         uids.add(guest_uid(guest.cid))
     assert len(uids) == sum(1 for g in plan.guests if g.vmm == "qemu")  # all distinct
+
+
+def test_multihomed_guest_default_route_election(cache: Path, tmp_path: Path) -> None:
+    """A guest with one router-gatewayed and one NAT attachment (the build-uplink shape) elects the NAT default deterministically by metric and keeps sibling-subnet routes via the router; a single-gatewayed guest renders exactly as before (no metrics)."""
+    import yaml
+    from inspect_ranges.schema import load_range
+
+    spec_yaml = """
+range:
+  name: multihome
+  schema_version: "0.3"
+  description: deterministic default election
+networks:
+  - name: a
+    cidr: 192.168.20.0/24
+    mode: routed
+  - name: b
+    cidr: 192.168.30.0/24
+    mode: routed
+  - name: uplink
+    cidr: 10.254.169.0/24
+    mode: nat
+hosts:
+  - name: dual
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces:
+      - { network: a, ip: 192.168.20.5 }
+      - { network: uplink }
+  - name: single
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: b, ip: 192.168.30.5 }]
+routers:
+  - name: r
+    interfaces:
+      - { network: a, ip: 192.168.20.1 }
+      - { network: b, ip: 192.168.30.1 }
+attacker:
+  image: noble-range-guest
+  interfaces: [{ network: uplink }]
+  entry: external
+"""
+    spec_path = tmp_path / "multihome.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    seeds = {p.parent.parent.name: p for p in out.rglob("network-config")}
+    dual = yaml.safe_load(seeds["dual"].read_text())["ethernets"]
+    routed_routes = dual["eth0"]["routes"]
+    uplink_routes = dual["eth1"]["routes"]
+    assert {"to": "default", "via": "192.168.20.1", "metric": 200} in routed_routes
+    assert {"to": "192.168.30.0/24", "via": "192.168.20.1"} in routed_routes
+    assert uplink_routes[0]["to"] == "default" and uplink_routes[0]["metric"] == 50
+    single = yaml.safe_load(seeds["single"].read_text())["ethernets"]
+    assert single["eth0"]["routes"] == [{"to": "default", "via": "192.168.30.1"}]

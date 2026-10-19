@@ -498,7 +498,7 @@ class ScheduledActivity(_StrictModel):
 class Variable(_StrictModel):
     """A named per-instance value: drawn fresh for each generated instance, with a required default.
 
-    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely; the per-instance draw arrives with the generation layer (gated at planning by `randomization-not-realized`). Python authors draw values and construct concretely instead of using references.
+    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: v1 semantics ARE defaults-resolution (linux-examples-v1), per-sample secrets are the challenge plant layer's job, and a per-instance generation layer that redraws non-secret values is deferred (see linux-examples-v1-parked-decisions.md). Python authors draw values and construct concretely instead of using references.
     """
 
     default: str | int | bool
@@ -676,7 +676,7 @@ class Router(_StrictModel):
     """Local accounts (converged state; applied and verified at build)."""
 
     acl: list[AclRule] = []
-    """Inter-segment policy enforced on this router (default-deny, stateful; endpoints may be routed, not only attached)."""
+    """Inter-segment policy enforced on this router (stateful; endpoints may be routed, not only attached). EMPTY means a plain router (everything forwards, the KYPO/CyRIS pure-router shape); declaring ANY rule flips the router to default-drop, forwarding only the declared allows plus established/related."""
 
 
 class Host(_StrictModel):

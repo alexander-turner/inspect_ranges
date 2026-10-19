@@ -410,3 +410,12 @@ def test_router_ruleset_renders_in_rule_order() -> None:
     ]
     # 0.0.0.0/0 compiles to no source match at all
     assert lines[9] == 'oifname "eth0" tcp dport 443 accept'
+
+
+def test_router_without_acl_is_a_plain_router() -> None:
+    """Linux-examples-v1: an empty `acl` renders policy accept (the KYPO/CyRIS pure-router shape); any declared rule keeps the default-drop allowlist posture."""
+    spec = two_segment_spec()
+    plain = spec.model_copy(deep=True)
+    plain.routers[0].acl = []
+    ruleset = render_router_nftables(plain, "router", allocate(plain))
+    assert "policy accept" in ruleset and "policy drop" not in ruleset

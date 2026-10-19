@@ -56,6 +56,7 @@ def run_check(
             challenge,  # type: ignore[arg-type]
             name,
             "echo chain",
+            "attacker",
             "10.0.0.9",
             Store(),
         )
