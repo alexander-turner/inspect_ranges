@@ -244,7 +244,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 )
             )
     # windows HOSTS realize (windows-ad-v1 slice 1: the unattend injector and
-    # daemon readiness); windows routers and attackers still refuse below
+    # daemon readiness); windows routers still refuse below, and the attacker
+    # is linux by construction (the Attacker schema declares no `os` field)
     for section, declared_list in (("hosts", spec.hosts), ("routers", spec.routers)):
         for index, guest_decl in enumerate(declared_list):
             content = any(
@@ -297,22 +298,43 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
-    from .render import guest_hostname
+    for index, host in enumerate(spec.hosts):
+        if host.os.type == "windows" and host.vmm == "cloud-hypervisor":
+            # the unattend seed rides a removable scsi cdrom and Windows'
+            # implicit answer-file search only looks at removable media; Cloud
+            # Hypervisor attaches disks as plain virtio-blk, so such a guest
+            # would boot and never specialize — fail here, never mid-boot
+            issues.append(
+                Issue(
+                    code="windows-vmm-not-supported",
+                    path=("hosts", index, "vmm"),
+                    message=f"host {host.name!r} is a Windows guest declared on cloud-hypervisor, which cannot deliver the unattend specialize seed",
+                    hint="run Windows hosts on qemu (the default)",
+                )
+            )
+    from .render import guest_hostname, windows_hostname
 
     hostnames: dict[str, str] = {}
-    for guest_name in (
-        [host.name for host in spec.hosts]
-        + [router.name for router in spec.routers]
-        + ([spec.attacker.name] if spec.attacker.host is None else [])
-    ):
-        sanitized = guest_hostname(guest_name)
+    named_guests: list[tuple[str, bool]] = [
+        (host.name, host.os.type == "windows") for host in spec.hosts
+    ]
+    named_guests += [(router.name, False) for router in spec.routers]
+    if spec.attacker.host is None:
+        named_guests.append((spec.attacker.name, False))
+    for guest_name, is_windows in named_guests:
+        # the collision gate checks the hostname each guest actually renders:
+        # Windows names also truncate to the 15-character NetBIOS limit, so two
+        # long names can collide after truncation alone
+        sanitized = (
+            windows_hostname(guest_name) if is_windows else guest_hostname(guest_name)
+        )
         if sanitized in hostnames and hostnames[sanitized] != guest_name:
             issues.append(
                 Issue(
                     code="hostname-collision",
                     path=("hosts",),
                     message=f"guests {hostnames[sanitized]!r} and {guest_name!r} both render the in-guest hostname {sanitized!r}",
-                    hint="hostname-invalid characters sanitize to hyphens; rename one guest so the sanitized forms differ",
+                    hint="hostname-invalid characters sanitize to hyphens and Windows names truncate to the 15-character NetBIOS limit; rename one guest so the rendered forms differ",
                 )
             )
         else:
@@ -492,6 +514,11 @@ def image_file_name(reference: str) -> str:
     if normalized.endswith((".qcow2", ".img", ".iso")):
         return normalized
     return f"{normalized}.qcow2"
+
+
+def image_sidecar_file_name(file: str) -> str:
+    """The provenance sidecar name for a cache image file: the full name with `.qcow2` swapped for `.json` (not `Path.stem`: golden names may contain dots). One rule shared by the image cache and the render stages that read recorded metadata."""
+    return file.removesuffix(".qcow2") + ".json"
 
 
 GUEST_UID_BASE = 1_000_000
