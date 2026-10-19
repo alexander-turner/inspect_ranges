@@ -7,6 +7,7 @@ Applier contract (in order): create bridges from `netns/bridges.txt`; add `netns
 
 import hashlib
 import json
+import re
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Any
@@ -369,7 +370,7 @@ def render_bundle(
             # generation is a NEW instance and cloud-init re-applies runtime
             # seeds instead of skipping them as already-run
             f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
-            f"local-hostname: {guest.name}\n",
+            f"local-hostname: {guest_hostname(guest.name)}\n",
         )
         write(
             f"guests/{guest.name}/seed/network-config",
@@ -542,10 +543,15 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
     return {"version": 2, "ethernets": ethernets}
 
 
+def guest_hostname(name: str) -> str:
+    """The in-guest hostname for a guest name: hostname-invalid characters become hyphens. Spec names allow underscores (terraform-derived ranges use them heavily), RFC hostnames do not, and an unsanitized name makes cloud-init's set-hostname module fail — which noble's cloud-init reports as DEGRADED, so `cloud-init status --wait` exits 2 and readiness refuses the guest (linux-examples-v1 slice 3)."""
+    return re.sub(r"[^A-Za-z0-9-]", "-", name)
+
+
 def _user_data(
     spec: RangeSpec, plan: ResolvedPlan, guest: PlannedGuest, allocation: Allocation
 ) -> dict[str, Any]:
-    user_data: dict[str, Any] = {"hostname": guest.name}
+    user_data: dict[str, Any] = {"hostname": guest_hostname(guest.name)}
     if guest.kind == "router":
         ruleset = "flush ruleset\n" + render_router_nftables(
             spec, guest.name, allocation

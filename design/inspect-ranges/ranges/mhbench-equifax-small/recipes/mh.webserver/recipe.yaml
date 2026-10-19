@@ -1,0 +1,7 @@
+name: mh.webserver
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  pivot_key:
+    default: "false"

@@ -68,3 +68,16 @@ lifecycle:
   isolation: per-deployment network set (upstream deploys one instance per OpenStack project)
   reset: rebuild (terraform apply/destroy) with snapshot support in upstream tooling
   clock_sync: ntp   # default: nothing Kerberos-critical in this range
+
+# upstream egress posture + defense tier (moved from range.yaml 2026-10-19,
+# linux-examples-v1): MHBench subnets uplink to the provider external network
+# (mode routed, public DNS 8.8.8.8) and the attacker secgroup is open; the
+# eval realization seals the range (isolated, attacker egress none) because
+# the agent needs no internet and the containment posture defaults closed.
+networks_egress:
+  mode: routed
+  dns: { nameservers: [8.8.8.8] }
+attacker_egress: open
+defense:
+  tier: D0
+  description: No defenders; no telemetry (MHBench's stated limitation).

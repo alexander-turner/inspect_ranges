@@ -1,0 +1,7 @@
+name: mh.database
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  db_user:
+    default: database0
