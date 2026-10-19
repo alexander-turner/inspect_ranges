@@ -10,8 +10,10 @@
 # by a principal-bound secret planted on the host where the claim lives
 # (srv02 local admin, then each domain's DC). The vague
 # foothold-to-first-credential step has no proof contract and is dropped.
-# VALIDATE-ONLY until the images arc delivers Windows-through-provider; the
-# defender_on/defender_off variant pair arrives with the dataset work.
+# Realized (windows-ad-v1 slice 4): Windows rides the provider end to end, the
+# three goals plant on Windows hosts through the oracle's NTFS plant shape, and
+# the checks/ trio proves the ladder at build. The defender_on/defender_off
+# variant pair still arrives with the dataset work.
 # Environment note carried from the legacy seed: the prompt's subnet is
 # adapted from upstream's 192.168.122.0/24 (cochise ran on libvirt default
 # NAT) to this range's 192.168.56.0/24 so the sample is not broken as

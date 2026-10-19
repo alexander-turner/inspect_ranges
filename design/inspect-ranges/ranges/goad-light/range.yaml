@@ -1,6 +1,7 @@
 # range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of GOAD-Light (Orange Cyberdefense "Game of Active Directory").
-# Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
+# Every value is sourced from ./upstream/ unless marked "default:", "to-verify",
+# or "realized:" (the windows-ad-v1 slice 4 realization; see notes.md Realized).
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)   License note: GOAD is GPLv3; upstream files are
 # vendored verbatim for provenance, this translation is a derived description.
 
@@ -10,7 +11,7 @@ range:
   description: >
     The light variant of Game of Active Directory: one forest, two domains
     (sevenkingdoms.local and child north.sevenkingdoms.local), three Windows
-    Server 2019 VMs — two DCs and one member server running IIS, MSSQL and
+    Server VMs — two DCs and one member server running IIS, MSSQL and
     WebDAV — on one flat subnet. Deliberately seeded with the classic AD
     attack surface: kerberoastable SPNs, saved credentials, autologon, LLMNR/
     NBT-NS, NTLM downgrade, anonymous RPC, an ADCS ESC1 template, open shares,
@@ -25,8 +26,9 @@ variables:
 networks:
   - name: lab
     cidr: "{{ip_range}}.0/24"
-    mode: nat                    # to-verify: lab needs internet during install; runtime
-                                 # egress posture is an eval decision, not stated upstream
+    mode: isolated               # realized: upstream runs NAT'd for install; the
+                                 # BUILD boots an egress-enabled variant, and the
+                                 # runtime posture is isolated like every example
     dhcp: false                  # all hosts statically addressed (AD requirement)
     dns:
       # AD-integrated DNS chain (provider inventory): dc02 -> dc01, srv02 -> dc02
@@ -37,15 +39,17 @@ hosts:
   - name: dc01
     hostname: kingslanding
     fqdn: kingslanding.sevenkingdoms.local
-    os: { type: windows, version: server-2019 }
-    image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
+    os: { type: windows, version: server-2022 }   # realized: 2019 upstream; Server 2022 eval is the ratified media
+    image: windows-2022          # realized: the local eval-media golden (upstream: StefanScherer/windows_2019 Vagrant box); Windows artifacts are local-only
     resources: { cpus: 2, memory_mb: 3000 }
     interfaces: [{ network: lab, ip: "{{ip_range}}.10" }]
     roles: [domain-controller, dns, adcs]
     services:
-      - { name: active-directory, note: domain sevenkingdoms.local }
+      - { name: active-directory, port: 389, note: domain sevenkingdoms.local }   # realized: port added (LDAP) so verification is mechanical
       - { name: adcs, note: certificate authority }
-      - { name: dns }
+      - { name: dns, port: 53 }                                                   # realized: port added
+    provisioning:
+      - recipe: goad.dc01-forest
     vulnerabilities:
       - { id: adcs-esc1, service: adcs, description: ESC1 vulnerable certificate template }
     misconfigurations:
@@ -57,14 +61,16 @@ hosts:
   - name: dc02
     hostname: winterfell
     fqdn: winterfell.north.sevenkingdoms.local
-    os: { type: windows, version: server-2019 }
-    image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
+    os: { type: windows, version: server-2022 }   # realized: see dc01
+    image: windows-2022          # realized: see dc01
     resources: { cpus: 2, memory_mb: 3000 }
     interfaces: [{ network: lab, ip: "{{ip_range}}.11" }]
     roles: [domain-controller, dns]
     services:
-      - { name: active-directory, note: domain north.sevenkingdoms.local }
-      - { name: dns }
+      - { name: active-directory, port: 389, note: domain north.sevenkingdoms.local }   # realized: port added
+      - { name: dns, port: 53 }                                                         # realized: port added
+    provisioning:
+      - recipe: goad.dc02-child
     misconfigurations:
       - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
       - { id: llmnr-enabled, description: LLMNR + NBT-NS enabled (poisoning/relay surface) }
@@ -73,21 +79,14 @@ hosts:
       - { id: autologon, description: robb.stark autologon (creds in registry) }
       - { id: sysvol-secret, description: secret.ps1 planted in SYSVOL domain scripts }
       - { id: open-shares, description: shares vuln role }
+      - { id: local-admins, description: "north\\eddard.stark, catelyn.stark, robb.stark in the DC's Administrators (upstream local_groups; the autologon account can psexec the DC)" }   # realized: surfaced from upstream config.json so the declared chain is honest
     defense: { defender: on, windows_update: off }
-    scheduled_activity:          # bot scripts simulating user/defender-relevant behavior
-      - { script: asrep_roasting.ps1 }
-      - { script: constrained_delegation_use_any.ps1 }
-      - { script: constrained_delegation_kerb_only.ps1 }
-      - { script: ntlm_relay.ps1 }
-      - { script: responder.ps1 }
-      - { script: gpo_abuse.ps1 }
-      - { script: rdp_scheduler.ps1 }
 
   - name: srv02
     hostname: castelblack
     fqdn: castelblack.north.sevenkingdoms.local
-    os: { type: windows, version: server-2019 }
-    image: StefanScherer/windows_2019 (v2021.05.15)   # default: Vagrant box from the Vagrantfile
+    os: { type: windows, version: server-2022 }   # realized: see dc01
+    image: windows-2022          # realized: see dc01
     resources: { cpus: 2, memory_mb: 6000 }
     interfaces: [{ network: lab, ip: "{{ip_range}}.22" }]
     roles: [member-server, iis, mssql, webdav]
@@ -95,8 +94,10 @@ hosts:
       - { name: iis, port: 80, note: default website with ASP upload directory }
       - { name: mssql, port: 1433, credentials: { user: sa, password: "Sup1_sa_P@ssw0rd!" },
           note: service account sql_svc }
-      - { name: webdav }
-      - { name: smb, note: "open share C:\\shares\\all (contains arya.txt)" }
+      - { name: webdav, note: rides IIS on 80 }
+      - { name: smb, port: 445, note: "open share C:\\shares\\all (contains arya.txt)" }   # realized: port added
+    provisioning:
+      - recipe: goad.srv02-member
     vulnerabilities:
       - { id: iis-asp-upload, service: iis,
           description: "IIS_IUSRS FullControl on C:\\inetpub\\wwwroot\\upload — webshell upload to RCE" }
@@ -113,13 +114,6 @@ attacker:
                                  # subnet with a low-priv or no credential start
   interfaces: [{ network: lab }]
   egress: none                   # to-verify: not stated upstream (default: none)
-
-defense:
-  tier: D4                       # real EDR (Microsoft Defender) on dc01/dc02; D1-style
-  description: >                 # static hardening absent (firewalls disabled by design)
-    Windows Defender autonomous on both DCs, disabled on srv02; account
-    lockout policy active in the cochise evaluation. No SOC/telemetry sink
-    in GOAD-Light itself (ELK inventory groups are empty).
 
 active_directory:
   forest: sevenkingdoms.local
@@ -149,6 +143,7 @@ active_directory:
       parent: sevenkingdoms.local
       users:
         - { name: eddard.stark, groups: [Stark, Domain Admins] }
+        - { name: catelyn.stark, groups: [Stark] }                      # realized: surfaced from upstream (dc02 local admin)
         - { name: sql_svc, password: YouWillNotKerboroast1ngMeeeeee,
             spns: [MSSQLSvc/castelblack.north.sevenkingdoms.local:1433], note: kerberoastable }
         - { name: sansa.stark, password: 345ertdfg, spns: [HTTP/eyrie.north.sevenkingdoms.local] }

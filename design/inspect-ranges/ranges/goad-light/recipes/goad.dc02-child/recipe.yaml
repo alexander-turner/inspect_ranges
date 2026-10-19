@@ -1,0 +1,4 @@
+name: goad.dc02-child
+version: "1"
+entrypoint: run.sh
+mode: online

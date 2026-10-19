@@ -46,3 +46,21 @@ GOAD is GPL-3.0. `upstream/` files are verbatim copies for provenance (GPL permi
 An `active_directory:` block (domains, trust shape, identity data), **static addressing + authoritative DNS chain** as hard constraints, per-host **defender toggles** (D1↔D4 within one range), **scheduled bot activity** (dc02's scripts), vulns expressed as **named roles with variables** rather than CVEs, and the Kerberos **clock-sync lifecycle constraint** (snapshot/resume clock skew produces auth failures that masquerade as agent failure).
 
 > Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../schema-v0.1-scope.md).
+
+## Realized (2026-10-19, windows-ad-v1 slice 4)
+
+The translation tables above stay frozen; this addendum records the realization choices. The fixture now BUILDS, VERIFIES, and SOLVES on the production pipeline (recipes under `recipes/`, the proof trio under `checks/`, the battery at `design/spikes/win-goad/`).
+
+- `image:` is the local `windows-2022` golden (`images derive-windows` from the ratified Server 2022 eval media) and `os.version` moved to `server-2022`: Windows artifacts are local-only, recipes-not-images, and the upstream Vagrant box string stays in the provenance tables only. `mode: nat` became `isolated` like every example; the BUILD boots an egress-enabled variant (the SQL Express download rides it), the runtime posture is isolated.
+
+- Ports were added to the portless AD services (`active-directory` 389, `dns` 53, `smb` 445) so verification is mechanical rather than vacuous; `adcs` and `webdav` stay name-only with notes (no honest single port).
+
+- Identity data reaches recipes from the SPEC via `IR_ACTIVE_DIRECTORY` (the single source; recipes never vendor a copy). Accounts the spec declares without a password get the documented convention `Goad2026!<name>` (upstream declares concrete passwords for every account; the translation carried only chain-load-bearing ones). The upstream `local_groups` fact that dc02's Administrators include eddard/catelyn/robb.stark is surfaced as the `local-admins` misconfiguration (and `catelyn.stark` joined `users:`) — it is the declared fact the proof ladder rides.
+
+- The reference ladder (checks/ad-domain-dominance) rides declared data only: autologon credential -> SYSTEM on dc02 (psexec; DC-admin by `local-admins`) -> DCSync (BUILTIN\Administrators) -> pass-the-hash to srv02 -> raiseChild child-to-forest escalation -> dc01. Kerberoast (sql_svc SPN + its crackable password), ESC1, MSSQL impersonation, LLMNR/NTLM downgrade remain agent-discoverable surface: realized and self-asserted by the recipes, deliberately not consumed by the reference.
+
+- `scheduled_activity` (seven unvendored dc02 bot scripts) and the spec-level `defense: tier` moved back to `deferred.yaml` (the kypo precedent): nothing realizes bot scripts honestly without the scripts, and a tier is a classification; the per-host `defense:` toggles ARE realized and verified (defender asserted on on both DCs, turned and asserted off on srv02 — chain-load-bearing for the webshell surface).
+
+- MSSQL realizes as SQL Server Express 2019 (downloaded in-build from Microsoft, pinned URL), `SECURITYMODE=SQL` with the declared sa credential, `NORTH\sql_svc` as the service account (the kerberoastable SPN lives on the account, declared in `active_directory`), TCP fixed to 1433, and the declared impersonation chains applied via sqlcmd.
+
+- Both domains disable password complexity (min length 4) before seeding accounts, exactly as upstream GOAD does: the declared weak passwords (`il0vejaime`, `hodor`, `345ertdfg`, `sexywolfy`) ARE the scenario, and the default policy refuses them (measured: `ADPasswordComplexityException`).

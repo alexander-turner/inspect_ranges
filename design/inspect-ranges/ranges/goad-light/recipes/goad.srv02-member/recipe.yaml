@@ -1,0 +1,4 @@
+name: goad.srv02-member
+version: "1"
+entrypoint: run.sh
+mode: online
