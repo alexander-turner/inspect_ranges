@@ -6,8 +6,9 @@ import yaml
 from inspect_ranges.schema import RangeSpec, load_range, range_json_schema
 from pydantic import ValidationError
 
-EXAMPLES = sorted(
-    (Path(__file__).parent.parent / "design/inspect-ranges/ranges").glob("*/range.yaml")
+_ROOT = Path(__file__).parent.parent
+EXAMPLES = sorted(_ROOT.glob("design/inspect-ranges/ranges/*/range.yaml")) + sorted(
+    _ROOT.glob("examples/*/range.yaml")
 )
 
 MINIMAL = """
@@ -34,7 +35,7 @@ def _with(overrides_yaml: str) -> Any:
 
 
 def test_examples_validate() -> None:
-    assert len(EXAMPLES) == 6
+    assert EXAMPLES, "no example ranges found"
     for path in EXAMPLES:
         spec = load_range(path)
         assert spec.meta.schema_version in {"0.1", "0.2", "0.3"}
