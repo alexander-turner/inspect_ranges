@@ -11,3 +11,12 @@
 **The decision parked:** the republish discipline. Recommendation: drift is ACCEPTED between publish days (the catalog ships digests, consumers pin by digest, so published artifacts never drift under anyone); every republish MUST bump `recipe.yaml`'s `version`, which re-keys the build and renames the realized file, so no two publishes ever share a name with different bytes; publish day records the image's dpkg-manifest alongside the catalog entry. Alternative: full apt snapshotting (snapshot.ubuntu.com + a frozen msf mirror), which buys byte-reproducibility at the cost of running a package mirror.
 
 **Also noted (slice-1 review N3):** the realized attack image (~2.9 GB) carries dead qcow2 clusters from deleted package archives; a capture-time sparsify pass would shrink every consumer's pull. Parked as a nice-to-have for the publish-day sizing, not a correctness issue.
+
+
+## 2. When the attacker's image default flips to `attack` (slice 2, 2026-10-19)
+
+**The question:** the schema promises "the backend's standard attack image" for an omitted `Attacker.image`; today that resolves to the router default (`noble-range-guest`). Flipping the default to `attack` before the catalog publishes bricks every offline dev box and every existing battery (the name resolves nowhere); flipping with a silent fallback to the router default violates the deterministic-resolution posture.
+
+**Recommendation:** flip HARD on publish day (slice 4), when `docker.io/meridianlabsai/attack` exists and the Q1 registry tier resolves it everywhere connected; offline hosts pull it once or keep declaring `image: noble-range-guest` explicitly. Until then the default stays as-is, and the battery-proven consumption path (`image: attack` after an `images pull attack`, or the realized file by name) is the opt-in.
+
+**Interim behavior in force:** the default is unchanged; `publish`/`images pull` make `attack` consumable by name on any host that fetched it.

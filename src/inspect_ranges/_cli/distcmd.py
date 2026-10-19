@@ -319,3 +319,89 @@ def mirror(
     except IssueError as error:
         display.close()
         raise click.ClickException(str(error)) from error
+
+
+@click.command()
+@click.argument("spec", required=False, type=click.Path(path_type=Path))
+@click.option(
+    "--guest",
+    default=None,
+    help="Built guest whose realized image promotes (reads the range directory's manifest).",
+)
+@click.option(
+    "--as", "catalog_name", default=None, help="The bare catalog name to publish under."
+)
+@click.option(
+    "--golden",
+    default=None,
+    help="Promote a cache golden under its own name instead of a built guest.",
+)
+@click.option(
+    "--to",
+    "to_location",
+    required=True,
+    help="Destination location (the public org on publish day; any location form).",
+)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache holding the artifacts.",
+)
+@click.option(
+    "--build-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/builds (or INSPECT_RANGES_BUILD_CACHE)",
+    help="Builds cache holding the factory manifest (guest promotion).",
+)
+def publish(
+    spec: Path | None,
+    guest: str | None,
+    catalog_name: str | None,
+    golden: str | None,
+    to_location: str,
+    image_cache: Path | None,
+    build_cache: Path | None,
+) -> None:
+    """The deliberate promotion act: a built guest's realized image (or a cache golden) becomes a bare catalog name other ranges' `image:` lines consume; the location's catalog list updates with it."""
+    from .._dist.catalog import publish_golden, publish_realized
+
+    display = TransferDisplay()
+    try:
+        location = parse_location(to_location)
+        images, builds, _ = _caches(image_cache, build_cache, None)
+        if golden is not None:
+            if guest is not None or catalog_name is not None:
+                raise click.UsageError(
+                    "--golden stands alone (its name is the catalog name)"
+                )
+            root = publish_golden(golden, location, image_cache=images)
+            display.close()
+            click.echo(f"publish OK  {golden}@{root.digest} -> {location.describe()}")
+            return
+        if guest is None or catalog_name is None:
+            raise click.UsageError("promotion needs --guest and --as (or --golden)")
+        spec_path = resolve_spec_path(spec)
+        validated = load_range(spec_path)
+        manifest = load_manifest(builds, validated.meta.name)
+        if manifest is None:
+            raise click.ClickException(
+                f"[range-not-built] no build manifest for {validated.meta.name!r}; "
+                "run 'inspect-ranges build' first"
+            )
+        root = publish_realized(
+            manifest, guest, catalog_name, location, image_cache=images
+        )
+        display.close()
+        click.echo(
+            f"publish OK  {catalog_name}@{root.digest} -> {location.describe()} "
+            f"(from {validated.meta.name}/{guest})"
+        )
+    except DistError as error:
+        display.close()
+        raise click.ClickException(str(error)) from error
+    except IssueError as error:
+        display.close()
+        raise click.ClickException(str(error)) from error

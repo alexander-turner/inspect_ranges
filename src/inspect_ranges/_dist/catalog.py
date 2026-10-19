@@ -1,0 +1,191 @@
+"""The catalog: publishing bare names (standard-images-v1 slice 2).
+
+`publish` is the deliberate promotion act distribution v1 deferred (Journey B: "push mints no image names"): a built guest's realized image, or a cache golden, becomes consumable by other ranges' `image:` lines under a bare catalog name. A promoted realized image travels with its whole chain (golden, vendor base, provenance sidecars) and lands in consumer caches under the catalog name's file (`attack.qcow2`), so bare-name resolution, stickiness, and `images refresh` all apply to it exactly like any catalog image.
+
+The catalog also publishes its own name list as a well-known artifact (the reserved ref `catalog`): a JSON layer enumerating the published names. That list is what closes the hub-enumeration gap mirror recorded (the hub exposes no org listing through the OCI API), and the Q11 fleet pin file is generated from the same resolution (name to root digest, consumed as refusals on divergence).
+"""
+
+import json
+import time
+from pathlib import Path
+from typing import cast
+
+from .._build.manifest import BuildManifest
+from .encode import (
+    ANN_BACKING_DIGEST,
+    ANN_BACKING_FILE,
+    ANN_KIND,
+    ANN_NAME,
+    ARTIFACT_REALIZED,
+    LAYER_SIDECAR,
+    encode_image_chain,
+    prefixed_digest,
+    qcow2_descriptor,
+    realized_sidecar_path,
+    validated_cache_name,
+)
+from .errors import DistError
+from .location import Location
+from .oci import Descriptor, OciIndex, OciManifest
+from .resolve import push_image_artifact
+
+__all__ = [
+    "CATALOG_REF",
+    "catalog_names",
+    "generate_pin_file",
+    "publish_golden",
+    "publish_realized",
+]
+
+CATALOG_REF = "catalog"
+"""The reserved ref carrying the catalog's name list at a location."""
+
+CATALOG_ARTIFACT = "application/vnd.inspect-ranges.catalog.v1"
+CATALOG_LAYER = "application/vnd.inspect-ranges.catalog.v1+json"
+
+
+def _update_catalog_index(location: Location, name: str) -> None:
+    """Add `name` to the location's published-name list (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture)."""
+    store = location.store_for(CATALOG_REF, create=True)
+    names: list[str] = []
+    try:
+        root = store.ref(location.latest_ref(CATALOG_REF))
+        index = store.read_index(root)
+        if index.manifests:
+            manifest = store.manifest(index.manifests[0])
+            data = json.loads(store.read_blob(manifest.layers[0]))
+            existing = data.get("names")
+            if isinstance(existing, list):
+                names = [
+                    entry
+                    for entry in cast("list[object]", existing)
+                    if isinstance(entry, str)
+                ]
+    except DistError as error:
+        if error.code != "ref-not-found":
+            raise
+    if name not in names:
+        names.append(name)
+    payload = json.dumps(
+        {
+            "names": sorted(names),
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    ).encode()
+    digest = store.put_blob_bytes(payload)
+    manifest = OciManifest(
+        artifact_type=CATALOG_ARTIFACT,
+        config=store.ensure_empty_config(),
+        layers=[Descriptor(media_type=CATALOG_LAYER, digest=digest, size=len(payload))],
+        annotations={ANN_KIND: "catalog"},
+    )
+    member = store.put_manifest(manifest)
+    index = OciIndex(manifests=[member], annotations={ANN_KIND: "catalog"})
+    store.put_index(location.latest_ref(CATALOG_REF), index)
+
+
+def catalog_names(location: Location) -> list[str]:
+    """The names a location's catalog artifact lists (the hub-safe enumeration).
+
+    Raises:
+        DistError: `ref-not-found` when the location publishes no catalog.
+    """
+    store = location.store_for(CATALOG_REF)
+    root = store.ref(location.latest_ref(CATALOG_REF))
+    index = store.read_index(root)
+    if not index.manifests:
+        return []
+    manifest = store.manifest(index.manifests[0])
+    data = json.loads(store.read_blob(manifest.layers[0]))
+    names = data.get("names")
+    if not isinstance(names, list):
+        return []
+    return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
+
+
+def publish_golden(name: str, location: Location, *, image_cache: Path) -> Descriptor:
+    """Promote a cache golden (its whole chain) to the catalog under its own name."""
+    root = push_image_artifact(name, location, image_cache=image_cache)
+    _update_catalog_index(location, name)
+    return root
+
+
+def publish_realized(
+    manifest: BuildManifest,
+    guest: str,
+    catalog_name: str,
+    location: Location,
+    *,
+    image_cache: Path,
+) -> Descriptor:
+    """Promote a built guest's realized image to the bare catalog name: the realized blob republishes under `<catalog_name>.qcow2` (bare-name resolution lands it there in consumer caches), its chain travels, and the provenance sidecar rides verbatim (the factory range and guest stay recorded as provenance).
+
+    Raises:
+        DistError: `artifact-missing` when the guest or its files are absent, plus every encode-time digest refusal.
+    """
+    validated_cache_name(f"{catalog_name}.qcow2")
+    record = manifest.guest(guest)
+    if record is None:
+        raise DistError(
+            "artifact-missing",
+            f"the manifest for {manifest.range_name!r} has no guest {guest!r}",
+        )
+    from .._compiler.plan import image_file_name
+
+    store = location.store_for(catalog_name, create=True)
+    config = store.ensure_empty_config()
+    golden_file = image_file_name(record.golden_reference)
+    members = encode_image_chain(
+        store, image_cache, golden_file, record.golden_digest, config=config
+    )
+    realized_blob = qcow2_descriptor(
+        store,
+        image_cache / record.realized_file,
+        expected=prefixed_digest(record.realized_sha256),
+    )
+    sidecar_path = realized_sidecar_path(image_cache, record.realized_file)
+    if not sidecar_path.is_file():
+        raise DistError(
+            "artifact-missing",
+            f"{sidecar_path} is missing; a realized image publishes with its provenance sidecar",
+        )
+    sidecar_bytes = sidecar_path.read_bytes()
+    sidecar_digest = store.put_blob_bytes(sidecar_bytes)
+    members.append(
+        store.put_manifest(
+            OciManifest(
+                artifact_type=ARTIFACT_REALIZED,
+                config=config,
+                layers=[
+                    realized_blob,
+                    Descriptor(
+                        media_type=LAYER_SIDECAR,
+                        digest=sidecar_digest,
+                        size=len(sidecar_bytes),
+                    ),
+                ],
+                annotations={
+                    ANN_KIND: "realized-image",
+                    ANN_NAME: f"{catalog_name}.qcow2",
+                    ANN_BACKING_FILE: golden_file,
+                    ANN_BACKING_DIGEST: prefixed_digest(record.golden_digest),
+                },
+            )
+        )
+    )
+    index = OciIndex(
+        manifests=members, annotations={"org.inspect-ranges.name": catalog_name}
+    )
+    root = store.put_index(location.latest_ref(catalog_name), index)
+    _update_catalog_index(location, catalog_name)
+    return root
+
+
+def generate_pin_file(location: Location, out: Path) -> dict[str, str]:
+    """The Q11 fleet pin file: every catalog name's current root digest at `location`, written as JSON; consumers refuse a resolved root diverging from its pin."""
+    pins: dict[str, str] = {}
+    for name in catalog_names(location):
+        store = location.store_for(name)
+        pins[name] = store.ref(location.latest_ref(name)).digest
+    out.write_text(json.dumps({"pins": pins}, indent=2, sort_keys=True) + "\n")
+    return pins

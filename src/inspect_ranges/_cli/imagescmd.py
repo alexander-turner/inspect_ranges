@@ -449,3 +449,23 @@ def prune(
             if staging in seen:
                 shutil_module.rmtree(staging, ignore_errors=True)
     click.echo(f"pruned {len(seen)} file(s), {total / (1024 * 1024):.0f} MB reclaimed")
+
+
+@images.command("pin")
+@click.option(
+    "--from", "from_location", required=True, help="The catalog location to pin."
+)
+@click.option(
+    "--out", type=click.Path(path_type=Path), required=True, help="Pin file to write."
+)
+def images_pin(from_location: str, out: Path) -> None:
+    """Write the fleet pin file (every catalog name's current root digest); hosts consuming it via INSPECT_RANGES_PIN_FILE refuse a catalog that moved past the pinned state."""
+    from .._dist import DistError
+    from .._dist.catalog import generate_pin_file
+    from .._dist.location import parse_location
+
+    try:
+        pins = generate_pin_file(parse_location(from_location), out)
+    except DistError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"pinned {len(pins)} catalog name(s) -> {out}")
