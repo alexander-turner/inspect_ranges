@@ -13,7 +13,7 @@ timestamp: 2026-10-19
 
 ## One-time hub setup (user, in the Docker Hub UI)
 
-1. Create these repositories under `meridianlabsai`, each **public** (pushing to a nonexistent repo auto-creates it with the org's default visibility, so creating them deliberately avoids an accidental private publish): `attack`, `noble-range-guest`, `ubuntu-focal`, `catalog`, `daemon-bundle`, `inspect-ranges-range`.
+1. Create these repositories under `meridianlabsai`, each **public** (pushing to a nonexistent repo auto-creates it with the org's default visibility, so creating them deliberately avoids an accidental private publish): `inspect-ranges-attack`, `inspect-ranges-ubuntu-noble`, `inspect-ranges-ubuntu-focal`, `inspect-ranges-catalog`, `inspect-ranges-daemon-bundle`, `inspect-ranges-range`. The `inspect-ranges-` spelling is the hub location's repo-name prefix (`docker.io/meridianlabsai/inspect-ranges`, user decision 2026-10-19): catalog names stay bare (`attack`), the shared org's namespace stays clean.
 2. Generate an org access token with read+write scope covering those repositories (the devbox's current token is scoped to `ir-dist-test` and cannot push them). Note the standing quirk from [distribution-v1-parked-decisions.md](distribution-v1-parked-decisions.md) entry 1: while a narrowly-scoped token is logged in, public `docker pull`s on that host fail; the distribution client is unaffected.
 3. `docker login -u meridianlabsai` with the token.
 
@@ -32,7 +32,7 @@ The derives below consume the Ubuntu cloud images. On a machine that lacks them:
 # fresh inputs: the daemon bundle and both goldens, derived with it
 inspect-ranges daemon-bundle -o dist/daemon
 inspect-ranges images derive ~/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img \
-  --sha256 <noble-sha> --name noble-range-guest --daemon-bundle dist/daemon --daemon-sha256 <bundle-sha>
+  --sha256 <noble-sha> --name ubuntu-noble --daemon-bundle dist/daemon --daemon-sha256 <bundle-sha>
 inspect-ranges images derive ~/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img \
   --sha256 <focal-sha> --name ubuntu-focal --daemon-bundle dist/daemon --daemon-sha256 <bundle-sha>
 
@@ -40,17 +40,17 @@ inspect-ranges images derive ~/.cache/inspect-ranges/images/focal-server-cloudim
 (cd catalog/attack && inspect-ranges build --recipe-budget 1800)
 
 # publication (the catalog list updates with each image publish)
-inspect-ranges publish --golden noble-range-guest --to docker.io/meridianlabsai
-inspect-ranges publish --golden ubuntu-focal     --to docker.io/meridianlabsai
-inspect-ranges publish --daemon dist/daemon      --to docker.io/meridianlabsai
-(cd catalog/attack && inspect-ranges publish --guest box --as attack --to docker.io/meridianlabsai)
+inspect-ranges publish --golden ubuntu-noble --to docker.io/meridianlabsai/inspect-ranges
+inspect-ranges publish --golden ubuntu-focal     --to docker.io/meridianlabsai/inspect-ranges
+inspect-ranges publish --daemon dist/daemon      --to docker.io/meridianlabsai/inspect-ranges
+(cd catalog/attack && inspect-ranges publish --guest box --as attack --to docker.io/meridianlabsai/inspect-ranges)
 
 # the hardened range container image (a conventional Docker image; record the digest)
 docker tag inspect-ranges-range:v<version> meridianlabsai/inspect-ranges-range:v<version>
 docker push meridianlabsai/inspect-ranges-range:v<version>   # output ends with the sha256 digest
 
-# the fleet pin file (3 names: attack, noble-range-guest, ubuntu-focal)
-inspect-ranges images pin --from docker.io/meridianlabsai --out pins.json
+# the fleet pin file (3 names: attack, ubuntu-noble, ubuntu-focal)
+inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out pins.json
 ```
 
 ## Record and verify

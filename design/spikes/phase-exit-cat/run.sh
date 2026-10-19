@@ -7,7 +7,7 @@
 # attacker is the DEFAULT (no image declared), a real `inspect eval` whose
 # init pulls everything implicitly, the booted attacker provably the attack
 # image, and a warm second eval. `./run.sh public <range-image-pin>` reruns
-# the consumer half against docker.io/meridianlabsai after the real publish
+# the consumer half against docker.io/meridianlabsai/inspect-ranges after the real publish
 # day. Usage: ./run.sh [down|public <pin>]. CID band 4090; registry port 5066.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -61,7 +61,7 @@ if [[ "$MODE" == "rehearsal" ]]; then
   echo "=== X1 the publisher half: the runbook's commands, verbatim ==="
   DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
   DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
-  $IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --name noble-range-guest \
+  $IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --name ubuntu-noble \
     --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
   $IR images derive "$FOCAL" --sha256 "$(sha256sum "$FOCAL" | cut -d' ' -f1)" --name ubuntu-focal \
     --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
@@ -71,7 +71,7 @@ if [[ "$MODE" == "rehearsal" ]]; then
   docker run -d --rm --name "$REG" -p 127.0.0.1:5066:5000 registry:2 >/dev/null
   for _ in $(seq 1 40); do curl -fs http://127.0.0.1:5066/v2/ >/dev/null && break; sleep 0.5; done
 
-  $IR publish --golden noble-range-guest --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1 \
+  $IR publish --golden ubuntu-noble --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1 \
     && $IR publish --golden ubuntu-focal --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1 \
     && ok "X1b both goldens publish under their names" || bad "X1b golden publish"
   $IR publish --daemon "$SPIKE/tmp/artifacts" --to "$REG_URL" >/dev/null 2>&1 \
@@ -93,7 +93,7 @@ if [[ "$MODE" == "rehearsal" ]]; then
   CONSUMER_REGISTRY="$REG_URL"
 else
   echo "=== public mode: the exit transcript against the published org ==="
-  CONSUMER_REGISTRY="docker.io/meridianlabsai"
+  CONSUMER_REGISTRY="docker.io/meridianlabsai/inspect-ranges"
   PIN="$PUBLIC_PIN"
 fi
 
@@ -111,7 +111,7 @@ networks:
 hosts:
   - name: web
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.97.0.10 }]
 attacker:
   interfaces: [{ network: lab }]
@@ -129,7 +129,7 @@ if (cd "$ROOT" && uv run python "$SPIKE/exit_eval.py" "$SPIKE/tmp/exit-range" >"
 else
   bad "X2 cold eval"; tail -30 "$SPIKE/tmp/x2.txt"
 fi
-[[ -f "$CONSUMER/attack.qcow2" && -f "$CONSUMER/noble-range-guest.qcow2" && -f "$CONSUMER/attack.realized.json" ]] \
+[[ -f "$CONSUMER/attack.qcow2" && -f "$CONSUMER/ubuntu-noble.qcow2" && -f "$CONSUMER/attack.realized.json" ]] \
   && ok "X2b the implicit pull landed the attack chain with provenance" || bad "X2b (cache: $(ls "$CONSUMER" 2>/dev/null | tr '\n' ' '))"
 docker image inspect "$PIN" >/dev/null 2>&1 \
   && ok "X2c the pinned range container image was pulled" || bad "X2c"

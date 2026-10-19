@@ -21,8 +21,8 @@ __all__ = [
     "registry_locations",
 ]
 
-DEFAULT_REGISTRY = "docker.io/meridianlabsai"
-"""The public org: the out-of-box search-path fallback carrying the reusable base tier."""
+DEFAULT_REGISTRY = "docker.io/meridianlabsai/inspect-ranges"
+"""The public org location: the out-of-box search-path fallback carrying the reusable base tier. The third segment is the hub form's repo-name prefix (user decision, 2026-10-19): the hub is two-level, so project artifacts keep the org's namespace clean by spelling name `attack` as repo `meridianlabsai/inspect-ranges-attack`."""
 
 REGISTRY_ENV = "INSPECT_RANGES_REGISTRY"
 """Ordered, comma-separated registry locations; prepending a deployment's own registry shadows public names deterministically."""
@@ -40,11 +40,13 @@ class Location:
         directory: Path | None = None,
         registry_url: str | None = None,
         prefix: str = "",
+        name_prefix: str = "",
     ) -> None:
         self.raw = raw
         self._directory = directory
         self._registry_url = registry_url
         self._prefix = prefix.strip("/")
+        self._name_prefix = name_prefix
 
     @property
     def is_directory(self) -> bool:
@@ -72,7 +74,8 @@ class Location:
             layout = OciLayout(self._directory)
             return layout.ensure() if create else layout.open()
         assert self._registry_url is not None
-        repo = f"{self._prefix}/{name}" if self._prefix else name
+        spelled = f"{self._name_prefix}-{name}" if self._name_prefix else name
+        repo = f"{self._prefix}/{spelled}" if self._prefix else spelled
         if self._registry_url == _HUB_REGISTRY and repo.count("/") > 1:
             raise DistError(
                 "registry-protocol",
@@ -123,7 +126,20 @@ def parse_location(raw: str) -> Location:
                 "location-invalid",
                 "the hub form needs an org or user namespace (docker.io/<org>)",
             )
-        return Location(raw, registry_url=_HUB_REGISTRY, prefix=prefix)
+        # the hub is two-level, so a third segment is a REPO-NAME prefix, not
+        # a path: docker.io/<org>/<prefix> spells name `attack` as the repo
+        # `<org>/<prefix>-attack`, keeping a shared org's namespace clean
+        # (user decision, 2026-10-19)
+        org, _, name_prefix = prefix.partition("/")
+        if "/" in name_prefix:
+            raise DistError(
+                "location-invalid",
+                f"{raw!r} nests too deep for the hub form "
+                "(docker.io/<org> or docker.io/<org>/<repo-name-prefix>)",
+            )
+        return Location(
+            raw, registry_url=_HUB_REGISTRY, prefix=org, name_prefix=name_prefix
+        )
     if "." not in host and ":" not in host and host != "localhost":
         # never cwd-dependent (round-3 N4): a directory location must LOOK like
         # a path (/, ./, ../, ~), so the same configured value parses the same

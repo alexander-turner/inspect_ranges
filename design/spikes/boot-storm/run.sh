@@ -24,12 +24,12 @@ if [[ "${1:-}" == "down" ]]; then
   exit 0
 fi
 
-[[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
+[[ -f "$IMAGE_CACHE/ubuntu-noble.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 
 echo "=== prebuild container image (not part of the measurement) ==="
 docker compose -p storm-build -f compose.yaml build >/dev/null 2>&1
 # warm the golden into page cache once: the warm-host assumption, stated in README
-cat "$IMAGE_CACHE/noble-range-guest.qcow2" > /dev/null
+cat "$IMAGE_CACHE/ubuntu-noble.qcow2" > /dev/null
 cat "$IMAGE_CACHE/noble-server-cloudimg-amd64.img" > /dev/null
 
 disk_stats() {  # sectors read, sectors written

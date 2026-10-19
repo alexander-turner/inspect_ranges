@@ -51,12 +51,12 @@ networks:
 hosts:
   - name: web
     os: { type: linux, distro: ubuntu-24.04 }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.91.10.10 }]
 
 attacker:
   interfaces: [{ network: lab, ip: 10.91.10.2 }]
-  image: noble-range-guest
+  image: ubuntu-noble
   entry: external
   egress: none
 ```

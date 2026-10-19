@@ -14,5 +14,5 @@
 
 ## Files
 
-- `run.sh` — the runner (shared setup once: daemon-bundle artifact, one v3 golden named `noble-range-guest` as the specs reference)
+- `run.sh` — the runner (shared setup once: daemon-bundle artifact, one v3 golden named `ubuntu-noble` as the specs reference)
 - checks live inline, keyed by guest NAME via `design/spikes/_shared/chexec.py --boot <bundle>/boot.json`

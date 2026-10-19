@@ -39,11 +39,11 @@ cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp/cache" "$SPIKE/tmp/logs"
 
-echo "=== setup: daemon bundle + recipe-v4 golden (noble-range-guest) ==="
+echo "=== setup: daemon bundle + recipe-v4 golden (ubuntu-noble) ==="
 DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
 DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name noble-range-guest \
+$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name ubuntu-noble \
   --image-cache "$INSPECT_RANGES_IMAGE_CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" \
   --daemon-sha256 "$DAEMON_SHA" >"$SPIKE/tmp/logs/derive.txt" 2>&1 \
   && ok "recipe-v4 golden derived" || { bad "golden derived"; tail -5 "$SPIKE/tmp/logs/derive.txt"; exit 1; }

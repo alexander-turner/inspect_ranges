@@ -27,7 +27,7 @@ from .dnsmasq import resolvers_for, search_domain
 from .egress import bridge_name
 from .routing import elect_gateways
 
-DEFAULT_ROUTER_IMAGE = "noble-range-guest"
+DEFAULT_ROUTER_IMAGE = "ubuntu-noble"
 """Image for routers when none is declared (module constant so pre-plan consumers, like the provider's catalog-image fetch, apply the same default)."""
 
 DEFAULT_ATTACKER_IMAGE = "attack"

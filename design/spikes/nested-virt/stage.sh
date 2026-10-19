@@ -20,7 +20,7 @@ if [[ "${1:-}" != "upload-only" ]]; then
   docker compose --project-directory ../checkpoint-clone cp range:/scratch/win-golden.qcow2 "$STAGE/images/win-golden.qcow2"
 
   echo "=== copy linux goldens + ISOs from the image cache ==="
-  for f in noble-server-cloudimg-amd64.img noble-range-guest.qcow2 noble-vsockd.qcow2 noble-e2e.qcow2 \
+  for f in noble-server-cloudimg-amd64.img ubuntu-noble.qcow2 noble-vsockd.qcow2 noble-e2e.qcow2 \
            busybox.exe ws2022-eval.iso virtio-win.iso; do
     cp "$IMAGE_CACHE/$f" "$STAGE/images/$f"
   done

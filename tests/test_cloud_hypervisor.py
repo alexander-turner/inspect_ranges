@@ -36,7 +36,7 @@ def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
     (cache / "img.qcow2").write_bytes(b"fake golden")
-    (cache / "noble-range-guest.qcow2").write_bytes(b"fake router golden")
+    (cache / "ubuntu-noble.qcow2").write_bytes(b"fake router golden")
     (cache / "attack.qcow2").write_bytes(b"fake attack golden")
     return cache
 

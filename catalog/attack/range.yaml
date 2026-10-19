@@ -19,12 +19,12 @@ networks:
 hosts:
   - name: box
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.97.0.10 }]
     provisioning:
       - { recipe: catalog.attack-tools }
 
 attacker:
-  image: noble-range-guest
+  image: ubuntu-noble
   interfaces: [{ network: lab }]
   entry: external

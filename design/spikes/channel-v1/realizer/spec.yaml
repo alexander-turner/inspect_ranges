@@ -15,7 +15,7 @@ networks:
 hosts:
   - name: target
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lan }]
 
 attacker:

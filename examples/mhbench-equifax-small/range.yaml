@@ -33,7 +33,7 @@ networks:
 
 routers:
   - name: router_external
-    image: noble-range-guest     # realized: the catalog golden (upstream: an OpenStack router)
+    image: ubuntu-noble     # realized: the catalog golden (upstream: an OpenStack router)
     # upstream: one OpenStack router (module perry_manager) with an interface on
     # every subnet, uplinked to the provider "external" network. (Its management-
     # network interface is parked in ./deferred.yaml with the management plane.)

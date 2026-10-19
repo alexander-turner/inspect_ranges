@@ -45,7 +45,7 @@ echo "=== R1 the local build stays the default (no knob, up builds and boots) ==
 DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
 DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 NOBLE_SHA=$(sha256sum "$NOBLE" | cut -d' ' -f1)
-$IR images derive "$NOBLE" --sha256 "$NOBLE_SHA" --name noble-range-guest \
+$IR images derive "$NOBLE" --sha256 "$NOBLE_SHA" --name ubuntu-noble \
   --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
 mkdir -p "$SPIKE/tmp/range"
 cat > "$SPIKE/tmp/range/range.yaml" <<'SPEC'
@@ -60,10 +60,10 @@ networks:
 hosts:
   - name: web
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.98.0.10 }]
 attacker:
-  image: noble-range-guest
+  image: ubuntu-noble
   interfaces: [{ network: lab }]
   entry: external
 SPEC

@@ -21,7 +21,7 @@ if [[ "${1:-}" == "down" ]]; then
 fi
 
 grep -q vhost_vsock /proc/modules || { echo "need: sudo modprobe vhost_vsock"; exit 1; }
-[[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
+[[ -f "$IMAGE_CACHE/ubuntu-noble.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 
 # cleaned even on failure (round 2): sweep the compose stack on any exit,
 # matching the other wrappers; ./run.sh down remains for manual cleanup

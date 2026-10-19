@@ -38,7 +38,7 @@ DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
 T0=$(date +%s.%N)
 uv run inspect-ranges images derive "$VENDOR" --sha256 "$VENDOR_SHA" \
-  --name noble-range-guest --image-cache "$COLD/cache" \
+  --name ubuntu-noble --image-cache "$COLD/cache" \
   --daemon-bundle "$COLD/artifacts" --daemon-sha256 "$DAEMON_SHA"
 uv run inspect-ranges render design/spikes/acl-v2/spec.yaml -o "$COLD/bundle" \
   --image-cache "$COLD/cache" --cid-base 3200

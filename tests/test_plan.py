@@ -34,7 +34,7 @@ def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
     for name in (
-        "noble-range-guest.qcow2",
+        "ubuntu-noble.qcow2",
         "img.qcow2",
         "Ubuntu20.qcow2",
         "attack.qcow2",
@@ -90,7 +90,7 @@ def test_attacker_defaults_to_the_catalog_attack_image(cache: Path) -> None:
     plan = resolve_plan(two_segment_spec(), options(cache))
     by_kind = {guest.kind: guest for guest in plan.guests}
     assert by_kind["attacker"].image.reference == "attack"
-    assert by_kind["router"].image.reference == "noble-range-guest"
+    assert by_kind["router"].image.reference == "ubuntu-noble"
     spec = two_segment_spec()
     opted_out = spec.model_copy(
         update={"attacker": spec.attacker.model_copy(update={"image": "img"})}
@@ -181,10 +181,10 @@ networks:
 hosts:
   - name: web
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.0.0.10 }]
 attacker:
-  image: noble-range-guest
+  image: ubuntu-noble
   interfaces: [{ network: lab }]
   entry: external
 """
@@ -374,13 +374,13 @@ networks:
 hosts:
   - name: dual
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces:
       - { network: a, ip: 192.168.20.5 }
       - { network: uplink }
   - name: single
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: b, ip: 192.168.30.5 }]
 routers:
   - name: r
@@ -388,7 +388,7 @@ routers:
       - { network: a, ip: 192.168.20.1 }
       - { network: b, ip: 192.168.30.1 }
 attacker:
-  image: noble-range-guest
+  image: ubuntu-noble
   interfaces: [{ network: uplink }]
   entry: external
 """
@@ -432,7 +432,7 @@ networks:
 hosts:
   - name: dual
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces:
       - { network: a, ip: 192.168.20.5 }
       - { network: b, ip: 192.168.30.5 }
@@ -443,7 +443,7 @@ routers:
       - { network: b, ip: 192.168.30.1 }
       - { network: c, ip: 192.168.40.1 }
 attacker:
-  image: noble-range-guest
+  image: ubuntu-noble
   interfaces: [{ network: c }]
   entry: external
 """

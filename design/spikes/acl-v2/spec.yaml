@@ -26,11 +26,11 @@ routers:
 hosts:
   - name: web
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: dmz, ip: 10.80.10.10 }]
   - name: db
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: internal }]   # allocated: 10.80.20.10
 
 attacker:

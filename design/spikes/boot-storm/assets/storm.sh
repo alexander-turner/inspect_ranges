@@ -27,7 +27,7 @@ EOF
   virsh -c qemu:///system destroy "$vm" 2>/dev/null || true
   virsh -c qemu:///system undefine "$vm" 2>/dev/null || true
   rm -f "/scratch/$vm.qcow2" "/scratch/$vm-seed.iso"
-  qemu-img create -f qcow2 -F qcow2 -b /images/noble-range-guest.qcow2 "/scratch/$vm.qcow2" 10G
+  qemu-img create -f qcow2 -F qcow2 -b /images/ubuntu-noble.qcow2 "/scratch/$vm.qcow2" 10G
   cloud-localds -N /tmp/seed/network-config "/scratch/$vm-seed.iso" /tmp/seed/user-data /tmp/seed/meta-data
   virt-install \
     --connect qemu:///system \

@@ -22,7 +22,7 @@ def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
     for name in (
-        "noble-range-guest.qcow2",
+        "ubuntu-noble.qcow2",
         "img.qcow2",
         "Ubuntu20.qcow2",
         "attack.qcow2",

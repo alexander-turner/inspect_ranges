@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from inspect_ranges._compiler.plan import spec_sha256
@@ -618,7 +619,7 @@ def test_catalog_image_references_applies_defaults() -> None:
             Host(
                 name="plain",
                 os=Os(type="linux"),
-                image="noble-range-guest",
+                image="ubuntu-noble",
                 interfaces=[Interface(network="lab")],
             ),
             Host(
@@ -631,14 +632,14 @@ def test_catalog_image_references_applies_defaults() -> None:
         ],
         attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
     )
-    assert catalog_image_references(spec) == ["noble-range-guest", "attack"]
+    assert catalog_image_references(spec) == ["ubuntu-noble", "attack"]
     foothold = spec.model_copy(
         update={
             "attacker": Attacker(host="plain", entry="assumed-breach"),
             "routers": [],
         }
     )
-    assert catalog_image_references(foothold) == ["noble-range-guest"]
+    assert catalog_image_references(foothold) == ["ubuntu-noble"]
 
 
 def test_ensure_images_available_warm_cold_and_never_pull(
@@ -684,3 +685,22 @@ def test_ensure_images_available_warm_cold_and_never_pull(
         ensure_images_available(ghost, image_cache=cold)
     assert excinfo.value.code == "image-not-published"
     assert "catalog-loc" in str(excinfo.value)
+
+
+def test_hub_name_prefix_spells_repos(tmp_path: Path) -> None:
+    """The hub form's third segment is a repo-NAME prefix (user decision, 2026-10-19): `docker.io/<org>/<prefix>` spells name `attack` as repo `<org>/<prefix>-attack`, keeping a shared org's namespace clean; deeper nesting refuses, and the one-slash-name refusal still holds."""
+    from inspect_ranges._dist.registry import RegistryRepo
+
+    prefixed = parse_location("docker.io/meridianlabsai/inspect-ranges")
+    store = prefixed.store_for("attack")
+    assert isinstance(store, RegistryRepo)
+    assert store.repo == "meridianlabsai/inspect-ranges-attack"
+    bare = parse_location("docker.io/meridianlabsai")
+    assert cast(RegistryRepo, bare.store_for("attack")).repo == "meridianlabsai/attack"
+    with pytest.raises(DistError, match="location-invalid"):
+        parse_location("docker.io/meridianlabsai/inspect-ranges/deeper")
+    with pytest.raises(DistError, match="registry-protocol"):
+        prefixed.store_for("acme/payroll-db")
+    # non-hub registries keep PATH prefixes untouched (nested repos are native)
+    acme = parse_location("registry.acme.net/ranges")
+    assert cast(RegistryRepo, acme.store_for("attack")).repo == "ranges/attack"

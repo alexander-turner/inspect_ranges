@@ -26,7 +26,7 @@ networks:
 
 routers:
   - name: firewall               # a full guest VM acting as gateway, not substrate routing
-    image: noble-range-guest     # realized: the catalog golden (upstream basevm_firewall.xml, KVM)
+    image: ubuntu-noble     # realized: the catalog golden (upstream basevm_firewall.xml, KVM)
     interfaces:                  # upstream pins NIC names (eth0/eth1); NIC naming is generated here
       - { network: office }      # gateway for office members
       - { network: servers }     # gateway for servers members
