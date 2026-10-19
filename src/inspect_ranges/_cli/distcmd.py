@@ -373,9 +373,13 @@ def publish(
         location = parse_location(to_location)
         images, builds, _ = _caches(image_cache, build_cache, None)
         if golden is not None:
-            if guest is not None or catalog_name is not None:
+            if guest is not None or catalog_name is not None or spec is not None:
                 raise click.UsageError(
-                    "--golden stands alone (its name is the catalog name)"
+                    "--golden stands alone (its name is the catalog name; no spec argument)"
+                )
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", golden):
+                raise click.UsageError(
+                    f"{golden!r} is not a catalog name (lowercase slug)"
                 )
             root = publish_golden(golden, location, image_cache=images)
             display.close()
@@ -383,6 +387,10 @@ def publish(
             return
         if guest is None or catalog_name is None:
             raise click.UsageError("promotion needs --guest and --as (or --golden)")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", catalog_name):
+            raise click.UsageError(
+                f"{catalog_name!r} is not a catalog name (lowercase slug: letters, digits, ., _, -)"
+            )
         spec_path = resolve_spec_path(spec)
         validated = load_range(spec_path)
         manifest = load_manifest(builds, validated.meta.name)

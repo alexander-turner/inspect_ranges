@@ -811,6 +811,19 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
                 sidecar.name.removesuffix(".realized.json") + ".qcow2"
             )
             if image.name not in recorded and image.is_file():
+                try:
+                    meta = json.loads(sidecar.read_text())
+                    from .._cli.imagescmd import is_catalog_realized
+
+                    if is_catalog_realized(
+                        str(meta.get("range_name", "")),
+                        str(meta.get("guest", "")),
+                        str(meta.get("build_key", "")),
+                        image.name,
+                    ):
+                        continue  # pulled catalog images are sticky, not reclaim bait
+                except (OSError, ValueError):
+                    continue
                 reclaimable += image.stat().st_size
         mb = reclaimable / (1024 * 1024)
         if reclaimable:

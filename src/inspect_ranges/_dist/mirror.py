@@ -192,4 +192,15 @@ def mirror_names(
         results[name] = mirror_one(
             name, source, destination, progress=progress, all_builds=True
         )
+    from .catalog import CATALOG_REF
+
+    try:
+        # the catalog list travels with its names, so a seeded location stays
+        # enumerable (and pin generation works against the mirror)
+        results[CATALOG_REF] = mirror_one(
+            CATALOG_REF, source, destination, progress=progress
+        )
+    except DistError as error:
+        if error.code != "ref-not-found":
+            raise
     return MirrorReport(results=results)

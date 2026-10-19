@@ -137,7 +137,14 @@ def list_cmd(image_cache: Path | None) -> None:
     reclaimable = 0
     for listing in realized:
         flags = ""
-        if listing.file not in recorded:
+        if is_catalog_realized(
+            listing.range_name, listing.guest, listing.build_key, listing.file
+        ):
+            # a pulled catalog image: sticky, images refresh moves it
+            flags = (
+                f"  CATALOG (pulled; provenance {listing.range_name}/{listing.guest})"
+            )
+        elif listing.file not in recorded:
             # no manifest references this generation: a superseded or orphaned
             # capture (parked-decisions item 1)
             try:
@@ -165,6 +172,13 @@ def list_cmd(image_cache: Path | None) -> None:
         else:
             note = "unmanaged: no provenance metadata"
         click.echo(f"{file}  ({note})")
+
+
+def is_catalog_realized(range_name: str, guest: str, build_key: str, file: str) -> bool:
+    """Whether a realized sidecar describes a CATALOG-pulled image (slice-2 review B1): a build's realized file is always `<range>-<guest>-<key12>.qcow2`, so a renamed landing (`attack.qcow2`) is a promoted catalog image, sticky by design and never the realized tier's reclaim bait (consumers hold no factory manifest to reference it)."""
+    from .._build.manifest import realized_file_name
+
+    return file != realized_file_name(range_name, guest, build_key)
 
 
 def prune_delete_pass(
@@ -357,11 +371,24 @@ def prune(
             f"[projects-running] {len(running)} registered project(s) exist ({', '.join(running[:3])}"
             f"{', ...' if len(running) > 3 else ''}); tear down first, or pass --force"
         )
+    import json as json_module
+
     victims: list[tuple[Path, int, str]] = []
     for sidecar in sorted(image_cache.glob("*.realized.json")):
         image = image_cache / (sidecar.name.removesuffix(".realized.json") + ".qcow2")
         if image.name in live:
             continue
+        try:
+            meta = json_module.loads(sidecar.read_text())
+            if is_catalog_realized(
+                str(meta.get("range_name", "")),
+                str(meta.get("guest", "")),
+                str(meta.get("build_key", "")),
+                image.name,
+            ):
+                continue  # a pulled catalog image: sticky, refresh moves it
+        except (OSError, ValueError):
+            continue  # unreadable provenance: never offered
         if image.is_file():
             victims.append((image, image.stat().st_size, "superseded realized image"))
         victims.append(
@@ -465,7 +492,10 @@ def images_pin(from_location: str, out: Path) -> None:
     from .._dist.location import parse_location
 
     try:
+        out.parent.mkdir(parents=True, exist_ok=True)
         pins = generate_pin_file(parse_location(from_location), out)
     except DistError as error:
         raise click.ClickException(str(error)) from error
+    except OSError as error:
+        raise click.ClickException(f"[pin-file-unwritable] {out}: {error}") from error
     click.echo(f"pinned {len(pins)} catalog name(s) -> {out}")

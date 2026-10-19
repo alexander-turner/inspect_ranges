@@ -59,6 +59,11 @@ def push_range(
     progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     """Push a built range's closure to `location`, named under both the latest ref and the exact-spec ref."""
+    if manifest.range_name == "catalog":
+        raise DistError(
+            "name-reserved",
+            "'catalog' is the catalog list's own ref at every location; rename the range",
+        )
     store = location.store_for(manifest.range_name, create=True)
     # the exact-spec ref lands FIRST and the latest ref LAST (round-3 N1): a
     # crash between the two must never leave a build visible as latest but
@@ -329,13 +334,27 @@ def pull_image(
         if root is None:
             continue
         if name in pins and root.digest != pins[name]:
-            raise DistError(
-                "pin-mismatch",
-                f"{name!r} at {location.describe()} resolves to {root.digest[:19]}..., "
-                f"but the fleet pin file pins {pins[name][:19]}...; the location moved "
-                "past the fleet's pinned state (update the pin file deliberately, or "
-                "mirror the pinned artifacts)",
+            # the pin consumes as an @sha256 pin (spine Q1): the pinned root
+            # stays fetchable by digest even after the tag moved, so the fleet
+            # lands its pinned state from origin; only a GONE pinned root
+            # refuses (round-2 slice-2 review N2)
+            pinned_root = Descriptor(
+                media_type=MEDIA_TYPE_INDEX, digest=pins[name], size=0
             )
+            try:
+                store.manifest_bytes(pinned_root)
+                root = pinned_root
+            except DistError as error:
+                if error.code not in ("ref-not-found", "missing-blob"):
+                    raise
+                raise DistError(
+                    "pin-mismatch",
+                    f"{name!r} at {location.describe()} resolves to "
+                    f"{root.digest[:19]}..., the fleet pin names "
+                    f"{pins[name][:19]}..., and the pinned root is no longer "
+                    "served there; mirror the pinned artifacts or update the "
+                    "pin file deliberately",
+                ) from None
         result = materialize_closure(
             store,
             root,
