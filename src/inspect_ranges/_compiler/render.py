@@ -710,7 +710,7 @@ _TCPIP_ROUTE = """\
 _DNS_INTERFACE = """\
         <Interface wcm:action="add">
           <Identifier>{mac}</Identifier>
-          <DNSServerSearchOrder>
+{domain}          <DNSServerSearchOrder>
 {servers}          </DNSServerSearchOrder>
         </Interface>
 """
@@ -738,6 +738,16 @@ def _windows_unattend(
         mac = interface.mac.upper().replace(":", "-")
         route_specs: list[tuple[str, str, int | None]] = []
         if network.gateway is not None:
+            # Windows treats 169.254/16 as on-link (APIPA) and ARPs for it
+            # instead of routing it, so a link-local resolver (the VPC-resolver
+            # shape the build hands guests) needs an explicit host route via
+            # the gateway — the route Linux takes implicitly (measured live:
+            # resolution dead without it, instant with it)
+            route_specs.extend(
+                (f"{resolver}/32", str(network.gateway), None)
+                for resolver in network.resolvers
+                if resolver.is_link_local
+            )
             if len(gatewayed) == 1:
                 route_specs.append(("0.0.0.0/0", str(network.gateway), None))
             else:
@@ -781,10 +791,17 @@ def _windows_unattend(
         )
         if network.resolvers:
             servers = "".join(
-                f'            <IpAddress wcm:action="add" wcm:keyValue="{index + 1}">{address}</IpAddress>\n'
-                for index, address in enumerate(network.resolvers)
+                f'            <IpAddress wcm:action="add" wcm:keyValue="{server_index + 1}">{address}</IpAddress>\n'
+                for server_index, address in enumerate(network.resolvers)
             )
-            dns.append(_DNS_INTERFACE.format(mac=mac, servers=servers))
+            # the connection-specific DNS suffix (AD short-name resolution
+            # needs it; the Linux analogue is netplan's nameservers.search)
+            domain = (
+                f"          <DNSDomain>{network.search}</DNSDomain>\n"
+                if network.search is not None
+                else ""
+            )
+            dns.append(_DNS_INTERFACE.format(mac=mac, domain=domain, servers=servers))
     return _WINDOWS_UNATTEND_TEMPLATE.format(
         hostname=windows_hostname(guest.name),
         tcpip_interfaces="".join(tcpip),
@@ -797,28 +814,50 @@ def _windows_unattend(
 
 
 def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) -> str:
-    """The golden's recorded Administrator password (its provenance sidecar, local-only scenario content), else `DEFAULT_WINDOWS_ADMIN_PASSWORD`. Every fallback logs: a seed carrying the wrong password RESETS the clone's Administrator at OOBE, so silence here would diverge a range from its golden invisibly."""
+    """The golden's recorded Administrator password (its provenance sidecar, local-only scenario content), else `DEFAULT_WINDOWS_ADMIN_PASSWORD`. A realized image (a captured Windows build, windows-ad-v1 slice 2) carries no password itself: its `.realized.json` sidecar names the backing golden, and the chase lands on that golden's record — the password lives in exactly one place. Every fallback logs: a seed carrying the wrong password RESETS the clone's Administrator at OOBE, so silence here would diverge a range from its golden invisibly."""
     if options is None or options.image_cache is None:
         logger.warning(
             "windows guest %r renders without an image cache; the seed carries the default Administrator password",
             guest.name,
         )
         return DEFAULT_WINDOWS_ADMIN_PASSWORD
-    sidecar = options.image_cache / image_sidecar_file_name(guest.image.file)
+    cache = options.image_cache
+    sidecar = cache / image_sidecar_file_name(guest.image.file)
+    realized = cache / (
+        guest.image.file.removesuffix(".qcow2") + ".realized.json"
+    )  # the capture sidecar convention
     try:
-        loaded: object = json.loads(sidecar.read_text())
-    except FileNotFoundError:
-        logger.warning(
-            "windows guest %r: image %s has no provenance sidecar; the seed carries the default Administrator password",
-            guest.name,
-            guest.image.file,
-        )
-        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+        if sidecar.is_file():
+            loaded: object = json.loads(sidecar.read_text())
+        elif realized.is_file():
+            realized_loaded: object = json.loads(realized.read_text())
+            golden_file = (
+                cast(dict[str, object], realized_loaded).get("golden_file")
+                if isinstance(realized_loaded, dict)
+                else None
+            )
+            if not isinstance(golden_file, str) or not golden_file:
+                logger.warning(
+                    "windows guest %r: realized sidecar %s names no backing golden; the seed carries the default Administrator password",
+                    guest.name,
+                    realized.name,
+                )
+                return DEFAULT_WINDOWS_ADMIN_PASSWORD
+            loaded = json.loads(
+                (cache / image_sidecar_file_name(golden_file)).read_text()
+            )
+        else:
+            logger.warning(
+                "windows guest %r: image %s has no provenance sidecar; the seed carries the default Administrator password",
+                guest.name,
+                guest.image.file,
+            )
+            return DEFAULT_WINDOWS_ADMIN_PASSWORD
     except (OSError, ValueError):
         logger.warning(
-            "windows guest %r: sidecar %s is unreadable; the seed carries the default Administrator password",
+            "windows guest %r: the provenance records for %s are unreadable; the seed carries the default Administrator password",
             guest.name,
-            sidecar.name,
+            guest.image.file,
         )
         return DEFAULT_WINDOWS_ADMIN_PASSWORD
     if isinstance(loaded, dict):

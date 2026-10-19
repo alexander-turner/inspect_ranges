@@ -410,6 +410,9 @@ class RecipeTarget:
     )
     """Cloud Hypervisor guests' hybrid-vsock endpoints as (socket path, VMM uid); QEMU guests are reached by CID. Serialized to the entrypoint as `IR_GUEST_SOCKETS`."""
 
+    guest_os: Mapping[str, str] = field(default_factory=dict[str, str])
+    """Per-guest OS (`"linux"`/`"windows"`); absent guests are linux. Serialized to the entrypoint as `IR_GUEST_OS` so `guesttool` picks the Windows exec/push shapes (windows-ad-v1 slice 2)."""
+
 
 class RecipeError(RuntimeError):
     """Stage-named recipe execution failure: `[stage] recipe NAME on guest GUEST: message`."""
@@ -583,6 +586,7 @@ def _contract_env(
             {name: list(endpoint) for name, endpoint in target.hybrid_sockets.items()},
             sort_keys=True,
         ),
+        "IR_GUEST_OS": json.dumps(dict(target.guest_os), sort_keys=True),
         "IR_RECIPE": recipe_name,
         "IR_EXEC_BUDGET_MS": str(exec_budget_ms),
     }

@@ -63,6 +63,20 @@ def test_projection_covers_only_realized_sections() -> None:
     assert spec_projection(changed) != same
 
 
+def test_windows_projection_keys_on_name_and_addressing() -> None:
+    """A Windows capture bakes its hostname and static addresses into the disk (the specialize pass runs once), so an IP or name edit must rebuild rather than re-render against a stale disk; Linux addressing stays outside the key (cloud-init re-seeds per boot)."""
+    host = make_host(os=Os(type="windows"))
+    same = spec_projection(host)
+    assert spec_projection(make_host(os=Os(type="windows"))) == same
+    moved = make_host(
+        os=Os(type="windows"),
+        interfaces=[Interface(network="lab", ip="10.0.0.9")],
+    )
+    assert spec_projection(moved) != same
+    renamed = make_host(os=Os(type="windows"), name="dc2")
+    assert spec_projection(renamed) != same
+
+
 Steps = list[tuple[ResolvedRecipe, dict[str, str | int | bool]]]
 
 

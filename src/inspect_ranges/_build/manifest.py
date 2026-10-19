@@ -179,12 +179,21 @@ def spec_projection(host: Host) -> str:
     """Canonical hash of the host's realized-relevant declarations.
 
     Only the sections the build realizes participate (provisioning, services, vulnerabilities), so edits elsewhere (addresses, resources, notes on other hosts) re-render without rebuilding this guest; the projection principle from the spine's checkpoint decision, applied per guest.
+
+    A WINDOWS host's projection also carries its name and interface addressing (windows-ad-v1 slice 2): the unattend specialize pass runs once on the generalized golden, so the captured realized disk holds the hostname and static addresses PERSISTENTLY — a consumer boot cannot re-apply them the way cloud-init re-seeds a Linux guest. Excluding addressing would let an IP edit re-render against a disk that still holds the old address, with no rebuild and no refusal; including it makes the edit an honest rebuild.
     """
-    projected = {
+    projected: dict[str, object] = {
         "provisioning": [step.model_dump(mode="json") for step in host.provisioning],
         "services": [service.model_dump(mode="json") for service in host.services],
         "vulnerabilities": [v.model_dump(mode="json") for v in host.vulnerabilities],
     }
+    if host.os.type == "windows":
+        projected["windows_identity"] = {
+            "name": host.name,
+            "interfaces": [
+                interface.model_dump(mode="json") for interface in host.interfaces
+            ],
+        }
     return hashlib.sha256(
         json.dumps(projected, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

@@ -92,6 +92,10 @@ def conformance_plan(
             guest
             for guest in plan.guests
             if guest.kind != "attacker"
+            # the sweep script is bash + /dev/tcp; a Windows guest cannot run
+            # it, so the defender must be linux (an all-Windows shared segment
+            # skips the sweep like the no-defender case)
+            and guest.os == "linux"
             and attacker_networks
             & {interface.network for interface in guest.interfaces}
         ),

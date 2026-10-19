@@ -3,6 +3,8 @@
 Verification is mechanical and derived from the spec, never from recipe claims: after all recipes complete, each guest with declarations is probed once over the channel (listening sockets, installed packages, listener-process package attribution), and every `services`/`vulnerabilities` assertion is evaluated against those observed facts. A service verifies on its listening port and, when declared, its version; the version attributes through an explicit `Service.package`, then the listener-process chain (port, pid, exe, owning dpkg), then a dpkg named exactly like the service (user decision, 2026-10-17), and a declared version that cannot be attributed fails naming the paths tried. A vulnerability verifies iff its linked service verifies (exploitability proof is challenge behavioral-check territory per the ratified verification structure); one without a service linkage verifies vacuously and says so.
 
 `credentials` and free-text fields are not mechanically checkable and are not checked. Failures carry the house codes (`service-not-verified`, `vulnerability-not-verified`) with the observed-versus-declared delta and the per-guest probe log path; the evaluation itself is pure over `GuestFacts`, so it tests without a guest.
+
+Windows guests (windows-ad-v1 slice 2) probe over PowerShell into the same `GuestFacts` shape: listeners from `Get-NetTCPConnection`/`Get-NetUDPEndpoint` (pid-attributed, process names joined from `Get-Process`), packages from the registry uninstall enumeration (DisplayName to DisplayVersion), and the listener attribution chain through the owning process's executable `ProductVersion` (the dpkg-ownership analogue: the exe path stands in for the owning package name). Everything below `GuestFacts` — the evaluation, the version matcher — is shared; Windows versions are plain dotted numerics, which the component-prefix matcher handles and the dpkg-specific rules (`~`, `+really`, epochs) simply never trigger on.
 """
 
 import asyncio
@@ -42,10 +44,10 @@ class GuestFacts(BaseModel):
 
     listeners: list[Listener] = []
     packages: dict[str, str] = {}
-    """Installed dpkg packages, name to full version."""
+    """Installed packages, name to full version (dpkg on linux; registry uninstall DisplayNames plus listener-executable paths with their ProductVersions on Windows)."""
 
     pid_packages: dict[int, str] = {}
-    """Listener pid to the dpkg owning its executable (the attribution chain's middle step)."""
+    """Listener pid to the package owning its executable (the attribution chain's middle step): the dpkg name on linux, the executable path on Windows."""
 
     def listening(self, port: int) -> Listener | None:
         """The listener on `port`, tcp preferred over udp."""
@@ -126,6 +128,63 @@ def parse_pid_packages(output: str) -> dict[int, str]:
         if match:
             attributions[int(match.group(1))] = match.group(2).strip()
     return attributions
+
+
+def parse_win_processes(output: str) -> dict[int, str]:
+    """Parse the Windows probe's `===PROCS===` section (`<pid> <name>` per line from `Get-Process`)."""
+    processes: dict[int, str] = {}
+    for line in output.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            processes[int(parts[0])] = parts[1].strip()
+    return processes
+
+
+def parse_win_listeners(
+    output: str, proto: Literal["tcp", "udp"], processes: Mapping[int, str]
+) -> list[Listener]:
+    """Parse the Windows probe's listener sections (`<port> <pid>` per line from `Get-NetTCPConnection -State Listen` / `Get-NetUDPEndpoint`), process names joined from the `===PROCS===` map."""
+    listeners: list[Listener] = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid = int(parts[1])
+        listeners.append(
+            Listener(
+                proto=proto,
+                port=int(parts[0]),
+                pid=pid,
+                process=processes.get(pid),
+            )
+        )
+    return listeners
+
+
+def parse_win_packages(output: str) -> dict[str, str]:
+    """Parse the Windows probe's `===PKGS===` section (registry uninstall enumeration, `DisplayName<TAB>DisplayVersion` per line); versionless entries record an empty version."""
+    packages: dict[str, str] = {}
+    for line in output.splitlines():
+        name, _, version = line.partition("\t")
+        if name.strip():
+            packages[name.strip()] = version.strip()
+    return packages
+
+
+_WIN_ATTRIBUTION = re.compile(r"pid (\d+) exe (.+) version (\S*)$")
+
+
+def parse_win_attribution(output: str) -> tuple[dict[int, str], dict[str, str]]:
+    """Parse the Windows attribution probe's `pid <pid> exe <path> version <v>` records into (pid to exe path, exe path to ProductVersion): the exe path stands in for the owning package name, so the shared attribution chain reads unchanged."""
+    pid_packages: dict[int, str] = {}
+    versions: dict[str, str] = {}
+    for line in output.splitlines():
+        match = _WIN_ATTRIBUTION.match(line.strip())
+        if match:
+            path = match.group(2).strip()
+            pid_packages[int(match.group(1))] = path
+            versions[path] = match.group(3)
+    return pid_packages, versions
 
 
 def version_matches(declared: str, observed: str) -> bool:
@@ -300,7 +359,15 @@ def verify_range(
         if not host.services and not host.vulnerabilities:
             continue
         log_path = log_dir / f"{host.name}.log"
-        facts = asyncio.run(_collect_facts(cids, host.name, log_path, hybrid_sockets))
+        facts = asyncio.run(
+            _collect_facts(
+                cids,
+                host.name,
+                log_path,
+                hybrid_sockets,
+                windows=host.os.type == "windows",
+            )
+        )
         host_results = evaluate_host(host, facts)
         results.extend(host_results)
         if stage_log is not None:
@@ -319,25 +386,50 @@ def verify_range(
     return results
 
 
+_WIN_PROBE = (
+    "$ErrorActionPreference='SilentlyContinue'; "
+    "Write-Output '===TCP==='; "
+    "Get-NetTCPConnection -State Listen | ForEach-Object { '{0} {1}' -f $_.LocalPort, $_.OwningProcess }; "
+    "Write-Output '===UDP==='; "
+    "Get-NetUDPEndpoint | ForEach-Object { '{0} {1}' -f $_.LocalPort, $_.OwningProcess }; "
+    "Write-Output '===PROCS==='; "
+    "Get-Process | ForEach-Object { '{0} {1}' -f $_.Id, $_.ProcessName }; "
+    "Write-Output '===PKGS==='; "
+    "Get-ItemProperty "
+    "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',"
+    "'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' "
+    "| Where-Object { $_.DisplayName } "
+    '| ForEach-Object { "{0}`t{1}" -f $_.DisplayName, $_.DisplayVersion }'
+)
+
+
 async def _collect_facts(
     cids: dict[str, int],
     guest: str,
     log_path: Path,
     hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    *,
+    windows: bool = False,
 ) -> GuestFacts:
     channel = MessageChannel(
         VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-verify"
     )
-    probe = (
-        "echo ===TCP===; ss -tlnpH; echo ===UDP===; ss -ulnpH; "
-        "echo ===PKGS===; dpkg-query -W -f '${Package}\\t${Version}\\t${Status}\\n'"
-    )
+    if windows:
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", _WIN_PROBE]
+        user: str | None = None
+    else:
+        probe = (
+            "echo ===TCP===; ss -tlnpH; echo ===UDP===; ss -ulnpH; "
+            "echo ===PKGS===; dpkg-query -W -f '${Package}\\t${Version}\\t${Status}\\n'"
+        )
+        cmd = ["sh", "-c", probe]
+        user = "root"
     outcome = await channel.exec(
         guest,
         ExecRequest(
             id=request_id(),
-            cmd=["sh", "-c", probe],
-            user="root",
+            cmd=cmd,
+            user=user,
             budget=Budget(command_ms=PROBE_BUDGET_MS),
         ),
     )
@@ -352,28 +444,64 @@ async def _collect_facts(
             f"{' (output truncated)' if outcome.stdout_truncated else ''}; log: {log_path}"
         )
     sections = _split_sections(text)
-    listeners = parse_ss(sections.get("TCP", ""), "tcp") + parse_ss(
-        sections.get("UDP", ""), "udp"
-    )
-    packages = parse_packages(sections.get("PKGS", ""))
+    if windows:
+        processes = parse_win_processes(sections.get("PROCS", ""))
+        listeners = parse_win_listeners(
+            sections.get("TCP", ""), "tcp", processes
+        ) + parse_win_listeners(sections.get("UDP", ""), "udp", processes)
+        packages = parse_win_packages(sections.get("PKGS", ""))
+    else:
+        listeners = parse_ss(sections.get("TCP", ""), "tcp") + parse_ss(
+            sections.get("UDP", ""), "udp"
+        )
+        packages = parse_packages(sections.get("PKGS", ""))
     pids = sorted({listener.pid for listener in listeners if listener.pid is not None})
     attribution_text = ""
+    pid_packages: dict[int, str] = {}
     if pids:
-        lines = "; ".join(
-            f'exe=$(readlink /proc/{pid}/exe 2>/dev/null) && [ -n "$exe" ] '
-            f'&& echo "pid {pid} pkg $(dpkg -S "$exe" 2>/dev/null)"'
-            for pid in pids
-        )
+        if windows:
+            pid_list = ",".join(str(pid) for pid in pids)
+            script = (
+                "$ErrorActionPreference='SilentlyContinue'; "
+                f"foreach ($p in @({pid_list})) {{ "
+                "$proc = Get-Process -Id $p; "
+                "if ($proc -and $proc.Path) { "
+                "$v = (Get-Item $proc.Path).VersionInfo.ProductVersion; "
+                "Write-Output ('pid {0} exe {1} version {2}' -f $p, $proc.Path, $v) } }"
+            )
+            attribution_cmd = [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ]
+            attribution_user: str | None = None
+        else:
+            lines = "; ".join(
+                f'exe=$(readlink /proc/{pid}/exe 2>/dev/null) && [ -n "$exe" ] '
+                f'&& echo "pid {pid} pkg $(dpkg -S "$exe" 2>/dev/null)"'
+                for pid in pids
+            )
+            attribution_cmd = ["sh", "-c", f"{lines}; true"]
+            attribution_user = "root"
         attribution = await channel.exec(
             guest,
             ExecRequest(
                 id=request_id(),
-                cmd=["sh", "-c", f"{lines}; true"],
-                user="root",
+                cmd=attribution_cmd,
+                user=attribution_user,
                 budget=Budget(command_ms=PROBE_BUDGET_MS),
             ),
         )
         attribution_text = attribution.stdout.decode(errors="replace")
+        if windows:
+            pid_packages, exe_versions = parse_win_attribution(attribution_text)
+            # the exe's ProductVersion is the Windows analogue of the owning
+            # package's version: merged under the path the chain resolves to
+            packages = {**packages, **exe_versions}
+        else:
+            pid_packages = parse_pid_packages(attribution_text)
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     log_path.write_text(
         f"# build-verify probe of guest {guest} at {stamp}\n{text}\n===STDERR===\n{stderr_text}\n===ATTRIBUTION===\n{attribution_text}"
@@ -381,7 +509,7 @@ async def _collect_facts(
     return GuestFacts(
         listeners=listeners,
         packages=packages,
-        pid_packages=parse_pid_packages(attribution_text),
+        pid_packages=pid_packages,
     )
 
 

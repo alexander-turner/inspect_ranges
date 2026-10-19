@@ -390,3 +390,32 @@ def test_default_with_nul_refuses(tmp_path: Path) -> None:
     with pytest.raises(IssueError) as excinfo:
         validate_vars(recipe, {})
     assert excinfo.value.issues[0].code == "recipe-var-invalid"
+
+
+def test_guest_os_contract_parsing() -> None:
+    from inspect_ranges._build.guesttool import guest_os_from_env
+
+    assert guest_os_from_env({}) == {}
+    assert guest_os_from_env({"IR_GUEST_OS": '{"dc": "windows", "web": "linux"}'}) == {
+        "dc": "windows",
+        "web": "linux",
+    }
+    with pytest.raises(ValueError):
+        guest_os_from_env({"IR_GUEST_OS": "not json"})
+    with pytest.raises(ValueError):
+        guest_os_from_env({"IR_GUEST_OS": '{"dc": 1}'})
+
+
+def test_contract_env_exports_guest_os(tmp_path: Path) -> None:
+    """The executor serializes the per-guest OS map so `IR_EXEC`/`IR_PUSH` pick the Windows shapes against Windows targets."""
+    write_recipe(tmp_path, body='#!/bin/sh\necho "$IR_GUEST_OS" > "$PWD/os.txt"\n')
+    recipe = resolve_recipe("acme.web", range_dir=tmp_path, cache=tmp_path / "cache")
+    run_recipe(
+        recipe,
+        step_vars={},
+        target=RecipeTarget(
+            guest="web", cids={"web": 3100}, guest_os={"web": "windows"}
+        ),
+        log_dir=tmp_path / "logs",
+    )
+    assert (recipe.bundle_dir / "os.txt").read_text().strip() == '{"web": "windows"}'

@@ -143,6 +143,8 @@ class Fakes:
         realized_name: str,
         meta: Any,
         hybrid_sockets: Any = None,
+        windows: bool = False,
+        build_nameserver: str | None = None,
     ) -> str:
         self.captures.append((guest, realized_name, golden_file))
         data = b"realized:" + guest.encode()
@@ -335,6 +337,7 @@ def test_network_settle_gates_each_guest_once(tmp_path: Path, cache: Path) -> No
         probe: str,
         timeout_s: float,
         hybrid_sockets: Any = None,
+        windows_resolver: str | None = None,
     ) -> float:
         assert probe == "archive.ubuntu.com" and "web" in cids
         settled.append(guest)
@@ -365,6 +368,7 @@ def test_settle_failure_tears_down(tmp_path: Path, cache: Path) -> None:
         probe: str,
         timeout_s: float,
         hybrid_sockets: Any = None,
+        windows_resolver: str | None = None,
     ) -> float:
         raise BuildError("network-settle", "cannot resolve", guest=guest)
 

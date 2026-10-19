@@ -8,6 +8,10 @@ from inspect_ranges._build.verify import (
     parse_packages,
     parse_pid_packages,
     parse_ss,
+    parse_win_attribution,
+    parse_win_listeners,
+    parse_win_packages,
+    parse_win_processes,
     version_matches,
 )
 from inspect_ranges.types import Host, Interface, Os, Service, Vulnerability
@@ -199,3 +203,60 @@ def test_parse_packages_filters_removed_but_not_purged() -> None:
         # a status-less line (the pre-review probe shape) stays accepted
         "legacyline": "3.1-2",
     }
+
+
+WIN_TCP = "445 4\n88 652\n389 652\n*:* 0\nheader noise\n"
+WIN_UDP = "53 2244\n"
+WIN_PROCS = "4 System\n652 lsass\n2244 dns\n"
+WIN_PKGS = (
+    "Mozilla Firefox (x64 en-US)\t115.0.2\n"
+    "Splunk Universal Forwarder\t9.1.2\n"
+    "NoVersionEntry\t\n"
+)
+WIN_ATTRIB = (
+    "pid 2244 exe C:\\Windows\\System32\\dns.exe version 10.0.20348.1\n"
+    "pid 7788 exe C:\\Program Files\\Splunk UF\\bin\\splunkd.exe version 9.1.2\n"
+)
+
+
+def test_parse_win_sections() -> None:
+    """The Windows probe sections parse into the shared facts shape: `<port> <pid>` listeners joined to `Get-Process` names, tab-separated registry packages (versionless entries keep an empty version)."""
+    processes = parse_win_processes(WIN_PROCS)
+    assert processes == {4: "System", 652: "lsass", 2244: "dns"}
+    tcp = parse_win_listeners(WIN_TCP, "tcp", processes)
+    assert [(entry.port, entry.pid, entry.process) for entry in tcp] == [
+        (445, 4, "System"),
+        (88, 652, "lsass"),
+        (389, 652, "lsass"),
+    ]
+    udp = parse_win_listeners(WIN_UDP, "udp", processes)
+    assert udp[0].proto == "udp" and udp[0].process == "dns"
+    assert parse_win_packages(WIN_PKGS) == {
+        "Mozilla Firefox (x64 en-US)": "115.0.2",
+        "Splunk Universal Forwarder": "9.1.2",
+        "NoVersionEntry": "",
+    }
+
+
+def test_parse_win_attribution_handles_spaced_paths() -> None:
+    pid_packages, versions = parse_win_attribution(WIN_ATTRIB)
+    assert pid_packages == {
+        2244: "C:\\Windows\\System32\\dns.exe",
+        7788: "C:\\Program Files\\Splunk UF\\bin\\splunkd.exe",
+    }
+    assert versions["C:\\Program Files\\Splunk UF\\bin\\splunkd.exe"] == "9.1.2"
+
+
+def test_windows_listener_chain_attributes_versions() -> None:
+    """The Windows attribution chain reads unchanged through `GuestFacts`: listener pid, the owning executable's path standing in for the package name, the exe's ProductVersion as the version."""
+    processes = parse_win_processes(WIN_PROCS)
+    pid_packages, versions = parse_win_attribution(WIN_ATTRIB)
+    windows_facts = GuestFacts(
+        listeners=parse_win_listeners(WIN_UDP, "udp", processes),
+        packages={**parse_win_packages(WIN_PKGS), **versions},
+        pid_packages=pid_packages,
+    )
+    host = host_with(services=[Service(name="dns", port=53, version="10.0")])
+    result = by_name(evaluate_host(host, windows_facts), "dns")
+    assert result.status == "ok"
+    assert "dns.exe" in result.observed and "10.0.20348.1" in result.observed

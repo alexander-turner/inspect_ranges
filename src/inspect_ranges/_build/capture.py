@@ -1,6 +1,6 @@
 """Capture of provisioned guests into realized images (build-v1 slice 5).
 
-After verification passes, each rebuilt guest is shut down cleanly (an in-guest `systemctl poweroff` over the channel, then a `virsh domstate` poll inside the range container until `shut off`), its per-guest overlay is copied out of the range container's scratch, rebased onto its golden's cache file name (relative backing, the cache convention), digested, and moved into the image cache atomically with a `.realized.json` provenance sidecar. The realized image is a boot-fresh scenario image in the Q4 sense: a chained qcow2 delta the runtime boots per sample with its own overlay on top.
+After verification passes, each rebuilt guest is shut down cleanly (an in-guest `systemctl poweroff` over the channel — `shutdown /s /t 0` on Windows — then a `virsh domstate` poll inside the range container until `shut off`), its per-guest overlay is copied out of the range container's scratch, rebased onto its golden's cache file name (relative backing, the cache convention), digested, and moved into the image cache atomically with a `.realized.json` provenance sidecar. The realized image is a boot-fresh scenario image in the Q4 sense: a chained qcow2 delta the runtime boots per sample with its own overlay on top.
 
 Clean shutdown before capture is the slice-5 decision's crash-consistency rule: the captured disk is a cleanly unmounted filesystem, never a crash image. Captures run only for rebuilt guests; reused guests carry their prior manifest records forward.
 """
@@ -25,6 +25,9 @@ CaptureRunner = Callable[[list[str]], str]
 """Host-command seam for docker/qemu-img/virsh calls; returns stdout, raises on failure."""
 
 SHUTOFF_TIMEOUT_S = 120.0
+
+SHUTOFF_TIMEOUT_WINDOWS_S = 300.0
+"""Windows guests flush much more state at poweroff (a domain controller writes NTDS.dit); the Linux bound reads as a capture failure on an honest shutdown."""
 
 
 class RealizedImageMeta(BaseModel):
@@ -57,12 +60,43 @@ def scrub_guest(
     cids: dict[str, int],
     guest: str,
     hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    *,
+    windows: bool = False,
+    build_nameserver: str | None = None,
 ) -> None:
     """Pre-capture cleanup so the realized image is a clean golden-like artifact (parked-decisions item 2): `cloud-init clean --logs` removes the build boot's instance state (every runtime boot then seeds fresh) and the build seed's rendered netplan goes with it, so neither the build's egress nameserver (a deployment's VPC resolver IP) nor an already-run marker survives into the captured disk.
+
+    A Windows guest has no per-boot network state to clean — its unattend specialize config is PERSISTENT registry state, deliberately kept (the realized image is specialized, and specialize will not re-run at consumer boot). The Windows scrub removes exactly the build-only contamination: staged `guesttool` temp files, and `build_nameserver` stripped from every adapter's resolver list (the build appended it; a consumer boot would otherwise query a dead resolver first on uplinked adapters). Explicitly NOT sysprep: generalizing a domain-joined capture would destroy the membership the build just created.
 
     Raises:
         BuildError: stage `capture`, when the scrub itself fails; a dirty capture must not pass silently.
     """
+    if windows:
+        strip_ns = ""
+        if build_nameserver is not None:
+            ns = build_nameserver.replace("'", "''")
+            strip_ns = (
+                f"foreach ($ifc in Get-DnsClientServerAddress -AddressFamily IPv4) {{ "
+                f"$servers = @($ifc.ServerAddresses | Where-Object {{ $_ -ne '{ns}' }}); "
+                f"if ($servers.Count -ne @($ifc.ServerAddresses).Count) {{ "
+                f"if ($servers.Count -eq 0) {{ Set-DnsClientServerAddress -InterfaceIndex $ifc.InterfaceIndex -ResetServerAddresses }} "
+                f"else {{ Set-DnsClientServerAddress -InterfaceIndex $ifc.InterfaceIndex -ServerAddresses $servers }} }} }}; "
+            )
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            + strip_ns
+            + "Remove-Item -Force -ErrorAction SilentlyContinue 'C:\\Windows\\Temp\\.ir-*'; "
+            + "exit 0"
+        )
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+        user: str | None = None
+    else:
+        cmd = [
+            "sh",
+            "-c",
+            "cloud-init clean --logs && rm -f /etc/netplan/50-cloud-init.yaml",
+        ]
+        user = "root"
 
     async def scrub() -> None:
         channel = MessageChannel(
@@ -72,12 +106,8 @@ def scrub_guest(
             guest,
             ExecRequest(
                 id=request_id(),
-                cmd=[
-                    "sh",
-                    "-c",
-                    "cloud-init clean --logs && rm -f /etc/netplan/50-cloud-init.yaml",
-                ],
-                user="root",
+                cmd=cmd,
+                user=user,
                 budget=Budget(command_ms=30_000),
             ),
         )
@@ -96,11 +126,15 @@ def shutdown_guest(
     cids: dict[str, int],
     guest: str,
     hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    *,
+    windows: bool = False,
 ) -> str | None:
     """Ask the guest to power off cleanly; the channel dying mid-call is the expected outcome.
 
-    Returns a short diagnosis when the poweroff visibly did NOT take (a nonzero exit from `systemctl poweroff`), else None; `wait_shutoff` folds it into its timeout error so a never-delivered poweroff is not reported as a slow one (round-1 review).
+    Returns a short diagnosis when the poweroff visibly did NOT take (a nonzero exit from the poweroff command), else None; `wait_shutoff` folds it into its timeout error so a never-delivered poweroff is not reported as a slow one (round-1 review).
     """
+    cmd = ["shutdown", "/s", "/t", "0"] if windows else ["systemctl", "poweroff"]
+    user: str | None = None if windows else "root"
 
     async def poweroff() -> str | None:
         channel = MessageChannel(
@@ -111,8 +145,8 @@ def shutdown_guest(
                 guest,
                 ExecRequest(
                     id=request_id(),
-                    cmd=["systemctl", "poweroff"],
-                    user="root",
+                    cmd=cmd,
+                    user=user,
                     budget=Budget(command_ms=5_000),
                 ),
             )
@@ -120,7 +154,7 @@ def shutdown_guest(
             return None  # the daemon dies with the guest; silence is success here
         if outcome.rc != 0:
             return (
-                f"systemctl poweroff exited {outcome.rc}: "
+                f"{' '.join(cmd)} exited {outcome.rc}: "
                 f"{outcome.stderr.decode(errors='replace')[-120:]}"
             )
         return None

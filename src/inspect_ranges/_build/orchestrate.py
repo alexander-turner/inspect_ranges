@@ -53,6 +53,8 @@ from ..types import (
 )
 from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
 from .capture import (
+    SHUTOFF_TIMEOUT_S,
+    SHUTOFF_TIMEOUT_WINDOWS_S,
     RealizedImageMeta,
     capture_guest,
     collect_realized_garbage,
@@ -165,8 +167,10 @@ class RecipeFn(Protocol):
     ) -> RecipeRun: ...
 
 
-SettleFn = Callable[[dict[str, int], str, str, float, "HybridSockets"], float]
-"""The network-settle seam: `(cids, guest, probe, timeout_s, hybrid_sockets) -> seconds waited` (the map dials Cloud Hypervisor guests through their hybrid-vsock sockets)."""
+SettleFn = Callable[
+    [dict[str, int], str, str, float, "HybridSockets", str | None], float
+]
+"""The network-settle seam: `(cids, guest, probe, timeout_s, hybrid_sockets, windows_resolver) -> seconds waited` (the map dials Cloud Hypervisor guests through their hybrid-vsock sockets; a non-None `windows_resolver` picks the Windows probe shape, querying that build resolver directly)."""
 
 
 HybridSockets = dict[str, HybridEndpoint]
@@ -187,6 +191,8 @@ class CaptureFn(Protocol):
         realized_name: str,
         meta: RealizedImageMeta,
         hybrid_sockets: "HybridSockets | None" = None,
+        windows: bool = False,
+        build_nameserver: str | None = None,
     ) -> str: ...
 
 
@@ -200,10 +206,20 @@ def _capture_realized(
     realized_name: str,
     meta: RealizedImageMeta,
     hybrid_sockets: "HybridSockets | None" = None,
+    windows: bool = False,
+    build_nameserver: str | None = None,
 ) -> str:
-    scrub_guest(cids, guest, hybrid_sockets)
-    diagnosis = shutdown_guest(cids, guest, hybrid_sockets)
-    wait_shutoff(default_capture_runner, project, guest, shutdown_diagnosis=diagnosis)
+    scrub_guest(
+        cids, guest, hybrid_sockets, windows=windows, build_nameserver=build_nameserver
+    )
+    diagnosis = shutdown_guest(cids, guest, hybrid_sockets, windows=windows)
+    wait_shutoff(
+        default_capture_runner,
+        project,
+        guest,
+        timeout_s=SHUTOFF_TIMEOUT_WINDOWS_S if windows else SHUTOFF_TIMEOUT_S,
+        shutdown_diagnosis=diagnosis,
+    )
     return capture_guest(
         default_capture_runner,
         project,
@@ -755,6 +771,15 @@ def build_range(
             for guest in result.guests
             if guest.hybrid_vsock is not None
         }
+        guest_os = {host.name: host.os.type for host in spec.hosts}
+        windows_hosts = frozenset(
+            name for name, os_type in guest_os.items() if os_type == "windows"
+        )
+        build_ns = (
+            options.build_nameserver
+            if options.build_nameserver is not None
+            else default_build_nameserver()
+        )
         log_dir = project_dir(state_dir, project) / "recipes"
         runs: list[RecipeRun] = []
         settle = settle_fn if settle_fn is not None else _settle_network
@@ -768,6 +793,7 @@ def build_range(
                         options.settle_probe,
                         options.settle_timeout_s,
                         hybrid,
+                        build_ns if step.guest in windows_hosts else None,
                     )
                     tee.log(
                         "network-settle",
@@ -786,6 +812,7 @@ def build_range(
                             name: (str(endpoint.path), endpoint.peer_uid)
                             for name, endpoint in hybrid.items()
                         },
+                        guest_os=guest_os,
                     ),
                     log_dir=log_dir,
                     stage_log=tee,
@@ -872,6 +899,8 @@ def build_range(
                         golden_file=golden.file,
                         realized_name=realized_name,
                         hybrid_sockets=hybrid,
+                        windows=host.name in windows_hosts,
+                        build_nameserver=build_ns,
                         meta=RealizedImageMeta(
                             range_name=spec.meta.name,
                             guest=host.name,
@@ -1455,12 +1484,31 @@ def _settle_network(
     probe: str,
     timeout_s: float,
     hybrid_sockets: "HybridSockets | None" = None,
+    windows_resolver: str | None = None,
 ) -> float:
     """Block until the guest resolves `probe` (the build-egress DNS warm-up gate); returns the wait.
+
+    A Windows guest queries `windows_resolver` (the build's egress resolver) DIRECTLY: on an `dns.authoritative` network the system resolver order deliberately leads with a DC whose DNS does not exist yet (measured: `-QuickTimeout` aborts on the dead preferred server and plain resolution burns any honest budget on it), and the gate's claim is exactly that the EGRESS resolver answers from inside the guest — the in-domain resolution path is the promotion recipe's own exit criterion.
 
     Raises:
         BuildError: stage `network-settle` when the guest cannot resolve within the bound, carrying the last underlying cause; the build's egress promise would be a lie for its recipes.
     """
+    if windows_resolver is not None:
+        # PowerShell cold-start alone costs seconds: the exec budget is
+        # windows-sized (measured: 5 s loses every attempt)
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop'; "
+            f"Resolve-DnsName -Name '{probe}' -Server '{windows_resolver}' "
+            "-Type A -QuickTimeout | Out-Null",
+        ]
+        command_ms = 15_000
+    else:
+        cmd = ["getent", "hosts", probe]
+        command_ms = 5_000
 
     async def wait() -> float:
         channel = MessageChannel(
@@ -1475,13 +1523,13 @@ def _settle_network(
                     guest,
                     ExecRequest(
                         id=request_id(),
-                        cmd=["getent", "hosts", probe],
-                        budget=Budget(command_ms=5_000),
+                        cmd=cmd,
+                        budget=Budget(command_ms=command_ms),
                     ),
                 )
                 if outcome.rc == 0:
                     return time.monotonic() - started
-                last_cause = f"getent exited {outcome.rc}"
+                last_cause = f"{cmd[0]} exited {outcome.rc}"
             except Exception as error:  # transient channel noise during early boot
                 last_cause = f"{type(error).__name__}: {error}"
             await asyncio.sleep(2.0)

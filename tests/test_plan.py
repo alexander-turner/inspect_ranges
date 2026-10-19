@@ -749,3 +749,125 @@ attacker:
     assert unattend.count("<Prefix>0.0.0.0/0</Prefix>") == 2
     assert "<Metric>50</Metric>" in unattend  # the NAT attachment wins
     assert "<Metric>201</Metric>" in unattend  # corp (index 1) deprioritized
+
+
+def test_windows_seed_routes_a_link_local_resolver_via_the_gateway(
+    cache: Path, tmp_path: Path
+) -> None:
+    """Windows treats 169.254/16 as on-link and ARPs for it instead of routing it, so a link-local resolver (the VPC-resolver shape the build hands guests) gets an explicit /32 route via the gateway (measured live: resolution dead without it)."""
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    spec_yaml = """
+range:
+  name: winlinklocal
+  schema_version: "0.3"
+  description: link-local resolver route
+networks:
+  - name: corp
+    cidr: 10.24.0.0/24
+    mode: nat
+    dns:
+      nameservers: [169.254.169.253]
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    interfaces: [{ network: corp, ip: 10.24.0.10 }]
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winlinklocal.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    unattend = (out / "guests" / "dc" / "seed" / "unattend.xml").read_text()
+    assert "<Prefix>169.254.169.253/32</Prefix>" in unattend
+    assert unattend.count("<Prefix>0.0.0.0/0</Prefix>") == 1
+
+
+def test_windows_seed_carries_the_search_domain(cache: Path, tmp_path: Path) -> None:
+    """A records-serving network's derived search domain renders as the Windows connection-specific DNS suffix (`DNSDomain`), the netplan `nameservers.search` analogue — AD short-name resolution needs it (windows-ad-v1 slice 2)."""
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    spec_yaml = """
+range:
+  name: winsearch
+  schema_version: "0.3"
+  description: windows search suffix
+networks:
+  - name: corp
+    cidr: 10.22.0.0/24
+    mode: isolated
+    dns:
+      records:
+        - { name: dc, ip: 10.22.0.10 }
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    interfaces: [{ network: corp, ip: 10.22.0.10 }]
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winsearch.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    unattend = (out / "guests" / "dc" / "seed" / "unattend.xml").read_text()
+    assert "<DNSDomain>corp.internal</DNSDomain>" in unattend
+
+
+def test_realized_windows_image_chases_password_to_its_golden(
+    cache: Path, tmp_path: Path
+) -> None:
+    """A captured Windows build's image has only a `.realized.json` sidecar; the seed's Administrator password chases through its `golden_file` to the golden's record instead of silently falling back to the default (windows-ad-v1 slice 2)."""
+    recorded = "Fr0m-the-g0lden"
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    (cache / "windows-2022.json").write_text(json.dumps({"admin_password": recorded}))
+    (cache / "winrange-dc-abc123.qcow2").write_bytes(b"fake realized windows")
+    (cache / "winrange-dc-abc123.realized.json").write_text(
+        json.dumps(
+            {
+                "type": "realized",
+                "range_name": "winrange",
+                "guest": "dc",
+                "build_key": "abc123",
+                "golden_file": "windows-2022.qcow2",
+                "sha256": "x",
+                "created": "2026-10-19T00:00:00Z",
+            }
+        )
+    )
+    spec_yaml = """
+range:
+  name: winrealized
+  schema_version: "0.3"
+  description: realized windows password chase
+networks:
+  - name: corp
+    cidr: 10.23.0.0/24
+    mode: isolated
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: winrange-dc-abc123
+    interfaces: [{ network: corp, ip: 10.23.0.10 }]
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winrealized.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    unattend = (out / "guests" / "dc" / "seed" / "unattend.xml").read_text()
+    assert recorded in unattend
