@@ -640,7 +640,9 @@ def up(
     log.log("range-image", "ok", tag=range_image)
 
     env = dict(os.environ)
-    # the hardened image is hard-required: no environment override survives
+    # the hardened image is hard-required: no compose-env override survives
+    # (the digest-pinned INSPECT_RANGES_RANGE_IMAGE knob resolves inside
+    # ensure_range_image, never here)
     env["RANGE_IMAGE"] = range_image
     env["IMAGE_CACHE"] = str(options.image_cache)
     if options.uplink_network is not None:
