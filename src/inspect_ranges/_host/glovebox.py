@@ -1,10 +1,8 @@
 """The glovebox control-channel connector: drive a glovebox-managed Kata cell as a Ranges guest.
 
-This is part 3 of the route-2 integration contract (`route2-full/ROUTE2-FULL.md`). A `provider: glovebox` attacker box is NOT booted by Ranges (`_compiler/render.py` skips it); it is supplied externally as a glovebox Kata cell whose exec rides the CRI/kata-agent channel, not the Ranges `vsockd` protocol. The applier relays a guest connection as a pure byte pump through the injectable `GuestConnector` seam (`applier.py`); the real seam dials a Cloud-Hypervisor hybrid-vsock or a QEMU `AF_VSOCK`. A glovebox cell speaks neither.
+Part 3 of the route-2 integration contract (`route2-full/ROUTE2-FULL.md`). A `provider: glovebox` attacker box is not booted by Ranges; it is an externally-supplied glovebox Kata cell whose exec rides the CRI/kata-agent channel, not the Ranges `vsockd` protocol. `glovebox_connector` bridges that gap behind the applier's `GuestConnector` byte-pump seam without changing it: for a cell's reserved cid it returns an in-process `ByteStream` whose far end is a tiny v3 wire server (`serve_guest_connection`) that reads one guest-control request, runs it against a `CellExecutor` (default: `crictl exec` into the pod), writes one wire-accurate reply, and closes — the per-operation-connect shape every honest daemon uses.
 
-`glovebox_connector` closes that gap WITHOUT changing the relay/byte-pump contract: for a cell's reserved cid it returns an in-process `ByteStream` whose far end is a tiny v3 wire server (`serve_guest_connection`). The server reads exactly one guest-control request off the pump, runs it against a `CellExecutor` (the default shells into the pod with `crictl exec`), and writes back exactly one wire-accurate reply, then closes — the per-operation-connect shape every honest daemon uses. The provider's `MessageChannel`/`ops.py` surface therefore drives the cell unchanged: `sandbox("attacker").exec(...)` lands in the cell.
-
-The server speaks the SAME codec (`_channel/codec.py`) and schema (`_channel/protocol.py`) as the Go daemon, so it is validated by the real client as untrusted input. What it does NOT reproduce (recorded honestly): the daemon's durable-replies store (`poll`/`ack` are answered as no-ops/ok because each op is synchronous here, so a lost reply is simply retried by a fresh connect), the in-guest process-tree kill on `command_ms` (the cell command runs to completion under the host-side budget), and `forward`/`diag`. These are the remaining gaps to a production connector.
+The server speaks the same codec (`_channel/codec.py`) and schema (`_channel/protocol.py`) as the Go daemon, so the real client validates it as untrusted input. Recorded gaps to a production connector: no durable-replies store (`poll`/`ack` are no-ops/ok because each op is synchronous, so a lost reply is retried by a fresh connect), no in-guest process-tree kill on `command_ms`, and no `forward`/`diag`.
 """
 
 import asyncio
@@ -16,7 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .._channel.channel import ByteStream
+from .._channel.channel import ByteStream, stream_pair
 from .._channel.codec import encode_message, read_message
 from .._channel.protocol import (
     DAEMON_INBOUND_BULK_CAP,
@@ -42,59 +40,6 @@ logger = logging.getLogger("inspect_ranges.glovebox")
 
 _DAEMON_NAME = "glovebox-crictl-connector/0.1"
 _RC_MARKER = "__IR_GB_RC__"
-
-
-# ---------------------------------------------------------------------------
-# In-memory duplex byte stream (the pump the applier relays)
-# ---------------------------------------------------------------------------
-
-
-class _MemoryStream(ByteStream):
-    """One endpoint of an in-process duplex pipe implementing the `ByteStream` pump contract.
-
-    `receive` returns empty bytes once the peer has closed and its queued bytes are drained — the EOF the codec's `MessageStreamReader` treats as a clean message boundary.
-    """
-
-    def __init__(
-        self,
-        inbound: "asyncio.Queue[bytes | None]",
-        outbound: "asyncio.Queue[bytes | None]",
-    ) -> None:
-        self._inbound = inbound
-        self._outbound = outbound
-        self._eof = False
-        self._closed = False
-
-    async def send(self, data: bytes) -> None:
-        if self._closed:
-            raise ConnectionError("send on a closed glovebox stream")
-        if data:
-            await self._outbound.put(data)
-
-    async def receive(self) -> bytes:
-        if self._eof:
-            return b""
-        chunk = await self._inbound.get()
-        if chunk is None:
-            self._eof = True
-            return b""
-        return chunk
-
-    async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        # signal EOF to the peer's receive()
-        await self._outbound.put(None)
-
-
-def _duplex() -> tuple[_MemoryStream, _MemoryStream]:
-    """A connected (client, server) pair of in-memory byte streams."""
-    a2b: asyncio.Queue[bytes | None] = asyncio.Queue()
-    b2a: asyncio.Queue[bytes | None] = asyncio.Queue()
-    client = _MemoryStream(inbound=b2a, outbound=a2b)
-    server = _MemoryStream(inbound=a2b, outbound=b2a)
-    return client, server
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +335,7 @@ def glovebox_connector(
         cell = cells.get(cid)
         if cell is None:
             return await fallback(cid)
-        client, server = _duplex()
+        client, server = stream_pair()
         task = asyncio.create_task(serve_guest_connection(server, cell))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
