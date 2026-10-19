@@ -8,7 +8,7 @@ timestamp: 2026-09-30
 
 # cyris-basic — source note
 
-*Status: translated requirements fixture. `range.yaml` validates against schema v0.1 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
+*Status: translated requirements fixture. `range.yaml` validates against schema v0.3 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
 
 Translation of CyRIS's annotated reference definition `examples/full.yml` (`github.com/crond-jaist/cyris`, BSD-3-Clause, fetched 2026-09-30), with `examples/basic-multi_host.yml` vendored alongside for the multi-hypervisor-host pattern. CyRIS is KVM/libvirt-native — the closest substrate precedent for the inspect_ranges sandbox — and contributes three schema ideas: `entry_point`, interface-level network membership (`members: guest.eth0`), and a per-guest `tasks:` layer.
 

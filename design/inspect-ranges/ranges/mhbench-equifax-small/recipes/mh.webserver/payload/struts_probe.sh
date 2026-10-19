@@ -2,8 +2,9 @@
 # CVE-2017-5638: execute a command on a struts2-showcase host via the
 # Content-Type OGNL injection (the canonical jakarta multipart payload).
 # Usage: struts_probe.sh <host> <command>; prints the command's output.
-# This file is both the recipe's liveness assert and the reference chain's
-# exploit (the checks copy it), so the CVE is exercised identically in both.
+# The OGNL payload also lives (as python re-implementations) in
+# ../../checks/exfiltrate-critical-data/{reference,insufficient}.sh — three
+# deliberate copies; change one, keep the others in step.
 set -eu
 HOST="$1"
 CMD="$2"

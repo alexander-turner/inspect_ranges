@@ -16,7 +16,7 @@ This article is organized as follows:
 
 ## Hosts {#hosts}
 
-Hosts are the machines the attacker works against: web servers, databases, domain controllers, workstations. Each host entry declares the guest's identity (its name and, optionally, its in-guest hostname and FQDN), its operating system, the image it boots from, its CPU and memory, and the networks it attaches to. What runs on the host (accounts, services, weaknesses, data) is declared separately, under [Guest content](#guest-content). The optional `hostname` and `fqdn` are build-phase content: render keeps the in-guest hostname equal to a hostname-safe form of `name` (underscores become hyphens), so declaring either refuses at planning (`guest-config-not-realized`) until the build arc realizes them.
+Hosts are the machines the attacker works against: web servers, databases, domain controllers, workstations. Each host entry declares the guest's identity (its name and, optionally, its in-guest hostname and FQDN), its operating system, the image it boots from, its CPU and memory, and the networks it attaches to. What runs on the host (accounts, services, weaknesses, data) is declared separately, under [Guest content](#guest-content). The optional `hostname` and `fqdn` are build-phase content: render keeps the in-guest hostname equal to a hostname-safe form of `name` (hostname-invalid characters such as underscores and dots become hyphens), so declaring either refuses at planning (`guest-config-not-realized`) until the build arc realizes them.
 
 This example defines a single host:
 
