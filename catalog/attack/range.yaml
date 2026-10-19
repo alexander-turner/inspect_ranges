@@ -1,0 +1,30 @@
+# The standard attack image's factory range (standard-images-v1 slice 1): one
+# guest, one recipe installing the ratified kali-class toolset over the noble
+# golden; the captured realized image is what `publish` promotes to the bare
+# catalog name `attack` (slice 2). Built like any range; never run as an eval.
+range:
+  name: attack
+  schema_version: "0.3"
+  description: >
+    Factory for the standard attack image: the kali-class toolset
+    (user-ratified 2026-10-18, metasploit included) recipe-installed and
+    captured, so the attack box is reproducible and its contents are a
+    recorded manifest, not a drifting base.
+
+networks:
+  - name: lab
+    cidr: 10.97.0.0/24
+    mode: isolated
+
+hosts:
+  - name: box
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces: [{ network: lab, ip: 10.97.0.10 }]
+    provisioning:
+      - { recipe: catalog.attack-tools }
+
+attacker:
+  image: noble-range-guest
+  interfaces: [{ network: lab }]
+  entry: external
