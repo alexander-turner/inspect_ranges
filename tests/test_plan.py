@@ -23,6 +23,7 @@ from inspect_ranges.types import (
     Os,
     RangeMeta,
     RangeSpec,
+    Router,
     Service,
 )
 
@@ -100,7 +101,7 @@ def test_attacker_defaults_to_the_catalog_attack_image(cache: Path) -> None:
     assert attacker.image.reference == "img"
 
 
-def test_windows_guests_refuse_at_planning() -> None:
+def test_windows_hosts_plan_and_windows_routers_refuse(cache: Path) -> None:
     spec = RangeSpec(
         meta=RangeMeta(name="win", description="windows refusal"),
         networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
@@ -114,11 +115,26 @@ def test_windows_guests_refuse_at_planning() -> None:
         ],
         attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
     )
+    # windows HOSTS plan as of windows-ad-v1 slice 1: the unattend injector
+    # and daemon-only readiness; nothing cloud-init touches them
+    plan = resolve_plan(spec, PlanOptions(image_cache=cache))
+    dc = next(g for g in plan.guests if g.name == "dc")
+    assert (dc.os, dc.injector, dc.readiness) == ("windows", "unattend", "daemon")
+    # windows ROUTERS still refuse
+    routed = spec.model_copy(deep=True)
+    routed.networks.append(Network(name="lab2", cidr="10.1.0.0/24", mode="isolated"))
+    routed.routers = [
+        Router(
+            name="winrt",
+            os=Os(type="windows"),
+            interfaces=[Interface(network="lab"), Interface(network="lab2")],
+        )
+    ]
     with pytest.raises(IssueError) as excinfo:
-        resolve_plan(spec)
-    issue = excinfo.value.issues[0]
-    assert issue.code == "windows-render-not-supported"
-    assert issue.path == ("hosts", 0, "os", "type")
+        resolve_plan(routed, PlanOptions(image_cache=cache))
+    assert any(
+        issue.code == "windows-render-not-supported" for issue in excinfo.value.issues
+    )
 
 
 def test_guest_config_gates_at_planning() -> None:
@@ -483,3 +499,99 @@ def test_colliding_sanitized_hostnames_refuse_at_planning(cache: Path) -> None:
     with pytest.raises(IssueError) as excinfo:
         resolve_plan(collided, options(cache))
     assert any(issue.code == "hostname-collision" for issue in excinfo.value.issues)
+
+
+def test_windows_guest_renders_unattend_seed(cache: Path, tmp_path: Path) -> None:
+    """Windows-ad-v1 slice 1: a windows host's seed is the per-boot answer file (hostname, MAC-keyed static address, gateway route), its domain carries the scsi-cdrom seed stanza (the implicit specialize search reads removable media; SATA is stripped), and boot.json records the unattend injector with daemon readiness."""
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    spec_yaml = """
+range:
+  name: winrange
+  schema_version: "0.3"
+  description: one windows host
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+hosts:
+  - name: dc_one
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    interfaces: [{ network: corp, ip: 10.20.0.10 }]
+attacker:
+  image: ubuntu-noble
+  vmm: qemu                      # a domain XML exists to compare stanzas against
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winrange.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    unattend = (out / "guests" / "dc_one" / "seed" / "unattend.xml").read_text()
+    assert "<ComputerName>dc-one</ComputerName>" in unattend
+    assert (
+        '<IpAddress wcm:action="add" wcm:keyValue="1">10.20.0.10/24</IpAddress>'
+        in unattend
+    )
+    assert "<DhcpEnabled>false</DhcpEnabled>" in unattend
+    assert "RangeAdm" in unattend  # the documented default password answers OOBE
+    assert not (out / "guests" / "dc_one" / "seed" / "user-data").exists()
+    domain = (out / "guests" / "dc_one" / "domain.xml").read_text()
+    assert "virtio-scsi" in domain and "device='cdrom'" in domain
+    linux_domain = (out / "guests" / "attacker" / "domain.xml").read_text()
+    assert "device='cdrom'" not in linux_domain
+    boot = json.loads((out / "boot.json").read_text())
+    by_name = {g["name"]: g for g in boot["guests"]}
+    assert by_name["dc_one"]["injector"] == "unattend"
+    assert by_name["dc_one"]["readiness"] == "daemon"
+    assert by_name["attacker"]["injector"] == "cloud-init"
+
+
+def test_boot_overlay_clamps_to_the_backing_virtual_size(
+    cache: Path, tmp_path: Path
+) -> None:
+    """An overlay created smaller than its backing truncates the guest's disk (Windows refuses 0xc0000001, measured); boot.json clamps overlay_gb up to the backing qcow2's virtual size and leaves larger declarations alone."""
+    import subprocess
+
+    subprocess.run(
+        ["qemu-img", "create", "-f", "qcow2", str(cache / "big-golden.qcow2"), "40G"],
+        check=True,
+        capture_output=True,
+    )
+    from inspect_ranges.schema import load_range
+
+    spec_yaml = """
+range:
+  name: clampcheck
+  schema_version: "0.3"
+  description: overlay clamp
+networks:
+  - name: lab
+    cidr: 10.30.0.0/24
+    mode: isolated
+hosts:
+  - name: big
+    os: { type: linux }
+    image: big-golden
+    interfaces: [{ network: lab, ip: 10.30.0.10 }]
+  - name: roomy
+    os: { type: linux }
+    image: big-golden
+    resources: { cpus: 1, memory_mb: 1024, disk_gb: 80 }
+    interfaces: [{ network: lab, ip: 10.30.0.11 }]
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: lab }]
+  entry: external
+"""
+    spec_path = tmp_path / "clampcheck.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    boot = json.loads((out / "boot.json").read_text())
+    by_name = {g["name"]: g for g in boot["guests"]}
+    assert by_name["big"]["overlay_gb"] == 40  # clamped up from the 10G default
+    assert by_name["roomy"]["overlay_gb"] == 80  # larger declarations stand

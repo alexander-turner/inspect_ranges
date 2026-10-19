@@ -976,15 +976,15 @@ spec = randomized()
 
 ## Guest Configuration {#how-configuration-reaches-a-guest}
 
-The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. The current realization injects over cloud-init (a seed presented as a read-only virtio disk), which covers cloud-style Linux images. Other injectors are designed: configuration baked at build time for images without an agent, unattend plus the Windows guest agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints for ranges that need no boot-time configuration at all.
+The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. Linux guests inject over cloud-init (a seed presented as a read-only virtio disk). Windows HOSTS inject over a per-boot unattend seed (a read-only cdrom whose answer file drives the sysprep'd golden's specialize pass: hostname, MAC-keyed static addressing, resolvers), with readiness announced by the in-guest control daemon; Windows routers and attack boxes are not yet realized and refuse at planning. Other injectors remain designed: configuration baked at build time for images without an agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints.
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` {.yaml .plan-invalid}
+``` yaml
 range:
-  name: windows-gated
-  description: A Windows target, valid to define, gated at planning.
+  name: windows-host
+  description: A Windows target on a locally installed golden (windows-ad-v1).
 networks:
   - name: corp
     cidr: 10.20.0.0/24
@@ -992,7 +992,7 @@ networks:
 hosts:
   - name: dc01
     os: { type: windows, version: server-2022 }
-    image: acme/win-golden
+    image: windows-2022
     interfaces: [{ network: corp }]
 attacker:
   interfaces: [{ network: corp }]
@@ -1001,12 +1001,12 @@ attacker:
 
 ### Python
 
-``` {.python .plan-invalid}
-windows_gated = RangeSpec(
+``` python
+windows_host = RangeSpec(
     meta=RangeMeta(
-        name="windows-gated",
-        description="A Windows target, valid to define, gated at "
-        "planning.",
+        name="windows-host",
+        description="A Windows target on a locally installed golden "
+        "(windows-ad-v1).",
     ),
     networks=[
         Network(name="corp", cidr="10.20.0.0/24", mode="isolated")
@@ -1015,7 +1015,7 @@ windows_gated = RangeSpec(
         Host(
             name="dc01",
             os=Os(type="windows", version="server-2022"),
-            image="acme/win-golden",
+            image="windows-2022",
             interfaces=[Interface(network="corp")],
         )
     ],
