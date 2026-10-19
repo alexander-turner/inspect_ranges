@@ -91,6 +91,7 @@ class Fakes:
         self.recipe_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.uplinks: list[str] = []
         self.captures: list[tuple[str, str, str]] = []
+        self.capture_nameservers: list[str | None] = []
         self.compose: str = ""
         self._guests = project_guests
 
@@ -147,6 +148,7 @@ class Fakes:
         build_nameserver: str | None = None,
     ) -> str:
         self.captures.append((guest, realized_name, golden_file))
+        self.capture_nameservers.append(build_nameserver)
         data = b"realized:" + guest.encode()
         (image_cache / realized_name).write_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
@@ -1631,3 +1633,38 @@ def test_egress_build_spec_uplink_dodges_name_and_cidr_collisions() -> None:
     build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
     uplink = next(n for n in build.networks if n.name == "ir-build-uplink")
     assert str(uplink.cidr) != "10.254.169.0/24"
+
+
+def test_scrub_never_strips_a_declared_resolver(tmp_path: Path, cache: Path) -> None:
+    """The capture scrub strips the build nameserver from Windows adapters; when the build nameserver equals a resolver the RUNTIME spec declares, the strip must not run — the address is legitimate baked state (slice-2 review)."""
+    from inspect_ranges.types import DnsConfig
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache, build_nameserver="192.0.2.53"),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+    )
+    assert fakes.capture_nameservers == ["192.0.2.53", "192.0.2.53"]
+
+    declared = spec.model_copy(deep=True)
+    declared.meta.name = "buildme-declared"
+    declared.networks[0].dns = DnsConfig(nameservers=["192.0.2.53"])
+    declared_fakes = Fakes(["web", "db", "attacker"])
+    build_range(
+        declared,
+        range_dir,
+        options_for(tmp_path, cache, build_nameserver="192.0.2.53"),
+        up_fn=declared_fakes.up_fn,
+        down_fn=declared_fakes.down_fn,
+        recipe_fn=declared_fakes.recipe_fn,
+        ensure_uplink=declared_fakes.ensure_uplink,
+        capture_fn=declared_fakes.capture_fn,
+    )
+    assert declared_fakes.capture_nameservers == [None, None]

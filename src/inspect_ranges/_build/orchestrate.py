@@ -65,6 +65,7 @@ from .capture import (
     wait_shutoff,
 )
 from .errors import BuildError
+from .guesttool import ps_quote
 from .manifest import (
     BUILD_REALIZED_SECTIONS,
     BaseImageRecord,
@@ -641,7 +642,15 @@ def build_range(
             if realized.is_file() and sha256_file(realized) == record.realized_sha256:
                 reusable[host.name] = record
 
-    build_spec = egress_build_spec(spec, options.build_nameserver)
+    # derived once: egress_build_spec appends it to resolvers and the Windows
+    # scrub strips it back out; two independent resolv.conf reads could
+    # disagree mid-build (slice-2 review)
+    build_ns = (
+        options.build_nameserver
+        if options.build_nameserver is not None
+        else default_build_nameserver()
+    )
+    build_spec = egress_build_spec(spec, build_ns)
 
     if (
         prior is not None
@@ -775,11 +784,17 @@ def build_range(
         windows_hosts = frozenset(
             name for name, os_type in guest_os.items() if os_type == "windows"
         )
-        build_ns = (
-            options.build_nameserver
-            if options.build_nameserver is not None
-            else default_build_nameserver()
-        )
+        # the scrub must never strip a resolver the RUNTIME spec declares:
+        # egress_build_spec only appends build_ns where it is not already
+        # declared, so a declared match means the address is legitimate
+        # baked state (slice-2 review)
+        declared_resolvers = {
+            str(address)
+            for network in spec.networks
+            if network.dns is not None and network.dns.nameservers
+            for address in network.dns.nameservers
+        }
+        scrub_ns = None if build_ns in declared_resolvers else build_ns
         log_dir = project_dir(state_dir, project) / "recipes"
         runs: list[RecipeRun] = []
         settle = settle_fn if settle_fn is not None else _settle_network
@@ -900,7 +915,7 @@ def build_range(
                         realized_name=realized_name,
                         hybrid_sockets=hybrid,
                         windows=host.name in windows_hosts,
-                        build_nameserver=build_ns,
+                        build_nameserver=scrub_ns,
                         meta=RealizedImageMeta(
                             range_name=spec.meta.name,
                             guest=host.name,
@@ -1502,7 +1517,8 @@ def _settle_network(
             "-NonInteractive",
             "-Command",
             "$ErrorActionPreference='Stop'; "
-            f"Resolve-DnsName -Name '{probe}' -Server '{windows_resolver}' "
+            f"Resolve-DnsName -Name {ps_quote(probe)} "
+            f"-Server {ps_quote(windows_resolver)} "
             "-Type A -QuickTimeout | Out-Null",
         ]
         command_ms = 15_000

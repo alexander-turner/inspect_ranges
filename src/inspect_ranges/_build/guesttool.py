@@ -83,8 +83,8 @@ def guest_os_from_env(environ: dict[str, str]) -> dict[str, str]:
     return guest_os
 
 
-def _ps_quote(value: str) -> str:
-    """Quote a value as a PowerShell literal string (embedded single quotes double)."""
+def ps_quote(value: str) -> str:
+    """Quote a value as a PowerShell literal string (embedded single quotes double): the one quoting rule every build-side PowerShell interpolation shares (slice-2 review)."""
     return "'" + value.replace("'", "''") + "'"
 
 
@@ -208,10 +208,10 @@ async def _run_push(args: argparse.Namespace) -> int:
         await channel.write_file(guest, staging, data)
         promote_ps = (
             "$ErrorActionPreference='Stop'; "
-            f"$parent = Split-Path -Parent {_ps_quote(str(args.remote))}; "
+            f"$parent = Split-Path -Parent {ps_quote(str(args.remote))}; "
             "if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }; "
-            f"Move-Item -LiteralPath {_ps_quote(staging)} "
-            f"-Destination {_ps_quote(str(args.remote))} -Force"
+            f"Move-Item -LiteralPath {ps_quote(staging)} "
+            f"-Destination {ps_quote(str(args.remote))} -Force"
         )
         cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", promote_ps]
         user = None

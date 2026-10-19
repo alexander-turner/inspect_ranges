@@ -11,14 +11,17 @@ boot_stamp() {
     2>/dev/null | tr -d '\r' || true
 }
 
+READY=0
 for _ in $(seq 1 120); do
   if "$IR_EXEC" -- powershell -NoProfile -NonInteractive -Command \
       "Resolve-DnsName -Type SRV _ldap._tcp.range.local -ErrorAction Stop | Out-Null; if (-not (Test-NetConnection -ComputerName 10.30.0.10 -Port 389 -InformationLevel Quiet)) { exit 1 }" \
       >/dev/null 2>&1; then
+    READY=1
     break
   fi
   sleep 5
 done
+[ "$READY" = "1" ] || { echo "domain-join: the domain never answered; refusing to join blind"; exit 1; }
 
 BEFORE=$(boot_stamp)
 [ -n "$BEFORE" ] || { echo "domain-join: no boot stamp"; exit 1; }

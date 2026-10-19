@@ -36,6 +36,7 @@ from .plan import (
     guest_uid,
     image_sidecar_file_name,
     plan_json,
+    realized_sidecar_file_name,
     resolve_plan,
 )
 from .probe import (
@@ -823,9 +824,7 @@ def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) 
         return DEFAULT_WINDOWS_ADMIN_PASSWORD
     cache = options.image_cache
     sidecar = cache / image_sidecar_file_name(guest.image.file)
-    realized = cache / (
-        guest.image.file.removesuffix(".qcow2") + ".realized.json"
-    )  # the capture sidecar convention
+    realized = cache / realized_sidecar_file_name(guest.image.file)
     try:
         if sidecar.is_file():
             loaded: object = json.loads(sidecar.read_text())

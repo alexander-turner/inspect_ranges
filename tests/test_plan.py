@@ -623,6 +623,43 @@ def test_windows_cloud_hypervisor_refuses_at_planning(cache: Path) -> None:
     assert issue.path == ("hosts", 0, "vmm")
 
 
+def test_windows_content_host_requires_explicit_ips(cache: Path) -> None:
+    """A captured Windows disk bakes its addresses and the build key sees only DECLARED addressing, so a content-carrying Windows host with an auto-allocated interface refuses at planning: an allocator shift elsewhere in the spec would silently re-render against a stale disk (slice-2 review, blocking)."""
+    from inspect_ranges.types import ProvisioningStep
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="winip", description="windows content ip gate"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="dc",
+                os=Os(type="windows"),
+                image="win-golden",
+                interfaces=[Interface(network="lab")],  # no ip: allocator-assigned
+                provisioning=[ProvisioningStep(recipe="win.dc-promote")],
+            )
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    build_options = PlanOptions(
+        image_cache=cache, realized_sections=frozenset({"provisioning"})
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, build_options)
+    issue = next(
+        issue for issue in excinfo.value.issues if issue.code == "windows-ip-required"
+    )
+    assert issue.path == ("hosts", 0, "interfaces", 0)
+    # explicit ip resolves it; a content-free windows host stays free to allocate
+    spec.hosts[0].interfaces = [Interface(network="lab", ip="10.0.0.10")]
+    plan = resolve_plan(spec, build_options)
+    assert plan.guests[0].os == "windows"
+    free = spec.model_copy(deep=True)
+    free.hosts[0].provisioning = []
+    free.hosts[0].interfaces = [Interface(network="lab")]
+    assert resolve_plan(free, options(cache)).guests[0].os == "windows"
+
+
 def test_windows_netbios_truncation_collides_at_planning(cache: Path) -> None:
     """Two Windows hosts whose names differ only past the 15-character NetBIOS limit render the same ComputerName; the collision gate checks the truncated form (slice-1 review finding)."""
     spec = RangeSpec(

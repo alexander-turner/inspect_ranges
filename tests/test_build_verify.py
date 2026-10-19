@@ -214,8 +214,10 @@ WIN_PKGS = (
     "NoVersionEntry\t\n"
 )
 WIN_ATTRIB = (
-    "pid 2244 exe C:\\Windows\\System32\\dns.exe version 10.0.20348.1\n"
-    "pid 7788 exe C:\\Program Files\\Splunk UF\\bin\\splunkd.exe version 9.1.2\n"
+    "2244\tC:\\Windows\\System32\\dns.exe\t10.0.20348.1\n"
+    "7788\tC:\\Program Files\\Splunk UF\\bin\\splunkd.exe\t9.1.2 build 4\n"
+    "9900\tC:\\Apps\\noversion.exe\t\n"
+    "garbage line\n"
 )
 
 
@@ -238,13 +240,16 @@ def test_parse_win_sections() -> None:
     }
 
 
-def test_parse_win_attribution_handles_spaced_paths() -> None:
+def test_parse_win_attribution_handles_spaced_paths_and_versions() -> None:
+    """Tab-separated records survive spaces in both the exe path and the ProductVersion (a free string on third-party binaries), and a versionless record keeps its pid-to-exe mapping (slice-2 review)."""
     pid_packages, versions = parse_win_attribution(WIN_ATTRIB)
     assert pid_packages == {
         2244: "C:\\Windows\\System32\\dns.exe",
         7788: "C:\\Program Files\\Splunk UF\\bin\\splunkd.exe",
+        9900: "C:\\Apps\\noversion.exe",
     }
-    assert versions["C:\\Program Files\\Splunk UF\\bin\\splunkd.exe"] == "9.1.2"
+    assert versions["C:\\Program Files\\Splunk UF\\bin\\splunkd.exe"] == "9.1.2 build 4"
+    assert versions["C:\\Apps\\noversion.exe"] == ""
 
 
 def test_windows_listener_chain_attributes_versions() -> None:

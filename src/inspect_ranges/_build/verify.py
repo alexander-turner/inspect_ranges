@@ -171,19 +171,17 @@ def parse_win_packages(output: str) -> dict[str, str]:
     return packages
 
 
-_WIN_ATTRIBUTION = re.compile(r"pid (\d+) exe (.+) version (\S*)$")
-
-
 def parse_win_attribution(output: str) -> tuple[dict[int, str], dict[str, str]]:
-    """Parse the Windows attribution probe's `pid <pid> exe <path> version <v>` records into (pid to exe path, exe path to ProductVersion): the exe path stands in for the owning package name, so the shared attribution chain reads unchanged."""
+    """Parse the Windows attribution probe's tab-separated `pid TAB exe-path TAB version` records into (pid to exe path, exe path to ProductVersion): the exe path stands in for the owning package name, so the shared attribution chain reads unchanged. Tab-separated because ProductVersion is a free string (third-party binaries carry spaces) and paths cannot contain tabs; a versionless record keeps its pid-to-exe mapping with an empty version."""
     pid_packages: dict[int, str] = {}
     versions: dict[str, str] = {}
     for line in output.splitlines():
-        match = _WIN_ATTRIBUTION.match(line.strip())
-        if match:
-            path = match.group(2).strip()
-            pid_packages[int(match.group(1))] = path
-            versions[path] = match.group(3)
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[0].strip().isdigit() or not parts[1].strip():
+            continue
+        path = parts[1].strip()
+        pid_packages[int(parts[0].strip())] = path
+        versions[path] = parts[2].strip()
     return pid_packages, versions
 
 
@@ -467,7 +465,7 @@ async def _collect_facts(
                 "$proc = Get-Process -Id $p; "
                 "if ($proc -and $proc.Path) { "
                 "$v = (Get-Item $proc.Path).VersionInfo.ProductVersion; "
-                "Write-Output ('pid {0} exe {1} version {2}' -f $p, $proc.Path, $v) } }"
+                'Write-Output ("{0}`t{1}`t{2}" -f $p, $proc.Path, $v) } }'
             )
             attribution_cmd = [
                 "powershell",

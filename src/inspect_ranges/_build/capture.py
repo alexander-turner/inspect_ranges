@@ -18,8 +18,10 @@ from pydantic import BaseModel, ConfigDict
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
+from .._compiler.plan import realized_sidecar_file_name
 from .._runtime.images import sha256_file
 from .errors import BuildError
+from .guesttool import ps_quote
 
 CaptureRunner = Callable[[list[str]], str]
 """Host-command seam for docker/qemu-img/virsh calls; returns stdout, raises on failure."""
@@ -74,18 +76,22 @@ def scrub_guest(
     if windows:
         strip_ns = ""
         if build_nameserver is not None:
-            ns = build_nameserver.replace("'", "''")
+            ns = ps_quote(build_nameserver)
             strip_ns = (
                 f"foreach ($ifc in Get-DnsClientServerAddress -AddressFamily IPv4) {{ "
-                f"$servers = @($ifc.ServerAddresses | Where-Object {{ $_ -ne '{ns}' }}); "
+                f"$servers = @($ifc.ServerAddresses | Where-Object {{ $_ -ne {ns} }}); "
                 f"if ($servers.Count -ne @($ifc.ServerAddresses).Count) {{ "
                 f"if ($servers.Count -eq 0) {{ Set-DnsClientServerAddress -InterfaceIndex $ifc.InterfaceIndex -ResetServerAddresses }} "
                 f"else {{ Set-DnsClientServerAddress -InterfaceIndex $ifc.InterfaceIndex -ServerAddresses $servers }} }} }}; "
             )
+        # a locked temp file surviving the sweep would ride into the capture:
+        # fail loudly, the same rule as the Linux scrub's hard rc
         script = (
             "$ErrorActionPreference='Stop'; "
             + strip_ns
             + "Remove-Item -Force -ErrorAction SilentlyContinue 'C:\\Windows\\Temp\\.ir-*'; "
+            + "if (Test-Path 'C:\\Windows\\Temp\\.ir-*') "
+            + "{ Write-Error 'staged temp files survived the scrub'; exit 1 }; "
             + "exit 0"
         )
         cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
@@ -220,7 +226,7 @@ def capture_guest(
     """
     container = f"{project}-range-1"
     staging = image_cache / f".{realized_name}.capturing"
-    sidecar = image_cache / f"{realized_name.removesuffix('.qcow2')}.realized.json"
+    sidecar = image_cache / realized_sidecar_file_name(realized_name)
     try:
         from .._dist.gc import chains_lock
 

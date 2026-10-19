@@ -14,7 +14,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..types import AnyIPNetwork, Attacker, Issue, IssueError, RangeSpec, Route, Vmm
+from ..types import (
+    AnyIPNetwork,
+    Attacker,
+    Issue,
+    IssueError,
+    RangeSpec,
+    Route,
+    Vmm,
+    has_guest_content,
+)
 from .allocate import (
     Allocation,
     GuestAllocation,
@@ -299,6 +308,22 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 )
             )
     for index, host in enumerate(spec.hosts):
+        if host.os.type == "windows" and has_guest_content(host):
+            # a captured Windows disk bakes its addresses (specialize runs
+            # once), and the build key can only see DECLARED addressing: an
+            # auto-allocated address shifts when the spec changes elsewhere
+            # while the key stays put, silently re-rendering a new plan
+            # against a stale disk (slice-2 review, blocking)
+            for interface_index, interface in enumerate(host.interfaces):
+                if interface.ip is None:
+                    issues.append(
+                        Issue(
+                            code="windows-ip-required",
+                            path=("hosts", index, "interfaces", interface_index),
+                            message=f"host {host.name!r} is a Windows guest with buildable content but interface {interface_index} declares no ip",
+                            hint="declare ip: on every interface of a content-carrying Windows host; its captured disk bakes the addresses, so the build key must see them",
+                        )
+                    )
         if host.os.type == "windows" and host.vmm == "cloud-hypervisor":
             # the unattend seed rides a removable scsi cdrom and Windows'
             # implicit answer-file search only looks at removable media; Cloud
@@ -519,6 +544,11 @@ def image_file_name(reference: str) -> str:
 def image_sidecar_file_name(file: str) -> str:
     """The provenance sidecar name for a cache image file: the full name with `.qcow2` swapped for `.json` (not `Path.stem`: golden names may contain dots). One rule shared by the image cache and the render stages that read recorded metadata."""
     return file.removesuffix(".qcow2") + ".json"
+
+
+def realized_sidecar_file_name(file: str) -> str:
+    """The provenance sidecar name for a captured realized image (`<file>.realized.json`, same full-name rule as `image_sidecar_file_name`). One rule shared by capture's landing and the render stages that chase realized provenance."""
+    return file.removesuffix(".qcow2") + ".realized.json"
 
 
 GUEST_UID_BASE = 1_000_000
