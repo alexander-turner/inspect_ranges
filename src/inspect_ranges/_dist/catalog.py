@@ -31,7 +31,7 @@ from .encode import (
 )
 from .errors import DistError
 from .location import Location
-from .oci import Descriptor, OciIndex, OciManifest
+from .oci import ContentStore, Descriptor, OciIndex, OciManifest
 from .resolve import push_image_artifact
 
 __all__ = [
@@ -56,20 +56,17 @@ CATALOG_ARTIFACT = "application/vnd.inspect-ranges.catalog.v1"
 CATALOG_LAYER = "application/vnd.inspect-ranges.catalog.v1+json"
 
 
-def _read_catalog_list(location: Location, store: "object") -> list[str]:
+def _read_catalog_list(location: Location, store: ContentStore) -> list[str]:
     """The validated name list a location's catalog ref holds (the one reader `catalog_names` and the publisher's read-modify-write share).
 
     Raises:
         DistError: `ref-not-found` when no catalog is published, `catalog-invalid` for a ref holding something else or an unparseable list.
     """
-    from .oci import ContentStore
-
-    typed = cast(ContentStore, store)
-    root = typed.ref(location.latest_ref(CATALOG_REF))
-    index = typed.read_index(root)
+    root = store.ref(location.latest_ref(CATALOG_REF))
+    index = store.read_index(root)
     if not index.manifests:
         return []
-    manifest = typed.manifest(index.manifests[0])
+    manifest = store.manifest(index.manifests[0])
     if manifest.artifact_type != CATALOG_ARTIFACT:
         raise DistError(
             "catalog-invalid",
@@ -77,7 +74,7 @@ def _read_catalog_list(location: Location, store: "object") -> list[str]:
             f"{manifest.artifact_type!r} artifact, not the catalog list",
         )
     try:
-        data = json.loads(typed.read_blob(manifest.layers[0]))
+        data = json.loads(store.read_blob(manifest.layers[0]))
     except ValueError as error:
         raise DistError(
             "catalog-invalid",
@@ -223,9 +220,7 @@ def publish_realized(
             )
         )
     )
-    index = OciIndex(
-        manifests=members, annotations={"org.inspect-ranges.name": catalog_name}
-    )
+    index = OciIndex(manifests=members, annotations={ANN_NAME: catalog_name})
     root = store.put_index(location.latest_ref(catalog_name), index)
     _update_catalog_index(location, catalog_name)
     return root
@@ -307,6 +302,10 @@ def fetch_daemon_bundle(
     from .._channel.bundle import DaemonBundleInfo, bundle_file_name
     from .oci import atomic_write
 
+    if expected_sha256 is not None:
+        # accept the digest exactly as the tool prints it ("sha256:<hex>"),
+        # the same normalization derive's pin flags apply
+        expected_sha256 = expected_sha256.removeprefix("sha256:").lower()
     for location in locations:
         store = location.store_for(DAEMON_REF)
         try:
