@@ -13,6 +13,7 @@ from .ownership import (
     ch_vsock_dir,
     default_state_dir,
     list_projects,
+    read_owner,
     remove_project,
 )
 from .up import Runner, run_command
@@ -88,7 +89,16 @@ def down(
     networks = _ids(run, network_query)
     if networks:
         _remove(run, ["docker", "network", "rm", *networks], network_query)
-    sockets = ch_vsock_dir(project)
+    # tear down the socket dir the owning `up` actually realized (recorded in
+    # the owner record): recomputing it here would pick a different path under a
+    # different TMPDIR or uid and leak the real one. Fall back to recompute only
+    # for records written before the path was recorded.
+    record = read_owner(state, project)
+    sockets = (
+        Path(record.ch_vsock_dir)
+        if record is not None and record.ch_vsock_dir is not None
+        else ch_vsock_dir(project)
+    )
     if sockets.exists():
         try:
             shutil.rmtree(sockets)

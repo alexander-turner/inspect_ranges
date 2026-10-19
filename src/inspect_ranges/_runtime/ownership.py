@@ -35,6 +35,8 @@ class OwnerRecord(BaseModel):
     origin: str | None = None
     sample_id: str | None = None
     cid_base: int | None = None
+    ch_vsock_dir: str | None = None
+    """The Cloud Hypervisor vsock-socket directory this process realized, recorded so teardown removes the right path even from a process with a different `TMPDIR` or uid (which would recompute a different `ch_vsock_dir`); None on records written before this field existed, where teardown recomputes."""
 
 
 def default_state_dir() -> Path:
@@ -126,6 +128,7 @@ def owner_record(
         bundle=str(bundle),
         created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         pid=os.getpid(),
+        ch_vsock_dir=str(ch_vsock_dir(project)),
     )
 
 

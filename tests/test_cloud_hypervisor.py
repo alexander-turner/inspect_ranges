@@ -513,6 +513,37 @@ def test_down_removes_the_ch_vsock_dir(
     assert not directory.exists()
 
 
+def test_down_removes_the_recorded_ch_vsock_dir_under_a_foreign_tmpdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #2: teardown must remove the dir the owning `up` realized, read from the owner record, not one recomputed from the tearing-down process's own `TMPDIR`. A `down` run with a different `TMPDIR` (a reaper, a service) would otherwise `rmtree` a path that does not exist and leak the real sockets."""
+    from inspect_ranges._runtime.down import down
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    state = tmp_path / "state"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    # `up` realizes and records the socket dir under its own TMPDIR
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "up-tmp"))
+    (tmp_path / "up-tmp").mkdir()
+    directory = prepare_ch_vsock_dir("ir-foreign-tmp")
+    (directory / "attacker.sock").touch()
+    write_owner(state, owner_record("ir-foreign-tmp", "foreign", "0" * 64, bundle))
+
+    # a fresh-process teardown sees a different TMPDIR, so a recomputed path
+    # would miss the real dir entirely
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "down-tmp"))
+
+    def no_docker(argv: list[str], **_: Any) -> Any:
+        import subprocess
+
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    down("ir-foreign-tmp", state_dir=state, runner=no_docker, keep_state=False)
+    assert not directory.exists()
+
+
 def test_provider_channel_factory_receives_the_hybrid_map() -> None:
     """Round-2 gap: the provider must thread UpResult's hybrid endpoints into the sample channel, or oracle/sandbox execs dial a CH attacker by dead CID."""
     from inspect_ranges._provider.state import _default_channel_factory
