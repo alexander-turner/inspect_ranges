@@ -35,7 +35,7 @@ def write_pcap(path, frames, linktype):
     with open(path, "wb") as fh:
         fh.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, linktype))
         for index, frame in enumerate(frames):
-            fh.write(struct.pack("<IIII", 1510000000 + index, 0, len(frame), len(frame)))
+            fh.write(struct.pack("<IIII", 1511000000 + index, 0, len(frame), len(frame)))
             fh.write(frame)
 
 ddos = [tcp_syn(f"203.0.113.{i % 254 + 1}", "10.1.20.5", 52000 + i, 80, i) for i in range(800)]
@@ -53,6 +53,7 @@ write_pcap("/home/wireless.pcap", beacons, 105)
 print("captures written")
 MKPCAP
 "$IR_PUSH" /tmp/mkpcap.$$.py /tmp/ir-mkpcap.py --mode 644
+rm -f /tmp/mkpcap.$$.py
 exec_guest 'python3 /tmp/ir-mkpcap.py && chmod 644 /home/traffic.pcap /home/wireless.pcap && rm -f /tmp/ir-mkpcap.py'
 
 echo "step: assert the declared surface"

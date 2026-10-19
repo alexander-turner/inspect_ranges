@@ -38,7 +38,7 @@ def write_pcap(path, frames):
     with open(path, "wb") as fh:
         fh.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
         for index, frame in enumerate(frames):
-            fh.write(struct.pack("<IIII", 1510000000 + index, 0, len(frame), len(frame)))
+            fh.write(struct.pack("<IIII", 1511000000 + index, 0, len(frame), len(frame)))
             fh.write(frame)
 
 ssh = [tcp_syn("69.89.31.226", "10.1.10.5", 40000 + i, 22, i) for i in range(200)]
@@ -48,6 +48,7 @@ write_pcap("/home/trainee/traffic2.pcap", dos)
 print("captures written")
 MKPCAP
 "$IR_PUSH" /tmp/mkpcap.$$.py /tmp/ir-mkpcap.py --mode 644
+rm -f /tmp/mkpcap.$$.py
 exec_guest 'mkdir -p /home/trainee && python3 /tmp/ir-mkpcap.py && chmod 644 /home/trainee/*.pcap && rm -f /tmp/ir-mkpcap.py'
 
 echo "step: ssh-attack log noise (upstream emulate_attack: 200 attempts against daniel)"

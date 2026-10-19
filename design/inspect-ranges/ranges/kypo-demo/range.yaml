@@ -1,6 +1,6 @@
 # range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of the KYPO CRP demo training sandbox (Masaryk University).
-# Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
+# Every value is sourced from ./upstream/ unless marked "default:" (invented), "realized:" (substrate realization, 2026-10-19), or "to-verify".
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
 
 range:

@@ -1,6 +1,6 @@
 # range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
 # Faithful translation of the CyRIS (JAIST) `examples/full.yml` reference range.
-# Every value is sourced from ./upstream/ unless marked "default:" or "to-verify".
+# Every value is sourced from ./upstream/ unless marked "default:" (invented), "realized:" (substrate realization, 2026-10-19), or "to-verify".
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
 
 range:
@@ -38,7 +38,7 @@ routers:
 
 hosts:
   - name: desktop
-    os: { type: linux }          # realized on ubuntu (upstream RPM-based; tool semantics preserved, yum->apt)
+    os: { type: linux, distro: ubuntu-20.04 }  # realized on ubuntu (upstream RPM-based; tool semantics preserved, yum->apt)
     image: ubuntu-focal          # realized: the catalog golden (upstream basevm_desktop.xml, KVM)
     interfaces:
       - { network: office, ip: 10.1.10.5 }   # default: pinned here (upstream IPAM auto-assigns)
@@ -52,11 +52,11 @@ hosts:
       - { name: root, password: abcd1234 }  # modify_account
     data:
       - { path: /root/flag.txt, description: flag, sensitive: true }
-      - { path: /home/trainee/traffic1.pcap, description: "pre-planted ssh-attack capture (source 69.89.31.226, medium noise)" }
-      - { path: /home/trainee/traffic2.pcap, description: pre-planted dos-attack capture (medium noise) }
+      - { path: /home/trainee/traffic1.pcap, description: "pre-planted ssh-attack capture (source 69.89.31.226; upstream medium noise; realized: pure attack frames)" }
+      - { path: /home/trainee/traffic2.pcap, description: "pre-planted dos-attack capture (upstream medium noise; realized: pure attack frames)" }
 
   - name: webserver
-    os: { type: linux }          # realized on ubuntu (upstream RPM-based)
+    os: { type: linux, distro: ubuntu-20.04 }  # realized on ubuntu (upstream RPM-based)
     image: ubuntu-focal          # realized: the catalog golden (upstream basevm_webserver.xml, KVM)
     interfaces:
       - { network: servers, ip: 10.1.20.5 }  # default: pinned here (upstream IPAM auto-assigns)
@@ -69,7 +69,7 @@ hosts:
       - { name: httpd, port: 80 }   # + php; port not stated upstream (default: 80)
     data:
       - { path: /root/flag.txt, description: flag, sensitive: true }
-      - { path: /home/traffic.pcap, description: pre-planted ddos-attack capture (medium noise) }
+      - { path: /home/traffic.pcap, description: "pre-planted ddos-attack capture (upstream medium noise; realized: pure attack frames)" }
       - { path: /home/wireless.pcap, description: pre-planted wireless capture (aircrack-ng exercise) }
 
 attacker:
