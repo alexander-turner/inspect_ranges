@@ -92,6 +92,8 @@ class Fakes:
         self.uplinks: list[str] = []
         self.captures: list[tuple[str, str, str]] = []
         self.capture_nameservers: list[str | None] = []
+        self.capture_quiesced: list[bool] = []
+        self.quiesces: list[str] = []
         self.compose: str = ""
         self._guests = project_guests
 
@@ -133,6 +135,20 @@ class Fakes:
     def ensure_uplink(self, name: str) -> None:
         self.uplinks.append(name)
 
+    def quiesce_fn(
+        self,
+        project: str,
+        guest: str,
+        cids: dict[str, int],
+        *,
+        hybrid_sockets: Any = None,
+        windows: bool = False,
+        build_nameserver: str | None = None,
+    ) -> None:
+        # ordering proof: every quiesce must precede every capture
+        assert self.captures == [], "a capture ran before the quiesce point"
+        self.quiesces.append(guest)
+
     def capture_fn(
         self,
         project: str,
@@ -146,9 +162,11 @@ class Fakes:
         hybrid_sockets: Any = None,
         windows: bool = False,
         build_nameserver: str | None = None,
+        quiesced: bool = False,
     ) -> str:
         self.captures.append((guest, realized_name, golden_file))
         self.capture_nameservers.append(build_nameserver)
+        self.capture_quiesced.append(quiesced)
         data = b"realized:" + guest.encode()
         (image_cache / realized_name).write_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
@@ -1668,3 +1686,113 @@ def test_scrub_never_strips_a_declared_resolver(tmp_path: Path, cache: Path) -> 
         capture_fn=declared_fakes.capture_fn,
     )
     assert declared_fakes.capture_nameservers == [None, None]
+
+
+def windows_build_fixture(tmp_path: Path, cache: Path) -> tuple[RangeSpec, Path]:
+    """A converged-shape fixture: one Windows content host and one Linux content host (any Windows content in a multi-guest set makes the build converged)."""
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    range_dir = tmp_path / "winrange"
+    if not (range_dir / "recipes" / "acme.web").exists():
+        write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
+        write_recipe(range_dir, name="acme.db")
+    spec = RangeSpec(
+        meta=RangeMeta(name="winbuild", description="converged fixture"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="dc",
+                os=Os(type="windows"),
+                image="windows-2022",
+                interfaces=[Interface(network="lab", ip="10.0.0.10")],
+                provisioning=[
+                    ProvisioningStep(recipe="acme.web", vars={"marker": "x"})
+                ],
+            ),
+            Host(
+                name="db",
+                os=Os(type="linux"),
+                image="tiny-golden",
+                interfaces=[Interface(network="lab", ip="10.0.0.11")],
+                provisioning=[ProvisioningStep(recipe="acme.db")],
+            ),
+        ],
+        attacker=Attacker(
+            image="tiny-golden",
+            interfaces=[Interface(network="lab")],
+            entry="external",
+        ),
+    )
+    return spec, range_dir
+
+
+def test_converged_build_quiesces_all_before_any_capture(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Windows-ad-v1 slice 3: a multi-guest build with Windows content quiesces EVERY content host at one point before any disk is copied (cross-guest domain state captures from a single moment), and each capture is told its guest is already quiesced."""
+    spec, range_dir = windows_build_fixture(tmp_path, cache)
+    fakes = Fakes(["dc", "db", "attacker"])
+    build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        quiesce_fn=fakes.quiesce_fn,
+    )
+    assert fakes.quiesces == ["dc", "db"]  # the quiesce_fn fake asserts ordering
+    assert fakes.capture_quiesced == [True, True]
+
+
+def test_converged_build_reuses_all_or_nothing(tmp_path: Path, cache: Path) -> None:
+    """A converged range rebuilds whole: one guest's recipe edit invalidates every guest's reuse (a partial rebuild would compose disks from different convergence points), while an unchanged range stays a cached no-op."""
+    spec, range_dir = windows_build_fixture(tmp_path, cache)
+    first = Fakes(["dc", "db", "attacker"])
+    build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=first.up_fn,
+        down_fn=first.down_fn,
+        recipe_fn=first.recipe_fn,
+        ensure_uplink=first.ensure_uplink,
+        capture_fn=first.capture_fn,
+        quiesce_fn=first.quiesce_fn,
+    )
+    assert len(first.captures) == 2
+    # the unchanged range is a cached no-op (no boot, no captures)
+    cached = Fakes(["dc", "db", "attacker"])
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=cached.up_fn,
+        down_fn=cached.down_fn,
+        recipe_fn=cached.recipe_fn,
+        ensure_uplink=cached.ensure_uplink,
+        capture_fn=cached.capture_fn,
+        quiesce_fn=cached.quiesce_fn,
+    )
+    assert result.cached and cached.captures == []
+    # one guest's edit rebuilds BOTH guests (linux per-guest reuse would keep dc)
+    edited = spec.model_copy(deep=True)
+    edited.hosts[1].provisioning = [
+        ProvisioningStep(recipe="acme.db", vars={}),
+        ProvisioningStep(recipe="acme.web", vars={"marker": "changed"}),
+    ]
+    second = Fakes(["dc", "db", "attacker"])
+    build_range(
+        edited,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=second.up_fn,
+        down_fn=second.down_fn,
+        recipe_fn=second.recipe_fn,
+        ensure_uplink=second.ensure_uplink,
+        capture_fn=second.capture_fn,
+        quiesce_fn=second.quiesce_fn,
+    )
+    assert {guest for guest, _, _ in second.captures} == {"dc", "db"}
+    assert {name for name, _, _ in second.recipe_calls} >= {"acme.web", "acme.db"}

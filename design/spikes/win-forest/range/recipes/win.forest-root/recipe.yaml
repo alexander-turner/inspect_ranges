@@ -1,0 +1,4 @@
+name: win.forest-root
+version: "1"
+entrypoint: run.sh
+mode: online

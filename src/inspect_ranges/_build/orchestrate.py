@@ -194,7 +194,45 @@ class CaptureFn(Protocol):
         hybrid_sockets: "HybridSockets | None" = None,
         windows: bool = False,
         build_nameserver: str | None = None,
+        quiesced: bool = False,
     ) -> str: ...
+
+
+class QuiesceFn(Protocol):
+    """The quiesce seam: scrub, clean shutdown, and shutoff wait for one guest, separable from the disk copy so a converged capture can quiesce EVERY content host at one point before copying any disk (windows-ad-v1 slice 3)."""
+
+    def __call__(
+        self,
+        project: str,
+        guest: str,
+        cids: dict[str, int],
+        *,
+        hybrid_sockets: "HybridSockets | None" = None,
+        windows: bool = False,
+        build_nameserver: str | None = None,
+    ) -> None: ...
+
+
+def _quiesce_guest(
+    project: str,
+    guest: str,
+    cids: dict[str, int],
+    *,
+    hybrid_sockets: "HybridSockets | None" = None,
+    windows: bool = False,
+    build_nameserver: str | None = None,
+) -> None:
+    scrub_guest(
+        cids, guest, hybrid_sockets, windows=windows, build_nameserver=build_nameserver
+    )
+    diagnosis = shutdown_guest(cids, guest, hybrid_sockets, windows=windows)
+    wait_shutoff(
+        default_capture_runner,
+        project,
+        guest,
+        timeout_s=SHUTOFF_TIMEOUT_WINDOWS_S if windows else SHUTOFF_TIMEOUT_S,
+        shutdown_diagnosis=diagnosis,
+    )
 
 
 def _capture_realized(
@@ -209,18 +247,17 @@ def _capture_realized(
     hybrid_sockets: "HybridSockets | None" = None,
     windows: bool = False,
     build_nameserver: str | None = None,
+    quiesced: bool = False,
 ) -> str:
-    scrub_guest(
-        cids, guest, hybrid_sockets, windows=windows, build_nameserver=build_nameserver
-    )
-    diagnosis = shutdown_guest(cids, guest, hybrid_sockets, windows=windows)
-    wait_shutoff(
-        default_capture_runner,
-        project,
-        guest,
-        timeout_s=SHUTOFF_TIMEOUT_WINDOWS_S if windows else SHUTOFF_TIMEOUT_S,
-        shutdown_diagnosis=diagnosis,
-    )
+    if not quiesced:
+        _quiesce_guest(
+            project,
+            guest,
+            cids,
+            hybrid_sockets=hybrid_sockets,
+            windows=windows,
+            build_nameserver=build_nameserver,
+        )
     return capture_guest(
         default_capture_runner,
         project,
@@ -510,6 +547,7 @@ def build_range(
     settle_fn: SettleFn | None = None,
     verify_fn: VerifyFn = verify_range,
     capture_fn: CaptureFn | None = None,
+    quiesce_fn: QuiesceFn | None = None,
     behavioral_fn: "BehavioralFn | None" = None,
 ) -> BuildResult:
     """Build a range: resolve, render the egress build plan, boot, provision, tear down.
@@ -642,6 +680,26 @@ def build_range(
             if realized.is_file() and sha256_file(realized) == record.realized_sha256:
                 reusable[host.name] = record
 
+    # CONVERGED mode (windows-ad-v1 slice 3): Windows domain state is
+    # cross-guest by nature (machine accounts, NTDS, SYSVOL, DNS
+    # registrations), so a multi-guest build carrying Windows content treats
+    # its content set as ONE artifact: reuse is all-or-nothing (a partial
+    # rebuild would compose disks from different convergence points), and
+    # every content host quiesces at one point before any disk is copied. A
+    # guest whose state the domain mutates but that carries no recipes of its
+    # own declares its membership by carrying at least a convergence recipe.
+    converged = len(content_hosts) > 1 and any(
+        host.os.type == "windows" for host in content_hosts
+    )
+    if converged and len(reusable) != len(content_hosts):
+        if reusable:
+            tee_note = f"{len(reusable)} of {len(content_hosts)} guests unchanged, but converged ranges rebuild whole"
+        else:
+            tee_note = None
+        reusable = {}
+    else:
+        tee_note = None
+
     # derived once: egress_build_spec appends it to resolvers and the Windows
     # scrub strips it back out; two independent resolv.conf reads could
     # disagree mid-build (slice-2 review)
@@ -701,6 +759,8 @@ def build_range(
     project = f"{PROJECT_PREFIX}{spec.meta.name}-{spec_sha256(build_spec)[:12]}"
     tee = _BuildTee(StageLog(state_dir, project), on_stage)
     run_steps = [step for step in steps if step.guest not in reusable]
+    if tee_note is not None:
+        tee.log("resolve", "ok", converged=tee_note)
     tee.log(
         "resolve",
         "ok",
@@ -894,8 +954,26 @@ def build_range(
             tee.log("capture", "ok", skipped="--keep (diagnostic build; no manifest)")
         else:
             capture = capture_fn if capture_fn is not None else _capture_realized
+            quiesce = quiesce_fn if quiesce_fn is not None else _quiesce_guest
             guest_records: list[GuestRecord] = []
             try:
+                if converged:
+                    # one quiesce point: every content host is scrubbed and
+                    # shut off before ANY disk is copied, so cross-guest
+                    # domain state (replication, machine accounts) is
+                    # captured from a single moment, never a sliding window
+                    for host in content_hosts:
+                        if host.name in reusable:
+                            continue
+                        quiesce(
+                            project,
+                            host.name,
+                            cids,
+                            hybrid_sockets=hybrid,
+                            windows=host.name in windows_hosts,
+                            build_nameserver=scrub_ns,
+                        )
+                        tee.log("quiesce", "ok", guest=host.name)
                 for host in content_hosts:
                     if host.name in reusable:
                         guest_records.append(reusable[host.name])
@@ -916,6 +994,7 @@ def build_range(
                         hybrid_sockets=hybrid,
                         windows=host.name in windows_hosts,
                         build_nameserver=scrub_ns,
+                        quiesced=converged,
                         meta=RealizedImageMeta(
                             range_name=spec.meta.name,
                             guest=host.name,
