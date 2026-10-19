@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/design/inspect-ranges/ranges/cyris-basic"
+RANGE="$ROOT/examples/cyris-basic"
 
 NOBLE="${NOBLE:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
 FOCAL="${FOCAL:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
