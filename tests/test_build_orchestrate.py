@@ -1692,9 +1692,8 @@ def windows_build_fixture(tmp_path: Path, cache: Path) -> tuple[RangeSpec, Path]
     """A converged-shape fixture: one Windows content host and one Linux content host (any Windows content in a multi-guest set makes the build converged)."""
     (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
     range_dir = tmp_path / "winrange"
-    if not (range_dir / "recipes" / "acme.web").exists():
-        write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
-        write_recipe(range_dir, name="acme.db")
+    write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
+    write_recipe(range_dir, name="acme.db")
     spec = RangeSpec(
         meta=RangeMeta(name="winbuild", description="converged fixture"),
         networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],

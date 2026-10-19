@@ -686,8 +686,9 @@ def build_range(
     # its content set as ONE artifact: reuse is all-or-nothing (a partial
     # rebuild would compose disks from different convergence points), and
     # every content host quiesces at one point before any disk is copied. A
-    # guest whose state the domain mutates but that carries no recipes of its
-    # own declares its membership by carrying at least a convergence recipe.
+    # guest whose state the domain mutates but that declares no content of its
+    # own joins the set by declaring any content (at minimum a convergence
+    # recipe; declared services or vulnerabilities equally count).
     converged = len(content_hosts) > 1 and any(
         host.os.type == "windows" for host in content_hosts
     )
@@ -961,18 +962,29 @@ def build_range(
                     # one quiesce point: every content host is scrubbed and
                     # shut off before ANY disk is copied, so cross-guest
                     # domain state (replication, machine accounts) is
-                    # captured from a single moment, never a sliding window
+                    # captured from a single moment, never a sliding window.
+                    # Quiesce order is spec declaration order: today's scrub
+                    # steps are purely guest-local, but a future domain-aware
+                    # scrub would make this ordering load-bearing (the root
+                    # DC, declared first, shuts off first)
                     for host in content_hosts:
                         if host.name in reusable:
                             continue
-                        quiesce(
-                            project,
-                            host.name,
-                            cids,
-                            hybrid_sockets=hybrid,
-                            windows=host.name in windows_hosts,
-                            build_nameserver=scrub_ns,
-                        )
+                        try:
+                            quiesce(
+                                project,
+                                host.name,
+                                cids,
+                                hybrid_sockets=hybrid,
+                                windows=host.name in windows_hosts,
+                                build_nameserver=scrub_ns,
+                            )
+                        except BuildError as error:
+                            # re-staged: no disk copy has started, and the
+                            # stage log should say which phase actually died
+                            raise BuildError(
+                                "quiesce", _strip_stage(error), guest=host.name
+                            ) from error
                         tee.log("quiesce", "ok", guest=host.name)
                 for host in content_hosts:
                     if host.name in reusable:
@@ -1025,6 +1037,10 @@ def build_range(
                         )
                     )
             except BuildError as error:
+                # the stage log is the --keep-free diagnosis artifact: a
+                # quiesce or capture failure must leave a fail row like every
+                # sibling phase (slice-3 review)
+                tee.log(error.stage, "fail", error=_strip_stage(error))
                 disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
                 raise BuildError(
                     error.stage,
