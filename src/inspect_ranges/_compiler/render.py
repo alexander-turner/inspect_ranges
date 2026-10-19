@@ -411,7 +411,7 @@ def render_bundle(
                 # generation is a NEW instance and cloud-init re-applies runtime
                 # seeds instead of skipping them as already-run
                 f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
-                f"local-hostname: {guest_hostname(guest.name)}\n",
+                f"local-hostname: {guest.hostname}\n",
             )
             write(
                 f"guests/{guest.name}/seed/network-config",
@@ -804,7 +804,7 @@ def _windows_unattend(
             )
             dns.append(_DNS_INTERFACE.format(mac=mac, domain=domain, servers=servers))
     return _WINDOWS_UNATTEND_TEMPLATE.format(
-        hostname=windows_hostname(guest.name),
+        hostname=guest.hostname,
         tcpip_interfaces="".join(tcpip),
         dns_interfaces="".join(dns),
         # the password is the one spec-side value a template cannot constrain:
@@ -874,7 +874,7 @@ def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) 
 def _user_data(
     spec: RangeSpec, plan: ResolvedPlan, guest: PlannedGuest, allocation: Allocation
 ) -> dict[str, Any]:
-    user_data: dict[str, Any] = {"hostname": guest_hostname(guest.name)}
+    user_data: dict[str, Any] = {"hostname": guest.hostname}
     if guest.kind == "router":
         ruleset = "flush ruleset\n" + render_router_nftables(
             spec, guest.name, allocation

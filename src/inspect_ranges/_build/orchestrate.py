@@ -74,6 +74,7 @@ from .manifest import (
     GuestRecord,
     RecipeRecord,
     VerificationRecord,
+    active_directory_hash,
     default_build_cache,
     guest_build_key,
     load_manifest,
@@ -632,6 +633,7 @@ def build_range(
             host,
             [(s.recipe, s.vars) for s in steps_by_host.get(host.name, [])],
             range_name=spec.meta.name,
+            active_directory_hash=active_directory_hash(spec),
         )
     if missing:
         raise IssueError(missing)
@@ -845,6 +847,9 @@ def build_range(
         windows_hosts = frozenset(
             name for name, os_type in guest_os.items() if os_type == "windows"
         )
+        defense_by_host = {
+            host.name: host.defense for host in spec.hosts if host.defense is not None
+        }
         # the scrub must never strip a resolver the RUNTIME spec declares:
         # egress_build_spec only appends build_ns where it is not already
         # declared, so a declared match means the address is legitimate
@@ -889,6 +894,16 @@ def build_range(
                             for name, endpoint in hybrid.items()
                         },
                         guest_os=guest_os,
+                        active_directory=(
+                            spec.active_directory.model_dump_json()
+                            if spec.active_directory is not None
+                            else None
+                        ),
+                        host_defense=(
+                            defense_by_host[step.guest].model_dump_json()
+                            if defense_by_host.get(step.guest) is not None
+                            else None
+                        ),
                     ),
                     log_dir=log_dir,
                     stage_log=tee,

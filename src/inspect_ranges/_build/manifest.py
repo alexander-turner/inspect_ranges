@@ -63,8 +63,11 @@ BUILD_REALIZED_SECTIONS: tuple[str, ...] = (
     "users",
     "misconfigurations",
     "data",
+    "roles",
+    "defense",
+    "active_directory",
 )
-"""The guest sections a build claims as realized (linux-examples-v1): recipes implement them, the build's behavioral checks prove the chain-load-bearing facts, and declared secret `data` is (re)planted per sample by the challenge layer, so baked defaults never score. The runtime path without a manifest keeps every gate."""
+"""The guest sections a build claims as realized: recipes implement them, the build's behavioral checks prove the chain-load-bearing facts, and declared secret `data` is (re)planted per sample by the challenge layer, so baked defaults never score (linux-examples-v1). Windows-ad-v1 slice 4 adds `roles` (the recipe-selection tags the AD recipes install), `defense` (per-host Defender/update toggles, verifiable in one query), and `active_directory` (identity data reaching recipes via `IR_ACTIVE_DIRECTORY`, hashed into every content guest's build key). `scheduled_activity` stays gated: nothing realizes it. The runtime path without a manifest keeps every gate."""
 
 
 class BaseImageRecord(BaseModel):
@@ -187,9 +190,16 @@ def spec_projection(host: Host) -> str:
         "services": [service.model_dump(mode="json") for service in host.services],
         "vulnerabilities": [v.model_dump(mode="json") for v in host.vulnerabilities],
     }
+    # realized-at-build sections join the projection only when declared, so
+    # every existing range's hash stays byte-identical (windows-ad-v1 slice 4)
+    if host.roles:
+        projected["roles"] = list(host.roles)
+    if host.defense is not None:
+        projected["defense"] = host.defense.model_dump(mode="json")
     if host.os.type == "windows":
         projected["windows_identity"] = {
             "name": host.name,
+            "hostname": host.hostname,
             "interfaces": [
                 interface.model_dump(mode="json") for interface in host.interfaces
             ],
@@ -205,19 +215,35 @@ def guest_build_key(
     recipes: list[tuple[ResolvedRecipe, dict[str, VarValue]]],
     *,
     range_name: str,
+    active_directory_hash: str | None = None,
 ) -> str:
-    """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars.
+    """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars, and the range's Active Directory hash when one is declared.
 
-    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes. Identity participates so two ranges (or guests) with byte-identical content never share a key or a realized file name, whose collisions caused last-writer-wins captures and digest-refusal ping-pong (round-1 review); a rename rebuilds, which is correct, names are identity.
+    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes. Identity participates so two ranges (or guests) with byte-identical content never share a key or a realized file name, whose collisions caused last-writer-wins captures and digest-refusal ping-pong (round-1 review); a rename rebuilds, which is correct, names are identity. The AD data is range-scoped and enters EVERY content guest's key (windows-ad-v1 slice 4): a user or ACL edit changes what the domain recipes realize on each member, so no guest may reuse across it.
     """
     parts = [
         f"identity:{range_name}/{host.name}",
         f"golden:{golden_digest}",
         f"spec:{spec_projection(host)}",
     ]
+    if active_directory_hash is not None:
+        parts.append(f"ad:{active_directory_hash}")
     for recipe, step_vars in recipes:
         parts.append(f"recipe:{recipe.digest}+vars:{vars_hash(step_vars)}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+def active_directory_hash(spec: "RangeSpec") -> str | None:
+    """Canonical hash of the range's declared Active Directory identity data, or None when the range declares none; the range-scoped build-key input (see `guest_build_key`)."""
+    if spec.active_directory is None:
+        return None
+    return hashlib.sha256(
+        json.dumps(
+            spec.active_directory.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def realized_file_name(range_name: str, guest: str, build_key: str) -> str:

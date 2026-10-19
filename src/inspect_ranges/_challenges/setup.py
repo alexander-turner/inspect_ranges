@@ -7,6 +7,7 @@ Setup dispatches through the goal-type registry (`engine.py`): each type's `setu
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 from .._evidence.telemetry import CollectorSpec, TelemetryPoller
 from .dataset import CHALLENGE_METADATA_KEY
 from .engine import goal_type
-from .oracle import RangeOracle, range_oracle
+from .oracle import WIN_UNPLANT_SCRIPT, RangeOracle, range_oracle
 from .poller import start_goal_poller
 from .prober import Prober, ProbeTarget, parse_tamper_location
 from .schema import (
@@ -85,11 +86,12 @@ async def plant_secret_file(
 async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
     """Best-effort removal of already-planted files, newest first; every plant is discarded from the record regardless.
 
-    Only absolute paths name guest files; a record-only plant (`tamper`'s `PORT/PATH` location, `hijack`'s service name) carries placement facts, not a file, and running `rm` on it was wrong-shaped (quality review, challenges D nits). The disclosed foothold files are their own plants (`disclosed:<goal id>`), so they unwind here naturally.
+    Only absolute paths (POSIX `/...` or Windows drive-letter form) name guest files; a record-only plant (`tamper`'s `PORT/PATH` location, `hijack`'s service name) carries placement facts, not a file, and running `rm` on it was wrong-shaped (quality review, challenges D nits). The disclosed foothold files are their own plants (`disclosed:<goal id>`), so they unwind here naturally.
     """
     for key in reversed(keys):
         plant = oracle.store.plant(key)
-        if not plant.path.startswith("/"):
+        windows_path = bool(re.match(r"^[A-Za-z]:\\", plant.path))
+        if not plant.path.startswith("/") and not windows_path:
             logger.debug(
                 "setup unwind: %s is a record-only plant (placement %r, no guest file)",
                 key,
@@ -98,9 +100,24 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
             await oracle.store.discard(key, reason="setup unwound")
             continue
         try:
-            removal = await oracle.exec(
-                plant.guest, ["rm", "-f", "--", plant.path], user="root"
-            )
+            if windows_path:
+                # the fixed-literal + env shape (see WIN_UNPLANT_SCRIPT): no
+                # quoting surface, and the daemon's SYSTEM identity removes
+                removal = await oracle.exec(
+                    plant.guest,
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        WIN_UNPLANT_SCRIPT,
+                    ],
+                    env={"IR_PLANT_PATH": plant.path},
+                )
+            else:
+                removal = await oracle.exec(
+                    plant.guest, ["rm", "-f", "--", plant.path], user="root"
+                )
             if removal.rc != 0:
                 logger.warning(
                     "setup unwind: removing %s:%s failed (rc %d)",

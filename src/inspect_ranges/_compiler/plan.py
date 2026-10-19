@@ -120,6 +120,8 @@ class PlannedGuest(BaseModel):
     memory_mb: int
     disk_gb: int
     interfaces: list[InterfaceAllocation]
+    hostname: str
+    """The rendered in-guest hostname: the declared `hostname:` when a host carries one (realized as of windows-ad-v1 slice 4), else derived from the guest name; sanitized, and NetBIOS-truncated for Windows. Plan-resolved so render, the collision gate, and the Windows build key all consume one value."""
     routes: list[Route]
     """Static routes (routers only)."""
     injector: Literal["cloud-init", "unattend"]
@@ -340,18 +342,21 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     from .render import guest_hostname, windows_hostname
 
     hostnames: dict[str, str] = {}
-    named_guests: list[tuple[str, bool]] = [
-        (host.name, host.os.type == "windows") for host in spec.hosts
+    named_guests: list[tuple[str, str, bool]] = [
+        # the declared hostname: wins when a host carries one (realized as of
+        # windows-ad-v1 slice 4); routers and the attacker derive from names
+        (host.name, host.hostname or host.name, host.os.type == "windows")
+        for host in spec.hosts
     ]
-    named_guests += [(router.name, False) for router in spec.routers]
+    named_guests += [(router.name, router.name, False) for router in spec.routers]
     if spec.attacker.host is None:
-        named_guests.append((spec.attacker.name, False))
-    for guest_name, is_windows in named_guests:
+        named_guests.append((spec.attacker.name, spec.attacker.name, False))
+    for guest_name, declared, is_windows in named_guests:
         # the collision gate checks the hostname each guest actually renders:
         # Windows names also truncate to the 15-character NetBIOS limit, so two
         # long names can collide after truncation alone
         sanitized = (
-            windows_hostname(guest_name) if is_windows else guest_hostname(guest_name)
+            windows_hostname(declared) if is_windows else guest_hostname(declared)
         )
         if sanitized in hostnames and hostnames[sanitized] != guest_name:
             issues.append(
@@ -359,7 +364,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     code="hostname-collision",
                     path=("hosts",),
                     message=f"guests {hostnames[sanitized]!r} and {guest_name!r} both render the in-guest hostname {sanitized!r}",
-                    hint="hostname-invalid characters sanitize to hyphens and Windows names truncate to the 15-character NetBIOS limit; rename one guest so the rendered forms differ",
+                    hint="hostname-invalid characters sanitize to hyphens and Windows names truncate to the 15-character NetBIOS limit; rename one guest (or its declared hostname) so the rendered forms differ",
                 )
             )
         else:
@@ -388,25 +393,33 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                         hint=_GUEST_CONTENT_HINT,
                     )
                 )
-        if host.defense is not None:
+        if host.defense is not None and "defense" not in options.realized_sections:
+            # realized by build recipes as of windows-ad-v1 slice 4 (Defender
+            # and update toggles are chain-load-bearing and verifiable); the
+            # runtime path keeps its gate like every build-claimed section
             issues.append(
                 Issue(
                     code="guest-config-not-realized",
                     path=("hosts", index, "defense"),
-                    message=f"host {host.name!r} declares defense toggles, which the build phase has not yet realized",
+                    message=f"host {host.name!r} declares defense toggles, which only the build realizes",
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
-        for field_name in ("hostname", "fqdn"):
-            if getattr(host, field_name) is not None:
-                issues.append(
-                    Issue(
-                        code="guest-config-not-realized",
-                        path=("hosts", index, field_name),
-                        message=f"host {host.name!r} declares {field_name}, which render v1 does not realize (the rendered in-guest hostname is the hostname-safe form of the host's name)",
-                        hint=_GUEST_CONTENT_HINT,
-                    )
+        if (
+            host.fqdn is not None
+            and "active_directory" not in options.realized_sections
+        ):
+            # an fqdn is realized by the AD recipes (promotion/join set the
+            # primary DNS suffix), so it travels with the active_directory
+            # claim rather than render (windows-ad-v1 slice 4)
+            issues.append(
+                Issue(
+                    code="guest-config-not-realized",
+                    path=("hosts", index, "fqdn"),
+                    message=f"host {host.name!r} declares fqdn, which only the build's AD recipes realize",
+                    hint=_GUEST_CONTENT_HINT,
                 )
+            )
     for index, router in enumerate(spec.routers):
         if router.users:
             issues.append(
@@ -426,12 +439,18 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 hint=_GUEST_CONTENT_HINT,
             )
         )
-    if spec.active_directory is not None:
+    if (
+        spec.active_directory is not None
+        and "active_directory" not in options.realized_sections
+    ):
+        # realized by build recipes as of windows-ad-v1 slice 4: the identity
+        # data reaches recipes through the IR_ACTIVE_DIRECTORY contract env,
+        # and its hash enters every content guest's build key
         issues.append(
             Issue(
                 code="guest-config-not-realized",
                 path=("active_directory",),
-                message="the range declares Active Directory identity data, which the build phase has not yet realized",
+                message="the range declares Active Directory identity data, which only the build realizes",
                 hint=_GUEST_CONTENT_HINT,
             )
         )
@@ -486,6 +505,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         windows = (
             guest.kind == "host" and specs_by_name[guest.name].os.type == "windows"
         )
+        declared_hostname = getattr(declared, "hostname", None) or guest.name
         guests.append(
             PlannedGuest(
                 name=guest.name,
@@ -497,6 +517,11 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 memory_mb=resources.memory_mb if resources else 1024,
                 disk_gb=(resources.disk_gb if resources and resources.disk_gb else 10),
                 interfaces=guest.interfaces,
+                hostname=(
+                    windows_hostname(declared_hostname)
+                    if windows
+                    else guest_hostname(declared_hostname)
+                ),
                 routes=list(getattr(declared, "routes", [])),
                 injector="unattend" if windows else "cloud-init",
                 readiness="daemon" if windows else "cloud-init",

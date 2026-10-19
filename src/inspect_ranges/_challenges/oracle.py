@@ -49,6 +49,34 @@ PLANT_SCRIPT = (
 A fixed literal by design (the residue rule bans values and value-derived text from argv): path, octal mode, and owner arrive as positional arguments, and the content arrives on stdin. The ordering and guards each carry an invariant: a pre-existing target, including a symlink dangling or not, refuses untouched (exit 2); the empty file is created exclusively first (`set -C`, exit 3 touching nothing on a lost race), so the failure branch's `rm` can only ever remove a file this script itself created and a plant never truncates real guest content; `umask 077` means the file is never wider than 0600 before the explicit `chmod`; and `chown` runs BEFORE `chmod` because chown(2) clears setuid/setgid bits, which would silently strip them from any mode that carries them.
 """
 
+WIN_PLANT_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "$plantPath = $env:IR_PLANT_PATH; $plantPrincipal = $env:IR_PLANT_PRINCIPAL; "
+    "if (-not $plantPath -or -not $plantPrincipal) { exit 5 }; "
+    "if (Test-Path -LiteralPath $plantPath) "
+    "{ [Console]::Error.WriteLine('plant target exists'); exit 2 }; "
+    "$plantDir = Split-Path -Parent $plantPath; "
+    "if ($plantDir -and -not (Test-Path -LiteralPath $plantDir)) "
+    "{ New-Item -ItemType Directory -Force -Path $plantDir | Out-Null }; "
+    "try { $plantFs = [System.IO.File]::Open($plantPath, [System.IO.FileMode]::CreateNew) } "
+    "catch { exit 3 }; "
+    "try { [Console]::OpenStandardInput().CopyTo($plantFs) } finally { $plantFs.Dispose() }; "
+    "if ((Get-Item -LiteralPath $plantPath).Length -eq 0) "
+    "{ Remove-Item -Force -LiteralPath $plantPath; exit 4 }; "
+    "icacls $plantPath /inheritance:r /grant 'SYSTEM:F' (\"{0}:R\" -f $plantPrincipal) | Out-Null; "
+    "if ($LASTEXITCODE -ne 0) { Remove-Item -Force -LiteralPath $plantPath; exit 1 }"
+)
+"""The Windows owner-flow write, run as the daemon's SYSTEM identity with the value on stdin (windows-ad-v1 slice 4).
+
+A fixed literal like `PLANT_SCRIPT`; the path and principal travel in the exec request's `env` (never interpolated into command text — PowerShell has no positional-argv `-Command` form, and `env` carries arbitrary bytes without a quoting surface). The invariants mirror the POSIX script where NTFS allows: a pre-existing target refuses untouched (exit 2); `FileMode.CreateNew` creates exclusively (exit 3 touching nothing on a lost race); an EMPTY landing removes itself and fails (exit 4) so a transport that silently dropped stdin can never pass as a plant (plant values are never empty); the ACL then strips inheritance and grants exactly SYSTEM (full) and the principal (read). The honest weakening versus 0600: NTFS lets local Administrators and SYSTEM take ownership regardless, so "readable only by the principal" is a domain-boundary claim, not an absolute one — exactly the claim AD control/privilege goals make. Exit 5 is the env-contract guard (an executor that dropped the env would otherwise probe `Test-Path $null`).
+"""
+
+WIN_UNPLANT_SCRIPT = (
+    "if ($env:IR_PLANT_PATH -and (Test-Path -LiteralPath $env:IR_PLANT_PATH)) "
+    "{ Remove-Item -Force -LiteralPath $env:IR_PLANT_PATH }"
+)
+"""The Windows unwind: removal by `env`-carried path, the same no-quoting-surface rule as the plant."""
+
 
 class RangeOracle:
     """Privileged access to one sample's range for setup and scoring. Not a `SandboxEnvironment`.
@@ -119,6 +147,13 @@ class RangeOracle:
 
     # -- guest verbs (raw channel) ---------------------------------------------
 
+    def is_windows(self, guest: str) -> bool:
+        """Whether `guest` runs Windows, from the sample's resolved plan; a plan-less handle (unit fixtures) treats every guest as linux."""
+        plan = self._handle.plan
+        if plan is None:
+            return False
+        return any(g.name == guest and g.os == "windows" for g in plan.guests)
+
     async def exec(
         self,
         guest: str,
@@ -126,17 +161,20 @@ class RangeOracle:
         *,
         user: str | None = None,
         timeout_s: float | None = None,
+        env: dict[str, str] | None = None,
     ) -> ExecOutcome:
         """Run `cmd` (argv, never an implicit shell) in `guest` over the raw channel.
 
-        `cmd` must never carry plant material: values travel as `write_file` bulk or `read_file` replies only.
+        `cmd` must never carry plant material: values travel as `write_file` bulk or `read_file` replies only. `env` is the Windows path-carrying contract (fixed script literals read `IR_PLANT_*` from it); it must never carry plant material either.
         """
         budget = (
             Budget(command_ms=max(1, round(timeout_s * 1000)))
             if timeout_s is not None
             else Budget()
         )
-        request = ExecRequest(id=request_id(), cmd=cmd, user=user, budget=budget)
+        request = ExecRequest(
+            id=request_id(), cmd=cmd, user=user, env=env or {}, budget=budget
+        )
         return await self._channel.exec(guest, request)
 
     async def read_file(
@@ -181,7 +219,7 @@ class RangeOracle:
     ) -> None:
         """Write a guest file with `mode` applied from the first byte; `owner` sets the principal.
 
-        Without `owner`, this is the daemon's file plane (mode pinned atomically with the write, daemon identity, so the path must be daemon-writable). With `owner`, the write rides the exec plane as root: the daemon's file identity cannot create files in privileged locations (`/root`, another principal's 0700 home), so the value travels as exec stdin (request bulk, the same transport privacy as a file write and never argv or env) into `umask 077 && cat`, then `chmod`/`chown` by positional argument. Any failure removes the file in the same script: a plant is never left behind under the wrong mode or principal.
+        Without `owner`, this is the daemon's file plane (mode pinned atomically with the write, daemon identity, so the path must be daemon-writable; the Windows daemon ignores `mode` by design — NTFS has ACLs, not permission bits). With `owner`, the write rides the exec plane: on Linux as root into `umask 077 && cat` then `chmod`/`chown` by positional argument; on a Windows guest (dispatched from the sample's plan) as the daemon's SYSTEM identity into `WIN_PLANT_SCRIPT`, whose ACL grant (inheritance stripped, SYSTEM full + the principal read) is the mode analogue. Either way the value travels as exec stdin (request bulk, the same transport privacy as a file write and never argv or env). Any failure removes the file in the same script: a plant is never left behind under the wrong mode or principal.
 
         On every failure path this frame scrubs `data` before raising, so a locals-rendered traceback (`INSPECT_TRACEBACK_LOCALS=1`) cannot carry plant bytes from here; lower channel frames are outside this guarantee, which is why that flag is forbidden on scoring runs.
 
@@ -195,21 +233,40 @@ class RangeOracle:
                 del data
                 raise
             return
-        request = ExecRequest(
-            id=request_id(),
-            cmd=[
-                "sh",
-                "-c",
-                PLANT_SCRIPT,
-                "plant",
-                path,
-                format(mode, "o"),
-                owner,
-            ],
-            user="root",
-            data_size=len(data),
-            budget=Budget(),
-        )
+        if self.is_windows(guest):
+            # the Windows daemon's identity is SYSTEM (user stays None: "root"
+            # is not a Windows principal and the daemon refuses it); the path
+            # and principal ride env into the fixed literal, and `mode` has no
+            # NTFS referent — the script's ACL grant is the mode analogue
+            request = ExecRequest(
+                id=request_id(),
+                cmd=[
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WIN_PLANT_SCRIPT,
+                ],
+                env={"IR_PLANT_PATH": path, "IR_PLANT_PRINCIPAL": owner},
+                data_size=len(data),
+                budget=Budget(),
+            )
+        else:
+            request = ExecRequest(
+                id=request_id(),
+                cmd=[
+                    "sh",
+                    "-c",
+                    PLANT_SCRIPT,
+                    "plant",
+                    path,
+                    format(mode, "o"),
+                    owner,
+                ],
+                user="root",
+                data_size=len(data),
+                budget=Budget(),
+            )
         try:
             outcome = await self._channel.exec(guest, request, stdin=data)
         except BaseException:

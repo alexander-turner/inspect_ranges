@@ -15,12 +15,15 @@ from typing import Any, cast
 import pytest
 from inspect_ranges._challenges.oracle import (
     PLANT_SCRIPT,
+    WIN_PLANT_SCRIPT,
+    WIN_UNPLANT_SCRIPT,
     OracleSetupError,
     RangeOracle,
 )
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import Challenge
 from inspect_ranges._challenges.setup import (
+    _unwind,  # pyright: ignore[reportPrivateUsage]
     plant_and_start,
     plant_secret_file,
     run_setup,
@@ -81,11 +84,39 @@ class RecordingEndpoint(LocalEndpoint):
             reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
             self._store(request.id, reply)
             return reply
+        if request.cmd and request.cmd[-1] == WIN_PLANT_SCRIPT:
+            # contract-level emulation of the Windows plant (no powershell on
+            # the CI host): path/principal arrive in env, value on stdin
+            win_path = request.env["IR_PLANT_PATH"]
+            target = self.translate(_strip_drive(win_path))
+            if target.exists():
+                reply = _result_reply(
+                    request, rc=2, stdout=b"", stderr=b"plant target exists\n"
+                )
+                self._store(request.id, reply)
+                return reply
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(stdin)
+            self.file_owners[win_path] = request.env["IR_PLANT_PRINCIPAL"]
+            reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
+            self._store(request.id, reply)
+            return reply
+        if request.cmd and request.cmd[-1] == WIN_UNPLANT_SCRIPT:
+            target = self.translate(_strip_drive(request.env["IR_PLANT_PATH"]))
+            target.unlink(missing_ok=True)
+            reply = _result_reply(request, rc=0, stdout=b"", stderr=b"")
+            self._store(request.id, reply)
+            return reply
         if request.user == "root" and request.cmd and request.cmd[0] in ("rm", "cat"):
             return await super()._run_command(
                 request.model_copy(update={"user": None}), stdin
             )
         return await super()._run_command(request, stdin)
+
+
+def _strip_drive(win_path: str) -> str:
+    """A Windows plant path as the endpoint's private-tmp translation input (`translate` maps only the agent home and `/tmp`; other absolute paths touch the real host)."""
+    return "/tmp/" + win_path.partition(":\\")[2].replace("\\", "/")
 
 
 class FailingPlantEndpoint(RecordingEndpoint):
@@ -120,6 +151,7 @@ def make_oracle(
     endpoint: RecordingEndpoint | None = None,
     session: FakePlantSession | None = None,
     capture: bool = False,
+    windows: bool = False,
 ) -> tuple[RangeOracle, RecordingEndpoint, SampleHandle]:
     """An oracle over a recording local endpoint named `box`."""
     endpoint = endpoint or RecordingEndpoint("box", root)
@@ -128,7 +160,8 @@ def make_oracle(
     plan = cast(
         ResolvedPlan,
         SimpleNamespace(
-            requirements=SimpleNamespace(evidence_capture=capture, probe_segments=())
+            requirements=SimpleNamespace(evidence_capture=capture, probe_segments=()),
+            guests=[SimpleNamespace(name="box", os="windows" if windows else "linux")],
         ),
     )
     handle = SampleHandle(
@@ -156,7 +189,10 @@ def assert_no_residue(endpoint: RecordingEndpoint, value: bytes) -> None:
         assert value not in serialized, f"plant value in request fields: {message.kind}"
         sanctioned = isinstance(message, WriteFileRequest) or (
             isinstance(message, ExecRequest)
-            and message.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]
+            and (
+                message.cmd[:3] == ["sh", "-c", PLANT_SCRIPT]
+                or message.cmd[-1:] == [WIN_PLANT_SCRIPT]
+            )
         )
         if bulk is not None and not sanctioned:
             assert value not in bulk, f"plant value in {message.kind} bulk"
@@ -640,3 +676,53 @@ class TestTracebackLocalsScrub:
                 assert VALUE_MARKER.decode() not in repr(local), (
                     f"plant bytes in frame {frame.f_code.co_name} local {name!r}"
                 )
+
+
+class TestWindowsPlantShape:
+    """Windows-ad-v1 slice 4: a Windows target dispatches the fixed PowerShell plant literal, with the path and principal in env (no quoting surface), the value on stdin, and the daemon's SYSTEM identity (user None — "root" is not a Windows principal)."""
+
+    def test_windows_plant_dispatches_env_carried_literal(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path, windows=True)
+            value = VALUE_MARKER + b"-win"
+            path = "C:\\ProgramData\\proof\\token"
+            await oracle.write_file("box", path, value, owner="NORTH\\Administrator")
+            [plant] = recorded_execs(endpoint)
+            assert plant.cmd[0] == "powershell" and plant.cmd[-1] == WIN_PLANT_SCRIPT
+            assert plant.env == {
+                "IR_PLANT_PATH": path,
+                "IR_PLANT_PRINCIPAL": "NORTH\\Administrator",
+            }
+            assert plant.user is None
+            assert_no_residue(endpoint, value)
+            assert (
+                tmp_path / "tmp" / "ProgramData" / "proof" / "token"
+            ).read_bytes() == value
+            assert endpoint.file_owners[path] == "NORTH\\Administrator"
+
+        asyncio.run(scenario())
+
+    def test_windows_plant_unwinds_through_the_fixed_literal(
+        self, tmp_path: Path
+    ) -> None:
+        async def scenario() -> None:
+            oracle, endpoint, _ = make_oracle(tmp_path, windows=True)
+            path = "C:\\ProgramData\\proof\\token"
+            key = await plant_secret_file(
+                oracle,
+                key="control:srv02-admin",
+                goal_id="srv02-admin",
+                guest="box",
+                path=path,
+                owner="NORTH\\Administrator",
+            )
+            target = tmp_path / "tmp" / "ProgramData" / "proof" / "token"
+            assert target.exists()
+            await _unwind(oracle, [key])
+            assert not target.exists()
+            unplant = recorded_execs(endpoint)[-1]
+            assert unplant.cmd[-1] == WIN_UNPLANT_SCRIPT
+            assert unplant.env == {"IR_PLANT_PATH": path}
+            assert unplant.user is None
+
+        asyncio.run(scenario())

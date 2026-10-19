@@ -167,16 +167,39 @@ def test_realized_sections_exempt_exactly_their_gate() -> None:
     assert excinfo.value.issues[0].path == ("hosts", 0, "provisioning")
 
 
-def test_hostname_and_fqdn_gate_at_planning() -> None:
+def test_hostname_renders_and_fqdn_gates_at_planning() -> None:
+    """A declared `hostname:` renders (realized at render as of windows-ad-v1 slice 4: the plan resolves it, sanitized, for every injector); `fqdn` stays gated on the runtime path — only the build's AD recipes realize it (promotion/join set the primary DNS suffix)."""
     spec = two_segment_spec()
     spec.hosts[0].hostname = "dc01-nyc"
+    plan = resolve_plan(spec)
+    assert plan.guests[0].hostname == "dc01-nyc"
+    underived = next(g for g in plan.guests if g.name == spec.hosts[1].name)
+    assert underived.hostname == spec.hosts[1].name  # no declaration: derived
     spec.hosts[0].fqdn = "dc01-nyc.corp.local"
     with pytest.raises(IssueError) as excinfo:
         resolve_plan(spec)
-    paths = {issue.path for issue in excinfo.value.issues}
-    codes = {issue.code for issue in excinfo.value.issues}
-    assert codes == {"guest-config-not-realized"}
-    assert ("hosts", 0, "hostname") in paths and ("hosts", 0, "fqdn") in paths
+    issue = excinfo.value.issues[0]
+    assert issue.code == "guest-config-not-realized"
+    assert issue.path == ("hosts", 0, "fqdn")
+    # the build path (active_directory realized) lifts the fqdn gate
+    assert (
+        resolve_plan(
+            spec, PlanOptions(realized_sections=frozenset({"active_directory"}))
+        )
+        .guests[0]
+        .hostname
+        == "dc01-nyc"
+    )
+
+
+def test_declared_hostnames_feed_the_collision_gate() -> None:
+    """Two hosts whose DECLARED hostnames render identically refuse at planning, exactly like colliding names."""
+    spec = two_segment_spec()
+    spec.hosts[0].hostname = "same-host"
+    spec.hosts[1].hostname = "same-host"
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    assert any(issue.code == "hostname-collision" for issue in excinfo.value.issues)
 
 
 def test_variables_resolve_to_defaults_at_planning(cache: Path) -> None:

@@ -413,6 +413,12 @@ class RecipeTarget:
     guest_os: Mapping[str, str] = field(default_factory=dict[str, str])
     """Per-guest OS (`"linux"`/`"windows"`); absent guests are linux. Serialized to the entrypoint as `IR_GUEST_OS` so `guesttool` picks the Windows exec/push shapes (windows-ad-v1 slice 2)."""
 
+    active_directory: str | None = None
+    """The range's declared Active Directory identity data as canonical JSON, serialized to the entrypoint as `IR_ACTIVE_DIRECTORY` (windows-ad-v1 slice 4): the spec is the single source the domain recipes realize from, never a vendored copy that could silently diverge."""
+
+    host_defense: str | None = None
+    """The TARGET host's declared defense toggles as canonical JSON, serialized as `IR_HOST_DEFENSE` (windows-ad-v1 slice 4)."""
+
 
 class RecipeError(RuntimeError):
     """Stage-named recipe execution failure: `[stage] recipe NAME on guest GUEST: message`."""
@@ -587,6 +593,16 @@ def _contract_env(
             sort_keys=True,
         ),
         "IR_GUEST_OS": json.dumps(dict(target.guest_os), sort_keys=True),
+        **(
+            {"IR_ACTIVE_DIRECTORY": target.active_directory}
+            if target.active_directory is not None
+            else {}
+        ),
+        **(
+            {"IR_HOST_DEFENSE": target.host_defense}
+            if target.host_defense is not None
+            else {}
+        ),
         "IR_RECIPE": recipe_name,
         "IR_EXEC_BUDGET_MS": str(exec_budget_ms),
     }
