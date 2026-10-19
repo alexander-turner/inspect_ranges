@@ -34,12 +34,24 @@ from .._channel.protocol import (
 )
 
 if TYPE_CHECKING:
-    from .._compiler.plan import ResolvedPlan
+    from .._compiler.plan import PlannedGuest, ResolvedPlan
 
 logger = logging.getLogger("inspect_ranges.glovebox")
 
 _DAEMON_NAME = "glovebox-crictl-connector/0.1"
 _RC_MARKER = "__IR_GB_RC__"
+
+
+async def _capture(argv: Sequence[str], stdin: bytes = b"") -> tuple[int, bytes, bytes]:
+    """Run `argv` to completion, returning `(returncode, stdout, stderr)`."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await proc.communicate(stdin)
+    return proc.returncode or 0, out, err
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +113,8 @@ class CrictlCellExecutor(CellExecutor):
         if self.run_command is not None:
             return await self.run_command(argv, stdin)
         full = [self.crictl, "exec", "-i", self.container_id, *argv]
-        proc = await asyncio.create_subprocess_exec(
-            *full,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await proc.communicate(stdin)
-        return CellExecResult(rc=proc.returncode or 0, stdout=out, stderr=err)
+        rc, out, err = await _capture(full, stdin)
+        return CellExecResult(rc=rc, stdout=out, stderr=err)
 
     async def run(
         self,
@@ -361,18 +367,11 @@ ExecutorFactory = Callable[[str], CellExecutor]
 async def _default_root_runner(commands: Sequence[Sequence[str]]) -> None:
     """Run each argv in order; a non-zero `ip link add ... type bridge` whose device already exists is tolerated (the node bridge is shared across leases/the pre-booted cell), every other failure raises."""
     for argv in commands:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode:
+        rc, _, err = await _capture(argv)
+        if rc:
             detail = err.decode("utf-8", "replace").strip()
             tolerable = (
-                "type" in argv
-                and "bridge" in argv
-                and ("exists" in detail.lower() or "file exists" in detail.lower())
+                "type" in argv and "bridge" in argv and "exists" in detail.lower()
             )
             if not tolerable:
                 raise OSError(f"root command {' '.join(argv)} failed: {detail}")
@@ -380,35 +379,27 @@ async def _default_root_runner(commands: Sequence[Sequence[str]]) -> None:
 
 async def _default_netns_pid(project: str) -> int:
     """The `range` service container's init pid for `project`, via `docker inspect` on the compose-labeled container."""
-    find = await asyncio.create_subprocess_exec(
-        "docker",
-        "ps",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-        "--filter",
-        "label=com.docker.compose.service=range",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    rc, out, err = await _capture(
+        [
+            "docker",
+            "ps",
+            "-q",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            "label=com.docker.compose.service=range",
+        ]
     )
-    out, err = await find.communicate()
     container = out.decode().strip().splitlines()
-    if find.returncode or not container:
+    if rc or not container:
         raise OSError(
             f"no range container for project {project}: "
             f"{err.decode('utf-8', 'replace').strip()}"
         )
-    inspect = await asyncio.create_subprocess_exec(
-        "docker",
-        "inspect",
-        "-f",
-        "{{.State.Pid}}",
-        container[0],
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    rc, pid_out, pid_err = await _capture(
+        ["docker", "inspect", "-f", "{{.State.Pid}}", container[0]]
     )
-    pid_out, pid_err = await inspect.communicate()
-    if inspect.returncode:
+    if rc:
         raise OSError(
             f"docker inspect of {container[0]} failed: "
             f"{pid_err.decode('utf-8', 'replace').strip()}"
@@ -447,34 +438,32 @@ class GloveboxHost:
         """A `GuestConnector` serving this host's cells, deferring every other cid to `fallback` (the real vsock dial)."""
         return glovebox_connector(self.cells, fallback)
 
+    def _is_configured_cell(self, guest: "PlannedGuest") -> bool:
+        """True for a `provider: glovebox` guest this host has a live cell container for."""
+        return guest.provider == "glovebox" and guest.name in self.containers
+
+    def _build_executor(self, container_id: str) -> CellExecutor:
+        """The injected executor, or the default `crictl exec` one, for a cell container."""
+        if self.executor_factory is not None:
+            return self.executor_factory(container_id)
+        return CrictlCellExecutor(container_id=container_id, crictl=self.crictl)
+
     async def realize(self, plan: "ResolvedPlan", project: str) -> None:
         """Bind each configured glovebox guest to its cell at the plan-reserved cid, then stitch its segment bridge out to the node netns so the cell reaches the range's guests.
 
         A glovebox guest with no configured container is bound neither to a cell nor a stitch (routing it would fail loudly at dial, which is the honest outcome for a missing cell). Stitch failures propagate: a half-stitched segment is worse than a refused realize.
         """
-        cids: list[int] = []
-        for guest in plan.guests:
-            if guest.provider == "glovebox" and guest.name in self.containers:
-                container_id = self.containers[guest.name]
-                executor = (
-                    self.executor_factory(container_id)
-                    if self.executor_factory is not None
-                    else CrictlCellExecutor(
-                        container_id=container_id, crictl=self.crictl
-                    )
-                )
-                self.cells[guest.cid] = CellConnection(executor=executor)
-                cids.append(guest.cid)
-        self._cell_cids[project] = cids
+        cells = [guest for guest in plan.guests if self._is_configured_cell(guest)]
+        for guest in cells:
+            executor = self._build_executor(self.containers[guest.name])
+            self.cells[guest.cid] = CellConnection(executor=executor)
+        self._cell_cids[project] = [guest.cid for guest in cells]
+
+        cell_ips = {str(nic.ip) for guest in cells for nic in guest.interfaces}
         segments = [
             segment
             for segment in glovebox_segments(plan)
-            if any(
-                guest.provider == "glovebox"
-                and guest.name in self.containers
-                and segment.attacker_ip in {str(nic.ip) for nic in guest.interfaces}
-                for guest in plan.guests
-            )
+            if segment.attacker_ip in cell_ips
         ]
         if not segments:
             return
