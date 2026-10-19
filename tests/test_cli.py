@@ -102,7 +102,7 @@ def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
     spec = Path(__file__).parent.parent / "design/spikes/acl-v2/spec.yaml"
-    (cache / "noble-range-guest.qcow2").write_bytes(b"fake")
+    (cache / "ubuntu-noble.qcow2").write_bytes(b"fake")
     (cache / "attack.qcow2").write_bytes(b"fake attack")
     out = tmp_path / "bundle"
     result = CliRunner().invoke(

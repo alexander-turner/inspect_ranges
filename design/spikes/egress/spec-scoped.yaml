@@ -21,7 +21,7 @@ networks:
 hosts:
   - name: workstation
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: corp }]   # allocated: 10.90.10.10 (gateway .1, attacker .2)
 
 attacker:

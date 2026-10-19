@@ -17,9 +17,9 @@
 
 ## 2. When the attacker's image default flips to `attack` (slice 2, 2026-10-19)
 
-**The question:** the schema promises "the backend's standard attack image" for an omitted `Attacker.image`; today that resolves to the router default (`noble-range-guest`). Flipping the default to `attack` before the catalog publishes bricks every offline dev box and every existing battery (the name resolves nowhere); flipping with a silent fallback to the router default violates the deterministic-resolution posture.
+**The question:** the schema promises "the backend's standard attack image" for an omitted `Attacker.image`; today that resolves to the router default (`ubuntu-noble`). Flipping the default to `attack` before the catalog publishes bricks every offline dev box and every existing battery (the name resolves nowhere); flipping with a silent fallback to the router default violates the deterministic-resolution posture.
 
-**Recommendation:** flip HARD on publish day (slice 4), when `docker.io/meridianlabsai/attack` exists and the Q1 registry tier resolves it everywhere connected; offline hosts pull it once or keep declaring `image: noble-range-guest` explicitly. Until then the default stays as-is, and the battery-proven consumption path (`image: attack` after an `images pull attack`, or the realized file by name) is the opt-in.
+**Recommendation:** flip HARD on publish day (slice 4), when `docker.io/meridianlabsai/attack` exists and the Q1 registry tier resolves it everywhere connected; offline hosts pull it once or keep declaring `image: ubuntu-noble` explicitly. Until then the default stays as-is, and the battery-proven consumption path (`image: attack` after an `images pull attack`, or the realized file by name) is the opt-in.
 
 **Interim behavior in force:** the default is unchanged; `publish`/`images pull` make `attack` consumable by name on any host that fetched it.
 

@@ -596,13 +596,13 @@ def test_pull_image_refuses_a_repointed_reference(tmp_path: Path) -> None:
     publish_golden("focal-guest", location, image_cache=fixture.image_cache)
     # the registry (or an operator mistake) re-points another name's tag at
     # focal-guest's root
-    store = location.store_for("noble-range-guest", create=True)
+    store = location.store_for("ubuntu-noble", create=True)
     root = store.ref(location.latest_ref("focal-guest"))
-    store.put_index(location.latest_ref("noble-range-guest"), store.read_index(root))
+    store.put_index(location.latest_ref("ubuntu-noble"), store.read_index(root))
     consumer = tmp_path / "consumer"
     consumer.mkdir()
     with pytest.raises(DistError) as excinfo:
-        pull_image("noble-range-guest", [location], image_cache=consumer)
+        pull_image("ubuntu-noble", [location], image_cache=consumer)
     assert excinfo.value.code == "published-mismatch"
     assert list(consumer.iterdir()) == [], "nothing may land from a refused pull"
 

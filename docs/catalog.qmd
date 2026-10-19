@@ -1,12 +1,12 @@
 ---
 title: "Image Catalog"
 description: "The standard published images: the attack image, the blessed goldens, the daemon bundle, and the hardened range container image, all pinned by digest under the project org."
-llms-description: "The standard image catalog under docker.io/meridianlabsai: the attack image (kali-class toolset including metasploit, recipe-built over the noble golden, /etc/attack-image.manifest recording, zero-non-loopback-listener containment invariant) consumed as the attacker default, the noble-range-guest and ubuntu-focal goldens, the daemon bundle via daemon-bundle --pull, the hardened range container image via the INSPECT_RANGES_RANGE_IMAGE digest pin, implicit pull at eval init, sticky-name and refresh semantics, the fleet pin file, and the republish discipline (digest identities, drift between publish days)."
+llms-description: "The standard image catalog at docker.io/meridianlabsai/inspect-ranges (hub repos spelled inspect-ranges-<name>): the attack image (kali-class toolset including metasploit, recipe-built over the noble golden, /etc/attack-image.manifest recording, zero-non-loopback-listener containment invariant) consumed as the attacker default, the ubuntu-noble and ubuntu-focal goldens, the daemon bundle via daemon-bundle --pull, the hardened range container image via the INSPECT_RANGES_RANGE_IMAGE digest pin, implicit pull at eval init, sticky-name and refresh semantics, the fleet pin file, and the republish discipline (digest identities, drift between publish days)."
 ---
 
 ## Overview
 
-The catalog is the set of standard images published under the project org (`docker.io/meridianlabsai`), each consumable by bare name from any `image:` line and pinned by digest end to end. It gives the schema's long-standing promises real referents: "the backend's standard attack image" is the published `attack`, and the blessed goldens are published under the names ranges already use.
+The catalog is the set of standard images published at the project location (`docker.io/meridianlabsai/inspect-ranges`; the third segment is the hub form's repo-name prefix, so name `attack` lives in the repo `meridianlabsai/inspect-ranges-attack` while specs keep writing the bare name), each consumable by bare name from any `image:` line and pinned by digest end to end. It gives the schema's long-standing promises real referents: "the backend's standard attack image" is the published `attack`, and the blessed goldens are published under the names ranges already use.
 
 Nothing about the catalog is special-cased: these are ordinary distribution artifacts (see [Distribution](distribution.qmd)), published with `inspect-ranges publish`, resolved pin first, then the local cache, then the search path, whose default tail is the public org. A deployment that prepends its own registry shadows any catalog name deterministically.
 
@@ -21,7 +21,7 @@ A dedicated attack box that declares no `image:` boots it by default. Two proper
 
 ## The goldens and the daemon bundle
 
-`noble-range-guest` and `ubuntu-focal` publish as golden chains (image, provenance sidecar, vendor base), each with the guest control daemon baked in. Pulled goldens are sticky: builds keep resolving the cached artifact until an explicit `images refresh` moves the whole chain forward.
+`ubuntu-noble` and `ubuntu-focal` publish as golden chains (image, provenance sidecar, vendor base), each with the guest control daemon baked in. Pulled goldens are sticky: builds keep resolving the cached artifact until an explicit `images refresh` moves the whole chain forward.
 
 The daemon bundle publishes under the reserved `daemon-bundle` ref, so a fleet that derives its own goldens fetches the artifact instead of building it from the Go toolchain:
 
@@ -39,7 +39,7 @@ The range container publishes as a conventional Docker image (`meridianlabsai/in
 
 An eval needs no explicit fetch verbs: init pulls whatever the range resolves that is absent from the cache (the published build for a built range, catalog images otherwise), with docker-pull-shaped progress, and warm evals cost zero network. `INSPECT_RANGES_NEVER_PULL=1` turns every implicit transfer into a coded refusal for hosts that must stay offline.
 
-Fleets pin: `inspect-ranges images pin --from docker.io/meridianlabsai --out pins.json` records every catalog name's current root digest, and a host running with `INSPECT_RANGES_PIN_FILE` set lands exactly the pinned roots, refusing `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through, the same posture as the search path).
+Fleets pin: `inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out pins.json` records every catalog name's current root digest, and a host running with `INSPECT_RANGES_PIN_FILE` set lands exactly the pinned roots, refusing `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through, the same posture as the search path).
 
 ## The republish discipline
 

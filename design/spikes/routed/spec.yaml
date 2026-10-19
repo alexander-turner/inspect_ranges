@@ -16,7 +16,7 @@ networks:
 hosts:
   - name: workstation
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: wide }]   # allocated: 10.91.10.10 (hypervisor gateway .1, attacker .2)
 
 attacker:

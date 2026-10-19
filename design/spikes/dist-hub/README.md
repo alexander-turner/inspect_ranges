@@ -15,3 +15,7 @@
 **Artifacts left behind:** the private test repo holds the tiny fixture chain under `latest`/`spec-...` tags plus the earlier `credential-check` tag; all private, non-canonical, deletable at will (the scoped token deliberately cannot delete).
 
 *Reproduce: `uv run python hub.py` (needs the org token logged in via `docker login -u meridianlabsai` and the private repo; see distribution-v1-parked-decisions.md entry 1 for the public-pull caveat while that token is logged in).*
+
+## Recorded: the repo-name-prefix probe (2026-10-19)
+
+`prefix_probe.py`, run once against the real hub after the prefixed-location decision: the location `docker.io/meridianlabsai/ir-dist` spelled the bare name `test` as the standing private repo `meridianlabsai/ir-dist-test` (zero new repos), the real qcow2 chain pushed through `push_image_artifact` (deliberately no catalog write), and a fresh-cache `pull_image` by bare name landed it byte-identically with the vendor base travelling. 5/5. This is the live proof behind `DEFAULT_REGISTRY = docker.io/meridianlabsai/inspect-ranges`.

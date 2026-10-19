@@ -22,7 +22,7 @@ from inspect_ranges.schema import load_range
 
 HERE = Path(__file__).parent
 RENDER = HERE / "tmp" / "render"
-GOLDEN = "/images/noble-range-guest.qcow2"
+GOLDEN = "/images/ubuntu-noble.qcow2"
 
 
 def main() -> None:

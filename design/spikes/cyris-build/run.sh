@@ -45,7 +45,7 @@ DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
 DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 $IR images derive "$FOCAL" --sha256 "$(sha256sum "$FOCAL" | cut -d' ' -f1)" --name ubuntu-focal \
   --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
-$IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --name noble-range-guest \
+$IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --name ubuntu-noble \
   --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
 (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 1200 >"$SPIKE/tmp/c1.txt" 2>&1) \
   && grep -q "build OK" "$SPIKE/tmp/c1.txt" && ok "C1 cyris-basic builds green" \

@@ -83,7 +83,7 @@ def main() -> None:
         xml = DOMAIN.format(name=vm["name"], cid=vm["cid"], interfaces=interfaces, extra=extra)
         (OUT / (vm["name"] + ".xml")).write_text(xml)
         boot += [
-            f"qemu-img create -f qcow2 -F qcow2 -b /images/noble-range-guest.qcow2 /scratch/{vm['name']}.qcow2 10G",
+            f"qemu-img create -f qcow2 -F qcow2 -b /images/ubuntu-noble.qcow2 /scratch/{vm['name']}.qcow2 10G",
             f"cloud-localds -N /render/vms/{vm['name']}/network-config /scratch/{vm['name']}-seed.iso "
             f"/render/vms/{vm['name']}/user-data /render/vms/{vm['name']}/meta-data",
             f"virsh -c qemu:///system define /mdxml/{vm['name']}.xml",

@@ -17,7 +17,7 @@ if [[ "${1:-}" == "down" ]]; then
 fi
 
 grep -q vhost_vsock /proc/modules || { echo "need: sudo modprobe vhost_vsock"; exit 1; }
-[[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
+[[ -f "$IMAGE_CACHE/ubuntu-noble.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 
 echo "=== B0 render the bundle (production CLI) ==="
 rm -rf tmp/bundle tmp/tampered

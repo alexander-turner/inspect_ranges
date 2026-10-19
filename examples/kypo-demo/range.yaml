@@ -35,7 +35,7 @@ networks:
 routers:
   - name: router
     os: { type: linux, distro: ubuntu-24.04 }  # realized: upstream debian-9; routing semantics preserved on the catalog guest
-    image: noble-range-guest                   # realized: the catalog golden (upstream image debian-9-x86_64)
+    image: ubuntu-noble                   # realized: the catalog golden (upstream image debian-9-x86_64)
     resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
     interfaces:
       - { network: server-switch, ip: 192.168.20.1 }

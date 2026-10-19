@@ -29,11 +29,11 @@ routers:
 hosts:
   - name: app
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: core }]      # allocated: 10.80.20.10
   - name: safe
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: vault }]     # allocated: 10.80.30.10
 
 attacker:

@@ -49,7 +49,7 @@ echo "=== P1 build the factory and PUBLISH the attack image by name ==="
 DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
 DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 NOBLE_SHA=$(sha256sum "$NOBLE" | cut -d' ' -f1)
-$IR images derive "$NOBLE" --sha256 "$NOBLE_SHA" --name noble-range-guest \
+$IR images derive "$NOBLE" --sha256 "$NOBLE_SHA" --name ubuntu-noble \
   --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
 (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 1800 >"$SPIKE/tmp/p1.txt" 2>&1) \
   && grep -q "build OK" "$SPIKE/tmp/p1.txt" && ok "P1 the factory builds green" || { bad "P1"; tail -10 "$SPIKE/tmp/p1.txt"; exit 1; }
@@ -59,14 +59,14 @@ sleep 2
   --image-cache "$CACHE" --build-cache "$BUILDS" >"$SPIKE/tmp/p1pub.txt" 2>&1) \
   && grep -q "publish OK  attack@sha256:" "$SPIKE/tmp/p1pub.txt" \
   && ok "P1b publish promotes the realized image to the bare name" || { bad "P1b"; cat "$SPIKE/tmp/p1pub.txt"; }
-(cd "$RANGE" && "$IRBIN" publish --golden noble-range-guest --to "$REG_URL" --image-cache "$CACHE" >"$SPIKE/tmp/p1g.txt" 2>&1) \
-  && grep -q "publish OK  noble-range-guest@" "$SPIKE/tmp/p1g.txt" \
+(cd "$RANGE" && "$IRBIN" publish --golden ubuntu-noble --to "$REG_URL" --image-cache "$CACHE" >"$SPIKE/tmp/p1g.txt" 2>&1) \
+  && grep -q "publish OK  ubuntu-noble@" "$SPIKE/tmp/p1g.txt" \
   && ok "P1c the golden promotes under its own name" || { bad "P1c"; cat "$SPIKE/tmp/p1g.txt"; }
 
 echo "=== P2 a consumer pulls the bare name and BOOTS it as the attacker ==="
 C="$SPIKE/tmp/consumer-images"; mkdir -p "$C"
 $IR images pull attack --from "$REG_URL" --image-cache "$C" >"$SPIKE/tmp/p2.txt" 2>&1 \
-  && [[ -f "$C/attack.qcow2" && -f "$C/attack.realized.json" && -f "$C/noble-range-guest.qcow2" ]] \
+  && [[ -f "$C/attack.qcow2" && -f "$C/attack.realized.json" && -f "$C/ubuntu-noble.qcow2" ]] \
   && ok "P2 images pull lands attack.qcow2 with its chain and provenance" || { bad "P2"; cat "$SPIKE/tmp/p2.txt"; }
 mkdir -p "$SPIKE/tmp/consumer-range"
 cat > "$SPIKE/tmp/consumer-range/range.yaml" <<'SPEC'
@@ -81,7 +81,7 @@ networks:
 hosts:
   - name: web
     os: { type: linux }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.99.0.10 }]
 attacker:
   image: attack
@@ -106,23 +106,23 @@ $IR images pin --from "$REG_URL" --out "$SPIKE/tmp/pins.json" >"$SPIKE/tmp/p3pin
   && grep -q "pinned 2 catalog name(s)" "$SPIKE/tmp/p3pin.txt" \
   && ok "P3b the fleet pin file records both names" || { bad "P3b"; cat "$SPIKE/tmp/p3pin.txt"; }
 # the publisher moves the catalog past the pin: republishing the golden after a touch
-printf 'moved' >> "$CACHE/noble-range-guest.qcow2"
+printf 'moved' >> "$CACHE/ubuntu-noble.qcow2"
 python3 - "$CACHE" <<'PYEOF'
 import hashlib, json, sys
 from pathlib import Path
 cache = Path(sys.argv[1])
-meta = json.loads((cache / "noble-range-guest.json").read_text())
+meta = json.loads((cache / "ubuntu-noble.json").read_text())
 h = hashlib.sha256()
-with open(cache / "noble-range-guest.qcow2", "rb") as f:
+with open(cache / "ubuntu-noble.qcow2", "rb") as f:
     for chunk in iter(lambda: f.read(1 << 20), b""):
         h.update(chunk)
 meta["golden_sha256"] = h.hexdigest()
-(cache / "noble-range-guest.json").write_text(json.dumps(meta))
+(cache / "ubuntu-noble.json").write_text(json.dumps(meta))
 PYEOF
-(cd "$RANGE" && "$IRBIN" publish --golden noble-range-guest --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1)
+(cd "$RANGE" && "$IRBIN" publish --golden ubuntu-noble --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1)
 F="$SPIKE/tmp/fleet-images"; mkdir -p "$F"
-INSPECT_RANGES_PIN_FILE="$SPIKE/tmp/pins.json" $IR images pull noble-range-guest --from "$REG_URL" --image-cache "$F" >"$SPIKE/tmp/p3c.txt" 2>&1 \
-  && ! cmp -s "$F/noble-range-guest.qcow2" "$CACHE/noble-range-guest.qcow2" \
+INSPECT_RANGES_PIN_FILE="$SPIKE/tmp/pins.json" $IR images pull ubuntu-noble --from "$REG_URL" --image-cache "$F" >"$SPIKE/tmp/p3c.txt" 2>&1 \
+  && ! cmp -s "$F/ubuntu-noble.qcow2" "$CACHE/ubuntu-noble.qcow2" \
   && ok "P3c the pinned fleet lands the PINNED root by digest, not the moved tag (@sha256 pin semantics)" \
   || { bad "P3c pinned pull"; cat "$SPIKE/tmp/p3c.txt"; }
 

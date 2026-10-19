@@ -1,6 +1,6 @@
 # The smoke eval's range: one isolated segment, one named target ("web"),
 # one attacker box; both guests run the derived golden the image cache holds
-# under the name noble-range-guest.
+# under the name ubuntu-noble.
 range:
   name: provider-smoke
   schema_version: "0.1"
@@ -16,11 +16,11 @@ networks:
 hosts:
   - name: web
     os: { type: linux, distro: ubuntu-24.04 }
-    image: noble-range-guest
+    image: ubuntu-noble
     interfaces: [{ network: lab, ip: 10.91.10.10 }]
 
 attacker:
   interfaces: [{ network: lab, ip: 10.91.10.2 }]
-  image: noble-range-guest
+  image: ubuntu-noble
   entry: external
   egress: none

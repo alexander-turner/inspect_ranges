@@ -18,7 +18,7 @@ if [[ "${1:-}" == "down" ]]; then
   exit 0
 fi
 
-for f in ws2022-eval.iso virtio-win.iso noble-range-guest.qcow2; do
+for f in ws2022-eval.iso virtio-win.iso ubuntu-noble.qcow2; do
   [[ -f "$IMAGE_CACHE/$f" ]] || { echo "missing $IMAGE_CACHE/$f (see win-guest / net-compile READMEs)"; exit 1; }
 done
 

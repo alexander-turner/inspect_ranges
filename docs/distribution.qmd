@@ -14,7 +14,7 @@ Every artifact is content-addressed: qcow2 images, provenance sidecars, recipe b
 
 Everywhere a registry location appears (`push --to`, `pull --from`, `mirror`, the configured search path) it takes one of three interchangeable forms:
 
-- **The public hub**: `docker.io/meridianlabsai`, the out-of-box default carrying the reusable base tier (goldens, the daemon bundle, common recipes).
+- **The public hub**: `docker.io/meridianlabsai/inspect-ranges`, the out-of-box default carrying the reusable base tier (the hub is two-level, so the third segment is a repo-NAME prefix: name `attack` lives in the repo `meridianlabsai/inspect-ranges-attack`; any `docker.io/<org>/<prefix>` location spells repos the same way) (goldens, the daemon bundle, common recipes).
 - **A private OCI registry**: `registry.example.net/ranges` (served over https; an explicit `http://host:port/path` form exists for local registries).
 - **A directory** in standard OCI image-layout format: `./archive` or `/mnt/mirror`. This is the registry-less shape: tar it, ship it across an air gap, untar it, and everything still verifies, because identity is content, not transport. Directory locations must look like paths (start with `/`, `./`, `../`, or `~`), so a configured value parses the same way in every working directory.
 
@@ -91,7 +91,7 @@ Unset (the default and the dev loop), `up` builds the image locally from package
 
 ``` {.bash .fragment}
 $ inspect-ranges mirror --from registry.other-group.net/ranges --to registry.example.net/ranges   # seed/sync everything the source lists
-$ inspect-ranges mirror vulhub-zabbix --from docker.io/meridianlabsai --to ./archive              # one name's current build
+$ inspect-ranges mirror vulhub-zabbix --from docker.io/meridianlabsai/inspect-ranges --to ./archive              # one name's current build
 $ inspect-ranges mirror . --from registry.other-group.net/ranges --to registry.example.net/ranges # the cross-group move: this range.yaml selects the source build exactly
 $ inspect-ranges mirror vulhub-zabbix@sha256:ab12e0... --from X --to Y                            # an exact root
 ```

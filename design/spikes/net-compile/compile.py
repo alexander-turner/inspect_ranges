@@ -17,7 +17,7 @@ import yaml
 HERE = Path(__file__).parent
 RENDER = HERE / "tmp" / "render"
 
-GOLDEN = "/images/noble-range-guest.qcow2"
+GOLDEN = "/images/ubuntu-noble.qcow2"
 FIRST_CID = 3
 HOST_IP_BASE = 10  # hosts allocate .10, .11, ...; agent gets .2; routers declare theirs
 AGENT_IP_OFFSET = 2

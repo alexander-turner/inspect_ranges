@@ -402,7 +402,7 @@ def test_provider_resolve_config_applies_the_gate(
     monkeypatch.setenv("INSPECT_RANGES_IMAGE_CACHE", str(image_cache))
     monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(builds))
     (image_cache / "focal-guest.qcow2").write_bytes(b"golden-bytes")
-    (image_cache / "noble-range-guest.qcow2").write_bytes(b"attacker-golden")
+    (image_cache / "ubuntu-noble.qcow2").write_bytes(b"attacker-golden")
     spec = RangeSpec(
         meta=RangeMeta(name="provgate", description="gate through the provider"),
         networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
@@ -416,7 +416,7 @@ def test_provider_resolve_config_applies_the_gate(
             )
         ],
         attacker=Attacker(
-            image="noble-range-guest", interfaces=[I(network="lab")], entry="external"
+            image="ubuntu-noble", interfaces=[I(network="lab")], entry="external"
         ),
     )
     runtime = ProviderRuntime()

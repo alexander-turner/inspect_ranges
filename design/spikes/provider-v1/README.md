@@ -25,7 +25,7 @@ Not run. The `devbox-b` instance (i-xxxxxxxxxxxxxxxxx, x.x.x.x) was STOPPED at b
 
 ## Files
 
-- `range.yaml`: the two-guest battery spec (image `noble-range-guest`)
+- `range.yaml`: the two-guest battery spec (image `ubuntu-noble`)
 - `run.sh`: the orchestrator (setup, batteries, eval, residue sweep)
 - `battery_main.py`, `lifecycle_matrix.py`, `boot_and_die.py`: the scenarios
 - `../../..//evals/smoke/`: the real-eval task (sample files, setup script, solver, scorer)

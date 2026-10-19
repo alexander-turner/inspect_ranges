@@ -18,7 +18,7 @@ grep -q vhost_vsock /proc/modules || { echo "need: sudo modprobe vhost_vsock"; e
 # derived guest image: vsockd baked in, cloud-init ENABLED (per-VM seeds carry
 # the compiled network config), wait-online masked. NOTE: the backing file
 # reference must be RELATIVE — the cache mounts at /images in the container.
-GUEST="$IMAGE_CACHE/noble-range-guest.qcow2"
+GUEST="$IMAGE_CACHE/ubuntu-noble.qcow2"
 if [[ ! -f "$GUEST" ]]; then
   cat > tmp/vsockd.service <<'EOF'
 [Unit]
@@ -30,7 +30,7 @@ Restart=always
 WantedBy=multi-user.target
 EOF
   (cd "$IMAGE_CACHE" && qemu-img create -f qcow2 -F qcow2 \
-    -b noble-server-cloudimg-amd64.img noble-range-guest.qcow2 10G >/dev/null)
+    -b noble-server-cloudimg-amd64.img ubuntu-noble.qcow2 10G >/dev/null)
   virt-customize -a "$GUEST" \
     --no-network --mkdir /opt \
     --copy-in ../vsock-exec/guest/vsockd.py:/opt \
