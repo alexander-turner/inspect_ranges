@@ -53,7 +53,19 @@ def _update_catalog_index(location: Location, name: str) -> None:
         index = store.read_index(root)
         if index.manifests:
             manifest = store.manifest(index.manifests[0])
-            data = json.loads(store.read_blob(manifest.layers[0]))
+            if manifest.artifact_type != CATALOG_ARTIFACT:
+                raise DistError(
+                    "catalog-invalid",
+                    f"{location.describe()}'s {CATALOG_REF!r} ref holds a "
+                    f"{manifest.artifact_type!r} artifact, not the catalog list",
+                )
+            try:
+                data = json.loads(store.read_blob(manifest.layers[0]))
+            except ValueError as error:
+                raise DistError(
+                    "catalog-invalid",
+                    f"{location.describe()}'s catalog list does not parse: {error}",
+                ) from error
             existing = data.get("names")
             if isinstance(existing, list):
                 names = [
@@ -96,15 +108,36 @@ def catalog_names(location: Location) -> list[str]:
     if not index.manifests:
         return []
     manifest = store.manifest(index.manifests[0])
-    data = json.loads(store.read_blob(manifest.layers[0]))
+    if manifest.artifact_type != CATALOG_ARTIFACT:
+        raise DistError(
+            "catalog-invalid",
+            f"{location.describe()}'s {CATALOG_REF!r} ref holds a "
+            f"{manifest.artifact_type!r} artifact, not the catalog list",
+        )
+    try:
+        data = json.loads(store.read_blob(manifest.layers[0]))
+    except ValueError as error:
+        raise DistError(
+            "catalog-invalid",
+            f"{location.describe()}'s catalog list does not parse: {error}",
+        ) from error
     names = data.get("names")
     if not isinstance(names, list):
         return []
     return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
 
 
+def _refuse_reserved(name: str) -> None:
+    if name == CATALOG_REF:
+        raise DistError(
+            "name-reserved",
+            f"{CATALOG_REF!r} is the catalog's own ref; nothing publishes under it",
+        )
+
+
 def publish_golden(name: str, location: Location, *, image_cache: Path) -> Descriptor:
     """Promote a cache golden (its whole chain) to the catalog under its own name."""
+    _refuse_reserved(name)
     root = push_image_artifact(name, location, image_cache=image_cache)
     _update_catalog_index(location, name)
     return root
@@ -123,7 +156,14 @@ def publish_realized(
     Raises:
         DistError: `artifact-missing` when the guest or its files are absent, plus every encode-time digest refusal.
     """
+    _refuse_reserved(catalog_name)
     validated_cache_name(f"{catalog_name}.qcow2")
+    if any(check.status != "pass" for check in manifest.verification.behavioral_checks):
+        raise DistError(
+            "range-unproven",
+            f"the manifest for {manifest.range_name!r} records failing behavioral "
+            "checks (a refused build); an unproven image never publishes",
+        )
     record = manifest.guest(guest)
     if record is None:
         raise DistError(

@@ -121,11 +121,10 @@ meta["golden_sha256"] = h.hexdigest()
 PYEOF
 (cd "$RANGE" && "$IRBIN" publish --golden noble-range-guest --to "$REG_URL" --image-cache "$CACHE" >/dev/null 2>&1)
 F="$SPIKE/tmp/fleet-images"; mkdir -p "$F"
-if INSPECT_RANGES_PIN_FILE="$SPIKE/tmp/pins.json" $IR images pull noble-range-guest --from "$REG_URL" --image-cache "$F" >"$SPIKE/tmp/p3c.txt" 2>&1; then
-  bad "P3c a moved catalog was accepted under the pin"
-else
-  grep -q "pin-mismatch" "$SPIKE/tmp/p3c.txt" && ok "P3c the pinned fleet refuses the moved catalog" || { bad "P3c refusal"; cat "$SPIKE/tmp/p3c.txt"; }
-fi
+INSPECT_RANGES_PIN_FILE="$SPIKE/tmp/pins.json" $IR images pull noble-range-guest --from "$REG_URL" --image-cache "$F" >"$SPIKE/tmp/p3c.txt" 2>&1 \
+  && ! cmp -s "$F/noble-range-guest.qcow2" "$CACHE/noble-range-guest.qcow2" \
+  && ok "P3c the pinned fleet lands the PINNED root by digest, not the moved tag (@sha256 pin semantics)" \
+  || { bad "P3c pinned pull"; cat "$SPIKE/tmp/p3c.txt"; }
 
 stop_registry
 echo

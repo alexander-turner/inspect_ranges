@@ -8,7 +8,7 @@ from inspect_ranges._dist import DistError, parse_location, pull_range, push_ran
 from inspect_ranges._dist.gc import unreferenced_chain_files
 from inspect_ranges._dist.mirror import mirror_names, mirror_one, source_names
 
-from tests.test_dist_encode import Fixture, fresh_dirs
+from tests.test_dist_encode import GOLDEN, Fixture, fresh_dirs
 from tests.test_dist_resolve import (  # noqa: F401  (autouse fixture)
     _spec_for_fixture,
     fake_backing_probe,  # pyright: ignore[reportUnusedImport]
@@ -323,7 +323,7 @@ def test_publish_golden_and_catalog_enumeration(tmp_path: Path) -> None:
 def test_pin_file_round_trip_and_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Q11: the fleet pin file pins catalog roots; a moved catalog refuses pin-mismatch instead of silently diverging the fleet."""
+    """Q11: pins consume as @sha256 pins: a moved catalog still lands the PINNED root from origin by digest, and only a gone pinned root refuses pin-mismatch."""
     import hashlib as hashlib_module
 
     from inspect_ranges._dist import pull_image
@@ -347,7 +347,164 @@ def test_pin_file_round_trip_and_mismatch(
     meta["golden_sha256"] = hashlib_module.sha256(moved).hexdigest()
     (fixture.image_cache / "focal-guest.json").write_text(json.dumps(meta))
     publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    # the pin consumes as an @sha256 pin: the moved tag is ignored and the
+    # PINNED root lands from origin (it stays fetchable by digest)
     fresh = tmp_path / "fresh-images"
     fresh.mkdir()
+    pinned_pull = pull_image("focal-guest", [location], image_cache=fresh)
+    assert pinned_pull is not None
+    assert (fresh / "focal-guest.qcow2").read_bytes() == GOLDEN
+    # only a GONE pinned root refuses
+    from inspect_ranges._dist import OciLayout
+
+    layout = OciLayout(tmp_path / "catalog-loc").open()
+    layout.blob_path(pins["focal-guest"]).unlink()
+    gone = tmp_path / "gone-images"
+    gone.mkdir()
     with pytest.raises(DistError, match="pin-mismatch"):
-        pull_image("focal-guest", [location], image_cache=fresh)
+        pull_image("focal-guest", [location], image_cache=gone)
+
+
+def test_refresh_moves_a_promoted_catalog_name(tmp_path: Path) -> None:
+    """Slice-2 review N4: refresh of a promoted (renamed) realized name lands image and sidecar together through the replace barrier; the chain converges."""
+    import hashlib as hashlib_module
+
+    from inspect_ranges._build.manifest import save_manifest
+    from inspect_ranges._dist import pull_image, refresh_image
+    from inspect_ranges._dist.catalog import publish_realized
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_realized(
+        fixture.manifest, "web", "attack", location, image_cache=fixture.image_cache
+    )
+    consumer = tmp_path / "consumer-images"
+    consumer.mkdir()
+    pull_image("attack", [location], image_cache=consumer)
+    # the factory republishes with new bytes (new build key, new realized file)
+    moved = b"realized-image-bytes-v2"
+    new_file = fixture.realized_file.replace("b" * 12, "c" * 12)
+    (fixture.image_cache / new_file).write_bytes(moved)
+    (
+        fixture.image_cache / (new_file.removesuffix(".qcow2") + ".realized.json")
+    ).write_text(
+        json.dumps(
+            {
+                "type": "realized",
+                "range_name": "distfix",
+                "guest": "web",
+                "build_key": "c" * 64,
+                "golden_file": "focal-guest.qcow2",
+                "sha256": hashlib_module.sha256(moved).hexdigest(),
+                "created": "2026-10-19T00:00:00Z",
+            }
+        )
+    )
+    republished = fixture.manifest.model_copy(
+        update={
+            "guests": (
+                fixture.manifest.guests[0].model_copy(
+                    update={
+                        "realized_file": new_file,
+                        "realized_sha256": hashlib_module.sha256(moved).hexdigest(),
+                        "build_key": "c" * 64,
+                    }
+                ),
+            )
+        }
+    )
+    save_manifest(republished, fixture.build_cache)
+    publish_realized(
+        republished, "web", "attack", location, image_cache=fixture.image_cache
+    )
+    # sticky first, then the explicit move-forward
+    with pytest.raises(DistError, match="cache-name-conflict"):
+        pull_image("attack", [location], image_cache=consumer)
+    refreshed = refresh_image("attack", [location], image_cache=consumer)
+    assert refreshed is not None
+    assert (consumer / "attack.qcow2").read_bytes() == moved
+    sidecar = json.loads((consumer / "attack.realized.json").read_text())
+    assert sidecar["build_key"] == "c" * 64
+
+
+def test_catalog_name_is_reserved_everywhere(tmp_path: Path) -> None:
+    """Slice-2 review B2: nothing publishes under the catalog's own ref."""
+    from inspect_ranges._dist.catalog import publish_golden, publish_realized
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    with pytest.raises(DistError, match="name-reserved"):
+        publish_golden("catalog", location, image_cache=fixture.image_cache)
+    with pytest.raises(DistError, match="name-reserved"):
+        publish_realized(
+            fixture.manifest,
+            "web",
+            "catalog",
+            location,
+            image_cache=fixture.image_cache,
+        )
+    reserved_range = fixture.manifest.model_copy(update={"range_name": "catalog"})
+    with pytest.raises(DistError, match="name-reserved"):
+        push_range(
+            reserved_range,
+            location,
+            image_cache=fixture.image_cache,
+            build_cache=fixture.build_cache,
+            range_dir=fixture.range_dir,
+        )
+
+
+def test_publish_refuses_unproven_manifests(tmp_path: Path) -> None:
+    """Slice-2 review N1: a refused (failing-checks) build never publishes to the catalog."""
+    from inspect_ranges._build.manifest import (
+        BehavioralCheckRecord,
+        VerificationRecord,
+        now_iso,
+    )
+    from inspect_ranges._dist.catalog import publish_realized
+
+    fixture = Fixture(tmp_path)
+    refused = fixture.manifest.model_copy(
+        update={
+            "verification": VerificationRecord(
+                verified_at=now_iso(),
+                declarations=(),
+                behavioral_checks=(
+                    BehavioralCheckRecord(
+                        challenge="demo", check="reference", status="fail", detail="0.0"
+                    ),
+                ),
+            )
+        }
+    )
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    with pytest.raises(DistError, match="range-unproven"):
+        publish_realized(
+            refused, "web", "attack", location, image_cache=fixture.image_cache
+        )
+
+
+def test_pulled_catalog_realized_is_not_prune_bait(tmp_path: Path) -> None:
+    """Slice-2 review B1: a pulled catalog image is sticky: never 'superseded', never offered by the realized tier, and its chain survives --chains."""
+    from inspect_ranges._cli.imagescmd import is_catalog_realized
+    from inspect_ranges._dist import pull_image
+    from inspect_ranges._dist.catalog import publish_realized
+    from inspect_ranges._dist.gc import unreferenced_chain_files
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_realized(
+        fixture.manifest, "web", "attack", location, image_cache=fixture.image_cache
+    )
+    consumer = tmp_path / "consumer-images"
+    consumer.mkdir()
+    pull_image("attack", [location], image_cache=consumer)
+    assert is_catalog_realized("distfix", "web", "b" * 64, "attack.qcow2")
+    assert not is_catalog_realized("distfix", "web", "b" * 64, fixture.realized_file)
+    # the chain scan on the consumer (no build manifests at all): the catalog
+    # image's golden is attributed by its sidecar, so nothing leaves
+    victims, frozen = unreferenced_chain_files(
+        consumer, tmp_path / "empty-builds", set()
+    )
+    assert not frozen
+    assert victims == []
