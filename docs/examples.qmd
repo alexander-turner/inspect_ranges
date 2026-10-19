@@ -1,0 +1,35 @@
+---
+title: "Example Ranges"
+description: "The in-repo example ranges: faithful translations of published range definitions, built and solved end to end, with provenance down to the field."
+llms-description: "The four example ranges: vulhub-zabbix (CVE-2016-10134 chain), kypo-demo (KYPO telnet ladder: routed two-subnet topology, weak password, sudoers less escalation), cyris-basic (CyRIS reference: firewall-as-router 25/53 ACL, local privesc, forensics triage of planted captures), mhbench-equifax-small (six-host Equifax model: CVE-2017-5638 struts entry, SSH-key pivot, four exfiltrate canaries, catalog-default attacker); each with upstream provenance, recipes, behavioral check trios, and a scored reference eval."
+---
+
+## Overview
+
+The `examples/` directory holds ranges translated faithfully from published definitions, then promoted to built, verified, solved ranges: recipes realize the declared guest content, the build's behavioral checks prove each challenge (the reference chain scores 1.0, insufficient and forged attempts score 0.0), and a real `inspect eval` solves each range through its declared foothold. Every example carries its upstream provenance (`source.md`, vendored `upstream/`, per-field tags in `range.yaml`), its unrealized remainder (`deferred.yaml`), and a realization record (`notes.md`).
+
+| Example | Upstream | The chain | Foothold |
+|---|---|---|---|
+| `vulhub-zabbix` | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution on server and agent | dedicated attack box |
+| `kypo-demo` | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation | the client host (assumed breach) |
+| `cyris-basic` | CyRIS reference (JAIST) | weak-root-password privesc; firewall-policy recon; forensics triage of planted captures | the desktop host (assumed breach) |
+| `mhbench-equifax-small` | MHBench (CMU) | CVE-2017-5638 Struts RCE, planted SSH-key pivot, four-database exfiltration | the standard attack box (catalog default) |
+
+## What the examples demonstrate
+
+- **kypo-demo** is the routed-topology reference: two subnets joined by a declared router, per-instance `variables:` resolving to defaults, a milestone ladder challenge, and the plant layer owning the flags (checked-in defaults never score).
+- **cyris-basic** is the firewall-ACL reference: a plain-router guest carrying the upstream 25/53 forwarding rules, deterministic synthesized evidence artifacts (pcaps, log noise, a resident dummy process), and a weights-scored forensics challenge.
+- **mhbench-equifax-small** is the scale and catalog reference: six targets, the attacker as the schema default (no `image:` line, the catalog's `attack`), a real CVE entry asserted live at build, and coverage-scored exfiltration with source-bound pcap corroboration.
+- **vulhub-zabbix** is the era-exact CVE reference: version-exact services compiled from canonical archives, with the patch dual (a defender removing the weakness) in its challenge set.
+
+Each example's `checks/<challenge-id>/{reference,insufficient,forged}.sh` trio runs at build against the captured artifacts; a build whose proof fails records a refused manifest, and no consumer can boot an unproven range.
+
+## Running one
+
+``` {.bash .fragment}
+$ cd examples/kypo-demo
+$ inspect-ranges build          # realize + verify + prove (build egress required)
+$ inspect eval my_task.py       # a task with sandbox=("range", "examples/kypo-demo/range.yaml")
+```
+
+Images resolve from the published catalog (see [Image Catalog](catalog.qmd)); a connected machine needs no explicit pulls.
