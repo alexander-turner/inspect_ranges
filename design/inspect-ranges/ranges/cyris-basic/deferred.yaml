@@ -74,3 +74,22 @@ lifecycle:
   isolation: per-instance cloned networks/bridges (CyRIS clone phase)
   reset: re-clone from base images
   clock_sync: ntp   # default: no Kerberos constraint
+
+# router guest content (moved from range.yaml 2026-10-19, linux-examples-v1):
+# the firewall is also a target upstream (is_host: true, account robot.abc);
+# router PROVISIONING does not exist yet, so its content is unrealized and the
+# firewall-pivot attack path (weak firewall account -> hop into the servers
+# segment) waits on it (recorded in linux-examples-v1-parked-decisions.md)
+routers:
+  firewall:
+    users:
+      - { name: robot.abc, password: abcrb1357 }
+
+# in-range defense posture (moved from range.yaml 2026-10-19): D0 is "no
+# defenders"; the pre-planted traces ARE realized (the desktop recipe plants
+# them), so only the tier declaration itself is deferred with the others
+defense:
+  tier: D0
+  description: >
+    No defenders. Pre-planted attack traces (pcap files, dummy malware,
+    ssh-attack log noise) exist for forensics realism, not response.
