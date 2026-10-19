@@ -27,6 +27,12 @@ from .dnsmasq import resolvers_for, search_domain
 from .egress import bridge_name
 from .routing import elect_gateways
 
+DEFAULT_ROUTER_IMAGE = "noble-range-guest"
+"""Image for routers when none is declared (module constant so pre-plan consumers, like the provider's catalog-image fetch, apply the same default)."""
+
+DEFAULT_ATTACKER_IMAGE = "attack"
+"""Image for a dedicated attack box when none is declared: the catalog's standard attack image."""
+
 
 class PlanOptions(BaseModel):
     """Host-class declarations and resolution inputs for planning (never per-instance probes)."""
@@ -37,10 +43,10 @@ class PlanOptions(BaseModel):
     cpu_model: str = "host-passthrough"
     """Guest CPU model; checkpointed fleets use a named model (see range-build.md)."""
 
-    default_router_image: str = "noble-range-guest"
+    default_router_image: str = DEFAULT_ROUTER_IMAGE
     """Image for routers when none is declared."""
 
-    default_attacker_image: str = "attack"
+    default_attacker_image: str = DEFAULT_ATTACKER_IMAGE
     """Image for a dedicated attack box when none is declared: the catalog's standard attack image (standard-images-v1), resolved like any bare name (pin, cache, then the search path, whose default tail is the public org)."""
 
     cid_base: int = Field(default=3, ge=3)

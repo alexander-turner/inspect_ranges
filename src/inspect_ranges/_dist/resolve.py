@@ -289,6 +289,60 @@ def ensure_build_available(
     )
 
 
+def catalog_image_references(spec: RangeSpec) -> list[str]:
+    """Every image reference a render resolves OUTSIDE the build closure: content-free hosts' declared images, routers with the default applied, and a dedicated attack box with the standard attack image applied. Built guests' artifacts land via the build pull, never here; a foothold attacker (`host:` set) boots nothing of its own."""
+    from .._compiler.plan import DEFAULT_ATTACKER_IMAGE, DEFAULT_ROUTER_IMAGE
+
+    names: list[str] = []
+    for host in spec.hosts:
+        if not (host.provisioning or host.services or host.vulnerabilities):
+            names.append(host.image)
+    for router in spec.routers:
+        names.append(router.image or DEFAULT_ROUTER_IMAGE)
+    if spec.attacker.host is None:
+        names.append(spec.attacker.image or DEFAULT_ATTACKER_IMAGE)
+    seen: set[str] = set()
+    return [name for name in names if not (name in seen or seen.add(name))]
+
+
+def ensure_images_available(
+    spec: RangeSpec,
+    *,
+    image_cache: Path,
+    progress: "ProgressFn | None" = None,
+) -> list[str]:
+    """The catalog tier of the provider's implicit fetch: every image this spec renders with that is absent from the cache pulls through the search path (the clean-machine `inspect eval` path: the attacker's default `attack`, goldens by bare name); returns what was pulled, `[]` on the warm path (zero network).
+
+    Raises:
+        DistError: `never-pull` when an image is missing and the host is pinned offline, `image-not-published` when no configured location serves a missing name, plus transport refusals.
+    """
+    missing = [
+        name
+        for name in catalog_image_references(spec)
+        if cached_image_digest(name, image_cache) is None
+    ]
+    if not missing:
+        return []
+    if os.environ.get(NEVER_PULL_ENV):
+        raise DistError(
+            "never-pull",
+            f"image(s) {', '.join(repr(name) for name in missing)} are not in the "
+            f"cache and {NEVER_PULL_ENV} is set; pull explicitly, or run on a host "
+            "that allows implicit transfers",
+        )
+    locations = registry_locations()
+    for name in missing:
+        pulled = pull_image(name, locations, image_cache=image_cache, progress=progress)
+        if pulled is None:
+            raise DistError(
+                "image-not-published",
+                f"image {name!r} is neither cached nor published at any configured "
+                f"location (searched: "
+                f"{', '.join(location.describe() for location in locations)})",
+            )
+    return missing
+
+
 def _artifacts_present(manifest: BuildManifest, image_cache: Path) -> bool:
     """Whether every image the manifest references exists in the cache (presence only; the gate's sidecar discipline and boot's verify-images own the digests)."""
     from .._compiler.plan import image_file_name

@@ -110,7 +110,7 @@ def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
     from .._build.recipes import default_recipe_cache
     from .._dist.errors import DistError
     from .._dist.progress import TransferDisplay
-    from .._dist.resolve import ensure_build_available
+    from .._dist.resolve import ensure_build_available, ensure_images_available
 
     display = TransferDisplay()
     try:
@@ -121,11 +121,19 @@ def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
             recipe_cache=default_recipe_cache(),
             progress=display,
         )
+        # the catalog tier: images outside the build closure (the attacker's
+        # default `attack`, bare-name goldens) pull the same implicit way, so
+        # a clean machine's first eval needs no explicit pull verbs
+        pulled_images = ensure_images_available(
+            spec, image_cache=image_cache, progress=display
+        )
     except DistError as error:
         display.close()
         raise _prerequisite(str(error)) from error
     if report is not None:
         display.final(f"pull OK   {spec.meta.name}@{report.root} ({report.location})")
+    if pulled_images:
+        display.final(f"pull OK   catalog image(s): {', '.join(pulled_images)}")
 
 
 def _prerequisite(message: str) -> Exception:
