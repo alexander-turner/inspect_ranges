@@ -346,3 +346,36 @@ def test_sweep_and_silence_scripts_are_falsifiable() -> None:
     probe = silence_script(["10.44.0.1", "10.44.0.254"])
     assert 'echo "ALIVE $ip"' in probe
     assert "TCP53" in probe and "timeout 1" in probe
+
+
+def test_attacker_guest_resolution_prefers_the_attack_box_then_the_foothold() -> None:
+    """Chains exec on the dedicated attack box when one exists, else the foothold host (linux-examples-v1: foothold ranges have no attacker-kind guest)."""
+    from types import SimpleNamespace
+
+    from inspect_ranges._build.behavioral import _attacker_guest
+
+    def guest(name: str, kind: str, ip: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            name=name, kind=kind, interfaces=[SimpleNamespace(ip=ip)]
+        )
+
+    dedicated = SimpleNamespace(
+        guests=[
+            guest("web", "host", "10.0.0.5"),
+            guest("attacker", "attacker", "10.0.0.9"),
+        ]
+    )
+    spec = SimpleNamespace(attacker=SimpleNamespace(host=None))
+    assert _attacker_guest(spec, dedicated) == ("attacker", "10.0.0.9")  # type: ignore[arg-type]
+
+    foothold_plan = SimpleNamespace(
+        guests=[
+            guest("client", "host", "192.168.30.5"),
+            guest("server", "host", "192.168.20.5"),
+        ]
+    )
+    foothold_spec = SimpleNamespace(attacker=SimpleNamespace(host="client"))
+    assert _attacker_guest(foothold_spec, foothold_plan) == (  # type: ignore[arg-type]
+        "client",
+        "192.168.30.5",
+    )

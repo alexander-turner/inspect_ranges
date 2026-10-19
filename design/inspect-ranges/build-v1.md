@@ -61,7 +61,7 @@ One scripted run on the devbox, under the battery flock: slice 1's fixture-recip
 - No Journey B surface: no push, pull, mirror, publish, registry resolution, or auto-pull in `task_init`; resolution in this phase is pin and local cache only, with the registry tier arriving with the distribution phase.
 - No Windows render, no checkpoints, no memory restore; cold-boot Linux ranges only.
 - No scenario-image promotion (`publish`); recipe outputs stay in the local cache as build intermediates.
-- No gate deletion beyond `services` and `vulnerabilities`; `users`, `data`, `defense`, `misconfigurations`, `roles`, `scheduled_activity`, `active_directory`, and `randomization-not-realized` stand.
+- No gate deletion beyond `services` and `vulnerabilities`; `users`, `data`, `defense`, `misconfigurations`, `roles`, `scheduled_activity`, `active_directory`, and `randomization-not-realized` stand. *(Superseded in part by linux-examples-v1, 2026-10-19: `users`/`misconfigurations`/`data` joined the build-claimed sections, and the variables gate lifted to defaults-resolution; `defense`, `roles`, `scheduled_activity`, `active_directory`, `hostname`/`fqdn` still gate.)*
 - No recipe-runner container pinning (deferred per recipe-references until tool drift bites) and no remote recipe registry.
 
 ## Decisions (resolved 2026-10-17)

@@ -359,7 +359,14 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
         while uplink_name in taken:
             uplink_name = "ir-" + uplink_name
         declared = [ip_network(str(network.cidr)) for network in build.networks]
-        candidates = ("10.254.169.0/24", "192.168.254.0/24", "172.31.199.0/24")
+        # the last resort lives in CGNAT space (100.64/10): never a guest
+        # subnet in practice, and 172.31/16 overlaps AWS default VPCs
+        candidates = (
+            "10.254.169.0/24",
+            "192.168.254.0/24",
+            "100.127.199.0/24",
+            "172.31.199.0/24",
+        )
         uplink_cidr = next(
             (
                 candidate
