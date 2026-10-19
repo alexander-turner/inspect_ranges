@@ -34,6 +34,7 @@ bad() { echo "FAIL  $1"; FAIL=$((FAIL+1)); }
 
 exec 9>/tmp/inspect-ranges-battery.lock
 flock 9
+trap stop_registry EXIT
 
 cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
@@ -78,7 +79,7 @@ $IR down --all >/dev/null 2>&1 || true
 
 echo "=== R2 a published pin: push, forget locally, up PULLS and boots with it ==="
 docker run -d --rm --name "$REG" -p 127.0.0.1:5065:5000 registry:2 >/dev/null
-sleep 2
+for _ in $(seq 1 40); do curl -fs http://127.0.0.1:5065/v2/ >/dev/null && break; sleep 0.5; done
 docker tag "$IMG" "$REPO:candidate"
 DIGEST=$(docker push "$REPO:candidate" 2>/dev/null | grep -o 'sha256:[0-9a-f]*' | tail -1)
 PIN="$REPO@$DIGEST"

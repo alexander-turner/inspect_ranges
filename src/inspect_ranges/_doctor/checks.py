@@ -63,6 +63,13 @@ def run_checks() -> list[CheckResult]:
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
     else:
+        from .._runtime.rangeimage import RangeImageError, pinned_range_image
+
+        try:
+            range_image_ref = pinned_range_image() or _range_image_tag()
+        except RangeImageError:
+            # check_realizer fails the row itself; nothing worth inspecting
+            range_image_ref = _range_image_tag()
         docker_probe = _run(["docker", "version", "--format", "ok"])
         results += check_realizer(
             image_inspect=(
@@ -71,7 +78,7 @@ def run_checks() -> list[CheckResult]:
                         "docker",
                         "image",
                         "inspect",
-                        _range_image_tag(),
+                        range_image_ref,
                         "--format",
                         "ok",
                     ]
@@ -926,9 +933,25 @@ def check_realizer(
     """Realizer host surface: the hardened range image, the daemon artifact, and the Go toolchain that builds it (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact)."""
     from .._channel.bundle import GO_PIN, locate_go
     from .._runtime.images import DEFAULT_ARTIFACT_DIR
+    from .._runtime.rangeimage import RangeImageError, pinned_range_image
 
     results: list[CheckResult] = []
-    if image_inspect is None:
+    pinned_image: str | None = None
+    pin_error: RangeImageError | None = None
+    try:
+        pinned_image = pinned_range_image()
+    except RangeImageError as error:
+        pin_error = error
+    if pin_error is not None:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "fail",
+                f"{pin_error}; `up` refuses this value before anything boots",
+            )
+        )
+    elif image_inspect is None:
         results.append(
             CheckResult(
                 REALIZER,
@@ -938,9 +961,6 @@ def check_realizer(
             )
         )
     elif image_inspect.returncode == 0:
-        from .._runtime.rangeimage import RANGE_IMAGE_ENV
-
-        pinned_image = os.environ.get(RANGE_IMAGE_ENV)
         results.append(
             CheckResult(
                 REALIZER,
@@ -949,6 +969,15 @@ def check_realizer(
                 f"pinned {pinned_image}"
                 if pinned_image
                 else f"local {_range_image_tag()}",
+            )
+        )
+    elif pinned_image:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "warn",
+                f"pinned {pinned_image} not pulled yet; `inspect-ranges up` pulls it on first use",
             )
         )
     else:
