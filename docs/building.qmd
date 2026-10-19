@@ -18,7 +18,7 @@ The rest of this page covers the build itself: how declared guest content become
 
 ## What the build is
 
-A definition's [guest content](guests.qmd#guest-content) describes converged state: services listening at versions, seeded vulnerabilities, provisioning steps that produce them. None of that is applied at boot. `inspect-ranges build` realizes it once: the range boots on an egress-enabled build plan, recipes converge each guest, every declaration is verified against the live guests, each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning.
+A definition's [guest content](guests.qmd#guest-content) describes converged state: services listening at versions, seeded vulnerabilities, provisioning steps that produce them. None of that is applied at boot. `inspect-ranges build` realizes it once: the range boots on an egress-enabled build plan, recipes converge each guest, declared services and vulnerabilities are verified mechanically against the live guests (declared `users`/`misconfigurations`/`data` are build-claimed through recipe self-assertion plus the behavioral checks' chain-load-bearing facts; mechanical probes for them are a recorded follow-up), each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning.
 
 ```{.bash filename="Terminal"}
 cd my-range/        # range.yaml plus ./recipes/

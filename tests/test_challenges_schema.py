@@ -40,11 +40,16 @@ from inspect_ranges.types import (
 )
 from pydantic import ValidationError
 
+# built examples graduate from design/inspect-ranges/ranges/ to examples/;
+# both tiers' challenges must keep validating (the promotion must never drop
+# a fixture out of coverage — linux-examples-v1 phase review round 1)
 EXAMPLES = sorted(
     directory
-    for directory in (
-        Path(__file__).parent.parent / "design" / "inspect-ranges" / "ranges"
-    ).iterdir()
+    for root in (
+        Path(__file__).parent.parent / "design" / "inspect-ranges" / "ranges",
+        Path(__file__).parent.parent / "examples",
+    )
+    for directory in root.iterdir()
     if (directory / "challenges.yaml").exists()
 )
 

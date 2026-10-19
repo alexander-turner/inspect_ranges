@@ -384,7 +384,7 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
                         code="build-uplink-cidr-exhausted",
                         path=("networks",),
                         message="every build-uplink candidate subnet overlaps a declared network; the build cannot attach egress",
-                        hint="free one of 10.254.169.0/24, 192.168.254.0/24, 172.31.199.0/24",
+                        hint="free one of 10.254.169.0/24, 192.168.254.0/24, 100.127.199.0/24, 172.31.199.0/24",
                     )
                 ]
             )
