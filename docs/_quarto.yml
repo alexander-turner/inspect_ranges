@@ -38,6 +38,12 @@ inspect-docs:
           href: cli.qmd
         - text: Sandbox Provider
           href: provider.qmd
+        - text: Distribution
+          href: distribution.qmd
+        - text: Image Catalog
+          href: catalog.qmd
+        - text: Example Ranges
+          href: examples.qmd
         - text: Host Topology
           href: topology.qmd
         - text: Security
