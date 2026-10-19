@@ -18,11 +18,33 @@ RANGE_IMAGE_TAG = f"inspect-ranges-range:v{__version__}"
 RANGE_IMAGE_ENV = "INSPECT_RANGES_RANGE_IMAGE"
 """A digest-pinned published range image (`repo@sha256:<hex>`, the catalog's conventional Docker repo): set, `up` pulls and uses it instead of building locally (standard-images-v1 slice 3). The pin is mandatory: a mutable tag could swap the hardened jail under a fleet, so unpinned values refuse. The local build remains the default and the dev loop."""
 
-_PINNED_REF = re.compile(r"\A[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}\Z")
+# docker's reference grammar allows uppercase in the registry host, never in the
+# repository path; a tag+digest form (repo:tag@sha256:) is refused outright rather
+# than silently dropping the tag the way docker would
+_PINNED_REF = re.compile(
+    r"\A(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/)?[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z"
+)
 
 
 class RangeImageError(RuntimeError):
     """A pinned range image could not be used; the message names the pin and the cause."""
+
+
+def pinned_range_image() -> str | None:
+    """The validated `INSPECT_RANGES_RANGE_IMAGE` pin, or `None` when the knob is unset.
+
+    Raises:
+        RangeImageError: The knob is set but not digest-pinned.
+    """
+    pinned = os.environ.get(RANGE_IMAGE_ENV)
+    if not pinned:
+        return None
+    if _PINNED_REF.fullmatch(pinned) is None:
+        raise RangeImageError(
+            f"{RANGE_IMAGE_ENV} must be digest-pinned (repo@sha256:<hex>); "
+            f"got {pinned!r}: a mutable tag could swap the hardened jail"
+        )
+    return pinned
 
 
 DockerRunner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -48,7 +70,7 @@ def _content_hash() -> str:
 def ensure_range_image(
     runner: DockerRunner | None = None, tag: str = RANGE_IMAGE_TAG
 ) -> str:
-    """Build the hardened range image unless this host has one whose content label matches; returns the tag.
+    """Resolve the hardened range image: the `INSPECT_RANGES_RANGE_IMAGE` pin (pulled once) when set, else the local content-labeled tag, built unless this host has one whose label matches.
 
     Tag presence alone is not trusted: the image must carry the content label for the current package version and build context, so `docker tag` substitution or an edited Dockerfile within one version both trigger a rebuild.
 
@@ -60,13 +82,8 @@ def ensure_range_image(
         FileNotFoundError: docker is not on this host.
     """
     run = runner or run_docker
-    pinned = os.environ.get(RANGE_IMAGE_ENV)
+    pinned = pinned_range_image()
     if pinned:
-        if _PINNED_REF.fullmatch(pinned) is None:
-            raise RangeImageError(
-                f"{RANGE_IMAGE_ENV} must be digest-pinned (repo@sha256:<hex>); "
-                f"got {pinned!r}: a mutable tag could swap the hardened jail"
-            )
         inspect = run(["docker", "image", "inspect", pinned, "--format", "ok"])
         if inspect.returncode != 0:
             pull = run(["docker", "pull", pinned])

@@ -298,6 +298,7 @@ def test_check_realizer_branches(
 
     artifact = tmp_path / "artifacts"
     monkeypatch.setattr(images_module, "DEFAULT_ARTIFACT_DIR", artifact)
+    monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
 
     def status_of(results: "list[CheckResult]", name: str) -> str:
         return next(r.status for r in results if r.name == name)
@@ -322,6 +323,50 @@ def test_check_realizer_branches(
     # full artifact present
     write_bundle(artifact, b"fake", version="9.9.9-test")
     assert status_of(check_realizer(image_inspect=ok_proc), "daemon artifact") == "ok"
+
+
+@pytest.mark.parametrize(
+    ("pin", "inspect_rc", "status", "fragment"),
+    [
+        (
+            "docker.io/meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32,
+            0,
+            "ok",
+            "pinned docker.io",
+        ),
+        (
+            "docker.io/meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32,
+            1,
+            "warn",
+            "pulls it on first use",
+        ),
+        ("meridianlabsai/inspect-ranges-range:latest", 0, "fail", "digest-pinned"),
+        (None, 1, "warn", "builds it on first use"),
+    ],
+)
+def test_check_realizer_range_image_pin_states(
+    pin: "str | None",
+    inspect_rc: int,
+    status: str,
+    fragment: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The range-image row follows the pin: present ok, absent warns it pulls on first use, an unpinned value fails exactly where `up` would refuse (slice-3 review blocking: doctor must never gate on the local tag while a pin is set, nor bless a value `up` refuses)."""
+    import inspect_ranges._runtime.images as images_module
+    from inspect_ranges._doctor.checks import check_realizer
+
+    monkeypatch.setattr(images_module, "DEFAULT_ARTIFACT_DIR", tmp_path / "artifacts")
+    if pin is None:
+        monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
+    else:
+        monkeypatch.setenv("INSPECT_RANGES_RANGE_IMAGE", pin)
+    proc = subprocess.CompletedProcess(
+        ["docker"], inspect_rc, "ok\n" if inspect_rc == 0 else "", ""
+    )
+    row = next(r for r in check_realizer(image_inspect=proc) if r.name == "range image")
+    assert row.status == status
+    assert fragment in row.detail
 
 
 def _provider_results(tmp_path: Path) -> dict[str, CheckResult]:

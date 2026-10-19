@@ -46,6 +46,12 @@ def tiny_spec() -> RangeSpec:
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_range_image_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dev machine's exported `INSPECT_RANGES_RANGE_IMAGE` must not leak into the local-build-path tests (slice-3 review)."""
+    monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolated_ch_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The updown spec's attacker defaults to cloud-hypervisor now, so up() prepares a vsock dir under tempfile.gettempdir(): keep unit tests off the real /tmp (round-2 review)."""
     import tempfile as tempfile_module
