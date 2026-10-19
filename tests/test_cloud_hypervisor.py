@@ -192,9 +192,8 @@ def test_cloud_hypervisor_socket_wait_tracks_readiness_timeout(
     boot = load_boot(out)
     assert "for _ in $(seq 100);" in boot_script(boot, 10.0)
     assert "for _ in $(seq 3000);" in boot_script(boot, 300.0)
-    assert (
-        'kill -0 "$(cat /scratch/ch/web.pid)" 2>/dev/null || break'
-        in boot_script(boot, 300.0)
+    assert 'kill -0 "$(cat /scratch/ch/web.pid)" 2>/dev/null || break' in boot_script(
+        boot, 300.0
     )
 
 
