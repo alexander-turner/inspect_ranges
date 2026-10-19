@@ -339,7 +339,7 @@ def test_boot_script_realizes_boot_json(bundle: Path) -> None:
     from inspect_ranges._runtime.up import load_boot
 
     boot = load_boot(bundle)
-    script = boot_script(boot)
+    script = boot_script(boot, 300.0)
     assert "qemu-img create -f qcow2 -F qcow2 -b /images/tiny-golden.qcow2" in script
     assert "virsh -c qemu:///system start web" in script
     assert script.index("define") < script.index("start web")

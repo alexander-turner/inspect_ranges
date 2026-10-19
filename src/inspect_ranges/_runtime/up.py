@@ -273,7 +273,6 @@ class BootPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    parallel: bool
     guests: list[BootGuest] = Field(min_length=1)
     verify: dict[str, Any]
 
@@ -305,10 +304,12 @@ def ch_uid(cid: int) -> int:
     return guest_uid(cid)
 
 
-def boot_script(boot: BootPlan) -> str:
+def boot_script(boot: BootPlan, readiness_timeout: float) -> str:
     """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway.
 
     A `cloud-hypervisor` guest has no domain XML: root prepares what the unprivileged VMM cannot (a persistent tap per NIC owned by the VMM's uid, image and console-log ownership), then Cloud Hypervisor starts as its own uid (`ch_uid`) with group `kvm`, no capabilities and its default seccomp filter, detached, its vsock socket in the host-supplied directory.
+
+    The wait for each Cloud Hypervisor guest's vsock socket is bounded by `readiness_timeout` (the same budget the readiness stage uses), not a fixed window, so a healthy but slow-to-start VMM is not failed prematurely; the loop still exits at once if the VMM process has died.
     """
     lines = ["#!/bin/bash", "set -euo pipefail"]
     ch_guests: list[str] = []
@@ -390,11 +391,17 @@ def boot_script(boot: BootPlan) -> str:
         lines.append(f"echo $! > /scratch/ch/{name}.pid")
     if ch_guests:
         # a VMM that refuses its configuration never creates its socket: fail
-        # the boot stage with its own error rather than timing out at readiness
+        # the boot stage with its own error rather than timing out at readiness.
+        # The window is the readiness budget, not a fixed 5 s (issue #1): a
+        # healthy but slow guest must get the whole budget, while polling the
+        # VMM pid still fails a truly dead one fast.
+        attempts = max(1, round(readiness_timeout / 0.1))
         for name in ch_guests:
             socket = f"{CH_VSOCK_MOUNT}/{name}.sock"
             lines.append(
-                f"for _ in $(seq 50); do [ -S {socket} ] && break; sleep 0.1; done"
+                f"for _ in $(seq {attempts}); do [ -S {socket} ] && break; "
+                f'kill -0 "$(cat /scratch/ch/{name}.pid)" 2>/dev/null || break; '
+                f"sleep 0.1; done"
             )
             lines.append(
                 f"[ -S {socket} ] || {{ echo 'cloud-hypervisor for {name} did not start:' >&2; "
@@ -679,7 +686,7 @@ def up(
     boot_result = run(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
         env=env,
-        input=boot_script(boot),
+        input=boot_script(boot, options.readiness_timeout),
         timeout=options.readiness_timeout,
     )
     if boot_result.returncode != 0:

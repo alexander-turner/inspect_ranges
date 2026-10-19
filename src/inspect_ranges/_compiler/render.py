@@ -388,7 +388,6 @@ def render_bundle(
         "boot.json",
         json.dumps(
             {
-                "parallel": True,
                 "guests": [
                     _boot_guest(guest, networks, backings) for guest in plan.guests
                 ],

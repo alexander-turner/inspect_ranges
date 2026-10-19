@@ -145,7 +145,7 @@ def test_boot_script_starts_cloud_hypervisor_unprivileged(
     out = tmp_path / "bundle"
     guests = render(ch_spec("web"), cache, out)
     cid, mac = guests["web"]["cid"], guests["web"]["interfaces"][0]["mac"]
-    script = boot_script(load_boot(out))
+    script = boot_script(load_boot(out), 300.0)
     uid = 1_000_000 + cid  # its own uid: no other VMM (or QEMU) shares it
     assert f"ip tuntap add dev ch{cid}n0 mode tap user {uid} group kvm" in script
     assert f"ip link set ch{cid}n0 master br-dmz" in script
@@ -181,6 +181,21 @@ def test_boot_script_starts_cloud_hypervisor_unprivileged(
     # is opened to the host-side dialer only after the VMM created it
     assert script.index(f"ip tuntap add dev ch{cid}n0") < script.index("setpriv")
     assert script.index("setpriv") < script.index("chmod 0666 /run/ch-vsock/web.sock")
+
+
+def test_cloud_hypervisor_socket_wait_tracks_readiness_timeout(
+    cache: Path, tmp_path: Path
+) -> None:
+    """Issue #1: the vsock-socket wait derives from `readiness_timeout` (0.1 s per poll), not a fixed 5 s window, so a healthy but slow-to-start guest is not failed prematurely; it still breaks at once when the VMM process has died, so a truly dead VMM fails fast."""
+    out = tmp_path / "bundle"
+    render(ch_spec("web"), cache, out)
+    boot = load_boot(out)
+    assert "for _ in $(seq 100);" in boot_script(boot, 10.0)
+    assert "for _ in $(seq 3000);" in boot_script(boot, 300.0)
+    assert (
+        'kill -0 "$(cat /scratch/ch/web.pid)" 2>/dev/null || break'
+        in boot_script(boot, 300.0)
+    )
 
 
 def test_cloud_hypervisor_guests_refuse_a_pinned_cpu_model(cache: Path) -> None:
