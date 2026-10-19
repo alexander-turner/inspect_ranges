@@ -52,6 +52,10 @@ EXAMPLES = sorted(
     for directory in root.iterdir()
     if (directory / "challenges.yaml").exists()
 )
+assert len(EXAMPLES) == 6, (
+    f"fixture discovery moved out from under the tests (found {EXAMPLES}); "
+    "update BOTH tiers' paths and this pin together"
+)
 
 
 def fixture_spec() -> RangeSpec:

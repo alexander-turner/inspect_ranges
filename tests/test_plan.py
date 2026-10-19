@@ -407,6 +407,62 @@ attacker:
     assert single["eth0"]["routes"] == [{"to": "default", "via": "192.168.30.1"}]
 
 
+def test_multihomed_tie_break_and_sibling_exclusion(
+    cache: Path, tmp_path: Path
+) -> None:
+    """Two non-NAT gatewayed attachments tie-break by interface index, and sibling routes never shadow a directly-attached subnet (phase review round 1 N3)."""
+    import yaml
+    from inspect_ranges.schema import load_range
+
+    spec_yaml = """
+range:
+  name: dualrouted
+  schema_version: "0.3"
+  description: tie-break and sibling exclusion
+networks:
+  - name: a
+    cidr: 192.168.20.0/24
+    mode: isolated
+  - name: b
+    cidr: 192.168.30.0/24
+    mode: isolated
+  - name: c
+    cidr: 192.168.40.0/24
+    mode: isolated
+hosts:
+  - name: dual
+    os: { type: linux }
+    image: noble-range-guest
+    interfaces:
+      - { network: a, ip: 192.168.20.5 }
+      - { network: b, ip: 192.168.30.5 }
+routers:
+  - name: r
+    interfaces:
+      - { network: a, ip: 192.168.20.1 }
+      - { network: b, ip: 192.168.30.1 }
+      - { network: c, ip: 192.168.40.1 }
+attacker:
+  image: noble-range-guest
+  interfaces: [{ network: c }]
+  entry: external
+"""
+    spec_path = tmp_path / "dualrouted.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    seeds = {p.parent.parent.name: p for p in out.rglob("network-config")}
+    dual = yaml.safe_load(seeds["dual"].read_text())["ethernets"]
+    eth0 = dual["eth0"]["routes"]
+    eth1 = dual["eth1"]["routes"]
+    assert {"to": "default", "via": "192.168.20.1", "metric": 200} in eth0
+    assert {"to": "default", "via": "192.168.30.1", "metric": 201} in eth1
+    # the sibling list excludes BOTH directly-attached subnets; only c remains
+    for routes in (eth0, eth1):
+        subnets = [r["to"] for r in routes if r["to"] != "default"]
+        assert subnets == ["192.168.40.0/24"], subnets
+
+
 def test_guest_hostnames_sanitize_to_rfc_form() -> None:
     """Underscored guest names (the terraform-derived shape) render hostname-safe: an invalid hostname makes noble's cloud-init degraded and readiness refuses (linux-examples-v1 slice 3)."""
     from inspect_ranges._compiler.render import guest_hostname
