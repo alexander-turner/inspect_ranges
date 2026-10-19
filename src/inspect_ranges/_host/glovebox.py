@@ -485,15 +485,12 @@ class GloveboxHost:
     async def teardown(self, project: str) -> None:
         """Unstitch every segment this host stitched for `project` and drop its cells; tolerant and idempotent (teardown must not raise over an already-gone device).
 
-        The undo mirrors `unstitch_commands` (deleting the host veth takes its in-netns peer with it, then the node bridge goes), built here from the recorded `(node_bridge, veth_host)` so teardown needs no live plan.
+        The undo runs `unstitch_commands` (deleting the host veth takes its in-netns peer with it, then the node bridge goes) off the recorded `(node_bridge, veth_host)`, so teardown needs no live plan.
         """
         for node_bridge, veth_host in self._stitched.pop(project, []):
             try:
                 await self.root_runner(
-                    [
-                        ["ip", "link", "del", veth_host],
-                        ["ip", "link", "del", node_bridge],
-                    ]
+                    unstitch_commands(node_bridge, veth_host=veth_host)
                 )
             except OSError as error:
                 logger.warning("glovebox unstitch of %s failed: %s", project, error)
@@ -616,11 +613,14 @@ def stitch_commands(
     ]
 
 
-def unstitch_commands(segment: GloveboxSegment, *, veth_host: str) -> list[list[str]]:
-    """Tear down the stitch: deleting the host veth end removes its peer, then the node bridge goes."""
+def unstitch_commands(node_bridge: str, *, veth_host: str) -> list[list[str]]:
+    """Tear down the stitch: deleting the host veth end removes its peer, then the node bridge goes.
+
+    Takes the plain `node_bridge` name (not a `GloveboxSegment`) so `GloveboxHost.teardown` can undo from its recorded `(node_bridge, veth_host)` without a live plan.
+    """
     return [
         ["ip", "link", "del", veth_host],
-        ["ip", "link", "del", segment.node_bridge],
+        ["ip", "link", "del", node_bridge],
     ]
 
 

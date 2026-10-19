@@ -309,7 +309,9 @@ def test_unstitch_removes_the_veth_and_node_bridge() -> None:
     from inspect_ranges._host.glovebox import glovebox_segments, unstitch_commands
 
     seg = glovebox_segments(_glovebox_plan())[0]
-    joined = [" ".join(c) for c in unstitch_commands(seg, veth_host="gbv0h")]
+    joined = [
+        " ".join(c) for c in unstitch_commands(seg.node_bridge, veth_host="gbv0h")
+    ]
     assert "ip link del gbv0h" in joined
     assert "ip link del gbx-dmz" in joined
 
