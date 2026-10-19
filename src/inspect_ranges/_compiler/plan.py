@@ -367,15 +367,6 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 hint=_GUEST_CONTENT_HINT,
             )
         )
-    if spec.variables:
-        issues.append(
-            Issue(
-                code="randomization-not-realized",
-                path=("variables",),
-                message="the range declares per-instance variables; draws arrive with the generation layer (defaults are in effect until then)",
-                hint="validation substitutes defaults, so the definition realizes concretely today",
-            )
-        )
     if spec.active_directory is not None:
         issues.append(
             Issue(

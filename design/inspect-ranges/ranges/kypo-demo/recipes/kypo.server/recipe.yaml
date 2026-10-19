@@ -1,0 +1,7 @@
+name: kypo.server
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  telnet_port:
+    default: "2323"

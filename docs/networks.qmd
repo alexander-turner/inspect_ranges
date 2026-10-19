@@ -353,7 +353,7 @@ Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux st
 
 ## Segmentation
 
-Routers join segments and carry the inter-segment policy. Rules are default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
+Routers join segments and carry the inter-segment policy. A router with no `acl` is a plain router: everything forwards (the KYPO/CyRIS pure-router shape). Declaring any rule flips it to default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

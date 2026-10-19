@@ -495,7 +495,40 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                     entry["routes"] = static
             else:
                 if network.gateway is not None:
-                    entry["routes"] = [{"to": "default", "via": str(network.gateway)}]
+                    gatewayed = [
+                        networks[other.network]
+                        for other in guest.interfaces
+                        if networks[other.network].gateway is not None
+                    ]
+                    if len(gatewayed) == 1:
+                        entry["routes"] = [
+                            {"to": "default", "via": str(network.gateway)}
+                        ]
+                    else:
+                        # a multi-homed guest (the build uplink shape) must
+                        # elect its default deterministically: the NAT-mode
+                        # attachment wins, and a deprioritized router-gatewayed
+                        # attachment keeps explicit sibling-subnet routes so
+                        # cross-segment traffic still crosses the router
+                        default_metric = 50 if network.mode == "nat" else 200
+                        routes = [
+                            {
+                                "to": "default",
+                                "via": str(network.gateway),
+                                "metric": default_metric,
+                            }
+                        ]
+                        if network.mode != "nat":
+                            routes.extend(
+                                {
+                                    "to": str(sibling.cidr),
+                                    "via": str(network.gateway),
+                                }
+                                for sibling in plan.networks
+                                if sibling.name != network.name
+                                and sibling.mode != "nat"
+                            )
+                        entry["routes"] = routes
                 nameservers: dict[str, Any] = {}
                 if network.resolvers:
                     nameservers["addresses"] = [

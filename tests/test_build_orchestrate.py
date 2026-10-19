@@ -1488,3 +1488,142 @@ def test_conformance_refusal_tears_down_the_bx_range(
     assert fakes.down_calls == ["buildme-bx"]
     staging_root = state_dir.parent / "staging"
     assert not any(staging_root.iterdir())
+
+
+def test_egress_build_spec_uplinks_stranded_content_hosts() -> None:
+    """Linux-examples-v1 (the goad-era answer): a provisioned host whose every attachment is router-attached gets the build-only NAT uplink; content-free guests and the router do not; the runtime spec never carries it."""
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Interface,
+        Network,
+        Os,
+        ProvisioningStep,
+        RangeMeta,
+        RangeSpec,
+        Router,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="routedbuild", description="routed build egress"),
+        networks=[
+            Network(name="a", cidr="192.168.20.0/24", mode="routed"),
+            Network(name="b", cidr="192.168.30.0/24", mode="routed"),
+        ],
+        routers=[
+            Router(
+                name="r",
+                interfaces=[
+                    Interface(network="a", ip="192.168.20.1"),
+                    Interface(network="b", ip="192.168.30.1"),
+                ],
+            )
+        ],
+        hosts=[
+            Host(
+                name="server",
+                os=Os(type="linux"),
+                image="ubuntu-focal",
+                interfaces=[Interface(network="a", ip="192.168.20.5")],
+                provisioning=[ProvisioningStep(recipe="kypo.server")],
+            ),
+            Host(
+                name="bare",
+                os=Os(type="linux"),
+                image="ubuntu-focal",
+                interfaces=[Interface(network="b", ip="192.168.30.7")],
+            ),
+        ],
+        attacker=Attacker(host="bare", entry="assumed-breach"),
+    )
+    build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
+    uplink = next(n for n in build.networks if n.name == "build-uplink")
+    # a content-free foothold keeps its containment in the build variant
+    assert build.attacker.egress == "none"
+    assert uplink.mode == "nat"
+    assert uplink.egress is not None and uplink.egress.allow == ["0.0.0.0/0"]
+    assert not any(
+        str(uplink.cidr) == str(n.cidr)
+        for n in build.networks
+        if n.name != "build-uplink"
+    )
+    by_name = {host.name: host for host in build.hosts}
+    assert [i.network for i in by_name["server"].interfaces] == ["a", "build-uplink"]
+    assert [i.network for i in by_name["bare"].interfaces] == ["b"]
+    assert [i.network for i in build.routers[0].interfaces] == ["a", "b"]
+    # the routed segments themselves are untouched, and the runtime spec too
+    assert all(n.mode == "routed" for n in build.networks if n.name in ("a", "b"))
+    assert not any(n.name == "build-uplink" for n in spec.networks)
+
+
+def test_egress_build_spec_lifts_containment_for_provisioned_footholds() -> None:
+    """A foothold host carrying recipes needs build egress, which the attacker's runtime containment (egress: none) would drop at the hypervisor; the build variant lifts it, the runtime spec keeps it."""
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Interface,
+        Network,
+        Os,
+        ProvisioningStep,
+        RangeMeta,
+        RangeSpec,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="foothold-build", description="provisioned foothold"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="client",
+                os=Os(type="linux"),
+                image="ubuntu-focal",
+                interfaces=[Interface(network="lab")],
+                provisioning=[ProvisioningStep(recipe="kypo.client")],
+            )
+        ],
+        attacker=Attacker(host="client", entry="assumed-breach"),
+    )
+    build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
+    assert build.attacker.egress == "open"
+    assert spec.attacker.egress == "none"
+
+
+def test_egress_build_spec_uplink_dodges_name_and_cidr_collisions() -> None:
+    from inspect_ranges.types import (
+        Attacker,
+        Host,
+        Interface,
+        Network,
+        Os,
+        ProvisioningStep,
+        RangeMeta,
+        RangeSpec,
+        Router,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="collide", description="uplink collisions"),
+        networks=[
+            Network(name="build-uplink", cidr="10.254.169.0/24", mode="routed"),
+            Network(name="b", cidr="192.168.30.0/24", mode="routed"),
+        ],
+        routers=[
+            Router(
+                name="r",
+                interfaces=[Interface(network="build-uplink"), Interface(network="b")],
+            )
+        ],
+        hosts=[
+            Host(
+                name="server",
+                os=Os(type="linux"),
+                image="ubuntu-focal",
+                interfaces=[Interface(network="build-uplink")],
+                provisioning=[ProvisioningStep(recipe="kypo.server")],
+            )
+        ],
+        attacker=Attacker(host="server", entry="assumed-breach"),
+    )
+    build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
+    uplink = next(n for n in build.networks if n.name == "ir-build-uplink")
+    assert str(uplink.cidr) != "10.254.169.0/24"

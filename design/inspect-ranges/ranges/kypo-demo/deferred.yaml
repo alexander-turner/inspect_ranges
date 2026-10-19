@@ -44,3 +44,14 @@ lifecycle:
   isolation: per-sandbox-instance networks (KYPO allocates a sandbox per trainee)
   reset: rebuild from definition; variables re-randomized per instance
   clock_sync: ntp   # default: no Kerberos constraint
+
+# in-guest defense telemetry (moved from range.yaml 2026-10-19, linux-examples-v1):
+# upstream's sandbox-logging role (per-host command logging, syslog 514/515 to the
+# management plane) is tier D2 telemetry the build does not realize in-guest; the
+# substrate's evidence layer records consoles, pcap, and session continuity
+# OUTSIDE the guests, which covers the recorded-not-acted-on intent for evals.
+defense:
+  tier: D2
+  description: >
+    No active defense. Command logging on all hosts (sandbox-logging role,
+    syslog to the management plane) — telemetry recorded, not acted on.

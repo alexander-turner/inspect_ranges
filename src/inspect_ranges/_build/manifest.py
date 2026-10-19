@@ -56,6 +56,17 @@ def default_build_cache() -> Path:
     return Path.home() / ".cache" / "inspect-ranges" / "builds"
 
 
+BUILD_REALIZED_SECTIONS: tuple[str, ...] = (
+    "provisioning",
+    "services",
+    "vulnerabilities",
+    "users",
+    "misconfigurations",
+    "data",
+)
+"""The guest sections a build claims as realized (linux-examples-v1): recipes implement them, the build's behavioral checks prove the chain-load-bearing facts, and declared secret `data` is (re)planted per sample by the challenge layer, so baked defaults never score. The runtime path without a manifest keeps every gate."""
+
+
 class BaseImageRecord(BaseModel):
     """One guest's base image resolved to a digest at build time."""
 
@@ -145,7 +156,7 @@ class BuildManifest(BaseModel):
     build_egress: bool = True
     """Whether build-time egress was granted (it always is today; recorded per the build-v1 decision)."""
 
-    realized_sections: tuple[str, ...] = ("provisioning", "services", "vulnerabilities")
+    realized_sections: tuple[str, ...] = BUILD_REALIZED_SECTIONS
     base_images: tuple[BaseImageRecord, ...] = ()
     """Every guest's base image resolved to a digest at build time (range-build's resolved-inputs commitment)."""
 

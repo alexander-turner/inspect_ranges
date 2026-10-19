@@ -2,7 +2,7 @@
 
 A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each host's `provisioning` steps run in declaration order through the slice-1 executor, every `services`/`vulnerabilities` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Provisioned guests are then captured as realized images and the build manifest records the whole build (slice 5); declared behavioral checks run against the captured artifacts before the manifest lands (slice 6), so a recorded build is realized, verified, AND proven.
 
-The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and the build nameserver appended (host-derived by default, because fleets that force DNS through a VPC resolver are the norm), router-attached and `routed` networks are left untouched (the goad-era question), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate. The staging bundle is per-run (a fresh temp dir) and removed after the build unless `keep` left the range running from it, so the egress-enabled bundle never lingers where a runtime verb could boot it.
+The egress build plan is a plan transformation, never a spec change (build-v1, decided 2026-10-17): routerless networks flip to `mode: nat` with an allow-all egress policy and the build nameserver appended (host-derived by default, because fleets that force DNS through a VPC resolver are the norm), router-attached and `routed` networks are left untouched with stranded content hosts gaining a build-only NAT uplink segment (the goad-era question, answered in linux-examples-v1), and the runtime spec is never mutated. The transformed spec re-validates before planning, and planning runs with `provisioning` in `PlanOptions.realized_sections`: the build realizes that section now, while the runtime path keeps its gate. The staging bundle is per-run (a fresh temp dir) and removed after the build unless `keep` left the range running from it, so the egress-enabled bundle never lingers where a runtime verb could boot it.
 """
 
 import asyncio
@@ -44,8 +44,10 @@ from ..schema import revalidate_range
 from ..types import (
     DnsConfig,
     EgressPolicy,
+    Interface,
     Issue,
     IssueError,
+    Network,
     RangeSpec,
     has_guest_content,
 )
@@ -62,6 +64,7 @@ from .capture import (
 )
 from .errors import BuildError
 from .manifest import (
+    BUILD_REALIZED_SECTIONS,
     BaseImageRecord,
     BehavioralCheckRecord,
     BuildManifest,
@@ -295,7 +298,7 @@ class BuildResult(BaseModel):
 def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> RangeSpec:
     """The egress-enabled build variant of a spec: a deep copy, never a mutation of the runtime spec.
 
-    Routerless networks flip to `mode: nat` with an allow-all v4 egress policy and the build nameserver (host-derived by default) appended to their resolvers; router-attached and `routed` networks are untouched. The copy re-validates, so the egress semantic gates still apply to what the build actually boots.
+    Routerless networks flip to `mode: nat` with an allow-all v4 egress policy and the build nameserver (host-derived by default) appended to their resolvers; router-attached and `routed` networks are untouched. A content-carrying host left with no egress-bearing attachment gets a dedicated `build-uplink` NAT segment appended instead (the routed-topology answer: the runtime spec never carries it, and realized images keep no reference because network config is per-boot cloud-init). The copy re-validates, so the egress semantic gates still apply to what the build actually boots.
 
     Raises:
         IssueError: when the transformed spec fails re-validation (the semantic gates), as positioned issues where the validator carried them.
@@ -330,6 +333,77 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
             network.dns.nameservers = [nameserver]
         elif nameserver not in network.dns.nameservers:
             network.dns.nameservers.append(nameserver)
+    # the build uplink (linux-examples-v1, answering the recorded goad-era
+    # question): a content-carrying host whose every attachment is a
+    # router-attached or routed segment has no egress-bearing network after
+    # the flips above, so the build variant attaches it to a dedicated NAT
+    # uplink segment instead; the runtime spec never carries it, the realized
+    # image keeps no reference (network config is per-boot cloud-init), and
+    # the proof boot consumes the runtime spec, uplink-free
+    egress_bearing = {
+        network.name for network in build.networks if network.mode == "nat"
+    }
+    stranded = [
+        host
+        for host in build.hosts
+        if host.provisioning
+        and not any(
+            interface.network in egress_bearing for interface in host.interfaces
+        )
+    ]
+    if stranded:
+        from ipaddress import ip_network
+
+        taken = {network.name for network in build.networks}
+        uplink_name = "build-uplink"
+        while uplink_name in taken:
+            uplink_name = "ir-" + uplink_name
+        declared = [ip_network(str(network.cidr)) for network in build.networks]
+        candidates = ("10.254.169.0/24", "192.168.254.0/24", "172.31.199.0/24")
+        uplink_cidr = next(
+            (
+                candidate
+                for candidate in candidates
+                if not any(
+                    ip_network(candidate).overlaps(existing) for existing in declared
+                )
+            ),
+            None,
+        )
+        if uplink_cidr is None:
+            raise IssueError(
+                [
+                    Issue(
+                        code="build-uplink-cidr-exhausted",
+                        path=("networks",),
+                        message="every build-uplink candidate subnet overlaps a declared network; the build cannot attach egress",
+                        hint="free one of 10.254.169.0/24, 192.168.254.0/24, 172.31.199.0/24",
+                    )
+                ]
+            )
+        build.networks.append(
+            Network(
+                name=uplink_name,
+                cidr=uplink_cidr,
+                mode="nat",
+                egress=EgressPolicy(allow=["0.0.0.0/0"]),
+                dns=DnsConfig(nameservers=[nameserver]),
+            )
+        )
+        for host in stranded:
+            host.interfaces.append(Interface(network=uplink_name))
+    # a provisioned FOOTHOLD host is also the attacker, whose runtime
+    # containment (egress: none) drops its flows at the hypervisor before any
+    # network policy applies; the build boots no agent, so the build variant
+    # lifts the drop exactly when recipes must run on that host (every such
+    # host has an egress-bearing attachment by now: flipped or uplinked). The
+    # runtime spec keeps the containment untouched.
+    if build.attacker.host is not None:
+        foothold = next(
+            (host for host in build.hosts if host.name == build.attacker.host), None
+        )
+        if foothold is not None and foothold.provisioning:
+            build.attacker.egress = "open"
     try:
         return revalidate_range(build)
     except ValidationError as error:
@@ -620,11 +694,11 @@ def build_range(
         plan_options = PlanOptions(
             image_cache=image_cache,
             cid_base=options.cid_base,
-            # the build realizes provisioning (slice 2) and verifies services
-            # and vulnerabilities (slice 4); the runtime path keeps its gates
-            realized_sections=frozenset(
-                {"provisioning", "services", "vulnerabilities"}
-            ),
+            # the build realizes the recipe-realizable guest sections: recipes
+            # implement them, behavioral checks prove them, and the challenge
+            # plant layer owns declared secret data at sample time
+            # (linux-examples-v1); the runtime path keeps its gates
+            realized_sections=frozenset(BUILD_REALIZED_SECTIONS),
         )
         try:
             plan = render_bundle(build_spec, staging, plan_options)
