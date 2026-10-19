@@ -11,9 +11,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+from inspect_ranges._build.manifest import now_iso
 from inspect_ranges._dist import parse_location
 from inspect_ranges._dist.resolve import pull_image, push_image_artifact
-from inspect_ranges._build.manifest import now_iso
 from inspect_ranges._runtime.images import DaemonPin, ImageMetadata
 
 CHECKS: list[tuple[bool, str]] = []
