@@ -405,3 +405,12 @@ attacker:
     assert uplink_routes[0]["to"] == "default" and uplink_routes[0]["metric"] == 50
     single = yaml.safe_load(seeds["single"].read_text())["ethernets"]
     assert single["eth0"]["routes"] == [{"to": "default", "via": "192.168.30.1"}]
+
+
+def test_guest_hostnames_sanitize_to_rfc_form() -> None:
+    """Underscored guest names (the terraform-derived shape) render hostname-safe: an invalid hostname makes noble's cloud-init degraded and readiness refuses (linux-examples-v1 slice 3)."""
+    from inspect_ranges._compiler.render import guest_hostname
+
+    assert guest_hostname("router_external") == "router-external"
+    assert guest_hostname("database_0") == "database-0"
+    assert guest_hostname("web") == "web"

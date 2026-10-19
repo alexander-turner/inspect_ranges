@@ -344,7 +344,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     Issue(
                         code="guest-config-not-realized",
                         path=("hosts", index, field_name),
-                        message=f"host {host.name!r} declares {field_name}, which render v1 does not realize (the rendered in-guest hostname is the host's name)",
+                        message=f"host {host.name!r} declares {field_name}, which render v1 does not realize (the rendered in-guest hostname is the hostname-safe form of the host's name)",
                         hint=_GUEST_CONTENT_HINT,
                     )
                 )
