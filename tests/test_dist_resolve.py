@@ -55,7 +55,8 @@ def spec_file(tmp_path: Path, *, extra: str = "") -> Path:
 @pytest.fixture(autouse=True)
 def fake_backing_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     def probe(path: Path) -> str | None:
-        if path.name.startswith("distfix-web-"):
+        if path.name.startswith("distfix-web-") or path.name == "attack.qcow2":
+            # a renamed overlay still embeds its original backing by name
             return "focal-guest.qcow2"
         return {"focal-guest.qcow2": "noble.img"}.get(path.name)
 

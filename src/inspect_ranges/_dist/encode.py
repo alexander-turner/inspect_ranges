@@ -40,6 +40,9 @@ __all__ = [
     "LAYER_RECIPE_TAR",
     "LAYER_SIDECAR",
     "encode_image_chain",
+    "prefixed_digest",
+    "qcow2_descriptor",
+    "realized_sidecar_path",
     "push_build",
     "qcow2_backing_name",
     "validated_cache_name",
@@ -107,7 +110,7 @@ def qcow2_backing_name(path: Path) -> str | None:
     return str(backing) if backing is not None else None
 
 
-def _prefixed(digest: str) -> str:
+def prefixed_digest(digest: str) -> str:
     """Normalize the repo's two digest spellings (raw hex and `sha256:`-prefixed) to the OCI form."""
     return digest if digest.startswith("sha256:") else f"sha256:{digest}"
 
@@ -117,11 +120,11 @@ def _metadata_path(image_cache: Path, file: str) -> Path:
     return image_cache / (file.removesuffix(".qcow2") + ".json")
 
 
-def _realized_sidecar_path(image_cache: Path, file: str) -> Path:
+def realized_sidecar_path(image_cache: Path, file: str) -> Path:
     return image_cache / (file.removesuffix(".qcow2") + ".realized.json")
 
 
-def _qcow2_descriptor(
+def qcow2_descriptor(
     store: ContentStore,
     path: Path,
     *,
@@ -188,7 +191,7 @@ def encode_image_chain(
                 "chain-invalid",
                 f"{file} embeds a backing file but has no provenance sidecar; it cannot publish as a vendor base",
             )
-        blob = _qcow2_descriptor(
+        blob = qcow2_descriptor(
             store, image_cache / file, expected=digest, progress=progress
         )
         members.append(
@@ -211,10 +214,10 @@ def encode_image_chain(
         ) from error
     validated_cache_name(metadata.vendor_file)
     vendor_path = image_cache / metadata.vendor_file
-    vendor_blob = _qcow2_descriptor(
+    vendor_blob = qcow2_descriptor(
         store,
         vendor_path,
-        expected=_prefixed(metadata.vendor_sha256),
+        expected=prefixed_digest(metadata.vendor_sha256),
         progress=progress,
     )
     members.append(
@@ -230,10 +233,10 @@ def encode_image_chain(
             )
         )
     )
-    golden_blob = _qcow2_descriptor(
+    golden_blob = qcow2_descriptor(
         store,
         image_cache / file,
-        expected=_prefixed(digest or metadata.golden_sha256),
+        expected=prefixed_digest(digest or metadata.golden_sha256),
         progress=progress,
     )
     members.append(
@@ -249,7 +252,7 @@ def encode_image_chain(
                     ANN_KIND: "golden",
                     ANN_NAME: file,
                     ANN_BACKING_FILE: metadata.vendor_file,
-                    ANN_BACKING_DIGEST: _prefixed(metadata.vendor_sha256),
+                    ANN_BACKING_DIGEST: prefixed_digest(metadata.vendor_sha256),
                 },
             )
         )
@@ -298,16 +301,16 @@ def push_build(
         encode_golden_chain(golden_file, guest.golden_digest)
         validated_cache_name(guest.realized_file)
         realized_path = image_cache / guest.realized_file
-        sidecar_path = _realized_sidecar_path(image_cache, guest.realized_file)
+        sidecar_path = realized_sidecar_path(image_cache, guest.realized_file)
         if not sidecar_path.is_file():
             raise DistError(
                 "artifact-missing",
                 f"{sidecar_path} is missing; a realized image publishes with its provenance sidecar",
             )
-        realized_blob = _qcow2_descriptor(
+        realized_blob = qcow2_descriptor(
             store,
             realized_path,
-            expected=_prefixed(guest.realized_sha256),
+            expected=prefixed_digest(guest.realized_sha256),
             progress=progress,
         )
         add(
@@ -324,7 +327,7 @@ def push_build(
                         ANN_NAME: guest.realized_file,
                         ANN_GUEST: guest.name,
                         ANN_BACKING_FILE: golden_file,
-                        ANN_BACKING_DIGEST: _prefixed(guest.golden_digest),
+                        ANN_BACKING_DIGEST: prefixed_digest(guest.golden_digest),
                     },
                 )
             )

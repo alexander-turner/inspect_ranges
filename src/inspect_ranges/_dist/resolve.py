@@ -26,6 +26,7 @@ from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor, OciIndex, ProgressF
 
 __all__ = [
     "NEVER_PULL_ENV",
+    "PIN_FILE_ENV",
     "PullReport",
     "ensure_build_available",
     "pull_image",
@@ -208,6 +209,32 @@ def pull_pinned(
     )
 
 
+PIN_FILE_ENV = "INSPECT_RANGES_PIN_FILE"
+"""Path to a fleet pin file ({"pins": {name: root digest}}): a catalog name resolving to a different root than its pin refuses `pin-mismatch` (Q11)."""
+
+
+def _pins() -> dict[str, str]:
+    path = os.environ.get(PIN_FILE_ENV)
+    if not path:
+        return {}
+    import json as json_module
+
+    try:
+        data = json_module.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise DistError(
+            "pin-file-invalid", f"{path} did not parse as a pin file: {error}"
+        ) from error
+    pins = data.get("pins")
+    if not isinstance(pins, dict):
+        raise DistError("pin-file-invalid", f"{path} carries no pins mapping")
+    return {
+        key: value
+        for key, value in pins.items()  # pyright: ignore[reportUnknownVariableType]
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
 NEVER_PULL_ENV = "INSPECT_RANGES_NEVER_PULL"
 """Set to pin a host against IMPLICIT transfers: the provider's auto-pull and the build path's registry tier refuse/skip instead of touching the network. Scope recorded (round-4 N4): explicit verbs (`pull`, `images pull`, `images refresh`) still work on a pinned host, because typing them IS the operator's explicit intent; a fully offline host simply configures no reachable locations."""
 
@@ -295,11 +322,20 @@ def pull_image(
 
     With `replace` (the refresh act), a cache name holding different content moves forward to the published chain; without it, divergence refuses `cache-name-conflict` (shadow deliberately or prune first).
     """
+    pins = _pins()
     for location in locations:
         store = location.store_for(name)
         root = _try_ref(store, location.latest_ref(name))
         if root is None:
             continue
+        if name in pins and root.digest != pins[name]:
+            raise DistError(
+                "pin-mismatch",
+                f"{name!r} at {location.describe()} resolves to {root.digest[:19]}..., "
+                f"but the fleet pin file pins {pins[name][:19]}...; the location moved "
+                "past the fleet's pinned state (update the pin file deliberately, or "
+                "mirror the pinned artifacts)",
+            )
         result = materialize_closure(
             store,
             root,

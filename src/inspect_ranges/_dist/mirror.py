@@ -45,12 +45,27 @@ def source_names(location: Location) -> list[str]:
     Raises:
         DistError: `location-unenumerable` for sources with no listing surface (the public hub), with the per-name form as the remedy.
     """
+    from .catalog import CATALOG_REF, catalog_names
+
+    try:
+        # the published name list is the first-class enumeration (it is what
+        # the hub-shaped locations have), with the structural listings below
+        # as the fallback for locations that never published one
+        return [name for name in catalog_names(location) if name != CATALOG_REF]
+    except DistError as error:
+        if error.code not in ("ref-not-found",):
+            raise
     if location.directory is not None:
         layout = OciLayout(location.directory).open()
         names: list[str] = []
         for entry in layout.index().manifests:
             name = (entry.annotations or {}).get(REF_NAME_ANNOTATION)
-            if name and ":spec-" not in name and name not in names:
+            if (
+                name
+                and ":spec-" not in name
+                and name != CATALOG_REF
+                and name not in names
+            ):
                 names.append(name)
         return names
     base, prefix = location.registry_base_and_prefix()

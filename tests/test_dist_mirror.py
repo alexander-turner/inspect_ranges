@@ -282,3 +282,72 @@ def test_push_refuses_unpublishable_names(tmp_path: Path) -> None:
             build_cache=fixture.build_cache,
             range_dir=fixture.range_dir,
         )
+
+
+def test_publish_realized_promotes_to_the_bare_name(tmp_path: Path) -> None:
+    """Catalog slice 2: a built guest's realized image publishes under the bare catalog name, consumers land it as <name>.qcow2 with its chain and provenance, and the catalog list carries it."""
+    from inspect_ranges._dist import pull_image
+    from inspect_ranges._dist.catalog import catalog_names, publish_realized
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    root = publish_realized(
+        fixture.manifest, "web", "attack", location, image_cache=fixture.image_cache
+    )
+    assert root.digest.startswith("sha256:")
+    assert catalog_names(location) == ["attack"]
+    consumer = tmp_path / "consumer-images"
+    consumer.mkdir()
+    pulled = pull_image("attack", [location], image_cache=consumer)
+    assert pulled is not None
+    assert (consumer / "attack.qcow2").read_bytes() == (
+        fixture.image_cache / fixture.realized_file
+    ).read_bytes()
+    assert (consumer / "attack.realized.json").is_file()
+    # the chain traveled: the golden and vendor landed for the boot path
+    assert (consumer / "focal-guest.qcow2").is_file()
+    assert (consumer / "noble.img").is_file()
+
+
+def test_publish_golden_and_catalog_enumeration(tmp_path: Path) -> None:
+    """Publish --golden promotes a golden chain; source_names enumerates via the catalog artifact (the hub-shaped path)."""
+    from inspect_ranges._dist.catalog import catalog_names, publish_golden
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    assert catalog_names(location) == ["focal-guest"]
+    assert source_names(location) == ["focal-guest"]
+
+
+def test_pin_file_round_trip_and_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q11: the fleet pin file pins catalog roots; a moved catalog refuses pin-mismatch instead of silently diverging the fleet."""
+    import hashlib as hashlib_module
+
+    from inspect_ranges._dist import pull_image
+    from inspect_ranges._dist.catalog import generate_pin_file, publish_golden
+    from inspect_ranges._dist.resolve import PIN_FILE_ENV
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    pin_file = tmp_path / "pins.json"
+    pins = generate_pin_file(location, pin_file)
+    assert set(pins) == {"focal-guest"}
+    monkeypatch.setenv(PIN_FILE_ENV, str(pin_file))
+    consumer = tmp_path / "pinned-images"
+    consumer.mkdir()
+    assert pull_image("focal-guest", [location], image_cache=consumer) is not None
+    # the publisher moves the catalog past the pin
+    moved = b"golden-image-bytes-moved"
+    (fixture.image_cache / "focal-guest.qcow2").write_bytes(moved)
+    meta = json.loads((fixture.image_cache / "focal-guest.json").read_text())
+    meta["golden_sha256"] = hashlib_module.sha256(moved).hexdigest()
+    (fixture.image_cache / "focal-guest.json").write_text(json.dumps(meta))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    fresh = tmp_path / "fresh-images"
+    fresh.mkdir()
+    with pytest.raises(DistError, match="pin-mismatch"):
+        pull_image("focal-guest", [location], image_cache=fresh)
