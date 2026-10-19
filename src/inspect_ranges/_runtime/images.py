@@ -27,7 +27,7 @@ from .._channel.bundle import (
     verify_daemon_bundle,
 )
 from .._channel.protocol import PROTOCOL_VERSION
-from .._compiler.plan import image_file_name
+from .._compiler.plan import image_file_name, image_sidecar_file_name
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +188,8 @@ def _cache_file_name(name: str) -> str:
 
 
 def _metadata_path(cache: Path, file: str) -> Path:
-    # full name, not Path.stem: golden names may contain dots
-    return cache / (file.removesuffix(".qcow2") + ".json")
+    # one naming rule with the compiler, which reads recorded metadata at render
+    return cache / image_sidecar_file_name(file)
 
 
 def _load_metadata(path: Path) -> "ImageMetadata | None":

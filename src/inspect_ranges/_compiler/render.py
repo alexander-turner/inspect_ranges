@@ -7,10 +7,12 @@ Applier contract (in order): create bridges from `netns/bridges.txt`; add `netns
 
 import hashlib
 import json
+import logging
 import re
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from xml.sax.saxutils import escape
 
 import yaml
 
@@ -32,6 +34,7 @@ from .plan import (
     ResolvedPlan,
     guest_allocation,
     guest_uid,
+    image_sidecar_file_name,
     plan_json,
     resolve_plan,
 )
@@ -622,6 +625,11 @@ def guest_hostname(name: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", name).rstrip("-")
 
 
+logger = logging.getLogger("inspect_ranges.render")
+
+DEFAULT_WINDOWS_ADMIN_PASSWORD = "RangeAdm!n2026"
+"""The Windows golden's built-in Administrator password when none was recorded: deliberate scenario content (ranges authenticate in-guest with it; the CONTROL plane is the vsock daemon as SYSTEM and never uses it). The install recipe (`winimage`) shares this constant, so a default-derived golden and a default-rendered seed agree."""
+
 _WINDOWS_UNATTEND_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
 <!-- Per-boot specialize seed for a sysprep'd inspect-ranges Windows golden:
      hostname, static addressing (interfaces keyed by MAC), and the OOBE
@@ -686,14 +694,17 @@ _TCPIP_INTERFACE = """\
 {routes}        </Interface>
 """
 
-_TCPIP_ROUTE = """\
+_TCPIP_ROUTES_WRAPPER = """\
           <Routes>
+{routes}          </Routes>
+"""
+
+_TCPIP_ROUTE = """\
             <Route wcm:action="add">
-              <Identifier>1</Identifier>
-              <Prefix>0.0.0.0/0</Prefix>
-              <NextHopAddress>{gateway}</NextHopAddress>
-            </Route>
-          </Routes>
+              <Identifier>{identifier}</Identifier>
+              <Prefix>{prefix}</Prefix>
+              <NextHopAddress>{via}</NextHopAddress>
+{metric}            </Route>
 """
 
 _DNS_INTERFACE = """\
@@ -715,14 +726,51 @@ def _windows_unattend(
 ) -> str:
     """The per-boot specialize answer file for a Windows guest: hostname, MAC-keyed static addressing, resolvers, and the OOBE answers. The Administrator password comes from the golden's recorded metadata (scenario content, local-only), falling back to the documented default."""
     networks = {network.name: network for network in plan.networks}
+    gatewayed = [
+        networks[other.network]
+        for other in guest.interfaces
+        if networks[other.network].gateway is not None
+    ]
     tcpip: list[str] = []
     dns: list[str] = []
-    for interface in guest.interfaces:
+    for index, interface in enumerate(guest.interfaces):
         network = networks[interface.network]
         mac = interface.mac.upper().replace(":", "-")
-        routes = ""
+        route_specs: list[tuple[str, str, int | None]] = []
         if network.gateway is not None:
-            routes = _TCPIP_ROUTE.format(gateway=network.gateway)
+            if len(gatewayed) == 1:
+                route_specs.append(("0.0.0.0/0", str(network.gateway), None))
+            else:
+                # the linux election, mirrored (the build uplink shape): the
+                # NAT-mode attachment wins the default; deprioritized
+                # router-gatewayed attachments tie-break by interface index
+                # and keep explicit sibling-subnet routes so cross-segment
+                # traffic still crosses the router
+                default_metric = 50 if network.mode == "nat" else 200 + index
+                route_specs.append(("0.0.0.0/0", str(network.gateway), default_metric))
+                if network.mode != "nat":
+                    attached = {other.network for other in guest.interfaces}
+                    route_specs.extend(
+                        (str(sibling.cidr), str(network.gateway), None)
+                        for sibling in plan.networks
+                        if sibling.name not in attached and sibling.mode != "nat"
+                    )
+        routes = ""
+        if route_specs:
+            rendered = "".join(
+                _TCPIP_ROUTE.format(
+                    identifier=identifier,
+                    prefix=prefix,
+                    via=via,
+                    metric=(
+                        f"              <Metric>{metric}</Metric>\n"
+                        if metric is not None
+                        else ""
+                    ),
+                )
+                for identifier, (prefix, via, metric) in enumerate(route_specs, start=1)
+            )
+            routes = _TCPIP_ROUTES_WRAPPER.format(routes=rendered)
         tcpip.append(
             _TCPIP_INTERFACE.format(
                 mac=mac,
@@ -741,27 +789,48 @@ def _windows_unattend(
         hostname=windows_hostname(guest.name),
         tcpip_interfaces="".join(tcpip),
         dns_interfaces="".join(dns),
-        admin_password=_windows_admin_password(options, guest),
+        # the password is the one spec-side value a template cannot constrain:
+        # XML-escape it so no password can break (or smuggle elements into)
+        # the answer file
+        admin_password=escape(_windows_admin_password(options, guest)),
     )
 
 
 def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) -> str:
-    """The golden's recorded Administrator password (ImageMetadata, local-only scenario content), else the documented default."""
-    from .._runtime.winimage import DEFAULT_ADMIN_PASSWORD
-
+    """The golden's recorded Administrator password (its provenance sidecar, local-only scenario content), else `DEFAULT_WINDOWS_ADMIN_PASSWORD`. Every fallback logs: a seed carrying the wrong password RESETS the clone's Administrator at OOBE, so silence here would diverge a range from its golden invisibly."""
     if options is None or options.image_cache is None:
-        return DEFAULT_ADMIN_PASSWORD
-    metadata_path: Path = options.image_cache / f"{Path(guest.image.file).stem}.json"
-    if metadata_path.is_file():
-        try:
-            from .._runtime.images import ImageMetadata
-
-            metadata = ImageMetadata.model_validate_json(metadata_path.read_text())
-            if metadata.admin_password:
-                return metadata.admin_password
-        except ValueError:
-            pass
-    return DEFAULT_ADMIN_PASSWORD
+        logger.warning(
+            "windows guest %r renders without an image cache; the seed carries the default Administrator password",
+            guest.name,
+        )
+        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    sidecar = options.image_cache / image_sidecar_file_name(guest.image.file)
+    try:
+        loaded: object = json.loads(sidecar.read_text())
+    except FileNotFoundError:
+        logger.warning(
+            "windows guest %r: image %s has no provenance sidecar; the seed carries the default Administrator password",
+            guest.name,
+            guest.image.file,
+        )
+        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    except (OSError, ValueError):
+        logger.warning(
+            "windows guest %r: sidecar %s is unreadable; the seed carries the default Administrator password",
+            guest.name,
+            sidecar.name,
+        )
+        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    if isinstance(loaded, dict):
+        password = cast(dict[str, object], loaded).get("admin_password")
+        if isinstance(password, str) and password:
+            return password
+    logger.warning(
+        "windows guest %r: golden %s records no Administrator password; the seed carries the default",
+        guest.name,
+        guest.image.file,
+    )
+    return DEFAULT_WINDOWS_ADMIN_PASSWORD
 
 
 def _user_data(

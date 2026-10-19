@@ -595,3 +595,157 @@ attacker:
     by_name = {g["name"]: g for g in boot["guests"]}
     assert by_name["big"]["overlay_gb"] == 40  # clamped up from the 10G default
     assert by_name["roomy"]["overlay_gb"] == 80  # larger declarations stand
+
+
+def test_windows_cloud_hypervisor_refuses_at_planning(cache: Path) -> None:
+    """A Windows host on cloud-hypervisor can never specialize (the unattend seed rides removable media, which CH cannot present), so planning refuses instead of hanging at readiness (slice-1 review finding)."""
+    spec = RangeSpec(
+        meta=RangeMeta(name="winch", description="windows on cloud-hypervisor"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="dc",
+                os=Os(type="windows"),
+                image="win-golden",
+                vmm="cloud-hypervisor",
+                interfaces=[Interface(network="lab")],
+            )
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, options(cache))
+    issue = next(
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "windows-vmm-not-supported"
+    )
+    assert issue.path == ("hosts", 0, "vmm")
+
+
+def test_windows_netbios_truncation_collides_at_planning(cache: Path) -> None:
+    """Two Windows hosts whose names differ only past the 15-character NetBIOS limit render the same ComputerName; the collision gate checks the truncated form (slice-1 review finding)."""
+    spec = RangeSpec(
+        meta=RangeMeta(name="winnb", description="netbios collision"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="dc-server-alpha-primary",
+                os=Os(type="windows"),
+                image="win-golden",
+                interfaces=[Interface(network="lab", ip="10.0.0.10")],
+            ),
+            Host(
+                name="dc-server-alpha-secondary",
+                os=Os(type="windows"),
+                image="win-golden",
+                interfaces=[Interface(network="lab", ip="10.0.0.11")],
+            ),
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, options(cache))
+    assert any(issue.code == "hostname-collision" for issue in excinfo.value.issues)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("dc", "dc"),
+        ("abcdefghijklmno", "abcdefghijklmno"),  # exactly the limit
+        ("abcdefghijklmn-xyz", "abcdefghijklmn"),  # no trailing hyphen survives
+        ("web_server.alpha99", "web-server-alph"),  # sanitize, then clamp
+    ],
+)
+def test_windows_hostname_clamps_to_netbios(name: str, expected: str) -> None:
+    from inspect_ranges._compiler.render import windows_hostname
+
+    assert windows_hostname(name) == expected
+
+
+def test_windows_seed_carries_the_goldens_recorded_password_escaped(
+    cache: Path, tmp_path: Path
+) -> None:
+    """The seed's Administrator password comes from the golden's provenance sidecar, XML-escaped: a password carrying `<&>` must neither break the answer file's parse nor smuggle elements into it (slice-1 review finding)."""
+    recorded = 'P@ss<&>"w'
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    (cache / "windows-2022.json").write_text(json.dumps({"admin_password": recorded}))
+    spec_yaml = """
+range:
+  name: winpw
+  schema_version: "0.3"
+  description: recorded password renders escaped
+networks:
+  - name: corp
+    cidr: 10.20.0.0/24
+    mode: isolated
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    interfaces: [{ network: corp, ip: 10.20.0.10 }]
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winpw.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    seed = out / "guests" / "dc" / "seed" / "unattend.xml"
+    root = ElementTree.fromstring(seed.read_text())  # well-formed despite <&>
+    namespace = "{urn:schemas-microsoft-com:unattend}"
+    value = root.find(
+        f".//{namespace}AdministratorPassword/{namespace}Value",
+    )
+    assert value is not None and value.text == recorded  # round-trips exactly
+
+
+def test_windows_multi_gatewayed_host_elects_one_default_route(
+    cache: Path, tmp_path: Path
+) -> None:
+    """A Windows host attached to two gatewayed segments mirrors the Linux election: the NAT attachment's default wins on metric, the router-gatewayed attachment's default is deprioritized — never two unmetered defaults (slice-1 review finding)."""
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    spec_yaml = """
+range:
+  name: winuplink
+  schema_version: "0.3"
+  description: windows build-uplink shape
+networks:
+  - name: uplink
+    cidr: 10.40.0.0/24
+    mode: nat
+  - name: corp
+    cidr: 10.41.0.0/24
+    mode: isolated
+routers:
+  - name: edge
+    interfaces:
+      - { network: corp, ip: 10.41.0.1 }
+      - { network: uplink }
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    interfaces:
+      - { network: uplink, ip: 10.40.0.10 }
+      - { network: corp, ip: 10.41.0.10 }
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external
+"""
+    from inspect_ranges.schema import load_range
+
+    spec_path = tmp_path / "winuplink.yaml"
+    spec_path.write_text(spec_yaml)
+    out = tmp_path / "bundle"
+    render_bundle(load_range(spec_path), out, options(cache))
+    unattend = (out / "guests" / "dc" / "seed" / "unattend.xml").read_text()
+    assert unattend.count("<Prefix>0.0.0.0/0</Prefix>") == 2
+    assert "<Metric>50</Metric>" in unattend  # the NAT attachment wins
+    assert "<Metric>201</Metric>" in unattend  # corp (index 1) deprioritized

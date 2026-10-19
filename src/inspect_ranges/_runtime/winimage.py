@@ -5,23 +5,29 @@ The Windows analogue of `derive_golden`, with a different mechanism because Wind
 The ratified posture (windows-ad-v1): artifacts are LOCAL ONLY, recipes-not-images — this module and the repo's answer files are what ships; the eval ISO comes from Microsoft per machine, and nothing Windows-derived is ever published.
 """
 
+import fcntl
 import hashlib
 import logging
+import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import time
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from .._build.manifest import now_iso
+from .._compiler.render import DEFAULT_WINDOWS_ADMIN_PASSWORD
 from .images import (
     DEFAULT_ARTIFACT_DIR,
     DaemonPin,
     DeriveError,
     ImageMetadata,
     _cache_file_name,  # pyright: ignore[reportPrivateUsage]
+    _load_metadata,  # pyright: ignore[reportPrivateUsage]
     _metadata_path,  # pyright: ignore[reportPrivateUsage]
     _name_lock,  # pyright: ignore[reportPrivateUsage]
     resolve_daemon_bundle,
@@ -34,8 +40,8 @@ logger = logging.getLogger("inspect_ranges.winimage")
 WIN_RECIPE_VERSION = "2"
 """Bumps re-key every Windows golden (the derive-recipe discipline)."""
 
-DEFAULT_ADMIN_PASSWORD = "RangeAdm!n2026"
-"""The golden's built-in Administrator password: deliberate scenario content (ranges authenticate in-guest with it; the CONTROL plane is the vsock daemon as SYSTEM and never uses it). Override per derive with `--admin-password`."""
+DEFAULT_ADMIN_PASSWORD = DEFAULT_WINDOWS_ADMIN_PASSWORD
+"""The golden's built-in Administrator password: deliberate scenario content (ranges authenticate in-guest with it; the CONTROL plane is the vsock daemon as SYSTEM and never uses it). Override per derive with `--admin-password`. The constant lives with the compiler (`render` falls back to it when a golden records no password), so a default-derived golden and a default-rendered seed agree."""
 
 INSTALL_CID = 2900
 """The installer VM's vsock CID: `install-daemon.ps1` verifies the viosock driver BINDS (not merely stages), which needs a live device during install. Below 3000 per the realizer CID partition (batteries at 3000+, the channel harness below), high enough to dodge the harness's own fixtures."""
@@ -157,10 +163,11 @@ _INSTALL_UNATTEND = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 # the hardened profile's measured capability floor (the compose template's
-# list), reused for the one-shot installer container; the installer needs no
-# bridges or vsock, so only /dev/kvm is granted
+# list) minus NET_ADMIN, which only the bridge/nft work needs and the installer
+# has none of (`--network none`, a networkless domain); of the device nodes,
+# /dev/kvm and /dev/vhost-vsock are granted — the install VM carries a live
+# vsock device so `install-daemon.ps1` can verify the viosock driver BINDS
 _INSTALLER_CAPS = (
-    "NET_ADMIN",
     "CHOWN",
     "DAC_OVERRIDE",
     "FOWNER",
@@ -185,7 +192,7 @@ def install_windows_golden(
 ) -> tuple[ImageMetadata, bool]:
     """Install a sysprep'd Windows golden into the cache from digest-pinned media.
 
-    Both ISOs are verified before anything runs; both are copied into the cache when absent (the install ISO is the golden's recorded vendor, so chain verification works like any derive). The install runs in a one-shot hardened range container with `--network none` and only `/dev/kvm`; the finalized disk is compacted (`qemu-img convert`) and landed atomically with its metadata.
+    Both ISOs are verified before anything runs; both are copied into the cache when absent or stale against their pins (the install ISO is the golden's recorded vendor, so chain verification works like any derive). The install runs in a one-shot hardened range container with `--network none` and only the KVM and vhost-vsock device nodes; the finalized disk is compacted (`qemu-img convert`) and landed atomically with its metadata, sidecar first.
 
     Returns:
         The golden's metadata and whether the cache already satisfied the request (same key discipline as `derive_golden`: recipe version, both ISO digests, the daemon bundle digest).
@@ -227,43 +234,70 @@ def install_windows_golden(
     from .._dist.gc import chains_lock
 
     with chains_lock(cache, exclusive=False), _name_lock(cache, file):
-        if golden_path.is_file() and metadata_path.is_file():
-            existing = ImageMetadata.model_validate_json(metadata_path.read_text())
+        # a crashed prior install of this name may have left temps; we hold the lock
+        temp_golden = cache / f".{file}.deriving"
+        metadata_temp = metadata_path.with_suffix(".json.deriving")
+        temp_golden.unlink(missing_ok=True)
+        metadata_temp.unlink(missing_ok=True)
+
+        if metadata_path.is_file():
+            existing = _load_metadata(metadata_path)
+            if existing is None:
+                # non-conforming sidecar: unmanaged, exactly as `images list` reports it
+                raise DeriveError(
+                    "prepare",
+                    f"{metadata_path} is not a valid provenance sidecar (unmanaged); refusing to touch it, remove it to re-install",
+                )
             if (
                 existing.derivation_key == key
+                and golden_path.is_file()
                 and sha256_file(golden_path) == existing.golden_sha256
             ):
                 return existing, True
-        _install_locked(
-            iso,
-            expected_iso,
-            virtio_iso,
-            cache,
-            bundle_path,
-            admin_password,
-            golden_path,
-            timeout_s,
-        )
-        metadata = ImageMetadata(
-            name=name,
-            file=file,
-            recipe_version=WIN_RECIPE_VERSION,
-            derivation_key=key,
-            vendor_file=iso.name,
-            vendor_sha256=expected_iso,
-            daemon=DaemonPin(
-                name=daemon_info.name,
-                version=daemon_info.version,
-                sha256=daemon_info.bundle_sha256,
-            ),
-            golden_sha256=sha256_file(golden_path),
-            created=now_iso(),
-            admin_password=admin_password,
-        )
-        temp = metadata_path.with_name(metadata_path.name + ".tmp")
-        temp.write_text(metadata.model_dump_json())
-        temp.replace(metadata_path)
-        return metadata, False
+        elif golden_path.exists():
+            raise DeriveError(
+                "prepare",
+                f"{golden_path} exists without metadata (unmanaged); refusing to overwrite",
+            )
+
+        try:
+            _install_locked(
+                iso,
+                expected_iso,
+                virtio_iso,
+                expected_virtio,
+                cache,
+                bundle_path,
+                admin_password,
+                temp_golden,
+                timeout_s,
+            )
+            metadata = ImageMetadata(
+                name=name,
+                file=file,
+                recipe_version=WIN_RECIPE_VERSION,
+                derivation_key=key,
+                vendor_file=iso.name,
+                vendor_sha256=expected_iso,
+                daemon=DaemonPin(
+                    name=daemon_info.name,
+                    version=daemon_info.version,
+                    sha256=daemon_info.bundle_sha256,
+                ),
+                golden_sha256=sha256_file(temp_golden),
+                created=now_iso(),
+                admin_password=admin_password,
+            )
+            # sidecar lands first (derive_golden's crash ordering): metadata
+            # pointing at a missing golden repairs on the next install; a
+            # provenance-less golden would refuse as unmanaged forever
+            metadata_temp.write_text(metadata.model_dump_json(indent=2) + "\n")
+            metadata_temp.replace(metadata_path)
+            temp_golden.replace(golden_path)
+            return metadata, False
+        finally:
+            temp_golden.unlink(missing_ok=True)
+            metadata_temp.unlink(missing_ok=True)
 
 
 _INSTALLER_ENTRYPOINT = """\
@@ -277,32 +311,40 @@ until virsh -c qemu:///system version >/dev/null 2>&1; do sleep 0.2; done
 touch /run/range-ready
 exec sleep infinity
 """
-"""The installer's entrypoint: the range image's own startup minus everything bundle-shaped (no bridges, no nft, no vsock — the install VM has no network and no control plane; the answer file drives it)."""
+"""The installer's entrypoint: the range image's own startup minus everything bundle-shaped (no bridges, no nft — the install VM has no network and no control plane; the answer file drives it). Vsock stays: the install VM carries a live vsock device so the daemon's install-time bind check passes."""
 
 
 def _install_locked(
     iso: Path,
     expected_iso: str,
-    cache_virtio: Path,
+    virtio_iso: Path,
+    expected_virtio: str,
     cache: Path,
     bundle_path: Path,
     admin_password: str,
-    golden_path: Path,
+    temp_golden: Path,
     timeout_s: float,
 ) -> None:
-    # media is cache-resident so the chain verifies and the container sees it
-    for source in (iso, cache_virtio):
+    # media is cache-resident so the chain verifies and the container sees it;
+    # an in-cache copy only counts when it still matches the pin (derive_golden's
+    # rule: the cache is local working state, not a signed artifact)
+    for source, expected in ((iso, expected_iso), (virtio_iso, expected_virtio)):
         target = cache / source.name
-        if not target.is_file():
-            temp = cache / f".pulling-{source.name}"
-            shutil.copyfile(source, temp)
+        if target.resolve() == source.resolve():
+            continue
+        if target.is_file() and sha256_file(target) == expected:
+            continue
+        # atomic and pid-suffixed: a kill mid-copy must never leave a partial
+        # ISO, and concurrent installs of different names share no lock
+        temp = cache / f".{source.name}.{os.getpid()}.deriving"
+        try:
+            shutil.copy2(source, temp)
             temp.replace(target)
+        finally:
+            temp.unlink(missing_ok=True)
 
     container = f"ir-win-derive-{secrets.token_hex(4)}"
     scratch = Path(tempfile.mkdtemp(prefix="ir-win-derive-"))
-    # the hardened image runs qemu as libvirt-qemu with dynamic ownership off:
-    # the VMM must traverse the scratch mount and read the files it opens
-    scratch.chmod(0o755)
     try:
         _build_payload(scratch, bundle_path, admin_password)
         run_args = [
@@ -334,68 +376,95 @@ def _install_locked(
             "-c",
             _INSTALLER_ENTRYPOINT,
         ]
-        _run("installer-container", run_args)
-        try:
-            _wait_container_ready(container, 60.0)
-            _exec(
-                container,
-                "genisoimage -quiet -o /scratch/unattend.iso -J -R /scratch/answer/autounattend.xml",
-            )
-            _exec(
-                container,
-                "genisoimage -quiet -o /scratch/payload.iso -J -R /scratch/payload",
-            )
-            _exec(
-                container, f"qemu-img create -f qcow2 /scratch/golden.qcow2 {DISK_GB}G"
-            )
-            _exec(
-                container,
-                "chown libvirt-qemu:kvm /scratch/golden.qcow2 "
-                "/scratch/unattend.iso /scratch/payload.iso",
-            )
-            _exec(
-                container,
-                "virt-install --connect qemu:///system --name wininstall "
-                "--memory 4096 --vcpus 4 --cpu host-passthrough "
-                "--disk path=/scratch/golden.qcow2,format=qcow2,bus=virtio "
-                f"--disk path=/images/{iso.name},device=cdrom,readonly=on "
-                f"--disk path=/images/{cache_virtio.name},device=cdrom,readonly=on "
-                "--disk path=/scratch/unattend.iso,device=cdrom,readonly=on "
-                "--disk path=/scratch/payload.iso,device=cdrom,readonly=on "
-                "--network none --boot hd,cdrom --graphics vnc,listen=127.0.0.1 "
-                f"--vsock cid.address={INSTALL_CID} "
-                "--osinfo win2k22 --import --noautoconsole",
-            )
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                state = _exec(container, "virsh -c qemu:///system domstate wininstall")
-                if state.strip() == "shut off":
-                    break
-                time.sleep(15)
-            else:
-                raise DeriveError(
-                    "install",
-                    f"the unattended install did not finish within {timeout_s:.0f} s "
-                    f"(console: docker exec {container} virsh console wininstall)",
+        # INSTALL_CID is host-global (vhost-vsock): one install at a time per host
+        with open(
+            Path(tempfile.gettempdir()) / "inspect-ranges-win-install.lock", "w"
+        ) as install_lock:
+            fcntl.flock(install_lock, fcntl.LOCK_EX)
+            _run("installer-container", run_args)
+            try:
+                _wait_container_ready(container, 60.0)
+                # the hardened image runs qemu as libvirt-qemu with dynamic
+                # ownership off: the VMM must traverse the scratch mount
+                # (group-execute only — the answer file and seed ISOs carry the
+                # Administrator password and must never be other-readable on a
+                # multi-user host) and own the files it opens
+                _exec(container, "chgrp kvm /scratch && chmod 710 /scratch")
+                _exec(
+                    container,
+                    "genisoimage -quiet -o /scratch/unattend.iso -J -R /scratch/answer/autounattend.xml",
                 )
-        finally:
-            subprocess.run(
-                ["docker", "rm", "-f", container], capture_output=True, text=True
-            )
-        # compact the sparse installer disk and land atomically in the cache
-        temp_golden = cache / f".pulling-{golden_path.name}"
-        _run(
-            "compact",
-            [
-                "qemu-img",
-                "convert",
-                "-O",
-                "qcow2",
-                str(scratch / "golden.qcow2"),
-                str(temp_golden),
-            ],
-        )
-        temp_golden.replace(golden_path)
+                _exec(
+                    container,
+                    "genisoimage -quiet -o /scratch/payload.iso -J -R /scratch/payload",
+                )
+                _exec(
+                    container,
+                    f"qemu-img create -f qcow2 /scratch/golden.qcow2 {DISK_GB}G",
+                )
+                _exec(
+                    container,
+                    "chown libvirt-qemu:kvm /scratch/golden.qcow2 "
+                    "/scratch/unattend.iso /scratch/payload.iso && "
+                    "chmod 640 /scratch/golden.qcow2 "
+                    "/scratch/unattend.iso /scratch/payload.iso",
+                )
+                _exec(
+                    container,
+                    "virt-install --connect qemu:///system --name wininstall "
+                    "--memory 4096 --vcpus 4 --cpu host-passthrough "
+                    "--disk path=/scratch/golden.qcow2,format=qcow2,bus=virtio "
+                    f"--disk path=/images/{shlex.quote(iso.name)},device=cdrom,readonly=on "
+                    f"--disk path=/images/{shlex.quote(virtio_iso.name)},device=cdrom,readonly=on "
+                    "--disk path=/scratch/unattend.iso,device=cdrom,readonly=on "
+                    "--disk path=/scratch/payload.iso,device=cdrom,readonly=on "
+                    "--network none --boot hd,cdrom --graphics vnc,listen=127.0.0.1 "
+                    f"--vsock cid.address={INSTALL_CID} "
+                    "--osinfo win2k22 --import --noautoconsole",
+                )
+                deadline = time.monotonic() + timeout_s
+                while time.monotonic() < deadline:
+                    state = _exec(
+                        container, "virsh -c qemu:///system domstate wininstall"
+                    )
+                    if state.strip() == "shut off":
+                        break
+                    time.sleep(15)
+                else:
+                    # the container is gone once we raise: capture what it knew
+                    diagnostics = subprocess.run(
+                        [
+                            "docker",
+                            "exec",
+                            container,
+                            "sh",
+                            "-c",
+                            "virsh -c qemu:///system domstate wininstall; "
+                            "tail -c 2000 /var/log/libvirt/qemu/wininstall.log 2>/dev/null",
+                        ],
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                    raise DeriveError(
+                        "install",
+                        f"the unattended install did not finish within {timeout_s:.0f} s; "
+                        f"last domain state and VMM log:\n{diagnostics[-2000:]}",
+                    )
+                # compact in-container (root reads the libvirt-qemu-owned disk;
+                # the host user cannot, by design) and hand the result back
+                # other-readable like any cache golden — the password lives
+                # inside the image either way
+                _exec(
+                    container,
+                    "qemu-img convert -O qcow2 /scratch/golden.qcow2 "
+                    "/scratch/golden-compact.qcow2 && "
+                    "chmod 644 /scratch/golden-compact.qcow2",
+                )
+            finally:
+                subprocess.run(
+                    ["docker", "rm", "-f", container], capture_output=True, text=True
+                )
+        shutil.move(str(scratch / "golden-compact.qcow2"), str(temp_golden))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -406,9 +475,15 @@ def _build_payload(scratch: Path, bundle_path: Path, admin_password: str) -> Non
     payload = scratch / "payload"
     answer.mkdir()
     payload.mkdir()
-    (answer / "autounattend.xml").write_text(
-        _INSTALL_UNATTEND.replace("__ADMIN_PASSWORD__", admin_password)
+    answer_file = answer / "autounattend.xml"
+    # XML-escaped: the password is the one caller value the template cannot
+    # constrain, and an unescaped `<&>` would break Setup's XML parse (the
+    # install then burns the whole timeout). Owner-only: it is plaintext
+    # scenario credentials and the container's genisoimage reads it as root.
+    answer_file.write_text(
+        _INSTALL_UNATTEND.replace("__ADMIN_PASSWORD__", escape(admin_password))
     )
+    answer_file.chmod(0o600)
     with tarfile.open(bundle_path) as tar:
         for member in tar.getmembers():
             if member.name.startswith("windows/") and member.isfile():
