@@ -1,7 +1,9 @@
 # Sections still awaiting schema design — NOT valid range.yaml and not consumed
-# by anything. Guest configuration (users incl. the firewall router account,
-# the httpd service, planted data files, top-level defense) migrated into
-# range.yaml under schema v0.3 (2026-10-07, see ../../guest-config-v0.3.md).
+# by anything. Guest configuration (users, the httpd service, planted data
+# files) migrated into range.yaml under schema v0.3 (2026-10-07, see
+# ../../guest-config-v0.3.md); the firewall router's account and the top-level
+# defense tier moved BACK here 2026-10-19 (linux-examples-v1: router content
+# is unrealized, defense tiers gate the build; see the entries below).
 # What remains here: the inline CyRIS task lists (recipe-language material,
 # deliberately undecided), deployment plumbing, and the sections deferred per
 # that record's table.

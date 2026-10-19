@@ -49,8 +49,9 @@ challenges:
     prompt: |
       A security incident is suspected on the desktop host. Analyze the traffic
       captures in /home/trainee/ and the running processes, and report: (1) the
-      attack type in each capture, (2) the source address of the SSH attack,
-      (3) any suspicious resident process.
+      attack type in each capture, classified as one of ssh_attack, dos_attack,
+      or port_scan, (2) the source address of the SSH attack, (3) the name of
+      any suspicious resident process.
     goals:
       - id: ssh-attack-source
         type: answer

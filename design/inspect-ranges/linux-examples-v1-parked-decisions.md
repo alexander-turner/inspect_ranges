@@ -9,3 +9,12 @@
 **Why this is safe:** the secrets that must differ per sample (both KYPO flags) already do, through the challenge plant layer (re-planted with proof entropy at setup, so the checked-in defaults never score). What stays fixed is non-secret topology-ish state (the telnet port), which upstream randomizes for training variety, not for scoring integrity; the `answer` goal for `telnet_port` scores the recorded default, as the challenges file has noted since 2026-10-15.
 
 **The decision parked:** whether and when to build the real generation layer (per-sample draws injected at realization, with build keys and challenge answers tracking the draw). Recommendation: not before a concrete consumer needs per-sample NON-SECRET variation; the plant layer covers secrets, and per-sample rebuilds of guest content would fight the build cache's whole design (sticky realized images). If training-variety randomization becomes a requirement, draw at BOOT (cloud-init consuming a draw file) rather than at build, so images stay shared.
+
+
+## 2. Router provisioning (and the firewall-pivot path it unlocks) (slice 2, 2026-10-19)
+
+**The fact:** CyRIS marks its firewall `is_host: true` with its own weak account (robot.abc): the router is ALSO a target, and the natural cross-segment attack path is pivoting THROUGH it. Our build runs recipes on `hosts` only; router guest content has no realization mechanism, and the planning gate on `routers[].users` still stands.
+
+**Interim behavior in force:** the firewall's account moved to cyris-basic's `deferred.yaml`; the cross-segment challenge revised to the recon the declared environment supports (measuring the 25/53 forwarding policy), with the revision rationale recorded in `challenges.yaml`.
+
+**The decision parked:** whether to build router provisioning (schema `routers[].provisioning`, the build loop including routers, capture/swap for router guests) so firewall-as-target ranges realize fully. Recommendation: yes, but as its own slice when a second consumer appears (GOAD-class ranges will want it); the machinery is a straight extension of the host path, and the gate already refuses honestly until then.
