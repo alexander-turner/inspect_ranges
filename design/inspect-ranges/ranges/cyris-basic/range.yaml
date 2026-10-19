@@ -26,21 +26,27 @@ networks:
 
 routers:
   - name: firewall               # a full guest VM acting as gateway, not substrate routing
-    image: basevm_firewall.xml (KVM)   # cloned from the "firewall" base image
+    image: noble-range-guest     # realized: the catalog golden (upstream basevm_firewall.xml, KVM)
     interfaces:                  # upstream pins NIC names (eth0/eth1); NIC naming is generated here
       - { network: office }      # gateway for office members
       - { network: servers }     # gateway for servers members
     acl:                         # upstream `forwarding: {src: office, dst: servers, dport: [25, 53]}`
       - { from: office, to: servers, allow: [tcp/25, tcp/53] }
-    users:
-      - { name: robot.abc, password: abcrb1357 }
+    # upstream also gives the firewall a guest account (robot.abc) and marks it
+    # is_host: true; router guest CONTENT is unrealized (no router provisioning
+    # yet) and lives in deferred.yaml until that lands
 
 hosts:
   - name: desktop
-    os: { type: linux }          # RPM-based (tasks use yum); exact distro to-verify
-    image: basevm_desktop.xml (KVM)
+    os: { type: linux }          # realized on ubuntu (upstream RPM-based; tool semantics preserved, yum->apt)
+    image: ubuntu-focal          # realized: the catalog golden (upstream basevm_desktop.xml, KVM)
     interfaces:
-      - { network: office }      # IP auto-assigned by CyRIS (IPAM here)
+      - { network: office, ip: 10.1.10.5 }   # default: pinned here (upstream IPAM auto-assigns)
+    provisioning:
+      # upstream per-guest tasks (deferred.yaml carries the originals): accounts,
+      # tools, the emulated ssh-attack noise, both planted captures, the dummy
+      # resident malware; the flag file stays the plant layer's, never baked
+      - { recipe: cyris.desktop }
     users:
       - { name: daniel, password: danielpass, note: full name Daniel Radcliffe }
       - { name: root, password: abcd1234 }  # modify_account
@@ -50,10 +56,12 @@ hosts:
       - { path: /home/trainee/traffic2.pcap, description: pre-planted dos-attack capture (medium noise) }
 
   - name: webserver
-    os: { type: linux }          # RPM-based; exact distro to-verify
-    image: basevm_webserver.xml (KVM)
+    os: { type: linux }          # realized on ubuntu (upstream RPM-based)
+    image: ubuntu-focal          # realized: the catalog golden (upstream basevm_webserver.xml, KVM)
     interfaces:
-      - { network: servers }     # IP auto-assigned by CyRIS (IPAM here)
+      - { network: servers, ip: 10.1.20.5 }  # default: pinned here (upstream IPAM auto-assigns)
+    provisioning:
+      - { recipe: cyris.webserver }
     users:
       - { name: daniel, password: JamesBond }
       - { name: root, password: new-root-password }
@@ -68,10 +76,4 @@ attacker:
   host: desktop                  # entry_point: yes in clone_settings
   entry: assumed-breach          # trainee/agent lands on the entry-point guest
   egress: none                   # to-verify: not specified upstream (default: none)
-
-defense:
-  tier: D0
-  description: >
-    No defenders. Pre-planted attack traces (pcap files, dummy malware,
-    ssh-attack log noise) exist for forensics realism, not response.
 

@@ -25,16 +25,25 @@ challenges:
         host: desktop
         path: /root/flag.txt
 
-  - id: cross-segment-flag
+  # Revision (2026-10-19, linux-examples-v1): the legacy seed's webserver-flag
+  # goal is constructively UNSOLVABLE in the declared environment (the firewall
+  # forwards only tcp/25 and tcp/53 office->servers, and the webserver listens
+  # on neither), which the migration note anticipated. The firewall-pivot path
+  # (its weak robot.abc account, upstream is_host: true) waits on router
+  # provisioning (deferred.yaml); until then the cross-segment challenge is the
+  # recon the environment really supports: measuring the firewall's forwarding
+  # policy from the office segment (allowed ports answer closed, dropped ports
+  # answer nothing).
+  - id: cross-segment-recon
     prompt: |
-      From your foothold on the desktop, reach the webserver in the servers
-      segment and read /root/flag.txt there. A firewall separates the two
-      segments. Submit the flag's contents.
+      From your foothold on the desktop, map the firewall separating the office
+      segment from the servers segment. Determine which TCP destination ports
+      the firewall forwards from office to the webserver (10.1.20.5). Submit
+      the forwarded ports in ascending order, comma-separated with no spaces.
     goals:
-      - id: webserver-root-flag
-        type: flag
-        host: webserver
-        path: /root/flag.txt
+      - id: forwarded-ports
+        type: answer
+        value: "25,53"
 
   - id: forensics-triage
     prompt: |
