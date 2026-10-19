@@ -8,15 +8,20 @@ The catalog also publishes its own name list as a well-known artifact (the reser
 import json
 import time
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from .._build.manifest import BuildManifest
+
+if TYPE_CHECKING:
+    from .._channel.bundle import DaemonBundleInfo as DaemonInfo
 from .encode import (
     ANN_BACKING_DIGEST,
     ANN_BACKING_FILE,
     ANN_KIND,
     ANN_NAME,
+    ARTIFACT_DAEMON_BUNDLE,
     ARTIFACT_REALIZED,
+    LAYER_DAEMON_TAR,
     LAYER_SIDECAR,
     encode_image_chain,
     prefixed_digest,
@@ -31,14 +36,20 @@ from .resolve import push_image_artifact
 
 __all__ = [
     "CATALOG_REF",
+    "DAEMON_REF",
     "catalog_names",
+    "fetch_daemon_bundle",
     "generate_pin_file",
+    "publish_daemon_bundle",
     "publish_golden",
     "publish_realized",
 ]
 
 CATALOG_REF = "catalog"
 """The reserved ref carrying the catalog's name list at a location."""
+
+DAEMON_REF = "daemon-bundle"
+"""The reserved ref carrying the published daemon bundle at a location: the bundle tar plus its `daemon.json` sidecar, landing in the artifact directory (never the image cache), so fleets derive goldens without a Go toolchain."""
 
 CATALOG_ARTIFACT = "application/vnd.inspect-ranges.catalog.v1"
 CATALOG_LAYER = "application/vnd.inspect-ranges.catalog.v1+json"
@@ -133,6 +144,11 @@ def _refuse_reserved(name: str) -> None:
             "name-reserved",
             f"{CATALOG_REF!r} is the catalog's own ref; nothing publishes under it",
         )
+    if name == DAEMON_REF:
+        raise DistError(
+            "name-reserved",
+            f"{DAEMON_REF!r} is the published daemon bundle's ref; images never publish under it",
+        )
 
 
 def publish_golden(name: str, location: Location, *, image_cache: Path) -> Descriptor:
@@ -219,6 +235,146 @@ def publish_realized(
     root = store.put_index(location.latest_ref(catalog_name), index)
     _update_catalog_index(location, catalog_name)
     return root
+
+
+def publish_daemon_bundle(artifact_dir: Path, location: Location) -> Descriptor:
+    """Publish the daemon artifact (the bundle tar and its `daemon.json` sidecar) under the reserved `daemon-bundle` ref, verified against the sidecar's recorded digest before anything uploads.
+
+    Raises:
+        DistError: `artifact-missing` when the directory lacks the sidecar or the tar it names, `digest-mismatch` when the tar does not match the sidecar's recorded digest.
+    """
+    import hashlib
+
+    from .._channel.bundle import DaemonBundleInfo, bundle_file_name
+
+    sidecar_path = artifact_dir / "daemon.json"
+    if not sidecar_path.is_file():
+        raise DistError(
+            "artifact-missing",
+            f"{sidecar_path} is missing; build the bundle with 'inspect-ranges daemon-bundle' first",
+        )
+    try:
+        info = DaemonBundleInfo.model_validate_json(sidecar_path.read_text())
+    except ValueError as error:
+        raise DistError(
+            "artifact-missing", f"{sidecar_path} does not parse: {error}"
+        ) from error
+    tar_path = artifact_dir / bundle_file_name(info.version)
+    if not tar_path.is_file():
+        raise DistError(
+            "artifact-missing",
+            f"{tar_path} is missing beside its sidecar; rebuild the bundle",
+        )
+    tar_bytes = tar_path.read_bytes()
+    digest = hashlib.sha256(tar_bytes).hexdigest()
+    if digest != info.bundle_sha256:
+        raise DistError(
+            "digest-mismatch",
+            f"{tar_path} is sha256:{digest[:16]}..., its sidecar records "
+            f"sha256:{info.bundle_sha256[:16]}...; rebuild the bundle",
+        )
+    sidecar_bytes = sidecar_path.read_bytes()
+    store = location.store_for(DAEMON_REF, create=True)
+    tar_digest = store.put_blob_bytes(tar_bytes)
+    sidecar_digest = store.put_blob_bytes(sidecar_bytes)
+    manifest = OciManifest(
+        artifact_type=ARTIFACT_DAEMON_BUNDLE,
+        config=store.ensure_empty_config(),
+        layers=[
+            Descriptor(
+                media_type=LAYER_DAEMON_TAR, digest=tar_digest, size=len(tar_bytes)
+            ),
+            Descriptor(
+                media_type=LAYER_SIDECAR, digest=sidecar_digest, size=len(sidecar_bytes)
+            ),
+        ],
+        annotations={
+            ANN_KIND: "daemon-bundle",
+            "org.inspect-ranges.daemon-version": info.version,
+        },
+    )
+    member = store.put_manifest(manifest)
+    index = OciIndex(manifests=[member], annotations={ANN_KIND: "daemon-bundle"})
+    return store.put_index(location.latest_ref(DAEMON_REF), index)
+
+
+def fetch_daemon_bundle(locations: "list[Location]", out_dir: Path) -> "DaemonInfo":
+    """Fetch the published daemon bundle from the first location serving one, landing the tar and sidecar in `out_dir` (the no-Go-toolchain path to the artifact `images derive` consumes).
+
+    The tar lands before the sidecar: a torn landing reads as rebuildable (`tar-missing`), never as a consumable bundle.
+
+    Raises:
+        DistError: `artifact-missing` when no configured location publishes a bundle, `daemon-bundle-invalid` for a ref holding something else, `digest-mismatch` when the served tar does not match its sidecar; a broken location aborts rather than silently falling through.
+    """
+    import hashlib
+
+    from .._channel.bundle import DaemonBundleInfo, bundle_file_name
+    from .oci import atomic_write
+
+    for location in locations:
+        store = location.store_for(DAEMON_REF)
+        try:
+            root = store.ref(location.latest_ref(DAEMON_REF))
+        except DistError as error:
+            if error.code == "ref-not-found":
+                continue
+            raise
+        index = store.read_index(root)
+        if not index.manifests:
+            raise DistError(
+                "daemon-bundle-invalid",
+                f"{location.describe()}'s {DAEMON_REF!r} ref is an empty index",
+            )
+        manifest = store.manifest(index.manifests[0])
+        if manifest.artifact_type != ARTIFACT_DAEMON_BUNDLE:
+            raise DistError(
+                "daemon-bundle-invalid",
+                f"{location.describe()}'s {DAEMON_REF!r} ref holds a "
+                f"{manifest.artifact_type!r} artifact, not a daemon bundle",
+            )
+        tar_layer = next(
+            (
+                layer
+                for layer in manifest.layers
+                if layer.media_type == LAYER_DAEMON_TAR
+            ),
+            None,
+        )
+        sidecar_layer = next(
+            (layer for layer in manifest.layers if layer.media_type == LAYER_SIDECAR),
+            None,
+        )
+        if tar_layer is None or sidecar_layer is None:
+            raise DistError(
+                "daemon-bundle-invalid",
+                f"{location.describe()}'s daemon bundle lacks its tar or sidecar layer",
+            )
+        sidecar_bytes = store.read_blob(sidecar_layer)
+        try:
+            info = DaemonBundleInfo.model_validate_json(sidecar_bytes)
+        except ValueError as error:
+            raise DistError(
+                "daemon-bundle-invalid",
+                f"{location.describe()}'s daemon sidecar does not parse: {error}",
+            ) from error
+        tar_bytes = store.read_blob(tar_layer)
+        digest = hashlib.sha256(tar_bytes).hexdigest()
+        if digest != info.bundle_sha256:
+            raise DistError(
+                "digest-mismatch",
+                f"the daemon tar served by {location.describe()} is "
+                f"sha256:{digest[:16]}..., its sidecar records "
+                f"sha256:{info.bundle_sha256[:16]}...",
+            )
+        atomic_write(out_dir / bundle_file_name(info.version), tar_bytes)
+        atomic_write(out_dir / "daemon.json", sidecar_bytes)
+        return info
+    raise DistError(
+        "artifact-missing",
+        "no configured location publishes a daemon bundle (searched: "
+        + ", ".join(location.describe() for location in locations)
+        + ")",
+    )
 
 
 def generate_pin_file(location: Location, out: Path) -> dict[str, str]:

@@ -21,7 +21,12 @@ from tests.test_compiler import nat_spec, two_segment_spec
 def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
-    for name in ("noble-range-guest.qcow2", "img.qcow2", "Ubuntu20.qcow2"):
+    for name in (
+        "noble-range-guest.qcow2",
+        "img.qcow2",
+        "Ubuntu20.qcow2",
+        "attack.qcow2",
+    ):
         (cache / name).write_bytes(b"fake golden: " + name.encode())
     return cache
 

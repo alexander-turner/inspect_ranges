@@ -1,4 +1,4 @@
-"""`inspect-ranges daemon-bundle`: build the versioned daemon artifact."""
+"""`inspect-ranges daemon-bundle`: build (or fetch) the versioned daemon artifact."""
 
 from pathlib import Path
 
@@ -16,12 +16,35 @@ from .._channel.bundle import BundleError, build_daemon_bundle
     show_default=True,
     help="Directory receiving the bundle tar and its daemon.json sidecar.",
 )
-def daemon_bundle(output: Path) -> None:
-    """Build the byte-deterministic daemon bundle the realizer bakes into goldens."""
-    try:
-        info = build_daemon_bundle(output)
-    except BundleError as error:
-        raise click.ClickException(str(error)) from error
+@click.option(
+    "--pull",
+    is_flag=True,
+    help="Fetch the published daemon bundle instead of building (no Go toolchain needed).",
+)
+@click.option(
+    "--from",
+    "from_location",
+    default=None,
+    help="Location override for --pull; default is the configured search path (INSPECT_RANGES_REGISTRY).",
+)
+def daemon_bundle(output: Path, pull: bool, from_location: str | None) -> None:
+    """Build the byte-deterministic daemon bundle the realizer bakes into goldens, or fetch the published one with `--pull`."""
+    if from_location is not None and not pull:
+        raise click.UsageError("--from only applies to --pull")
+    if pull:
+        from .._dist.catalog import fetch_daemon_bundle
+        from .._dist.errors import DistError
+        from .._dist.location import registry_locations
+
+        try:
+            info = fetch_daemon_bundle(registry_locations(from_location), output)
+        except DistError as error:
+            raise click.ClickException(str(error)) from error
+    else:
+        try:
+            info = build_daemon_bundle(output)
+        except BundleError as error:
+            raise click.ClickException(str(error)) from error
     click.echo(f"bundle: vsockd-bundle-{info.version}.tar")
     click.echo(f"protocol: {info.protocol}")
     for name, digest in sorted(info.files.items()):

@@ -31,11 +31,13 @@ __all__ = [
     "ANN_RECIPE_VERSION",
     "ANN_SPEC_SHA256",
     "ARTIFACT_BUILD_MANIFEST",
+    "ARTIFACT_DAEMON_BUNDLE",
     "ARTIFACT_GOLDEN",
     "ARTIFACT_REALIZED",
     "ARTIFACT_RECIPE_BUNDLE",
     "ARTIFACT_VENDOR_BASE",
     "LAYER_BUILD_MANIFEST",
+    "LAYER_DAEMON_TAR",
     "LAYER_QCOW2",
     "LAYER_RECIPE_TAR",
     "LAYER_SIDECAR",
@@ -55,6 +57,7 @@ ARTIFACT_GOLDEN = "application/vnd.inspect-ranges.golden.v1"
 ARTIFACT_REALIZED = "application/vnd.inspect-ranges.realized-image.v1"
 ARTIFACT_RECIPE_BUNDLE = "application/vnd.inspect-ranges.recipe-bundle.v1"
 ARTIFACT_BUILD_MANIFEST = "application/vnd.inspect-ranges.build-manifest.v1"
+ARTIFACT_DAEMON_BUNDLE = "application/vnd.inspect-ranges.daemon-bundle.v1"
 
 LAYER_QCOW2 = "application/vnd.inspect-ranges.qcow2.v1"
 """Uncompressed qcow2 bytes: the blob digest equals the cache file's sha256, which is the identity every manifest and sidecar already records."""
@@ -62,6 +65,7 @@ LAYER_QCOW2 = "application/vnd.inspect-ranges.qcow2.v1"
 LAYER_SIDECAR = "application/vnd.inspect-ranges.sidecar.v1+json"
 LAYER_RECIPE_TAR = "application/vnd.inspect-ranges.recipe-bundle.v1.tar"
 LAYER_BUILD_MANIFEST = "application/vnd.inspect-ranges.build-manifest.v1+json"
+LAYER_DAEMON_TAR = "application/vnd.inspect-ranges.daemon-bundle.v1.tar"
 
 ANN_KIND = "org.inspect-ranges.kind"
 ANN_NAME = "org.inspect-ranges.name"

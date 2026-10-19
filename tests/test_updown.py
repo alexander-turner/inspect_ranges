@@ -66,6 +66,7 @@ def cache(tmp_path: Path) -> Path:
     cache.mkdir()
     (cache / "tiny-golden.qcow2").write_bytes(b"golden")
     (cache / "noble-range-guest.qcow2").write_bytes(b"attacker-golden")
+    (cache / "attack.qcow2").write_bytes(b"attack-golden")
     return cache
 
 

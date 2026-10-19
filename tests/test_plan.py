@@ -33,7 +33,12 @@ from tests.test_compiler import chained_spec, nat_spec, netsvc_spec, two_segment
 def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
-    for name in ("noble-range-guest.qcow2", "img.qcow2", "Ubuntu20.qcow2"):
+    for name in (
+        "noble-range-guest.qcow2",
+        "img.qcow2",
+        "Ubuntu20.qcow2",
+        "attack.qcow2",
+    ):
         (cache / name).write_bytes(b"fake golden: " + name.encode())
     return cache
 
@@ -78,6 +83,21 @@ def test_image_cache_miss_is_loud(cache: Path, tmp_path: Path) -> None:
         render_bundle(spec, tmp_path / "bundle", options(cache))
     assert excinfo.value.issues[0].code == "image-not-in-cache"
     assert excinfo.value.issues[0].path == ("hosts", 0, "image")
+
+
+def test_attacker_defaults_to_the_catalog_attack_image(cache: Path) -> None:
+    """An undeclared dedicated attack box resolves to `attack` (standard-images-v1 slice 4: the schema's standard-attack-image promise gets its referent); routers keep the default guest image; a declared image opts out."""
+    plan = resolve_plan(two_segment_spec(), options(cache))
+    by_kind = {guest.kind: guest for guest in plan.guests}
+    assert by_kind["attacker"].image.reference == "attack"
+    assert by_kind["router"].image.reference == "noble-range-guest"
+    spec = two_segment_spec()
+    opted_out = spec.model_copy(
+        update={"attacker": spec.attacker.model_copy(update={"image": "img"})}
+    )
+    declared = resolve_plan(opted_out, options(cache))
+    attacker = next(g for g in declared.guests if g.kind == "attacker")
+    assert attacker.image.reference == "img"
 
 
 def test_windows_guests_refuse_at_planning() -> None:

@@ -59,10 +59,11 @@ def push_range(
     progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     """Push a built range's closure to `location`, named under both the latest ref and the exact-spec ref."""
-    if manifest.range_name == "catalog":
+    if manifest.range_name in ("catalog", "daemon-bundle"):
         raise DistError(
             "name-reserved",
-            "'catalog' is the catalog list's own ref at every location; rename the range",
+            f"{manifest.range_name!r} is a reserved ref at every location "
+            "(the catalog list, the published daemon bundle); rename the range",
         )
     store = location.store_for(manifest.range_name, create=True)
     # the exact-spec ref lands FIRST and the latest ref LAST (round-3 N1): a

@@ -337,6 +337,13 @@ def mirror(
     help="Promote a cache golden under its own name instead of a built guest.",
 )
 @click.option(
+    "--daemon",
+    "daemon_dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Publish the daemon artifact directory (its bundle tar and daemon.json) under the reserved 'daemon-bundle' ref.",
+)
+@click.option(
     "--to",
     "to_location",
     required=True,
@@ -361,17 +368,34 @@ def publish(
     guest: str | None,
     catalog_name: str | None,
     golden: str | None,
+    daemon_dir: Path | None,
     to_location: str,
     image_cache: Path | None,
     build_cache: Path | None,
 ) -> None:
-    """The deliberate promotion act: a built guest's realized image (or a cache golden) becomes a bare catalog name other ranges' `image:` lines consume; the location's catalog list updates with it."""
-    from .._dist.catalog import publish_golden, publish_realized
+    """The deliberate promotion act: a built guest's realized image (or a cache golden, or the daemon artifact) becomes consumable at a location; image promotions update the location's catalog list."""
+    from .._dist.catalog import publish_daemon_bundle, publish_golden, publish_realized
 
     display = TransferDisplay()
     try:
         location = parse_location(to_location)
         images, builds, _ = _caches(image_cache, build_cache, None)
+        if daemon_dir is not None:
+            if (
+                golden is not None
+                or guest is not None
+                or catalog_name is not None
+                or spec is not None
+            ):
+                raise click.UsageError(
+                    "--daemon stands alone (it publishes the artifact directory, nothing else)"
+                )
+            root = publish_daemon_bundle(daemon_dir, location)
+            display.close()
+            click.echo(
+                f"publish OK  daemon-bundle@{root.digest} -> {location.describe()}"
+            )
+            return
         if golden is not None:
             if guest is not None or catalog_name is not None or spec is not None:
                 raise click.UsageError(

@@ -742,7 +742,7 @@ class Attacker(_StrictModel):
     """Name of a declared host to use as the foothold instead of a dedicated box."""
 
     image: str | None = None
-    """Attack box image; omitted means the backend's default guest image (shared with routers today; a dedicated attack image arrives with the images arc)."""
+    """Attack box image; omitted means the backend's standard attack image (the catalog's `attack`: the kali-class toolset image published under the org). Declare an image to opt out."""
 
     resources: Resources | None = None
     """Attack box sizing."""
