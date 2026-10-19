@@ -37,7 +37,8 @@ CONFORMANCE_PORT_CEILING = 1024
 """The defender-side sweep covers 1..1024 plus `CONFORMANCE_EXTRA_PORTS`; the attack image ships zero listeners, so any answer is a containment regression. Scope recorded in agent-containment.md section 6."""
 CONFORMANCE_EXTRA_PORTS = (1337, 3128, 4444, 5000, 8000, 8080, 8443, 9001)
 CHECK_NAMES = ("reference", "insufficient", "forged")
-CHAIN_TIMEOUT_S = 300.0
+CHAIN_TIMEOUT_S = 900.0
+"""One check chain's exec budget: chains legitimately wait for post-boot convergence and run full port scans (the kypo reference waits up to 240 s then nmap -p-), so the budget must dominate the sum of a chain's own bounded waits or the executor's generic kill masks the script's diagnostics (slice-1 review N1)."""
 
 _SUBMIT = re.compile(r"SUBMIT\s+(\S+)\s+(.+)$")
 
