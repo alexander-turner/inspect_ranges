@@ -50,7 +50,13 @@ inspect-ranges publish --daemon dist/daemon      --to docker.io/meridianlabsai/i
 #   docker images --format '{{.Repository}}:{{.Tag}}' | grep '^inspect-ranges-range:'
 # (or build/print it: uv run python -c "from inspect_ranges._runtime.rangeimage import ensure_range_image; print(ensure_range_image())")
 docker tag inspect-ranges-range:v<version> meridianlabsai/inspect-ranges-range:v<version>
-docker push meridianlabsai/inspect-ranges-range:v<version>   # output ends with the sha256 digest
+# NOTE (recorded live, 2026-10-19): `docker push` FAILS from a host logged in
+# with an org access token — docker requests a cross-repo mount scope on the
+# base image's repo (library/ubuntu), which org tokens cannot grant. Push via
+# skopeo with the same credential instead:
+docker save meridianlabsai/inspect-ranges-range:v<version> -o /tmp/rimage.tar
+skopeo copy --dest-authfile ~/.docker/config.json docker-archive:/tmp/rimage.tar docker://meridianlabsai/inspect-ranges-range:v<version>
+skopeo inspect --format '{{.Digest}}' docker://meridianlabsai/inspect-ranges-range:v<version>   # the pin digest
 
 # the fleet pin file (3 names: attack, ubuntu-noble, ubuntu-focal)
 inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out pins.json
