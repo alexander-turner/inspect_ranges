@@ -45,7 +45,10 @@ inspect-ranges publish --golden ubuntu-focal     --to docker.io/meridianlabsai/i
 inspect-ranges publish --daemon dist/daemon      --to docker.io/meridianlabsai/inspect-ranges
 (cd catalog/attack && inspect-ranges publish --guest box --as attack --to docker.io/meridianlabsai/inspect-ranges)
 
-# the hardened range container image (a conventional Docker image; record the digest)
+# the hardened range container image (a conventional Docker image; record the digest).
+# The local tag is version-suffixed; read it off the built image:
+#   docker images --format '{{.Repository}}:{{.Tag}}' | grep '^inspect-ranges-range:'
+# (or build/print it: uv run python -c "from inspect_ranges._runtime.rangeimage import ensure_range_image; print(ensure_range_image())")
 docker tag inspect-ranges-range:v<version> meridianlabsai/inspect-ranges-range:v<version>
 docker push meridianlabsai/inspect-ranges-range:v<version>   # output ends with the sha256 digest
 

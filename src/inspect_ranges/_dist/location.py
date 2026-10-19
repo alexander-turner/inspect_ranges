@@ -1,6 +1,6 @@
 """Locations: the one type with three forms (public hub, private OCI registry, image-layout directory), interchangeable everywhere a registry location appears (Journey B, ratified 2026-10-17).
 
-A location maps an artifact name to a store: on a registry, each name is a repository under the location's path prefix (`docker.io/meridianlabsai` plus `ubuntu-focal` is the repo `meridianlabsai/ubuntu-focal`; `registry.acme.net/ranges` plus `vulhub-zabbix` is `ranges/vulhub-zabbix`); in a directory layout, every name shares one layout and refs carry the name. Reference naming per form: a registry repo tags its current root `latest` and each build's root `spec-<spec sha256>`; a layout names them `<name>` and `<name>:spec-<hash>`. Resolution order is the spine's Q1: an explicit digest pin short-circuits, then the local cache, then the ordered search path, first match wins, so a deployment's own registry shadows public names deterministically.
+A location maps an artifact name to a store: on a registry, each name is a repository under the location's path prefix (`registry.acme.net/ranges` plus `vulhub-zabbix` is `ranges/vulhub-zabbix`); the two-level hub form instead takes an optional repo-NAME prefix as its third segment (`docker.io/meridianlabsai/inspect-ranges` plus `attack` is the repo `meridianlabsai/inspect-ranges-attack`, keeping a shared org's namespace clean); in a directory layout, every name shares one layout and refs carry the name. Reference naming per form: a registry repo tags its current root `latest` and each build's root `spec-<spec sha256>`; a layout names them `<name>` and `<name>:spec-<hash>`. Resolution order is the spine's Q1: an explicit digest pin short-circuits, then the local cache, then the ordered search path, first match wins, so a deployment's own registry shadows public names deterministically.
 
 The search path comes from `INSPECT_RANGES_REGISTRY` (comma-separated locations, first match wins) and defaults to the public org. Nothing in any spec or manifest names a registry host: redirection is configuration, never spec content.
 """
@@ -130,7 +130,13 @@ def parse_location(raw: str) -> Location:
         # a path: docker.io/<org>/<prefix> spells name `attack` as the repo
         # `<org>/<prefix>-attack`, keeping a shared org's namespace clean
         # (user decision, 2026-10-19)
-        org, _, name_prefix = prefix.partition("/")
+        org, slash, name_prefix = prefix.partition("/")
+        if slash and not name_prefix:
+            raise DistError(
+                "location-invalid",
+                f"{raw!r} has an empty repo-name prefix; write docker.io/<org> "
+                "or docker.io/<org>/<repo-name-prefix>",
+            )
         if "/" in name_prefix:
             raise DistError(
                 "location-invalid",

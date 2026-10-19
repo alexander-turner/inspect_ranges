@@ -704,3 +704,9 @@ def test_hub_name_prefix_spells_repos(tmp_path: Path) -> None:
     # non-hub registries keep PATH prefixes untouched (nested repos are native)
     acme = parse_location("registry.acme.net/ranges")
     assert cast(RegistryRepo, acme.store_for("attack")).repo == "ranges/attack"
+
+
+def test_hub_empty_name_prefix_refuses() -> None:
+    """A trailing slash (empty third segment) refuses instead of silently degrading to the bare-org form."""
+    with pytest.raises(DistError, match="location-invalid"):
+        parse_location("docker.io/meridianlabsai/")
