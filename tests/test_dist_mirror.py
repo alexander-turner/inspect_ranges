@@ -508,3 +508,79 @@ def test_pulled_catalog_realized_is_not_prune_bait(tmp_path: Path) -> None:
     )
     assert not frozen
     assert victims == []
+
+
+# -- standard-images-v1 slice 4: the published daemon bundle ---------------------
+
+
+def test_daemon_bundle_publish_and_fetch_round_trip(tmp_path: Path) -> None:
+    """The daemon artifact publishes under the reserved ref and a consumer fetch lands a consumable artifact dir (what `images derive` reads), no Go toolchain involved."""
+    from inspect_ranges._channel.bundle import write_bundle
+    from inspect_ranges._dist.catalog import fetch_daemon_bundle, publish_daemon_bundle
+    from inspect_ranges._doctor.checks import _artifact_state
+
+    artifacts = tmp_path / "artifacts"
+    built = write_bundle(artifacts, b"fake daemon binary", version="9.9.9-test")
+    location = parse_location(str(tmp_path / "loc"))
+    publish_daemon_bundle(artifacts, location)
+    out = tmp_path / "fetched"
+    info = fetch_daemon_bundle([location], out)
+    assert info == built
+    assert _artifact_state(out / "daemon.json") == "ok"
+
+
+def test_daemon_bundle_publish_refuses_a_tampered_tar(tmp_path: Path) -> None:
+    from inspect_ranges._channel.bundle import bundle_file_name, write_bundle
+    from inspect_ranges._dist.catalog import publish_daemon_bundle
+
+    artifacts = tmp_path / "artifacts"
+    write_bundle(artifacts, b"fake daemon binary", version="9.9.9-test")
+    with (artifacts / bundle_file_name("9.9.9-test")).open("ab") as handle:
+        handle.write(b"tamper")
+    location = parse_location(str(tmp_path / "loc"))
+    with pytest.raises(DistError) as excinfo:
+        publish_daemon_bundle(artifacts, location)
+    assert excinfo.value.code == "digest-mismatch"
+
+
+def test_daemon_bundle_name_is_reserved_for_images_and_ranges(tmp_path: Path) -> None:
+    from inspect_ranges._dist.catalog import publish_golden
+
+    location = parse_location(str(tmp_path / "loc"))
+    with pytest.raises(DistError) as excinfo:
+        publish_golden("daemon-bundle", location, image_cache=tmp_path)
+    assert excinfo.value.code == "name-reserved"
+
+
+def test_daemon_bundle_travels_with_whole_location_mirrors(tmp_path: Path) -> None:
+    """An air-gapped fleet's mirror carries the daemon bundle beside the catalog, so derive works there without Go."""
+    from inspect_ranges._channel.bundle import write_bundle
+    from inspect_ranges._dist.catalog import (
+        fetch_daemon_bundle,
+        publish_daemon_bundle,
+        publish_golden,
+    )
+
+    fixture = Fixture(tmp_path)
+    source = parse_location(str(tmp_path / "source-loc"))
+    publish_golden("focal-guest", source, image_cache=fixture.image_cache)
+    artifacts = tmp_path / "artifacts"
+    write_bundle(artifacts, b"fake daemon binary", version="9.9.9-test")
+    publish_daemon_bundle(artifacts, source)
+    destination = parse_location(str(tmp_path / "dest-loc"))
+    mirror_names(source_names(source), source, destination)
+    info = fetch_daemon_bundle([destination], tmp_path / "fetched")
+    assert info.version == "9.9.9-test"
+
+
+def test_daemon_bundle_fetch_names_the_searched_locations(tmp_path: Path) -> None:
+    """A valid location that publishes no bundle: the refusal lists what was searched."""
+    from inspect_ranges._dist.catalog import fetch_daemon_bundle, publish_golden
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "golden-only-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    with pytest.raises(DistError) as excinfo:
+        fetch_daemon_bundle([location], tmp_path / "out")
+    assert excinfo.value.code == "artifact-missing"
+    assert "golden-only-loc" in str(excinfo.value)

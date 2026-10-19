@@ -38,7 +38,10 @@ class PlanOptions(BaseModel):
     """Guest CPU model; checkpointed fleets use a named model (see range-build.md)."""
 
     default_router_image: str = "noble-range-guest"
-    """Image for routers, and the attacker, when none is declared (one default guest image today; a dedicated attack image arrives with the images arc)."""
+    """Image for routers when none is declared."""
+
+    default_attacker_image: str = "attack"
+    """Image for a dedicated attack box when none is declared: the catalog's standard attack image (standard-images-v1), resolved like any bare name (pin, cache, then the search path, whose default tail is the public org)."""
 
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
@@ -415,7 +418,11 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         declared = specs_by_name[guest.name]
         reference = getattr(declared, "image", None)
         if reference is None:
-            reference = options.default_router_image
+            reference = (
+                options.default_attacker_image
+                if guest.kind == "attacker"
+                else options.default_router_image
+            )
         resources = getattr(declared, "resources", None)
         vmm = _attacker_vmm(spec.attacker) if guest.kind == "attacker" else declared.vmm
         guests.append(
