@@ -820,7 +820,7 @@ def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
             if image.name not in recorded and image.is_file():
                 try:
                     meta = json.loads(sidecar.read_text())
-                    from .._cli.imagescmd import is_catalog_realized
+                    from .._build.manifest import is_catalog_realized
 
                     if is_catalog_realized(
                         str(meta.get("range_name", "")),

@@ -486,7 +486,7 @@ def test_publish_refuses_unproven_manifests(tmp_path: Path) -> None:
 
 def test_pulled_catalog_realized_is_not_prune_bait(tmp_path: Path) -> None:
     """Slice-2 review B1: a pulled catalog image is sticky: never 'superseded', never offered by the realized tier, and its chain survives --chains."""
-    from inspect_ranges._cli.imagescmd import is_catalog_realized
+    from inspect_ranges._build.manifest import is_catalog_realized
     from inspect_ranges._dist import pull_image
     from inspect_ranges._dist.catalog import publish_realized
     from inspect_ranges._dist.gc import unreferenced_chain_files
@@ -584,3 +584,42 @@ def test_daemon_bundle_fetch_names_the_searched_locations(tmp_path: Path) -> Non
         fetch_daemon_bundle([location], tmp_path / "out")
     assert excinfo.value.code == "artifact-missing"
     assert "golden-only-loc" in str(excinfo.value)
+
+
+def test_pull_image_refuses_a_repointed_reference(tmp_path: Path) -> None:
+    """Phase review round-1 B1: the root a name resolves to must RECORD that name; a mutable tag re-pointed at another image's root refuses `published-mismatch` instead of landing foreign bytes under a success message."""
+    from inspect_ranges._dist.catalog import publish_golden
+    from inspect_ranges._dist.resolve import pull_image
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    # the registry (or an operator mistake) re-points another name's tag at
+    # focal-guest's root
+    store = location.store_for("noble-range-guest", create=True)
+    root = store.ref(location.latest_ref("focal-guest"))
+    store.put_index(location.latest_ref("noble-range-guest"), store.read_index(root))
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    with pytest.raises(DistError) as excinfo:
+        pull_image("noble-range-guest", [location], image_cache=consumer)
+    assert excinfo.value.code == "published-mismatch"
+    assert list(consumer.iterdir()) == [], "nothing may land from a refused pull"
+
+
+def test_daemon_bundle_pull_honors_the_operator_pin(tmp_path: Path) -> None:
+    """The sidecar travels with the artifact, so only the out-of-band pin catches a registry serving a regenerated pair."""
+    from inspect_ranges._channel.bundle import write_bundle
+    from inspect_ranges._dist.catalog import fetch_daemon_bundle, publish_daemon_bundle
+
+    artifacts = tmp_path / "artifacts"
+    built = write_bundle(artifacts, b"fake daemon binary", version="9.9.9-test")
+    location = parse_location(str(tmp_path / "loc"))
+    publish_daemon_bundle(artifacts, location)
+    out = tmp_path / "fetched"
+    with pytest.raises(DistError) as excinfo:
+        fetch_daemon_bundle([location], out, expected_sha256="f" * 64)
+    assert excinfo.value.code == "digest-mismatch"
+    assert not (out / "daemon.json").exists(), "a refused fetch lands nothing"
+    info = fetch_daemon_bundle([location], out, expected_sha256=built.bundle_sha256)
+    assert info == built

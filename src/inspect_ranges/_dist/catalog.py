@@ -43,6 +43,7 @@ __all__ = [
     "publish_daemon_bundle",
     "publish_golden",
     "publish_realized",
+    "refuse_reserved",
 ]
 
 CATALOG_REF = "catalog"
@@ -55,35 +56,45 @@ CATALOG_ARTIFACT = "application/vnd.inspect-ranges.catalog.v1"
 CATALOG_LAYER = "application/vnd.inspect-ranges.catalog.v1+json"
 
 
+def _read_catalog_list(location: Location, store: "object") -> list[str]:
+    """The validated name list a location's catalog ref holds (the one reader `catalog_names` and the publisher's read-modify-write share).
+
+    Raises:
+        DistError: `ref-not-found` when no catalog is published, `catalog-invalid` for a ref holding something else or an unparseable list.
+    """
+    from .oci import ContentStore
+
+    typed = cast(ContentStore, store)
+    root = typed.ref(location.latest_ref(CATALOG_REF))
+    index = typed.read_index(root)
+    if not index.manifests:
+        return []
+    manifest = typed.manifest(index.manifests[0])
+    if manifest.artifact_type != CATALOG_ARTIFACT:
+        raise DistError(
+            "catalog-invalid",
+            f"{location.describe()}'s {CATALOG_REF!r} ref holds a "
+            f"{manifest.artifact_type!r} artifact, not the catalog list",
+        )
+    try:
+        data = json.loads(typed.read_blob(manifest.layers[0]))
+    except ValueError as error:
+        raise DistError(
+            "catalog-invalid",
+            f"{location.describe()}'s catalog list does not parse: {error}",
+        ) from error
+    names = data.get("names")
+    if not isinstance(names, list):
+        return []
+    return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
+
+
 def _update_catalog_index(location: Location, name: str) -> None:
     """Add `name` to the location's published-name list (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture)."""
     store = location.store_for(CATALOG_REF, create=True)
     names: list[str] = []
     try:
-        root = store.ref(location.latest_ref(CATALOG_REF))
-        index = store.read_index(root)
-        if index.manifests:
-            manifest = store.manifest(index.manifests[0])
-            if manifest.artifact_type != CATALOG_ARTIFACT:
-                raise DistError(
-                    "catalog-invalid",
-                    f"{location.describe()}'s {CATALOG_REF!r} ref holds a "
-                    f"{manifest.artifact_type!r} artifact, not the catalog list",
-                )
-            try:
-                data = json.loads(store.read_blob(manifest.layers[0]))
-            except ValueError as error:
-                raise DistError(
-                    "catalog-invalid",
-                    f"{location.describe()}'s catalog list does not parse: {error}",
-                ) from error
-            existing = data.get("names")
-            if isinstance(existing, list):
-                names = [
-                    entry
-                    for entry in cast("list[object]", existing)
-                    if isinstance(entry, str)
-                ]
+        names = _read_catalog_list(location, store)
     except DistError as error:
         if error.code != "ref-not-found":
             raise
@@ -113,47 +124,30 @@ def catalog_names(location: Location) -> list[str]:
     Raises:
         DistError: `ref-not-found` when the location publishes no catalog.
     """
-    store = location.store_for(CATALOG_REF)
-    root = store.ref(location.latest_ref(CATALOG_REF))
-    index = store.read_index(root)
-    if not index.manifests:
-        return []
-    manifest = store.manifest(index.manifests[0])
-    if manifest.artifact_type != CATALOG_ARTIFACT:
-        raise DistError(
-            "catalog-invalid",
-            f"{location.describe()}'s {CATALOG_REF!r} ref holds a "
-            f"{manifest.artifact_type!r} artifact, not the catalog list",
-        )
-    try:
-        data = json.loads(store.read_blob(manifest.layers[0]))
-    except ValueError as error:
-        raise DistError(
-            "catalog-invalid",
-            f"{location.describe()}'s catalog list does not parse: {error}",
-        ) from error
-    names = data.get("names")
-    if not isinstance(names, list):
-        return []
-    return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
+    return _read_catalog_list(location, location.store_for(CATALOG_REF))
 
 
-def _refuse_reserved(name: str) -> None:
+def refuse_reserved(name: str, hint: str) -> None:
+    """Refuse the reserved refs wherever a caller would publish under a name.
+
+    Raises:
+        DistError: `name-reserved` for `catalog` and `daemon-bundle`.
+    """
     if name == CATALOG_REF:
         raise DistError(
             "name-reserved",
-            f"{CATALOG_REF!r} is the catalog's own ref; nothing publishes under it",
+            f"{CATALOG_REF!r} is the catalog list's own ref at every location; {hint}",
         )
     if name == DAEMON_REF:
         raise DistError(
             "name-reserved",
-            f"{DAEMON_REF!r} is the published daemon bundle's ref; images never publish under it",
+            f"{DAEMON_REF!r} is the published daemon bundle's ref at every location; {hint}",
         )
 
 
 def publish_golden(name: str, location: Location, *, image_cache: Path) -> Descriptor:
     """Promote a cache golden (its whole chain) to the catalog under its own name."""
-    _refuse_reserved(name)
+    refuse_reserved(name, "nothing publishes under it")
     root = push_image_artifact(name, location, image_cache=image_cache)
     _update_catalog_index(location, name)
     return root
@@ -172,7 +166,7 @@ def publish_realized(
     Raises:
         DistError: `artifact-missing` when the guest or its files are absent, plus every encode-time digest refusal.
     """
-    _refuse_reserved(catalog_name)
+    refuse_reserved(catalog_name, "nothing publishes under it")
     validated_cache_name(f"{catalog_name}.qcow2")
     if any(check.status != "pass" for check in manifest.verification.behavioral_checks):
         raise DistError(
@@ -298,10 +292,12 @@ def publish_daemon_bundle(artifact_dir: Path, location: Location) -> Descriptor:
     return store.put_index(location.latest_ref(DAEMON_REF), index)
 
 
-def fetch_daemon_bundle(locations: "list[Location]", out_dir: Path) -> "DaemonInfo":
+def fetch_daemon_bundle(
+    locations: "list[Location]", out_dir: Path, *, expected_sha256: str | None = None
+) -> "DaemonInfo":
     """Fetch the published daemon bundle from the first location serving one, landing the tar and sidecar in `out_dir` (the no-Go-toolchain path to the artifact `images derive` consumes).
 
-    The tar lands before the sidecar: a torn landing reads as rebuildable (`tar-missing`), never as a consumable bundle.
+    The tar lands before the sidecar: a torn landing reads as rebuildable (`tar-missing`), never as a consumable bundle. `expected_sha256` is the operator's out-of-band pin (the digest publish day recorded): the sidecar travels with the artifact, so without the pin the check proves internal consistency, not provenance.
 
     Raises:
         DistError: `artifact-missing` when no configured location publishes a bundle, `daemon-bundle-invalid` for a ref holding something else, `digest-mismatch` when the served tar does not match its sidecar; a broken location aborts rather than silently falling through.
@@ -359,6 +355,16 @@ def fetch_daemon_bundle(locations: "list[Location]", out_dir: Path) -> "DaemonIn
             ) from error
         tar_bytes = store.read_blob(tar_layer)
         digest = hashlib.sha256(tar_bytes).hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            # the sidecar travels WITH the artifact, so tar-vs-sidecar alone
+            # cannot catch a registry serving a regenerated pair; the operator
+            # pin (the digest publish day recorded) can
+            raise DistError(
+                "digest-mismatch",
+                f"the daemon bundle served by {location.describe()} is "
+                f"sha256:{digest[:16]}..., the requested pin is "
+                f"sha256:{expected_sha256[:16]}...",
+            )
         if digest != info.bundle_sha256:
             raise DistError(
                 "digest-mismatch",

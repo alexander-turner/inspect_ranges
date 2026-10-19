@@ -12,9 +12,10 @@ from pydantic import BaseModel, ConfigDict
 
 from .._build.manifest import BuildManifest, load_manifest
 from .._compiler.plan import image_file_name, resolve_image_reference, spec_sha256
-from ..types import RangeSpec
+from ..types import RangeSpec, has_guest_content
 from .encode import (
     ANN_BUILT_AT,
+    ANN_NAME,
     ANN_SPEC_SHA256,
     encode_image_chain,
     push_build,
@@ -59,12 +60,9 @@ def push_range(
     progress: "ProgressFn | None" = None,
 ) -> Descriptor:
     """Push a built range's closure to `location`, named under both the latest ref and the exact-spec ref."""
-    if manifest.range_name in ("catalog", "daemon-bundle"):
-        raise DistError(
-            "name-reserved",
-            f"{manifest.range_name!r} is a reserved ref at every location "
-            "(the catalog list, the published daemon bundle); rename the range",
-        )
+    from .catalog import refuse_reserved
+
+    refuse_reserved(manifest.range_name, "rename the range")
     store = location.store_for(manifest.range_name, create=True)
     # the exact-spec ref lands FIRST and the latest ref LAST (round-3 N1): a
     # crash between the two must never leave a build visible as latest but
@@ -258,10 +256,7 @@ def ensure_build_available(
     Raises:
         DistError: `never-pull` when a pull is needed but the host is pinned offline; otherwise whatever `pull_range` refuses with (`no-build-for-spec` with the nearest builds, a named broken location, an unreachable registry).
     """
-    content = any(
-        host.provisioning or host.services or host.vulnerabilities
-        for host in spec.hosts
-    )
+    content = any(has_guest_content(host) for host in spec.hosts)
     if not content:
         return None
     manifest = load_manifest(build_cache, spec.meta.name)
@@ -295,7 +290,7 @@ def catalog_image_references(spec: RangeSpec) -> list[str]:
 
     names: list[str] = []
     for host in spec.hosts:
-        if not (host.provisioning or host.services or host.vulnerabilities):
+        if not has_guest_content(host):
             names.append(host.image)
     for router in spec.routers:
         names.append(router.image or DEFAULT_ROUTER_IMAGE)
@@ -319,7 +314,7 @@ def ensure_images_available(
     missing = [
         name
         for name in catalog_image_references(spec)
-        if cached_image_digest(name, image_cache) is None
+        if not (image_cache / image_cache_file(name)).is_file()
     ]
     if not missing:
         return []
@@ -340,6 +335,13 @@ def ensure_images_available(
                 f"location (searched: "
                 f"{', '.join(location.describe() for location in locations)})",
             )
+        if not (image_cache / image_cache_file(name)).is_file():
+            raise DistError(
+                "published-mismatch",
+                f"pulling {name!r} from {pulled[0]} landed a closure that does "
+                f"not contain {image_cache_file(name)}; the published artifact "
+                "is not the named image",
+            )
     return missing
 
 
@@ -357,7 +359,14 @@ def _artifacts_present(manifest: BuildManifest, image_cache: Path) -> bool:
 def push_image_artifact(
     name: str, location: Location, *, image_cache: Path
 ) -> Descriptor:
-    """Publish one cache image's chain (golden plus vendor base, or a bare vendor base) as a standalone catalog artifact named at `location`."""
+    """Publish one cache image's chain (golden plus vendor base, or a bare vendor base) as a standalone catalog artifact named at `location`.
+
+    Raises:
+        DistError: `name-reserved` for the reserved refs, `artifact-missing` when the image is not cached.
+    """
+    from .catalog import refuse_reserved
+
+    refuse_reserved(name, "images never publish under it")
     reference = resolve_image_reference(name, image_cache)
     if reference.digest is None:
         raise DistError("artifact-missing", f"image {name!r} is not in the image cache")
@@ -366,7 +375,7 @@ def push_image_artifact(
     members = encode_image_chain(
         store, image_cache, reference.file, reference.digest, config=config
     )
-    index = OciIndex(manifests=members, annotations={"org.inspect-ranges.name": name})
+    index = OciIndex(manifests=members, annotations={ANN_NAME: name})
     return store.put_index(location.latest_ref(name), index)
 
 
@@ -410,6 +419,18 @@ def pull_image(
                     "served there; mirror the pinned artifacts or update the "
                     "pin file deliberately",
                 ) from None
+        # the identity check the range path gets from expect_range (round-3
+        # B1), for the catalog tier: registry tags are mutable, so the root a
+        # name RESOLVED TO is untrusted until its recorded published name
+        # matches what was asked for; a re-pointed reference never lands
+        recorded = (store.read_index(root).annotations or {}).get(ANN_NAME)
+        if recorded != name:
+            raise DistError(
+                "published-mismatch",
+                f"the root {root.digest[:19]}... served for {name!r} at "
+                f"{location.describe()} records the published name "
+                f"{recorded!r}; a re-pointed reference never lands",
+            )
         result = materialize_closure(
             store,
             root,

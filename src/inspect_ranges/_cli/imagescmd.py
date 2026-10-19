@@ -4,7 +4,11 @@ from pathlib import Path
 
 import click
 
-from .._build.manifest import default_build_cache, recorded_realized_files
+from .._build.manifest import (
+    default_build_cache,
+    is_catalog_realized,
+    recorded_realized_files,
+)
 from .._runtime import DeriveError, derive_golden, list_images
 from .._runtime.images import RECIPE_VERSION, default_image_cache
 
@@ -172,13 +176,6 @@ def list_cmd(image_cache: Path | None) -> None:
         else:
             note = "unmanaged: no provenance metadata"
         click.echo(f"{file}  ({note})")
-
-
-def is_catalog_realized(range_name: str, guest: str, build_key: str, file: str) -> bool:
-    """Whether a realized sidecar describes a CATALOG-pulled image (slice-2 review B1): a build's realized file is always `<range>-<guest>-<key12>.qcow2`, so a renamed landing (`attack.qcow2`) is a promoted catalog image, sticky by design and never the realized tier's reclaim bait (consumers hold no factory manifest to reference it)."""
-    from .._build.manifest import realized_file_name
-
-    return file != realized_file_name(range_name, guest, build_key)
 
 
 def prune_delete_pass(
