@@ -639,6 +639,90 @@ def test_range_image_rebuilds_on_content_mismatch() -> None:
     )
 
 
+def test_range_image_pin_uses_the_published_image_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A digest pin already present locally is used as-is: no pull, no build."""
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import RANGE_IMAGE_ENV, ensure_range_image
+
+    pin = "meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, "ok\n", "")
+
+    assert ensure_range_image(scripted) == pin
+    assert calls == [["docker", "image", "inspect", pin, "--format", "ok"]]
+
+
+def test_range_image_pin_pulls_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import RANGE_IMAGE_ENV, ensure_range_image
+
+    pin = "127.0.0.1:5065/inspect-ranges-range@sha256:" + "cd" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        rc = 1 if argv[:3] == ["docker", "image", "inspect"] else 0
+        return sp.CompletedProcess(argv, rc, "", "")
+
+    assert ensure_range_image(scripted) == pin
+    assert ["docker", "pull", pin] in calls
+    assert not any(argv[:2] == ["docker", "build"] for argv in calls)
+
+
+def test_range_image_pin_refuses_when_the_pull_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import (
+        RANGE_IMAGE_ENV,
+        RangeImageError,
+        ensure_range_image,
+    )
+
+    pin = "example.com/gone@sha256:" + "ef" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        return sp.CompletedProcess(argv, 1, "", "manifest unknown")
+
+    with pytest.raises(RangeImageError, match="manifest unknown"):
+        ensure_range_image(scripted)
+
+
+def test_range_image_pin_refuses_mutable_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unpinned value never reaches docker: a mutable tag could swap the jail."""
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import (
+        RANGE_IMAGE_ENV,
+        RangeImageError,
+        ensure_range_image,
+    )
+
+    monkeypatch.setenv(RANGE_IMAGE_ENV, "meridianlabsai/inspect-ranges-range:latest")
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(RangeImageError, match="digest-pinned"):
+        ensure_range_image(scripted)
+    assert calls == []
+
+
 def test_make_channel_uses_the_readiness_allowance() -> None:
     """One wedged accept-but-never-reply guest must cost seconds per attempt, not the channel default."""
     channel = up_module().make_channel({"web": 3000})

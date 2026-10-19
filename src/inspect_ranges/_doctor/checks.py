@@ -938,7 +938,19 @@ def check_realizer(
             )
         )
     elif image_inspect.returncode == 0:
-        results.append(CheckResult(REALIZER, "range image", "ok", _range_image_tag()))
+        from .._runtime.rangeimage import RANGE_IMAGE_ENV
+
+        pinned_image = os.environ.get(RANGE_IMAGE_ENV)
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "ok",
+                f"pinned {pinned_image}"
+                if pinned_image
+                else f"local {_range_image_tag()}",
+            )
+        )
     else:
         results.append(
             CheckResult(

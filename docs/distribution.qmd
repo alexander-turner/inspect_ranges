@@ -1,7 +1,7 @@
 ---
 title: "Distribution"
 description: "Publishing and consuming built ranges: locations in three forms, push and spec-driven pull, the implicit pull at eval init, catalog images, mirroring and the air gap, and cache reclamation."
-llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows, and the fleet guidance for Docker Hub credentials and rate limits."
+llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, the hardened range container image's INSPECT_RANGES_RANGE_IMAGE digest pin with the local build as the default, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows, and the fleet guidance for Docker Hub credentials and rate limits."
 ---
 
 ## Overview
@@ -74,6 +74,18 @@ $ inspect-ranges images refresh ubuntu-focal     # the explicit move-forward act
 ```
 
 A plain `images pull` of a name whose published chain moved refuses rather than silently replacing the cache; `refresh` replaces the whole chain (image, provenance sidecar, vendor base) together, and the next build's keys change accordingly.
+
+## The hardened range container image
+
+The range container (the hardened jail every guest boots inside) is an ordinary Docker image, not an OCI-artifact qcow2, so it distributes as one: the project publishes it to a conventional Docker repo (`docker.io/meridianlabsai/inspect-ranges-range`), and a consumer opts in by pinning it:
+
+``` {.bash .fragment}
+export INSPECT_RANGES_RANGE_IMAGE=docker.io/meridianlabsai/inspect-ranges-range@sha256:ab12e0...
+```
+
+With the knob set, `up` pulls the pin once (plain `docker pull`, so hub credentials and private mirrors work exactly as they do for any image) and every range boots inside it; doctor's range-image row reports the pinned source. The pin is mandatory: a mutable tag could swap the hardened jail under a fleet, so an unpinned value refuses before anything boots, as does a pin the registry does not hold.
+
+Unset (the default and the dev loop), `up` builds the image locally from package data, keyed by a content label over the package version and build context, so an edited Dockerfile rebuilds within one version. The digest pin plays the same role for published images that the content label plays for local ones: the identity that decides whether the image on this host is the one intended.
 
 ## Mirroring and the air gap: `mirror`
 
