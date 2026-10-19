@@ -89,6 +89,106 @@ def derive(
     )
 
 
+@images.command(name="derive-windows")
+@click.argument("iso", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--sha256",
+    "iso_sha256",
+    required=True,
+    help="Required digest pin for the Windows install ISO (hex or sha256:-prefixed).",
+)
+@click.option(
+    "--virtio-iso",
+    "virtio_iso",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="The virtio-win driver ISO (viostor for WinPE, guest tools, the viosock driver).",
+)
+@click.option(
+    "--virtio-sha256",
+    "virtio_sha256",
+    required=True,
+    help="Required digest pin for the virtio-win ISO.",
+)
+@click.option("--name", default="windows-2022", show_default=True, help="Golden name.")
+@click.option(
+    "--admin-password",
+    "admin_password",
+    default=None,
+    help="The golden's built-in Administrator password (scenario content; the control plane is the vsock daemon as SYSTEM). Defaults to the documented constant.",
+)
+@click.option(
+    "--image-cache",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache the golden is installed into.",
+)
+@click.option(
+    "--daemon-bundle",
+    "daemon_bundle",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory holding the daemon-bundle artifact (its windows/ sources compile in-guest).",
+)
+@click.option(
+    "--daemon-sha256",
+    "daemon_sha256",
+    default=None,
+    help="Out-of-band pin for the daemon bundle digest.",
+)
+def derive_windows(
+    iso: Path,
+    iso_sha256: str,
+    virtio_iso: Path,
+    virtio_sha256: str,
+    name: str,
+    admin_password: str | None,
+    image_cache: Path | None,
+    daemon_bundle: Path | None,
+    daemon_sha256: str | None,
+) -> None:
+    """Install a sysprep'd Windows golden from digest-pinned eval media (windows-ad-v1).
+
+    A one-shot hardened range container runs the unattended install: viostor in WinPE, virtio guest tools and the vsock control daemon at first logon (compiled in-guest from the daemon bundle's Windows sources), then `sysprep /generalize /shutdown`. Clones specialize per boot from the render-emitted unattend seed. Windows artifacts are LOCAL ONLY (recipes-not-images, the ratified posture); nothing Windows-derived publishes anywhere. Idempotent on the same media, daemon, and password pins.
+    """
+    from .._runtime.winimage import DEFAULT_ADMIN_PASSWORD, install_windows_golden
+
+    if image_cache is None:
+        image_cache = default_image_cache()
+    try:
+        metadata, hit = install_windows_golden(
+            iso,
+            iso_sha256,
+            virtio_iso,
+            virtio_sha256,
+            image_cache,
+            name=name,
+            admin_password=(
+                admin_password if admin_password is not None else DEFAULT_ADMIN_PASSWORD
+            ),
+            artifact_dir=daemon_bundle,
+            daemon_sha256=daemon_sha256,
+        )
+    except DeriveError as error:
+        raise click.ClickException(str(error)) from error
+    except OSError as error:
+        raise click.ClickException(
+            f"derive-windows failed on this host: {error}"
+        ) from error
+    if daemon_sha256 is None:
+        click.echo(
+            "daemon artifact unpinned: sidecar-only verification; "
+            "pass --daemon-sha256 for out-of-band pinning"
+        )
+    verb = "cache hit" if hit else "installed"
+    click.echo(f"{verb}: {metadata.file}  sha256:{metadata.golden_sha256}")
+    click.echo(
+        f"  media {metadata.vendor_file} sha256:{metadata.vendor_sha256}"
+        f"  daemon {metadata.daemon.name} v{metadata.daemon.version}"
+    )
+
+
 @images.command(name="list")
 @click.option(
     "--image-cache",

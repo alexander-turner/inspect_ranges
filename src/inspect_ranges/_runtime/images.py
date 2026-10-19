@@ -76,6 +76,8 @@ class ImageMetadata(BaseModel):
     daemon: DaemonPin
     golden_sha256: str
     created: str
+    admin_password: str | None = None
+    """Windows goldens only: the built-in Administrator password baked at install (deliberate, LOCAL-ONLY scenario content; the control plane is the vsock daemon as SYSTEM). Render reads it to answer the per-boot OOBE pass."""
 
 
 class DeriveError(Exception):

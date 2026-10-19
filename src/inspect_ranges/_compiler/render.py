@@ -74,13 +74,7 @@ _DOMAIN_XML = """<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domai
       <source file='/scratch/{name}.qcow2'/>
       <target dev='vda' bus='virtio'/>
     </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='raw'/>
-      <source file='/scratch/{name}-seed.iso'/>
-      <target dev='vdb' bus='virtio'/>
-      <readonly/>
-    </disk>
-{interfaces}    <vsock model='virtio'>
+{seed_stanza}{interfaces}    <vsock model='virtio'>
       <cid auto='no' address='{cid}'/>
     </vsock>
     <serial type='file'>
@@ -110,6 +104,34 @@ _INTERFACE_XML = """    <interface type='bridge'>
       <mac address='{mac}'/>
       <model type='virtio'/>
     </interface>
+"""
+
+_SEED_STANZA_LINUX = """\
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='/scratch/{name}-seed.iso'/>
+      <target dev='vdb' bus='virtio'/>
+      <readonly/>
+    </disk>
+"""
+
+# Windows' implicit answer-file search covers removable media only, and the
+# strict profile strips SATA, so the unattend seed rides a virtio-scsi cdrom
+# (the vioscsi driver ships in the golden's guest tools)
+_SEED_STANZA_WINDOWS = """\
+    <controller type='scsi' model='virtio-scsi'/>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='/scratch/{name}-seed.iso'/>
+      <target dev='sda' bus='scsi'/>
+      <readonly/>
+    </disk>
+    <!-- windows setup passes (specialize/OOBE) hang without a display
+         adapter (measured: the installer and the first clone boot both);
+         the VNC listener binds the range container's loopback, which no
+         guest segment can reach -->
+    <graphics type='vnc' listen='127.0.0.1' autoport='yes'/>
+    <video><model type='vga'/></video>
 """
 
 _COMPOSE_ISOLATED = """# Generated realization bundle: hardened range container profile
@@ -361,28 +383,43 @@ def render_bundle(
                     cid=guest.cid,
                     uid=guest_uid(guest.cid),
                     interfaces=interfaces,
+                    seed_stanza=(
+                        _SEED_STANZA_WINDOWS
+                        if guest.os == "windows"
+                        else _SEED_STANZA_LINUX
+                    ).format(name=guest.name),
                 ),
             )
-        write(
-            f"guests/{guest.name}/seed/meta-data",
-            # the image file keys the instance-id (parked-decisions item 2):
-            # a realized image's name embeds its build key, so a new build
-            # generation is a NEW instance and cloud-init re-applies runtime
-            # seeds instead of skipping them as already-run
-            f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
-            f"local-hostname: {guest_hostname(guest.name)}\n",
-        )
-        write(
-            f"guests/{guest.name}/seed/network-config",
-            yaml.safe_dump(_netplan(plan, guest), sort_keys=False),
-        )
-        write(
-            f"guests/{guest.name}/seed/user-data",
-            "#cloud-config\n"
-            + yaml.safe_dump(
-                _user_data(spec, plan, guest, allocation), sort_keys=False
-            ),
-        )
+        if guest.injector == "unattend":
+            # the file MUST be named unattend.xml: the specialize/OOBE passes'
+            # implicit answer-file search matches that name on removable media
+            # (autounattend.xml is the installation-media name; measured:
+            # specialize ignored it and booted with defaults)
+            write(
+                f"guests/{guest.name}/seed/unattend.xml",
+                _windows_unattend(plan, guest, options),
+            )
+        else:
+            write(
+                f"guests/{guest.name}/seed/meta-data",
+                # the image file keys the instance-id (parked-decisions item 2):
+                # a realized image's name embeds its build key, so a new build
+                # generation is a NEW instance and cloud-init re-applies runtime
+                # seeds instead of skipping them as already-run
+                f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
+                f"local-hostname: {guest_hostname(guest.name)}\n",
+            )
+            write(
+                f"guests/{guest.name}/seed/network-config",
+                yaml.safe_dump(_netplan(plan, guest), sort_keys=False),
+            )
+            write(
+                f"guests/{guest.name}/seed/user-data",
+                "#cloud-config\n"
+                + yaml.safe_dump(
+                    _user_data(spec, plan, guest, allocation), sort_keys=False
+                ),
+            )
 
     backings = options.realized_backings if options is not None else {}
     write(
@@ -391,7 +428,13 @@ def render_bundle(
             {
                 "parallel": True,
                 "guests": [
-                    _boot_guest(guest, networks, backings) for guest in plan.guests
+                    _boot_guest(
+                        guest,
+                        networks,
+                        backings,
+                        options.image_cache if options is not None else None,
+                    )
+                    for guest in plan.guests
                 ],
                 "verify": {"reserved": True},
             },
@@ -420,10 +463,34 @@ def render_bundle(
     return plan
 
 
+def _overlay_gb(guest: PlannedGuest, image_cache: Path | None) -> int:
+    """The guest overlay's virtual size: the declared `disk_gb`, clamped up to the backing image's own virtual size (a smaller overlay truncates the disk under the guest)."""
+    if image_cache is None:
+        return guest.disk_gb
+    backing = _qcow2_virtual_gb(image_cache / guest.image.file)
+    if backing is None:
+        return guest.disk_gb
+    return max(guest.disk_gb, backing)
+
+
+def _qcow2_virtual_gb(path: Path) -> int | None:
+    """The qcow2 header's virtual size, in whole GiB rounded up; `None` for raw or unreadable images. An overlay created SMALLER than its backing truncates the guest's disk (Windows refuses to boot with 0xc0000001; measured, windows-ad-v1 slice 1), so boot overlays clamp to this."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+    except OSError:
+        return None
+    if len(header) < 32 or header[:4] != b"QFI\xfb":
+        return None
+    size = int.from_bytes(header[24:32], "big")
+    return max(1, -(-size // (1 << 30)))
+
+
 def _boot_guest(
     guest: PlannedGuest,
     networks: dict[str, PlannedNetwork],
     backings: dict[str, tuple[str, str]],
+    image_cache: Path | None,
 ) -> dict[str, Any]:
     """One guest's `boot.json` entry; a Cloud Hypervisor guest also carries what its command line needs (it has no domain XML), and a realized guest carries its backing golden (verified by `up`: the overlay digest cannot see its backing)."""
     entry: dict[str, Any] = {
@@ -433,8 +500,9 @@ def _boot_guest(
         "image_digest": guest.image.digest,
         "backing_file": backings.get(guest.name, (None, None))[0],
         "backing_digest": backings.get(guest.name, (None, None))[1],
-        "overlay_gb": guest.disk_gb,
+        "overlay_gb": _overlay_gb(guest, image_cache),
         "readiness": guest.readiness,
+        "injector": guest.injector,
         "vmm": guest.vmm,
     }
     if guest.vmm == "cloud-hypervisor":
@@ -552,6 +620,148 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
 def guest_hostname(name: str) -> str:
     """The in-guest hostname for a guest name: hostname-invalid characters become hyphens and trailing separators drop. Spec names allow underscores and dots (terraform-derived ranges use them heavily), RFC hostnames do not, and an unsanitized name makes cloud-init's set-hostname module fail — which noble's cloud-init reports as DEGRADED, so `cloud-init status --wait` exits 2 and readiness refuses the guest (linux-examples-v1 slice 3). Planning refuses two guests whose names sanitize identically (`hostname-collision`)."""
     return re.sub(r"[^a-z0-9-]", "-", name).rstrip("-")
+
+
+_WINDOWS_UNATTEND_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<!-- Per-boot specialize seed for a sysprep'd inspect-ranges Windows golden:
+     hostname, static addressing (interfaces keyed by MAC), and the OOBE
+     answers that keep the first boot unattended. Rendered per guest. -->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>{hostname}</ComputerName>
+      <TimeZone>UTC</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{tcpip_interfaces}      </Interfaces>
+    </component>
+    <component name="Microsoft-Windows-DNS-Client" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{dns_interfaces}      </Interfaces>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>{admin_password}</Value><PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+    </component>
+  </settings>
+</unattend>
+"""
+
+_TCPIP_INTERFACE = """\
+        <Interface wcm:action="add">
+          <Identifier>{mac}</Identifier>
+          <Ipv4Settings>
+            <DhcpEnabled>false</DhcpEnabled>
+            <RouterDiscoveryEnabled>false</RouterDiscoveryEnabled>
+          </Ipv4Settings>
+          <UnicastIpAddresses>
+            <IpAddress wcm:action="add" wcm:keyValue="1">{ip}/{prefix}</IpAddress>
+          </UnicastIpAddresses>
+{routes}        </Interface>
+"""
+
+_TCPIP_ROUTE = """\
+          <Routes>
+            <Route wcm:action="add">
+              <Identifier>1</Identifier>
+              <Prefix>0.0.0.0/0</Prefix>
+              <NextHopAddress>{gateway}</NextHopAddress>
+            </Route>
+          </Routes>
+"""
+
+_DNS_INTERFACE = """\
+        <Interface wcm:action="add">
+          <Identifier>{mac}</Identifier>
+          <DNSServerSearchOrder>
+{servers}          </DNSServerSearchOrder>
+        </Interface>
+"""
+
+
+def windows_hostname(name: str) -> str:
+    """The NetBIOS-safe in-guest name: the sanitized hostname truncated to 15 characters (the NetBIOS limit; longer names make specialize warn and truncate unpredictably)."""
+    return guest_hostname(name)[:15].rstrip("-")
+
+
+def _windows_unattend(
+    plan: ResolvedPlan, guest: PlannedGuest, options: "PlanOptions | None"
+) -> str:
+    """The per-boot specialize answer file for a Windows guest: hostname, MAC-keyed static addressing, resolvers, and the OOBE answers. The Administrator password comes from the golden's recorded metadata (scenario content, local-only), falling back to the documented default."""
+    networks = {network.name: network for network in plan.networks}
+    tcpip: list[str] = []
+    dns: list[str] = []
+    for interface in guest.interfaces:
+        network = networks[interface.network]
+        mac = interface.mac.upper().replace(":", "-")
+        routes = ""
+        if network.gateway is not None:
+            routes = _TCPIP_ROUTE.format(gateway=network.gateway)
+        tcpip.append(
+            _TCPIP_INTERFACE.format(
+                mac=mac,
+                ip=interface.ip,
+                prefix=network.cidr.prefixlen,
+                routes=routes,
+            )
+        )
+        if network.resolvers:
+            servers = "".join(
+                f'            <IpAddress wcm:action="add" wcm:keyValue="{index + 1}">{address}</IpAddress>\n'
+                for index, address in enumerate(network.resolvers)
+            )
+            dns.append(_DNS_INTERFACE.format(mac=mac, servers=servers))
+    return _WINDOWS_UNATTEND_TEMPLATE.format(
+        hostname=windows_hostname(guest.name),
+        tcpip_interfaces="".join(tcpip),
+        dns_interfaces="".join(dns),
+        admin_password=_windows_admin_password(options, guest),
+    )
+
+
+def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) -> str:
+    """The golden's recorded Administrator password (ImageMetadata, local-only scenario content), else the documented default."""
+    from .._runtime.winimage import DEFAULT_ADMIN_PASSWORD
+
+    if options is None or options.image_cache is None:
+        return DEFAULT_ADMIN_PASSWORD
+    metadata_path: Path = options.image_cache / f"{Path(guest.image.file).stem}.json"
+    if metadata_path.is_file():
+        try:
+            from .._runtime.images import ImageMetadata
+
+            metadata = ImageMetadata.model_validate_json(metadata_path.read_text())
+            if metadata.admin_password:
+                return metadata.admin_password
+        except ValueError:
+            pass
+    return DEFAULT_ADMIN_PASSWORD
 
 
 def _user_data(

@@ -67,13 +67,19 @@ async def wait(channel: MessageChannel, guest: str, timeout: float) -> int:
 
 
 async def run_exec(
-    channel: MessageChannel, guest: str, command: str, user: str | None = None
+    channel: MessageChannel,
+    guest: str,
+    command: str,
+    user: str | None = None,
+    shell: str = "sh",
 ) -> int:
+    """`--shell cmd` wraps for Windows guests (cmd /c; there is no sh and the daemon's default identity is SYSTEM)."""
+    wrapped = ["cmd", "/c", command] if shell == "cmd" else ["sh", "-c", command]
     outcome = await channel.exec(
         guest,
         ExecRequest(
             id=request_id(),
-            cmd=["sh", "-c", command],
+            cmd=wrapped,
             user=user,
             budget=Budget(command_ms=120_000),
         ),
@@ -90,6 +96,7 @@ def main() -> int:
     parser.add_argument("--project", default=None)
     parser.add_argument("--guest", default=GUEST)
     parser.add_argument("--user", default=None)
+    parser.add_argument("--shell", default="sh", choices=["sh", "cmd"])
     parser.add_argument("op", choices=["wait", "exec", "diag"])
     parser.add_argument("arg", nargs="?")
     args = parser.parse_args()
@@ -111,7 +118,7 @@ def main() -> int:
         if args.op == "diag":
             return await diag()
         assert args.arg is not None, "exec needs a command"
-        return await run_exec(channel, guest, args.arg, args.user)
+        return await run_exec(channel, guest, args.arg, args.user, args.shell)
 
     return asyncio.run(dispatch())
 

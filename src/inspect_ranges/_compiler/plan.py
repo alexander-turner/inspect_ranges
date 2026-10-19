@@ -2,7 +2,7 @@
 
 `resolve_plan` turns a validated `RangeSpec` into everything downstream stages consume: per-guest allocations (addresses, MACs, CIDs), per-network realization facts (bridge, gateway, resolvers, search domain), image references with cache-resolved digests, host requirements, and resource totals. Unsupported combinations fail here, at planning, as `IssueError`s with stable codes — never mid-boot. The plan is pure data with no timestamps, so the same spec and options always produce byte-identical `plan.json` (see `plan_json`).
 
-Render v1 scope: guests whose configuration injector is cloud-init (Linux). Windows guests refuse at planning (`windows-render-not-supported`); their injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase.
+Render scope: Linux guests inject configuration via cloud-init; Windows HOSTS inject via a per-boot unattend seed with daemon-only readiness (windows-ad-v1 slice 1). Windows routers and attackers still refuse at planning (`windows-render-not-supported`).
 """
 
 import hashlib
@@ -113,9 +113,9 @@ class PlannedGuest(BaseModel):
     interfaces: list[InterfaceAllocation]
     routes: list[Route]
     """Static routes (routers only)."""
-    injector: Literal["cloud-init"]
+    injector: Literal["cloud-init", "unattend"]
     """How configuration reaches the guest (render v1: cloud-init only)."""
-    readiness: Literal["cloud-init"]
+    readiness: Literal["cloud-init", "daemon"]
     """What the applier waits on before the range is ready."""
     profile: Literal["strict"]
     """Device-model profile (min-devices strict; richer profiles arrive with a schema field)."""
@@ -243,16 +243,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="probe segments come from the challenge's active-prober goals; the goal's host must sit on a declared network",
                 )
             )
-    for index, host in enumerate(spec.hosts):
-        if host.os.type == "windows":
-            issues.append(
-                Issue(
-                    code="windows-render-not-supported",
-                    path=("hosts", index, "os", "type"),
-                    message=f"host {host.name!r} is a Windows guest, which render v1 cannot realize",
-                    hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
-                )
-            )
+    # windows HOSTS realize (windows-ad-v1 slice 1: the unattend injector and
+    # daemon readiness); windows routers and attackers still refuse below
     for section, declared_list in (("hosts", spec.hosts), ("routers", spec.routers)):
         for index, guest_decl in enumerate(declared_list):
             content = any(
@@ -442,20 +434,25 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             )
         resources = getattr(declared, "resources", None)
         vmm = _attacker_vmm(spec.attacker) if guest.kind == "attacker" else declared.vmm
+        # windows hosts realize through the unattend injector and daemon-only
+        # readiness (windows-ad-v1 slice 1); routers and attackers stay linux
+        windows = (
+            guest.kind == "host" and specs_by_name[guest.name].os.type == "windows"
+        )
         guests.append(
             PlannedGuest(
                 name=guest.name,
                 kind=guest.kind,
                 cid=guest.cid,
-                os="linux",
+                os="windows" if windows else "linux",
                 image=_resolve_image(reference, options.image_cache),
                 cpus=resources.cpus if resources else 1,
                 memory_mb=resources.memory_mb if resources else 1024,
                 disk_gb=(resources.disk_gb if resources and resources.disk_gb else 10),
                 interfaces=guest.interfaces,
                 routes=list(getattr(declared, "routes", [])),
-                injector="cloud-init",
-                readiness="cloud-init",
+                injector="unattend" if windows else "cloud-init",
+                readiness="daemon" if windows else "cloud-init",
                 profile="strict",
                 vmm=vmm,
             )

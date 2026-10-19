@@ -252,7 +252,8 @@ class BootGuest(BaseModel):
     """A realized overlay's backing golden in the cache; verified at boot like the overlay itself (round-2 review: the overlay digest cannot see its backing, and goldens re-derive in place under the same name)."""
     backing_digest: str | None = None
     overlay_gb: int = Field(ge=1)
-    readiness: Literal["cloud-init"]
+    readiness: Literal["cloud-init", "daemon"]
+    injector: Literal["cloud-init", "unattend"] = "cloud-init"
     vmm: Literal["qemu", "cloud-hypervisor"] = "qemu"
     cpus: int | None = Field(default=None, ge=1)
     memory_mb: int | None = Field(default=None, ge=64)
@@ -319,11 +320,20 @@ def boot_script(boot: BootPlan) -> str:
             f"qemu-img create -f qcow2 -F qcow2 -b /images/{image} "
             f"/scratch/{name}.qcow2 {guest.overlay_gb}G >/dev/null"
         )
-        lines.append(
-            f"cloud-localds -N /render/guests/{name}/seed/network-config "
-            f"/scratch/{name}-seed.iso "
-            f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
-        )
+        if guest.injector == "unattend":
+            # a windows guest's seed is a plain ISO with the per-boot answer
+            # file at its root (the implicit specialize search reads it from
+            # removable media); -J keeps the 8.3-unfriendly name intact
+            lines.append(
+                f"genisoimage -quiet -o /scratch/{name}-seed.iso -J -R "
+                f"/render/guests/{name}/seed/unattend.xml"
+            )
+        else:
+            lines.append(
+                f"cloud-localds -N /render/guests/{name}/seed/network-config "
+                f"/scratch/{name}-seed.iso "
+                f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
+            )
         if guest.vmm == "qemu":
             # the DAC seclabel runs this QEMU as its own uid with relabel off
             # (issue #5): root pre-owns the files the unprivileged VMM opens
