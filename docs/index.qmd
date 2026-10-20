@@ -259,7 +259,7 @@ Inspect Ranges includes seven examples: the original dmz-pivot above, and six tr
 | [cyris-basic](examples/cyris-basic.md) | CyRIS reference (JAIST) | weak-password privesc, firewall recon, forensics triage |
 | [mhbench-equifax-small](examples/mhbench-equifax-small.md) | MHBench (CMU) | CVE-2017-5638 Struts RCE, SSH-key pivot, four-database exfiltration |
 | [goad-light](examples/goad-light.md) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
-| [attack-range-windows](examples/attack-range-windows.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection scored from the exported Splunk stream |
+| [splunk-detection](examples/splunk-detection.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection scored from the exported Splunk stream |
 
 ## Architecture
 

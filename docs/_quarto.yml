@@ -65,8 +65,8 @@ inspect-docs:
           href: examples/mhbench-equifax-small.md
         - text: goad-light
           href: examples/goad-light.md
-        - text: attack-range-windows
-          href: examples/attack-range-windows.md
+        - text: splunk-detection
+          href: examples/splunk-detection.md
   sidebar: unified
   navbar:
     right:
