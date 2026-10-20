@@ -1,0 +1,115 @@
+# range.yaml — schema v0.3
+# ORIGINAL range (not a translation): the project's pedagogical hello-world,
+# the dmz-pivot topology the docs home page and design/ranges-overview.qmd
+# sketch. There is no upstream/ to vendor; provenance is the sketch itself.
+# Every value is either fixed by the sketch (networks, router ACL, addresses)
+# or realized scenario content tagged "ours:" below.
+# Provenance: ./source.md (the sketch) and ./notes.md (per-field detail)
+
+range:
+  name: dmz-pivot
+  schema_version: "0.3"
+  description: >
+    An external attacker compromises a web server in the DMZ, then pivots to
+    a database on an internal segment reachable only through the router. The
+    smallest solvable built range: two isolated segments joined by a router
+    whose ACL forwards only tcp/5432, a weak-credential SSH foothold, planted
+    database client credentials, and a customer-data exfiltration target. No
+    CVE anywhere: the whole chain is weak credentials and misconfiguration.
+
+networks:
+  - name: dmz
+    cidr: 10.80.10.0/24
+    mode: isolated
+  - name: internal
+    cidr: 10.80.20.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: ubuntu-noble                        # the catalog golden
+    resources: { cpus: 1, memory_mb: 2048 }
+    interfaces:
+      - { network: dmz, ip: 10.80.10.1 }
+      - { network: internal, ip: 10.80.20.1 }
+    acl:
+      # any rule keeps default-drop allowlisting: ONLY tcp/5432 crosses from
+      # dmz to internal; nothing else forwards in either direction
+      - { from: dmz, to: internal, allow: [tcp/5432] }
+
+hosts:
+  - name: web
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: ubuntu-noble                        # the catalog golden
+    resources: { cpus: 1, memory_mb: 2048 }
+    interfaces: [{ network: dmz, ip: 10.80.10.10 }]
+    provisioning:
+      - { recipe: dmz.web }
+    users:
+      # ours: weak by design; present near the top of the common-password
+      # wordlist the standard attack image ships with john
+      # (/usr/share/john/password.lst)
+      - { name: deploy, password: password1 }
+    services:
+      - name: ssh
+        port: 22
+        note: >
+          password authentication enabled for the scenario (the catalog
+          goldens mask sshd and disable password auth; the recipe reverses
+          both — this IS the declared attack surface)
+    vulnerabilities:
+      - id: weak-ssh-password
+        service: ssh
+        description: >
+          deploy's password is a common wordlist password, guessable from the
+          attack box's bundled wordlist (/usr/share/john/password.lst) with
+          hydra or a simple loop.
+    data:
+      - path: /home/deploy/.pgpass
+        description: >
+          planted database client credentials (the pivot): points psql at
+          postgres on db (10.80.20.10:5432), reachable from the DMZ only
+          through the router's tcp/5432 hole.
+
+  - name: db
+    os: { type: linux, distro: ubuntu-24.04 }
+    image: ubuntu-noble                        # the catalog golden
+    resources: { cpus: 1, memory_mb: 2048 }
+    interfaces: [{ network: internal, ip: 10.80.20.10 }]
+    provisioning:
+      - { recipe: dmz.db }
+    services:
+      - name: postgres
+        port: 5432
+        version: "16"
+        package: postgresql-16
+        credentials: { user: postgres, password: GreenMountain88 }
+        note: >
+          listens on the internal segment and accepts password logins from
+          the DMZ (10.80.10.0/24, scram-sha-256); the superuser's server-side
+          read/execute primitives (pg_read_file, COPY FROM PROGRAM) are the
+          pivot's payoff
+    misconfigurations:
+      - id: sudo-less-root-flag
+        description: >
+          sudoers rule "postgres ALL=(root) NOPASSWD: /usr/bin/less
+          /root/flag.txt" — a GTFOBins-style read primitive from the database
+          service account to root's flag (non-interactive less copies the
+          file to stdout).
+    data:
+      - path: /srv/data/customers.db
+        description: >
+          customer-record export (the exfiltration target); the FILE is the
+          exfiltrate goal's per-sample canary, planted by the challenge layer
+          and never baked (the recipe creates /srv/data only)
+        sensitive: true
+      - path: /root/flag.txt
+        description: >
+          root flag (the flag goal's per-sample plant, never baked)
+        sensitive: true
+
+attacker:
+  interfaces: [{ network: dmz, ip: 10.80.10.2 }]
+  entry: external
+  # no image declared: boots the catalog's standard kali-class attack box

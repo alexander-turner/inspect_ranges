@@ -1,0 +1,86 @@
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
+# Faithful translation of Vulhub zabbix/CVE-2016-10134 (4-service monitoring stack).
+# Upstream is docker-compose; expressed here substrate-agnostically as small guests.
+# Build-realized since build-v1 slice 6: images are logical golden references
+# (Q1 grammar), the app stack is ./recipes/ run at `inspect-ranges build`
+# (upstream's docker-tag image strings moved to ./notes.md as provenance), and
+# every services/vulnerabilities declaration below is build-verified.
+# Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
+
+range:
+  name: vulhub-zabbix
+  schema_version: "0.3"
+  description: >
+    The smallest example: a realistic 4-host monitoring stack (Zabbix 3.0.3
+    web UI, Zabbix server, Zabbix agent, MySQL) on one flat network. Entry is
+    a real, public CVE: unauthenticated SQL injection in the Zabbix web UI
+    (latest.php/jsrpc.php via the guest account), escalating to admin session
+    hijack and RCE through the Zabbix server's command execution on the agent.
+    The fast smoke-test range, and build-v1's forcing example.
+
+networks:
+  - name: lab
+    cidr: 10.10.10.0/24        # default: upstream uses the docker default bridge
+    mode: isolated             # default: no egress needed post-provisioning
+    dns:
+      # upstream services resolve each other by name (docker DNS); replicate as records
+      records: [{ name: server }, { name: agent }, { name: mysql }, { name: web }]
+
+hosts:
+  - name: mysql
+    os: { type: linux }
+    image: ubuntu-focal
+    interfaces: [{ network: lab, ip: 10.10.10.11 }]
+    provisioning:
+      - { recipe: vulhub.mysql57, vars: { agent_ip: 10.10.10.13 } }
+    services:
+      - { name: mysql, port: 3306, credentials: { user: root, password: root },
+          note: "MySQL 5.7 (upstream mysql:5), Oracle generic tarball; database zabbix seeded from the 3.0.3 schema" }
+
+  - name: server
+    os: { type: linux }
+    image: ubuntu-focal
+    interfaces: [{ network: lab, ip: 10.10.10.12 }]
+    provisioning:
+      - { recipe: vulhub.zabbix-server, vars: { db_host: mysql } }
+    services:
+      - { name: zabbix-server, port: 10051,
+          note: "zabbix 3.0.3 compiled from the canonical source tarball; connects to mysql:3306 as root/root" }
+
+  - name: agent
+    os: { type: linux }
+    image: ubuntu-focal
+    interfaces: [{ network: lab, ip: 10.10.10.13 }]
+    provisioning:
+      - { recipe: vulhub.zabbix-agent, vars: { server_host: server } }
+    services:
+      - { name: zabbix-agent, port: 10050,
+          note: "zabbix 3.0.3 agent; EnableRemoteCommands=1 is declared scenario content (the attack path's final hop)" }
+
+  - name: web
+    os: { type: linux }
+    image: ubuntu-focal
+    interfaces: [{ network: lab, ip: 10.10.10.14 }]
+    provisioning:
+      - { recipe: vulhub.zabbix-web, vars: { db_host: mysql, server_host: server } }
+    services:
+      - { name: zabbix-web, port: 80,
+          note: "the exact 3.0.3 frontend sources (CVE fixed in 3.0.4); guest login enabled (zabbix 3.0 default)" }
+      - { name: php, version: "7.4", package: php7.4,
+          note: "focal's stock interpreter; the 3.0.3 sources run on it unmodified (measured), and the era php7.0 is no longer obtainable from packages" }
+    vulnerabilities:
+      - id: CVE-2016-10134
+        cve: CVE-2016-10134
+        service: zabbix-web
+        description: >
+          SQL injection in latest.php (toggle_ids array), also triggerable
+          unauthenticated via jsrpc.php. Path: guest login -> zbx_sessionid
+          cookie -> SQLi -> dump admin session -> authenticated RCE via
+          Zabbix server scripts/agent commands.
+
+attacker:
+  name: attacker               # default: upstream has no attacker host (researcher's own box)
+  image: ubuntu-focal
+  interfaces: [{ network: lab }]
+  entry: external
+  egress: none                 # default

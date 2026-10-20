@@ -15,16 +15,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
-from .._channel.vsock import VsockTransport
+from .._channel.vsock import HybridEndpoint, VsockTransport
+from .._compiler.plan import GUEST_UID_BASE, guest_uid
 from .ownership import (
     PROJECT_PREFIX,
     StageLog,
     default_state_dir,
     owner_record,
+    prepare_ch_vsock_dir,
     project_dir,
     write_owner,
 )
@@ -33,19 +35,41 @@ from .rangeimage import ensure_range_image
 logger = logging.getLogger("inspect_ranges.up")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
-"""Executes a command: `run(argv, env=None, input=None)`; injectable for tests."""
+"""Executes a command: `run(argv, env=None, input=None, timeout=None)`; injectable for tests. A runner must honor the timeout contract `run_command` sets: on expiry it returns rc 124 with the timeout named in stderr, never raises, so call sites surface the hang through their normal stage-named failure paths (an injected runner that ignores `timeout` silently reintroduces the unbounded hang the bound exists to prevent)."""
 
 OnStage = Callable[[str, str, dict[str, Any]], None]
 """Mirrors every stage-log write as `(stage, status, fields)`; exceptions are logged and never alter `up`'s outcome. The mirror begins where the stage log does (after ownership registration); earlier failures surface as `UpError` only."""
+
+
+IMAGE_BUILD_TIMEOUT_S = 1800.0
+"""Bound on the one legitimately slow docker call (`ensure_range_image` builds the hypervisor image on first use); a wedged docker daemon surfaces as a stage-named `UpError` instead of hanging `up()` forever (quality-review B21)."""
 
 
 def run_command(
     argv: list[str],
     env: dict[str, str] | None = None,
     input: str | None = None,
+    timeout: float | None = None,
 ) -> "subprocess.CompletedProcess[str]":
-    """The default runner: captured text output, no check."""
-    return subprocess.run(argv, capture_output=True, text=True, env=env, input=input)
+    """The default runner: captured text output, no check.
+
+    A `timeout` expiry returns rc 124 with the timeout named in stderr (never raises), so call sites surface it through their normal stage-named failure paths: `up()` must be internally bounded, since the provider's cancellation drain awaits it to completion (quality-review B21).
+    """
+    try:
+        return subprocess.run(
+            argv, capture_output=True, text=True, env=env, input=input, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as expired:
+        detail = expired.stderr
+        stderr = (
+            detail.decode(errors="replace") if isinstance(detail, bytes) else detail
+        )
+        return subprocess.CompletedProcess(
+            argv,
+            returncode=124,
+            stdout="",
+            stderr=f"timed out after {timeout:.0f}s: {stderr or ''}".strip(),
+        )
 
 
 class UpError(Exception):
@@ -76,6 +100,8 @@ class GuestState(BaseModel):
     name: str
     cid: int
     ready: bool
+    hybrid_vsock: HybridEndpoint | None = None
+    """A Cloud Hypervisor guest's hybrid-vsock socket and the VMM uid its peer must have (`SO_PEERCRED`); `None` for QEMU guests, which are reached by CID."""
 
 
 class UpResult(BaseModel):
@@ -204,17 +230,43 @@ def verify_bundle(bundle: Path, expected_digest: str | None = None) -> dict[str,
 _SAFE_NAME = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 
 
+class BootInterface(BaseModel):
+    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bridge: str = Field(pattern=_SAFE_NAME, max_length=15)
+    mac: str = Field(pattern=r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
+
 class BootGuest(BaseModel):
     """One guest in `boot.json`, shape-validated before anything interpolates it anywhere."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_SAFE_NAME)
-    cid: int = Field(ge=3)
+    cid: int = Field(ge=3, le=99_999_999)
     image_file: str = Field(pattern=_SAFE_NAME)
     image_digest: str | None = None
+    backing_file: str | None = Field(default=None, pattern=_SAFE_NAME)
+    """A realized overlay's backing golden in the cache; verified at boot like the overlay itself (round-2 review: the overlay digest cannot see its backing, and goldens re-derive in place under the same name)."""
+    backing_digest: str | None = None
     overlay_gb: int = Field(ge=1)
-    readiness: Literal["cloud-init"]
+    readiness: Literal["cloud-init", "daemon"]
+    injector: Literal["cloud-init", "unattend"] = "cloud-init"
+    vmm: Literal["qemu", "cloud-hypervisor"] = "qemu"
+    cpus: int | None = Field(default=None, ge=1)
+    memory_mb: int | None = Field(default=None, ge=64)
+    interfaces: list[BootInterface] = []
+
+    @model_validator(mode="after")
+    def _check_vmm_fields(self) -> "BootGuest":
+        sized = self.cpus is not None and self.memory_mb is not None
+        if self.vmm == "cloud-hypervisor" and not sized:
+            raise ValueError(
+                f"cloud-hypervisor guest {self.name!r} needs cpus and memory_mb"
+            )
+        return self
 
 
 class BootPlan(BaseModel):
@@ -241,9 +293,26 @@ def load_boot(bundle: Path) -> BootPlan:
         ) from error
 
 
+CH_UID_BASE = GUEST_UID_BASE
+"""Alias of `GUEST_UID_BASE` (the per-guest uid scheme now covers QEMU guests too, via the DAC seclabel): a host-side dialer's `SO_PEERCRED` check names exactly one VMM."""
+CH_BINARY = "/usr/local/bin/cloud-hypervisor"
+CH_FIRMWARE = "/usr/local/share/cloud-hypervisor/firmware.fd"
+CH_VSOCK_MOUNT = "/run/ch-vsock"
+"""Where the range container sees the host directory holding Cloud Hypervisor guests' vsock sockets (compose's `CH_VSOCK_DIR`)."""
+
+
+def ch_uid(cid: int) -> int:
+    """The uid the guest's VMM runs as (`guest_uid`; the name predates QEMU joining the scheme)."""
+    return guest_uid(cid)
+
+
 def boot_script(boot: BootPlan) -> str:
-    """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway."""
+    """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway.
+
+    A `cloud-hypervisor` guest has no domain XML: root prepares what the unprivileged VMM cannot (a persistent tap per NIC owned by the VMM's uid, image and console-log ownership), then Cloud Hypervisor starts as its own uid (`ch_uid`) with group `kvm`, no capabilities and its default seccomp filter, detached, its vsock socket in the host-supplied directory.
+    """
     lines = ["#!/bin/bash", "set -euo pipefail"]
+    ch_guests: list[str] = []
     for guest in boot.guests:
         name = shlex.quote(guest.name)
         image = shlex.quote(guest.image_file)
@@ -251,15 +320,100 @@ def boot_script(boot: BootPlan) -> str:
             f"qemu-img create -f qcow2 -F qcow2 -b /images/{image} "
             f"/scratch/{name}.qcow2 {guest.overlay_gb}G >/dev/null"
         )
+        if guest.injector == "unattend":
+            # a windows guest's seed is a plain ISO with the per-boot answer
+            # file at its root (the implicit specialize search reads it from
+            # removable media); -J keeps the 8.3-unfriendly name intact
+            lines.append(
+                f"genisoimage -quiet -o /scratch/{name}-seed.iso -J -R "
+                f"/render/guests/{name}/seed/unattend.xml"
+            )
+        else:
+            lines.append(
+                f"cloud-localds -N /render/guests/{name}/seed/network-config "
+                f"/scratch/{name}-seed.iso "
+                f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
+            )
+        if guest.vmm == "qemu":
+            # the DAC seclabel runs this QEMU as its own uid with relabel off
+            # (issue #5): root pre-owns the files the unprivileged VMM opens
+            uid = guest_uid(guest.cid)
+            lines.append(
+                f"chown {uid}:kvm /scratch/{name}.qcow2 /scratch/{name}-seed.iso"
+            )
+            lines.append(
+                f"install -o {uid} -g kvm -m 0640 /dev/null /scratch/console/{name}.log"
+            )
+            lines.append(
+                f"virsh -c qemu:///system define /render/guests/{name}/domain.xml >/dev/null"
+            )
+            lines.append(f"virsh -c qemu:///system start {name} >/dev/null")
+            continue
+        if not ch_guests:
+            lines.append("install -d -m 0755 /scratch/ch")
+        ch_guests.append(name)
+        uid = ch_uid(guest.cid)
+        lines.append(f"chown {uid}:kvm /scratch/{name}.qcow2 /scratch/{name}-seed.iso")
+        # the VMM cannot create files in the root-owned console dir: hand it its log
         lines.append(
-            f"cloud-localds -N /render/guests/{name}/seed/network-config "
-            f"/scratch/{name}-seed.iso "
-            f"/render/guests/{name}/seed/user-data /render/guests/{name}/seed/meta-data"
+            f"install -o {uid} -g kvm -m 0640 /dev/null /scratch/console/{name}.log"
         )
+        nets: list[str] = []
+        for index, interface in enumerate(guest.interfaces):
+            tap = f"ch{guest.cid}n{index}"  # CID-derived: unique per host, within IFNAMSIZ
+            lines.append(f"ip tuntap add dev {tap} mode tap user {uid} group kvm")
+            # libvirt's tap MAC rule (guest MAC, first octet 0xfe): the bridge
+            # adopts its lowest port MAC, and a random tap MAC would leak onto
+            # the segment in the bridge's own frames, unlike QEMU ranges
+            lines.append(f"ip link set {tap} address fe{interface.mac[2:]}")
+            lines.append(f"ip link set {tap} master {shlex.quote(interface.bridge)}")
+            lines.append(f"ip link set {tap} up")
+            nets.append(f"tap={tap},mac={interface.mac}")
+        socket = f"{CH_VSOCK_MOUNT}/{name}.sock"
+        argv = [
+            CH_BINARY,
+            "--firmware",
+            CH_FIRMWARE,
+            "--cpus",
+            f"boot={guest.cpus}",
+            "--memory",
+            f"size={guest.memory_mb}M",
+            "--disk",
+            f"path=/scratch/{name}.qcow2,image_type=qcow2,backing_files=on",
+            f"path=/scratch/{name}-seed.iso,image_type=raw,readonly=on",
+            *(["--net", *nets] if nets else []),
+            "--vsock",
+            f"cid={guest.cid},socket={socket}",
+            "--serial",
+            f"file=/scratch/console/{name}.log",
+            "--console",
+            "off",
+            "--rng",
+            "src=/dev/urandom",
+        ]
+        lines.append(f"rm -f {socket}")
         lines.append(
-            f"virsh -c qemu:///system define /render/guests/{name}/domain.xml >/dev/null"
+            f"(exec setsid setpriv --reuid={uid} --regid=kvm "
+            f"--clear-groups {' '.join(argv)} </dev/null "
+            f">/scratch/ch/{name}.log 2>&1) &"
         )
-        lines.append(f"virsh -c qemu:///system start {name} >/dev/null")
+        lines.append(f"echo $! > /scratch/ch/{name}.pid")
+    if ch_guests:
+        # a VMM that refuses its configuration never creates its socket: fail
+        # the boot stage with its own error rather than timing out at readiness
+        for name in ch_guests:
+            socket = f"{CH_VSOCK_MOUNT}/{name}.sock"
+            lines.append(
+                f"for _ in $(seq 50); do [ -S {socket} ] && break; sleep 0.1; done"
+            )
+            lines.append(
+                f"[ -S {socket} ] || {{ echo 'cloud-hypervisor for {name} did not start:' >&2; "
+                f"tail -5 /scratch/ch/{name}.log >&2; exit 1; }}"
+            )
+            # Cloud Hypervisor creates the socket 0700 whatever the umask; the
+            # host-side dialer runs as a uid this container does not know, so
+            # open it up here: the host directory's private root bounds access
+            lines.append(f"chmod 0666 {socket}")
     return "\n".join(lines) + "\n"
 
 
@@ -287,13 +441,17 @@ CLOUD_INIT_PROBE = ["sh", "-c", "cloud-init status --wait >/dev/null 2>&1"]
 """The readiness exec: the exit status of `cloud-init status --wait` IS the signal (0 done; nonzero error or degraded, both meaning the declared configuration did not fully apply)."""
 
 
-def make_channel(cids: "dict[str, int]") -> MessageChannel:
+def make_channel(
+    cids: "dict[str, int]", hybrid_sockets: "dict[str, HybridEndpoint] | None" = None
+) -> MessageChannel:
     """The readiness channel to this range's guests (a test seam; built inside the event loop).
 
     The per-round-trip allowance is readiness-tuned: a daemon that accepts but never replies must cost seconds per attempt, not the channel's long default, or one wedged guest overshoots the whole readiness budget. Long cloud-init waits stay fine: exec liveness rides pending polls, each bounded by this allowance.
     """
     return MessageChannel(
-        VsockTransport(cids), label="up-readiness", channel_budget_s=10.0
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets),
+        label="up-readiness",
+        channel_budget_s=10.0,
     )
 
 
@@ -397,6 +555,44 @@ def up(
         )
 
     guests = boot.guests
+    vendor_memo: dict[str, str] = {}
+
+    def verify_vendor_edge(image_file: str, guest_name: str) -> None:
+        # the golden-to-vendor edge (round-3 distribution review B4): a golden
+        # whose provenance sidecar names a vendor must sit over exactly those
+        # vendor bytes, or QEMU would silently read a mixed chain (an
+        # interrupted refresh, a re-pulled vendor) that no build verified
+        sidecar = options.image_cache / (image_file.removesuffix(".qcow2") + ".json")
+        if not sidecar.is_file():
+            return
+        try:
+            meta = json.loads(sidecar.read_text())
+            vendor_file = meta.get("vendor_file")
+            vendor_sha = meta.get("vendor_sha256")
+        except (OSError, ValueError):
+            return  # a corrupt sidecar is the derive path's concern, not boot's
+        if not isinstance(vendor_file, str) or not isinstance(vendor_sha, str):
+            return
+        vendor = options.image_cache / vendor_file
+        if not vendor.is_file():
+            raise UpError(
+                "verify-images",
+                f"vendor base {vendor_file} backing {image_file} is not in the cache; "
+                "re-derive the golden or re-pull the image chain",
+                guest=guest_name,
+            )
+        if vendor_file not in vendor_memo:
+            vendor_memo[vendor_file] = _sha256(vendor)
+        if vendor_memo[vendor_file] != vendor_sha:
+            raise UpError(
+                "verify-images",
+                f"vendor base {vendor_file} hashes {vendor_memo[vendor_file][:12]}..., but "
+                f"{image_file}'s provenance records {vendor_sha[:12]}...: the chain is mixed "
+                "(a vendor refresh under an older golden, or an interrupted image refresh); "
+                "refresh or re-derive the golden so the chain agrees",
+                guest=guest_name,
+            )
+
     for guest in guests:
         image = options.image_cache / guest.image_file
         if not image.is_file():
@@ -410,12 +606,39 @@ def up(
             if actual != guest.image_digest:
                 raise UpError(
                     "verify-images",
-                    f"image {guest.image_file} digest {actual} does not match the bundle's {guest.image_digest}",
+                    f"image {guest.image_file} digest {actual} does not match the bundle's {guest.image_digest}: "
+                    "the cache's copy changed since this bundle was rendered (an image re-derive, update, or build); "
+                    "re-render the bundle",
                     guest=guest.name,
                 )
+        if guest.backing_file is not None:
+            backing = options.image_cache / guest.backing_file
+            if not backing.is_file():
+                raise UpError(
+                    "verify-images",
+                    f"backing golden {guest.backing_file} for {guest.image_file} is not in the cache {options.image_cache}; "
+                    "re-derive the golden or pull the build artifacts",
+                    guest=guest.name,
+                )
+            if guest.backing_digest:
+                actual = f"sha256:{_sha256(backing)}"
+                if actual != guest.backing_digest:
+                    raise UpError(
+                        "verify-images",
+                        f"backing golden {guest.backing_file} digest {actual} does not match the build's {guest.backing_digest}: "
+                        "the golden was re-derived or refreshed since the build, so the realized overlay would boot over a "
+                        "composition no build verified; rebuild the range (builders), or re-pull the matching build / pin it "
+                        "by digest (consumers)",
+                        guest=guest.name,
+                    )
+            verify_vendor_edge(guest.backing_file, guest.name)
+        else:
+            verify_vendor_edge(guest.image_file, guest.name)
 
     try:
-        range_image = ensure_range_image(lambda argv: run(argv))
+        range_image = ensure_range_image(
+            lambda argv: run(argv, timeout=IMAGE_BUILD_TIMEOUT_S)
+        )
     except Exception as error:
         raise UpError("range-image", str(error)) from error
 
@@ -427,7 +650,9 @@ def up(
     log.log("range-image", "ok", tag=range_image)
 
     env = dict(os.environ)
-    # the hardened image is hard-required: no environment override survives
+    # the hardened image is hard-required: no compose-env override survives
+    # (the digest-pinned INSPECT_RANGES_RANGE_IMAGE knob resolves inside
+    # ensure_range_image, never here)
     env["RANGE_IMAGE"] = range_image
     env["IMAGE_CACHE"] = str(options.image_cache)
     if options.uplink_network is not None:
@@ -461,19 +686,55 @@ def up(
                 )
         return UpError(stage, message, guest=guest)
 
+    ch_dir: Path | None = None
+    if any(guest.vmm == "cloud-hypervisor" for guest in guests):
+        try:
+            ch_dir = prepare_ch_vsock_dir(project)
+        except OSError as error:
+            # through fail(): the stage-log line and the owner-record teardown
+            # match every other post-ownership failure (round-1 review)
+            raise fail(
+                "range-container",
+                f"cannot prepare the cloud-hypervisor vsock dir: {error}",
+            ) from error
+        env["CH_VSOCK_DIR"] = str(ch_dir)
+
     log.log("range-container", "start")
-    result = run(_compose_argv(project, bundle, "up", "-d", "--wait"), env=env)
+    result = run(
+        _compose_argv(
+            project,
+            bundle,
+            "up",
+            "-d",
+            "--wait",
+            "--wait-timeout",
+            str(int(options.readiness_timeout)),
+        ),
+        env=env,
+        timeout=options.readiness_timeout + 60.0,
+    )
     if result.returncode != 0:
         raise fail(
             "range-container", f"compose up failed: {result.stderr.strip()[-800:]}"
         )
     log.log("range-container", "ok")
 
+    # each VMM's uid follows from its CID in boot.json (`ch_uid`); host-side
+    # dialers refuse any socket whose peer is not that one uid
+    ch_sockets: dict[str, HybridEndpoint] = {}
+    if ch_dir is not None:
+        ch_sockets = {
+            guest.name: HybridEndpoint(ch_dir / f"{guest.name}.sock", ch_uid(guest.cid))
+            for guest in guests
+            if guest.vmm == "cloud-hypervisor"
+        }
+
     log.log("guest-boot", "start", guests=[g.name for g in guests])
     boot_result = run(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
         env=env,
         input=boot_script(boot),
+        timeout=options.readiness_timeout,
     )
     if boot_result.returncode != 0:
         raise fail(
@@ -485,7 +746,7 @@ def up(
     log.log("guest-boot", "ok")
 
     async def _readiness() -> list[GuestState]:
-        channel = make_channel({g.name: g.cid for g in guests})
+        channel = make_channel({g.name: g.cid for g in guests}, ch_sockets)
         deadline = time.monotonic() + options.readiness_timeout
         collected: list[GuestState] = []
         for guest in guests:
@@ -503,7 +764,14 @@ def up(
                 guest_deadline,
                 min_window=options.readiness_min_window,
             )
-            collected.append(GuestState(name=guest.name, cid=guest.cid, ready=ready))
+            collected.append(
+                GuestState(
+                    name=guest.name,
+                    cid=guest.cid,
+                    ready=ready,
+                    hybrid_vsock=ch_sockets.get(guest.name),
+                )
+            )
             log.log(
                 "readiness",
                 "ok" if ready else "fail",
@@ -553,6 +821,7 @@ def _pull_consoles(
                 str(destination / f"{name}.log"),
             ),
             env=env,
+            timeout=60.0,  # best-effort against a possibly wedged daemon
         )
 
 

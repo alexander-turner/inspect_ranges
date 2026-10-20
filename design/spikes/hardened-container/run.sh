@@ -14,7 +14,7 @@ if [[ "${1:-}" == "down" ]]; then
   exit 0
 fi
 
-[[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
+[[ -f "$IMAGE_CACHE/ubuntu-noble.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 [[ -f ../net-compile/tmp/render/boot-vms.sh ]] || { echo "missing compiled render; run ../net-compile/run.sh once first"; exit 1; }
 
 T0=$(date +%s.%N)

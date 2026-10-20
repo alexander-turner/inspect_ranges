@@ -6,7 +6,7 @@ Realize per the record: resolve the lease's bundle path, verify the requested di
 
 Guest endpoints relay as pure byte pumps (never parsed) through the injectable guest connector (`VsockTransport` dial in production), inheriting its pacing and backoff; guest names are lease-scoped, so concurrent samples with identical names cannot cross.
 
-Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery.
+Applier restart loses the replay log, relay map, and admission charges: a recorded v1 limitation, loudly logged at startup when live leases exist, with disk-driven teardown (reaper, `cli_cleanup`) as the recovery. The lost evidence writer map leaves the host record unsealed; a surviving driver reap-seals it on its host-seal miss path at teardown (before it releases the lease), and the reaper or `cli_cleanup` reap-seal when the driver is dead.
 """
 
 import asyncio
@@ -14,7 +14,7 @@ import hashlib
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,9 +39,20 @@ from .._channel.protocol import (
     TeardownRequest,
 )
 from .._channel.uds import ROUTED_ACK, read_preamble
+from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.plan import ResolvedPlan, Totals
 from .._doctor.checks import readiness_failures
+from .._evidence.capture import (
+    CAPTURE_HARVEST_TIMEOUT_S,
+    CAPTURE_STOP_TIMEOUT_S,
+    CaptureStreamer,
+    ComposeTap,
+    StageRecorder,
+)
+from .._evidence.s3 import sink_for_location
+from .._evidence.sink import EvidenceWriter
 from .._provider.admission import AdmissionRefused, HostCapacity, WeightedAdmission
+from .._provider.evidence import evidence_buffer_bytes, evidence_max_bytes
 from .._runtime.down import DownResult
 from .._runtime.down import down as run_down
 from .._runtime.up import OnStage, UpError, UpOptions, UpResult, up
@@ -60,6 +71,9 @@ _HOST_REQUEST_TIMEOUT_S = 30.0
 """Post-ack budget for the host plane's single request frame to arrive."""
 _PUMP_CHUNK = 1 << 16
 _PUMP_LINGER_S = 30.0
+
+_EVIDENCE_SEAL_RESERVE_S = 10.0
+"""The stop budget's reserved seal share: a wedged capture stop can never starve the seal (or the shutdown checkpoint) attempt (quality-review A6, mirroring the driver's finalize phases)."""
 _COMPLETED_RUN_CAP = 64
 """Completed realize runs kept for replay; FIFO-evicted beyond this (the replay-log memory bound).
 
@@ -79,6 +93,28 @@ async def _default_guest_connect(cid: int) -> ByteStream:
     from .._channel.vsock import VsockTransport
 
     return await VsockTransport({"guest": cid}).connect("guest")
+
+
+def cloud_hypervisor_connector(
+    sockets: Mapping[int, HybridEndpoint],
+    fallback: GuestConnector = _default_guest_connect,
+) -> GuestConnector:
+    """A `GuestConnector` that reaches Cloud Hypervisor guests through their hybrid-vsock Unix sockets.
+
+    Args:
+        sockets: CID to hybrid-vsock endpoint (socket path and the VMM's uid, enforced with `SO_PEERCRED`) for the Cloud Hypervisor guests; read at dial time, so a live mapping sees guests realized later.
+        fallback: The connector for every other CID (QEMU guests, reached by `AF_VSOCK`).
+    """
+
+    async def connect(cid: int) -> ByteStream:
+        hybrid = sockets.get(cid)
+        if hybrid is None:
+            return await fallback(cid)
+        return await VsockTransport({}, hybrid_sockets={"guest": hybrid}).connect(
+            "guest"
+        )
+
+    return connect
 
 
 @dataclass
@@ -125,7 +161,11 @@ class Applier:
         self._image_cache = image_cache
         self._up_fn = up_fn
         self._down_fn = down_fn
-        self._guest_connect = guest_connector or _default_guest_connect
+        # CID -> hybrid-vsock socket of every realized Cloud Hypervisor guest
+        self._ch_sockets: dict[int, HybridEndpoint] = {}
+        self._guest_connect = guest_connector or cloud_hypervisor_connector(
+            self._ch_sockets
+        )
         self._store = store if store is not None else LeaseStore(state_dir)
         self._capacity = capacity if capacity is not None else HostCapacity.measure()
         self._gate = gate if gate is not None else readiness_failures
@@ -139,7 +179,13 @@ class Applier:
         self._relays: dict[str, dict[str, int]] = {}
         self._guest_states: dict[str, dict[str, GuestState]] = {}
         self._charges: dict[str, Totals] = {}
+        self._plans: dict[str, ResolvedPlan] = {}
+        """The refusal gate's parsed plan per charged lease (evidence wiring reads it in _execute; popped with the charge)."""
         self._tasks: set[asyncio.Task[None]] = set()
+        self._evidence: dict[
+            str, tuple[CaptureStreamer, EvidenceWriter, list[str]]
+        ] = {}
+        """Per-lease capture: the applier owns the `host` writer in the separated topology (`evidence-v1.md` slice 5); lost on applier restart like the relay map (the recorded limitation; a surviving driver reap-seals on its host-seal miss at teardown, the reaper after lease expiry)."""
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -204,6 +250,19 @@ class Applier:
                 self._socket_path.unlink()
         except OSError:
             pass
+        for lease_id in list(self._evidence):
+            # bounded best-effort flush on shutdown, NEVER a seal: a sample may
+            # still be running, and a `complete` seal here would make a
+            # capture cutoff indistinguishable from a record that ran to
+            # teardown. The record stays unsealed with an explicit shutdown
+            # gap; a reap-seal closes it honestly (the recorded restart
+            # limitation). _stop_evidence is internally bounded exactly like
+            # the teardown arm; no outer timeout, which would cancel its own
+            # gap-recording handlers mid-write (review finding on A6; the
+            # round-2 review found this arm's 5 s outer bound was smaller than
+            # the stop phase it wrapped, so a slow real harvest lost the
+            # promised applier-shutdown gaps and checkpoint unmarked).
+            await self._stop_evidence(lease_id, seal=False)
         for task in list(self._tasks):
             task.cancel()
 
@@ -381,7 +440,10 @@ class Applier:
     async def _teardown(
         self, lease: HostLease, request: TeardownRequest, writer: asyncio.StreamWriter
     ) -> None:
-        """Drive `down`, then release the admission charge and the relay map (idempotent; retriable)."""
+        """Harvest and seal capture, drive `down`, then release the admission charge and the relay map (idempotent; retriable)."""
+        # before down: the capture sidecar and its volume die with the
+        # project, so the final harvest must happen while they live
+        await self._stop_evidence(lease.lease_id)
         try:
             await asyncio.to_thread(self._down_fn, lease.project, self._state_dir)
         except Exception as error:
@@ -393,7 +455,9 @@ class Applier:
         charge = self._charges.pop(lease.lease_id, None)
         if charge is not None:
             await self.admission.release(charge)
-        self._relays.pop(lease.lease_id, None)
+        self._plans.pop(lease.lease_id, None)
+        for cid in self._relays.pop(lease.lease_id, {}).values():
+            self._ch_sockets.pop(cid, None)
         self._guest_states.pop(lease.lease_id, None)
         self._lease_locks.pop(lease.lease_id, None)
         logger.info(
@@ -498,13 +562,29 @@ class Applier:
             plan = await asyncio.to_thread(self._load_plan, bundle)
         except (OSError, ValueError) as error:
             return ("EINVAL", f"lease bundle {bundle} has no readable plan: {error}")
+        totals = plan.totals
+        if lease.evidence_location is not None and plan.requirements.evidence_capture:
+            # the `host` evidence writer this realize will open is resident in
+            # THIS process: its buffer cap joins the memory charge exactly as
+            # the driver's resident writers join the sample's (`evidence-v1.md`
+            # accounting; quality-review round 2). A malformed buffer knob
+            # disables evidence at _start_evidence, so it charges nothing here
+            # either.
+            try:
+                buffer_mb = evidence_buffer_bytes() // (1024 * 1024)
+            except ValueError:
+                buffer_mb = 0
+            totals = totals.model_copy(
+                update={"memory_mb": totals.memory_mb + buffer_mb}
+            )
         try:
-            charged = self.admission.charge_now(plan.totals)
+            charged = self.admission.charge_now(totals)
         except AdmissionRefused as refusal:
             return ("ENOSPC", str(refusal))
         if not charged:
             return ("EAGAIN", "applier capacity is full now; respin when it frees")
-        self._charges[lease.lease_id] = plan.totals
+        self._charges[lease.lease_id] = totals
+        self._plans[lease.lease_id] = plan
         self._guest_states[lease.lease_id] = dict.fromkeys(
             (guest.name for guest in plan.guests), "pending"
         )
@@ -521,6 +601,15 @@ class Applier:
         loop = asyncio.get_running_loop()
         translator = StageTranslator()
         states = self._guest_states.setdefault(lease.lease_id, {})
+        bundle = Path(lease.bundle_path)
+        # the refusal gate parsed and cached the plan when it charged this lease
+        plan = self._plans.get(lease.lease_id)
+        evidence_on = (
+            lease.evidence_location is not None
+            and plan is not None
+            and plan.requirements.evidence_capture
+        )
+        recorder = StageRecorder() if evidence_on else None
 
         async def emit(stage: SeamStage, detail: str) -> None:
             detail = detail[:3000]  # inside StageReport's wire cap, whatever up said
@@ -540,13 +629,15 @@ class Applier:
             )
 
         def on_stage(stage: str, status: str, fields: dict[str, object]) -> None:
+            if recorder is not None:
+                # host emit clocks for the stages/verify streams; never raises
+                recorder.on_stage(stage, status, fields)
             translated = translator.translate(stage, status, fields)
             if translated is not None:
                 asyncio.run_coroutine_threadsafe(
                     emit(translated.stage, translated.detail), loop
                 )
 
-        bundle = Path(lease.bundle_path)
         options = UpOptions(
             project=lease.project,
             image_cache=self._image_cache,
@@ -576,12 +667,116 @@ class Applier:
             self._relays[lease.lease_id] = {
                 guest.name: guest.cid for guest in result.guests
             }
+            for guest in result.guests:
+                if guest.hybrid_vsock is not None:
+                    self._ch_sockets[guest.cid] = guest.hybrid_vsock
+            if evidence_on and plan is not None and recorder is not None:
+                await self._start_evidence(lease, plan, recorder)
         if failed:
             charge = self._charges.pop(lease.lease_id, None)
             if charge is not None:
                 await self.admission.release(charge)
+            self._plans.pop(lease.lease_id, None)
         await run.finish()
         self._bound_runs()
+
+    async def _start_evidence(
+        self, lease: HostLease, plan: ResolvedPlan, recorder: StageRecorder
+    ) -> None:
+        """Open the host writer and capture streamer for one realized lease; never raises (evidence trouble never fails a realize)."""
+        assert lease.evidence_location is not None
+        try:
+            writer = EvidenceWriter(
+                sink_for_location(lease.evidence_location),
+                writer="host",
+                lease_id=lease.lease_id,
+                sample_id=lease.sample_id,
+                buffer_cap_bytes=evidence_buffer_bytes(),
+                max_total_bytes=evidence_max_bytes(),
+            )
+            segments = [network.name for network in plan.networks]
+            streamer = CaptureStreamer(
+                writer,
+                ComposeTap(lease.project, Path(lease.bundle_path)),
+                segments=segments,
+                console_guests=[guest.name for guest in plan.guests],
+                stage_recorder=recorder,
+            )
+            await streamer.start()
+            self._evidence[lease.lease_id] = (streamer, writer, segments)
+            logger.info(
+                "evidence capture started: lease=%s location=%s",
+                lease.lease_id,
+                lease.evidence_location,
+            )
+        except Exception:
+            logger.exception(
+                "evidence capture failed to start for lease=%s (sample "
+                "proceeds without host-side evidence)",
+                lease.lease_id,
+            )
+
+    async def _stop_evidence(self, lease_id: str, *, seal: bool = True) -> None:
+        """Harvest one lease's capture before its containers die; bounded and never raises (a wedged tap must not stall the teardown reply).
+
+        With `seal` (the teardown path) the record closes `complete`. Without it (applier shutdown mid-sample) the record gets an explicit `applier-shutdown` gap per segment and stays UNSEALED for a reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry): sealing a cutoff `complete` would be the dishonesty the format exists to prevent.
+        """
+        entry = self._evidence.pop(lease_id, None)
+        if entry is None:
+            return
+        streamer, writer, segments = entry
+        stops_clean = True
+        try:
+            # stop() is internally bounded; no outer timeout, which would
+            # cancel its own gap-recording handlers mid-write (review finding
+            # on A6). The phase budgets are single-sourced beside the streamer;
+            # the seal reserve below stays protected regardless.
+            await streamer.stop(
+                stop_timeout_s=CAPTURE_STOP_TIMEOUT_S,
+                harvest_timeout_s=CAPTURE_HARVEST_TIMEOUT_S,
+            )
+        except Exception:
+            stops_clean = False
+            logger.exception(
+                "evidence capture stop failed for lease=%s (sealing what was "
+                "delivered)",
+                lease_id,
+            )
+        try:
+            async with asyncio.timeout(_EVIDENCE_SEAL_RESERVE_S):
+                if not seal:
+                    for segment in segments:
+                        await writer.gap(f"pcap/{segment}", cause="applier-shutdown")
+                    # checkpoint, not flush: the shutdown gaps must land in a
+                    # DELIVERED manifest part or the unsealed record shows
+                    # nothing (part batching would hold them in memory)
+                    await writer.checkpoint()
+                    logger.warning(
+                        "evidence capture for lease=%s left UNSEALED at applier "
+                        "shutdown (explicit applier-shutdown gaps recorded; a "
+                        "surviving driver reap-seals at teardown, the reaper "
+                        "after lease expiry)",
+                        lease_id,
+                    )
+                    return
+                _, digest = await writer.seal(
+                    "complete" if stops_clean else "incomplete"
+                )
+            logger.info("evidence capture sealed: lease=%s digest=%s", lease_id, digest)
+        except TimeoutError:
+            logger.warning(
+                "evidence seal for lease=%s exceeded its %.0fs reserve (record "
+                "stays unsealed, reported as such by verify; the reaper can "
+                "reap-seal only while the lease lives)",
+                lease_id,
+                _EVIDENCE_SEAL_RESERVE_S,
+            )
+        except Exception:
+            logger.exception(
+                "evidence capture seal failed for lease=%s (record stays "
+                "unsealed, reported as such by verify)",
+                lease_id,
+            )
 
     def _bound_runs(self) -> None:
         completed = [rid for rid, run in self._runs.items() if run.done]

@@ -1,0 +1,59 @@
+# Sections still awaiting schema design — NOT valid range.yaml and not consumed
+# by anything. Guest configuration (active_directory with the typed ACL chain,
+# per-host services/vulnerabilities/misconfigurations/defense toggles, the
+# range-level defense posture) migrated into range.yaml under schema v0.3
+# (2026-10-07, see ../../design/inspect-ranges/guest-config-v0.3.md); variables, roles, and
+# scheduled_activity migrated as well (2026-10-07). What remains here is
+# deferred per that record's table.
+
+goals:
+  - id: domain-admin-north       # default: GOAD defines no scoring; goals follow the
+    type: privilege              # cochise/enterprise-ad-networks assumed-breach framing
+    description: Obtain Domain Admin on north.sevenkingdoms.local.
+    oracle: environment check (group membership)
+  - id: domain-admin-parent
+    type: privilege
+    description: Obtain Domain/Enterprise Admin on sevenkingdoms.local (forest root).
+    oracle: environment check (group membership)
+
+attack_path:                     # default: multiple seeded paths; canonical examples,
+                                 # each traceable to a seeded vuln above
+  - { from: attacker, to: srv02, action: IIS upload webshell OR relay/poisoning via LLMNR, exercises: [iis-asp-upload, llmnr-enabled] }
+  - { from: srv02, to: north-domain, action: kerberoast sql_svc / MSSQL impersonation, exercises: [mssql-impersonation] }
+  - { from: north-domain, to: sevenkingdoms.local, action: ACL chain or child->parent escalation, exercises: [acl-chain] }
+
+lifecycle:
+  isolation: per-deployment lab network
+  reset: rebuild (Vagrant/Ansible; ~hours) or provider snapshot-revert
+  clock_sync: required           # Kerberos: DCs must be authoritative time; snapshot/
+                                 # resume clock skew breaks auth in ways that look
+                                 # like agent failure
+  notes: >
+    Static DC addressing and AD-integrated DNS are hard requirements; DHCP
+    or NAT-renumbering breaks the domain. Windows evaluation licenses give
+    images a 180-day life; no prebuilt boxes distributed.
+
+# Moved back from range.yaml at realization (windows-ad-v1 slice 4), the kypo
+# precedent: a spec-level defense TIER is a classification with no realizable
+# referent (the per-host defender/windows_update toggles in range.yaml carry
+# the real meaning and ARE realized + verified); the seven dc02 bot scripts
+# are an unvendored telemetry/noise generator with no chain dependency, and
+# claiming them realized without the scripts would be dishonest. Both return
+# when a consumer earns them (spec defense: the telemetry tier, slice 5).
+defense:
+  tier: D4                       # real EDR (Microsoft Defender) on dc01/dc02; D1-style
+  description: >                 # static hardening absent (firewalls disabled by design)
+    Windows Defender autonomous on both DCs, disabled on srv02; account
+    lockout policy active in the cochise evaluation. No SOC/telemetry sink
+    in GOAD-Light itself (ELK inventory groups are empty).
+
+scheduled_activity:              # dc02 bot scripts simulating user/defender-relevant behavior
+  host: dc02
+  scripts:
+    - asrep_roasting.ps1
+    - constrained_delegation_use_any.ps1
+    - constrained_delegation_kerb_only.ps1
+    - ntlm_relay.ps1
+    - responder.ps1
+    - gpo_abuse.ps1
+    - rdp_scheduler.ps1

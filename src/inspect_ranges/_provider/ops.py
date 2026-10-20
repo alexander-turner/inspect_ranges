@@ -22,11 +22,13 @@ from .._channel.channel import (
 from .._channel.codec import MAX_CONTROL_PAYLOAD, EncodeError, encode_message
 from .._channel.protocol import DEFAULT_BULK_CAP, Budget, ExecRequest
 from .errors import (
+    SessionChangedError,
     exec_permission_error,
     file_limit_error,
     human_size,
     map_file_failure,
     output_limit_error,
+    shell_returncode,
     timeout_error,
     unavailable,
 )
@@ -95,11 +97,13 @@ async def confirm_session(handle: SampleHandle, guest: str, op: str) -> None:
     pinned = handle.sessions.get(guest)
     if pinned is None:
         return
-    from .errors import SessionChangedError
-
     observed = await _channel(handle).session(guest)
     if observed != pinned:
         handle.sessions[guest] = observed  # re-pin so later samples/ops proceed
+        if handle.evidence is not None:
+            # a daemon restart is evidence (the `session` stream feeds the
+            # continuity corroboration); recording it never alters the op
+            await handle.evidence.record_session_event(guest, observed, "re-pinned")
         raise SessionChangedError(guest, op, pinned, observed)
 
 
@@ -161,7 +165,7 @@ async def provider_exec(
     user: str | None,
     timeout: int | None,
 ) -> InspectExecResult[str]:
-    """The contract's `exec` over the channel; see `LibvirtRangeSandboxEnvironment.exec` for semantics."""
+    """The contract's `exec` over the channel; see `RangeSandboxEnvironment.exec` for semantics."""
     channel = _channel(handle)
     stdin = input.encode("utf-8") if isinstance(input, str) else input
     resolved_cwd = resolve_guest_path(cwd) if cwd is not None else AGENT_HOME
@@ -307,19 +311,13 @@ async def provider_exec(
     denied = exec_permission_error(outcome.rc, stderr)
     if denied is not None:
         raise denied
-    returncode = _shell_rc(outcome.rc)
+    returncode = shell_returncode(outcome.rc)
     return InspectExecResult(
         success=returncode == 0,
         returncode=returncode,
         stdout=stdout,
         stderr=stderr,
     )
-
-
-def _shell_rc(rc: int) -> int:
-    from .errors import shell_returncode
-
-    return shell_returncode(rc)
 
 
 async def provider_read_file(handle: SampleHandle, guest: str, file: str) -> bytes:
@@ -351,10 +349,13 @@ async def provider_read_file(handle: SampleHandle, guest: str, file: str) -> byt
     except ChannelBudgetError as failure:
         if failure.layer == "command":
             raise timeout_error(failure, None) from failure
-        await confirm_session(handle, guest, "read_file")
+        # best-effort like the exec/write_file siblings: the confirm ping
+        # hitting the same dead daemon must not replace the mapped
+        # SandboxUnavailableError with its own raw failure (quality-review B4)
+        await _confirm_session_best_effort(handle, guest, "read_file")
         raise unavailable(failure) from failure
     except TransportFailure as failure:
-        await confirm_session(handle, guest, "read_file")
+        await _confirm_session_best_effort(handle, guest, "read_file")
         raise unavailable(failure) from failure
 
 

@@ -92,9 +92,14 @@ class Rig:
         *,
         with_bundle: bool = True,
         expired: bool = False,
+        evidence_location: str | None = None,
     ) -> tuple[HostLease, str]:
         bundle = tmp_path / f"bundle-{project}"
-        digest = make_bundle(bundle) if with_bundle else "ab" * 32
+        digest = (
+            make_bundle(bundle, evidence=evidence_location is not None)
+            if with_bundle
+            else "ab" * 32
+        )
         store = self.store
         if expired:
             past = datetime.now(UTC) - timedelta(seconds=3600)
@@ -110,6 +115,7 @@ class Rig:
             staging=str(tmp_path / f"staging-{project}"),
             host_facts=facts(),
             ttl_s=600,
+            evidence_location=evidence_location,
         )
         return lease, digest
 
@@ -299,7 +305,7 @@ def test_preamble_garbage_overlength_and_timeout_never_crash_the_server(
             assert await reader.read(1) == b""
             writer.close()
 
-            # the server survived all three: a good route still works
+            # the server survived all four: a good route still works
             beat = await rig.channel(lease).heartbeat()
             assert beat.uptime_ms >= 0
 
@@ -678,5 +684,169 @@ def test_reaper_tears_down_through_the_live_applier(tmp_path: Path) -> None:
             assert rig.store.leases() == []
             relays = rig.applier._relays  # pyright: ignore[reportPrivateUsage]
             assert lease.lease_id not in relays
+
+    asyncio.run(scenario())
+
+
+def test_applier_owns_the_host_capture_writer(tmp_path: Path) -> None:
+    """Separated-topology evidence (slice 5): a lease carrying an evidence location gets a `host` writer in the APPLIER; teardown harvests, seals `complete`, and the record (stage events included) verifies offline. The dead tap (no live compose project in CI) only costs unreachable gaps, never the seal."""
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(
+                tmp_path, "ir-evid", evidence_location=str(evidence_root)
+            )
+            channel = rig.channel(lease)
+            async for _ in channel.realize(digest, []):
+                pass
+            tracked = rig.applier._evidence  # pyright: ignore[reportPrivateUsage]
+            assert lease.lease_id in tracked, "capture tracked per lease"
+            await channel.teardown()
+            assert lease.lease_id not in tracked, "teardown stops and seals"
+            report = await verify_location(LocalDirStore(evidence_root))
+            host = report.writers["host"]
+            assert report.ok and host.seal_status == "complete"
+            assert host.lease_id == lease.lease_id
+            assert "stages" in host.streams, "up stage events reached the record"
+
+    asyncio.run(scenario())
+
+
+def test_realize_admission_charges_the_resident_host_writer_buffer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The applier's admission mirrors the driver's (`evidence-v1.md` accounting, quality-review round 2): a lease whose realize opens the resident `host` evidence writer charges the writer's buffer cap on top of the plan totals, and a lease without evidence charges exactly the plan totals; teardown releases what was charged."""
+    from inspect_ranges._provider.evidence import EVIDENCE_BUFFER_MB_VAR
+
+    monkeypatch.setenv(EVIDENCE_BUFFER_MB_VAR, "16")
+
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            charges = rig.applier._charges  # pyright: ignore[reportPrivateUsage]
+
+            evidenced, digest = rig.lease(
+                tmp_path, "ir-charge-ev", evidence_location=str(tmp_path / "ev")
+            )
+            plan = Applier._load_plan(  # pyright: ignore[reportPrivateUsage]
+                Path(evidenced.bundle_path)
+            )
+            async for _ in rig.channel(evidenced).realize(digest, []):
+                pass
+            assert charges[evidenced.lease_id].memory_mb == (
+                plan.totals.memory_mb + 16
+            ), "the resident host-writer buffer joins the charge"
+
+            plain, digest2 = rig.lease(tmp_path, "ir-charge-noev")
+            async for _ in rig.channel(plain).realize(digest2, []):
+                pass
+            assert charges[plain.lease_id].memory_mb == plan.totals.memory_mb, (
+                "a lease without evidence charges the plan totals alone"
+            )
+
+            # teardown releases exactly what was charged (the stored totals)
+            await rig.channel(evidenced).teardown()
+            await rig.channel(plain).teardown()
+            assert charges == {}
+
+    asyncio.run(scenario())
+
+
+def test_applier_without_evidence_location_writes_nothing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        async with Rig(tmp_path) as rig:
+            lease, digest = rig.lease(tmp_path, "ir-noev")
+            channel = rig.channel(lease)
+            async for _ in channel.realize(digest, []):
+                pass
+            tracked = rig.applier._evidence  # pyright: ignore[reportPrivateUsage]
+            assert tracked == {}
+            await channel.teardown()
+
+    asyncio.run(scenario())
+
+
+def test_slow_capture_stop_still_lands_the_shutdown_gaps_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """The shutdown flush must not wrap `_stop_evidence` in an outer timeout smaller than the stop phase's own internal bounds (quality-review round 2, the A6 family): with a tap whose stop is slower than the removed 5 s outer envelope but inside the streamer's documented bounds, aclose still lands the promised `applier-shutdown` gaps and the checkpoint. The slow tap is the point of this pin: the sibling pin's instant dead tap can never exercise the envelope, so the deliberate 5.5 s here must exceed any outer bound a regression could reintroduce (the removed one was 5 s)."""
+    import json
+    import time
+
+    from inspect_ranges._evidence.capture import CaptureStreamer, LocalTap
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+    from inspect_ranges._evidence.supervisor import STATUS_FILENAME
+
+    class SlowStopTap(LocalTap):
+        """A tap whose stop request takes 5.5 s (a real teardown-tail harvest under load), then reports the sidecar stopped."""
+
+        def request_stop(self) -> None:
+            time.sleep(5.5)
+            (self.root / STATUS_FILENAME).write_text(json.dumps({"stopped": True}))
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        volume = tmp_path / "volume"
+        volume.mkdir()
+        applier = Applier(
+            tmp_path / "sock" / "applier.sock",
+            tmp_path / "state",
+            image_cache=tmp_path / "cache",
+            gate=lambda: [],
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(evidence_root),
+            writer="host",
+            lease_id="f" * 32,
+            sample_id="s1",
+        )
+        # one delivered chunk: the record exists before the shutdown flush
+        await writer.append("pcap/lab", b"captured-bytes")
+        await writer.checkpoint()
+        streamer = CaptureStreamer(
+            writer,
+            SlowStopTap(volume, tmp_path / "console"),
+            segments=["lab"],
+            console_guests=[],
+        )
+        evidence = applier._evidence  # pyright: ignore[reportPrivateUsage]
+        evidence["f" * 32] = (streamer, writer, ["lab"])
+        started = time.monotonic()
+        await applier.aclose()
+        elapsed = time.monotonic() - started
+        assert elapsed > 5.0, "the slow stop must actually exercise the envelope"
+        report = await verify_location(LocalDirStore(evidence_root))
+        host = report.writers["host"]
+        assert not host.sealed, "a cutoff record must stay unsealed"
+        assert host.first_break is None, "unsealed is reported, never broken"
+        causes = {gap.cause for gap in host.gaps}
+        assert "applier-shutdown" in causes, f"gaps: {causes}"
+
+    asyncio.run(scenario())
+
+
+def test_applier_shutdown_leaves_evidence_unsealed_with_gaps(tmp_path: Path) -> None:
+    """Applier restart mid-sample must NOT seal a cutoff record `complete`: shutdown records explicit `applier-shutdown` gaps and leaves the record unsealed for an honest reap-seal (the surviving driver's at teardown, or the reaper's after lease expiry)."""
+    from inspect_ranges._evidence.reader import LocalDirStore, verify_location
+
+    async def scenario() -> None:
+        evidence_root = tmp_path / "evidence"
+        rig = Rig(tmp_path)
+        await rig.applier.start()
+        lease, digest = rig.lease(
+            tmp_path, "ir-shutdown", evidence_location=str(evidence_root)
+        )
+        channel = rig.channel(lease)
+        async for _ in channel.realize(digest, []):
+            pass
+        await rig.applier.aclose()  # shutdown with the sample still live
+        report = await verify_location(LocalDirStore(evidence_root))
+        host = report.writers["host"]
+        assert not host.sealed, "a cutoff record must stay unsealed"
+        assert host.first_break is None, "unsealed is reported, never broken"
+        causes = {gap.cause for gap in host.gaps}
+        assert "applier-shutdown" in causes, f"gaps: {causes}"
 
     asyncio.run(scenario())

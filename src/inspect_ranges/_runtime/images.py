@@ -27,12 +27,24 @@ from .._channel.bundle import (
     verify_daemon_bundle,
 )
 from .._channel.protocol import PROTOCOL_VERSION
-from .._compiler.plan import image_file_name
+from .._compiler.plan import image_file_name, image_sidecar_file_name
 
 logger = logging.getLogger(__name__)
 
 RECIPE_VERSION = "4"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
+
+
+def default_image_cache() -> Path:
+    """`INSPECT_RANGES_IMAGE_CACHE`, or `~/.cache/inspect-ranges/images`.
+
+    The one source of the image-cache default: the provider, doctor, applier, and every CLI command resolve through here, so the knob cannot drift per surface.
+    """
+    override = os.environ.get("INSPECT_RANGES_IMAGE_CACHE")
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "inspect-ranges" / "images"
+
 
 Runner = Callable[[list[str], Path], None]
 """Executes an external command (argv, cwd); raises `CalledProcessError` on failure."""
@@ -64,6 +76,8 @@ class ImageMetadata(BaseModel):
     daemon: DaemonPin
     golden_sha256: str
     created: str
+    admin_password: str | None = None
+    """Windows goldens only: the built-in Administrator password baked at install (deliberate, LOCAL-ONLY scenario content; the control plane is the vsock daemon as SYSTEM). Render reads it to answer the per-boot OOBE pass."""
 
 
 class DeriveError(Exception):
@@ -174,8 +188,8 @@ def _cache_file_name(name: str) -> str:
 
 
 def _metadata_path(cache: Path, file: str) -> Path:
-    # full name, not Path.stem: golden names may contain dots
-    return cache / (file.removesuffix(".qcow2") + ".json")
+    # one naming rule with the compiler, which reads recorded metadata at render
+    return cache / image_sidecar_file_name(file)
 
 
 def _load_metadata(path: Path) -> "ImageMetadata | None":
@@ -251,7 +265,11 @@ def derive_golden(
     golden_path = cache / file
     metadata_path = _metadata_path(cache, file)
 
-    with _name_lock(cache, file):
+    from .._dist.gc import chains_lock
+
+    # shared with the GC's exclusive scan (distribution round-5 B2): a derive
+    # landing vendor-then-golden must never look like an orphan mid-flight
+    with chains_lock(cache, exclusive=False), _name_lock(cache, file):
         return _derive_locked(
             run,
             vendor,
@@ -428,20 +446,62 @@ def _derive_locked(
         metadata_temp.unlink(missing_ok=True)
 
 
-def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
-    """The cache's managed goldens (with provenance) and unmanaged files (no metadata sidecar).
+class RealizedListing(BaseModel):
+    """A build-captured realized image as `images list` reports it (shape-matched from its `.realized.json` sidecar; the build package owns the full model, and the boundary forbids importing it here)."""
+
+    file: str
+    range_name: str
+    guest: str
+    build_key: str
+    created: str
+
+
+def _load_realized(sidecar: Path) -> "RealizedListing | None":
+    try:
+        import json
+        from typing import cast
+
+        loaded: object = json.loads(sidecar.read_text())
+        if not isinstance(loaded, dict):
+            return None
+        data = cast(dict[str, object], loaded)
+        if data.get("type") != "realized":
+            return None
+        return RealizedListing(
+            file=sidecar.name.removesuffix(".realized.json") + ".qcow2",
+            range_name=str(data["range_name"]),
+            guest=str(data["guest"]),
+            build_key=str(data["build_key"]),
+            created=str(data["created"]),
+        )
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def list_images(
+    cache: Path,
+) -> tuple[list[ImageMetadata], list[RealizedListing], list[str]]:
+    """The cache's managed goldens, build-captured realized images, and unmanaged files.
 
     Args:
         cache: The image cache directory.
 
     Returns:
-        Managed metadata sorted by name, and unmanaged image file names sorted.
+        Managed golden metadata sorted by name, realized listings sorted by file, and unmanaged image file names sorted.
     """
     if not cache.is_dir():
-        return [], []
+        return [], [], []
     managed: list[ImageMetadata] = []
     managed_files: set[str] = set()
+    realized: list[RealizedListing] = []
+    for sidecar in sorted(cache.glob("*.realized.json")):
+        listing = _load_realized(sidecar)
+        if listing is not None and (cache / listing.file).is_file():
+            realized.append(listing)
+            managed_files.add(listing.file)
     for sidecar in sorted(cache.glob("*.json")):
+        if sidecar.name.endswith(".realized.json"):
+            continue
         metadata = _load_metadata(sidecar)
         if metadata is None:
             continue  # corrupt sidecar: its image surfaces as unmanaged below
@@ -453,8 +513,16 @@ def list_images(cache: Path) -> tuple[list[ImageMetadata], list[str]]:
         for path in cache.iterdir()
         if path.is_file()
         and (
-            path.suffix in (".qcow2", ".img", ".iso") or path.name.endswith(".deriving")
+            path.suffix in (".qcow2", ".img", ".iso")
+            or path.name.endswith(".deriving")
+            # a crash mid-capture strands a multi-GB `.capturing` temp that the
+            # next capture of the SAME name would clean, but a post-crash fix
+            # usually changes the build key, so listing must surface it (round-1)
+            or path.name.endswith(".capturing")
+            # same lesson for a hard-killed pull's `.{name}.pulling-*` temp
+            # (the next pull of that name sweeps it, but listing must see it)
+            or ".pulling-" in path.name
         )
         and path.name not in managed_files
     )
-    return managed, unmanaged
+    return managed, realized, unmanaged

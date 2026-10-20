@@ -6,8 +6,15 @@ import yaml
 from inspect_ranges.schema import RangeSpec, load_range, range_json_schema
 from pydantic import ValidationError
 
+# built examples graduate from design/inspect-ranges/ranges/ to examples/
+# (vulhub-zabbix first, 2026-10-18); both tiers must keep validating
 EXAMPLES = sorted(
-    (Path(__file__).parent.parent / "design/inspect-ranges/ranges").glob("*/range.yaml")
+    [
+        *(Path(__file__).parent.parent / "design/inspect-ranges/ranges").glob(
+            "*/range.yaml"
+        ),
+        *(Path(__file__).parent.parent / "examples").glob("*/range.yaml"),
+    ]
 )
 
 MINIMAL = """
@@ -34,7 +41,7 @@ def _with(overrides_yaml: str) -> Any:
 
 
 def test_examples_validate() -> None:
-    assert len(EXAMPLES) == 6
+    assert len(EXAMPLES) == 7
     for path in EXAMPLES:
         spec = load_range(path)
         assert spec.meta.schema_version in {"0.1", "0.2", "0.3"}

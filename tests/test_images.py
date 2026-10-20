@@ -190,7 +190,7 @@ def test_corrupt_sidecar_is_unmanaged_to_both_list_and_derive(
     )
     sidecar = cache / "noble-server-cloudimg-amd64-golden.json"
     sidecar.write_text("{not json")
-    managed, unmanaged = list_images(cache)
+    managed, _, unmanaged = list_images(cache)
     assert managed == []
     assert metadata.file in unmanaged
     with pytest.raises(DeriveError, match=r"\[prepare\].*not a valid provenance"):
@@ -275,7 +275,7 @@ def test_dotted_names_map_to_distinct_files_and_sidecars(
     assert second.file == "ubuntu-24.10.qcow2"
     assert (cache / "ubuntu-24.04.json").is_file()
     assert (cache / "ubuntu-24.10.json").is_file()
-    managed, _ = list_images(cache)
+    managed, _, _ = list_images(cache)
     assert {m.file for m in managed} >= {"ubuntu-24.04.qcow2", "ubuntu-24.10.qcow2"}
 
 
@@ -286,7 +286,7 @@ def test_list_images_separates_managed_and_unmanaged(
     cache = tmp_path / "cache"
     derive_golden(image, digest, cache, runner=fake_runner, artifact_dir=artifact)
     (cache / "handmade.qcow2").write_bytes(b"x")
-    managed, unmanaged = list_images(cache)
+    managed, _, unmanaged = list_images(cache)
     assert [m.file for m in managed] == ["noble-server-cloudimg-amd64-golden.qcow2"]
     assert unmanaged == ["handmade.qcow2"]
 
@@ -326,3 +326,48 @@ def test_protocol_skewed_artifact_refuses(
             runner=fake_runner,
             artifact_dir=artifact,
         )
+
+
+def test_list_cmd_labels_unparseable_recipe_version(
+    tmp_path: Path, vendor: tuple[Path, str], artifact: Path
+) -> None:
+    """A non-integer recipe version must not be labeled with an ordering that could not be computed (the doctor's three-way split, mirrored)."""
+    import json as json_module
+
+    from click.testing import CliRunner
+    from inspect_ranges._cli.main import ranges
+
+    image, digest = vendor
+    cache = tmp_path / "cache"
+    metadata, _ = derive_golden(
+        image, digest, cache, runner=fake_runner, artifact_dir=artifact
+    )
+    sidecar = cache / (Path(metadata.file).stem + ".json")
+    doctored = json_module.loads(sidecar.read_text())
+    doctored["recipe_version"] = "beta"
+    sidecar.write_text(json_module.dumps(doctored))
+    result = CliRunner().invoke(ranges, ["images", "list", "--image-cache", str(cache)])
+    assert result.exit_code == 0
+    assert "RECIPE UNPARSEABLE" in result.output
+    assert "STALE RECIPE" not in result.output
+
+
+def test_prune_reporters_apply_the_live_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-2 gap: images list/doctor/prune must agree on one liveness definition (recorded manifests UNION running projects' boot.json files)."""
+    import json
+
+    from inspect_ranges._build.capture import live_project_files
+    from inspect_ranges._build.manifest import recorded_realized_files
+    from inspect_ranges._runtime.ownership import owner_record, write_owner
+
+    state = tmp_path / "state"
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "boot.json").write_text(
+        json.dumps({"guests": [{"name": "web", "image_file": "live-web-abc.qcow2"}]})
+    )
+    write_owner(state, owner_record("ir-live-x", "live", "0" * 64, bundle))
+    live = recorded_realized_files(tmp_path / "no-builds") | live_project_files(state)
+    assert "live-web-abc.qcow2" in live

@@ -1,6 +1,6 @@
 """Throwaway stub provider for the realizer-v1 slice 0 Inspect API checkpoint.
 
-Registers `libvirt_range` as a `SandboxEnvironment` and records every lifecycle hook invocation to a JSONL log so `run_check.py` can assert the contract (hook order, config forms, named-sandbox resolution). No VMs are booted; exec/file operations are deliberately unimplemented.
+Registers `range` as a `SandboxEnvironment` and records every lifecycle hook invocation to a JSONL log so `run_check.py` can assert the contract (hook order, config forms, named-sandbox resolution). No VMs are booted; exec/file operations are deliberately unimplemented.
 """
 
 import json
@@ -38,7 +38,7 @@ def config_kind(config: SandboxEnvironmentConfigType | None) -> str:
     return f"str:{config}"
 
 
-@sandboxenv(name="libvirt_range")
+@sandboxenv(name="range")
 class ApiCheckSandboxEnvironment(SandboxEnvironment):
     def __init__(self, guest: str) -> None:
         self.guest = guest

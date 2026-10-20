@@ -1,0 +1,7 @@
+name: bc.order
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  marker:
+    description: line appended to /opt/build-order, proving declaration-order execution

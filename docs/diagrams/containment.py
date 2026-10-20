@@ -75,7 +75,12 @@ def build() -> Elements:
     _, e = make_text(50, 84, "range container", 14)
     els += e
     _, e = make_text(
-        175, 86, "unprivileged · libvirtd + QEMU", 12, MUTED, font_family=FONT_MONO
+        175,
+        86,
+        "unprivileged · libvirtd + QEMU · cloud-hypervisor",
+        12,
+        MUTED,
+        font_family=FONT_MONO,
     )
     els += e
 
@@ -104,6 +109,19 @@ def build() -> Elements:
         els += e
         if label == "agent VM":
             agent_id = box_id
+            # The attack box runs Cloud Hypervisor rather than QEMU (the most
+            # adversarial guest gets the smaller VMM); annotate in the same
+            # muted mono style as the container header.
+            _, e = make_text(
+                x + vm_w / 2,
+                vm_y + 8,
+                "cloud-hypervisor",
+                10,
+                MUTED,
+                align="center",
+                font_family=FONT_MONO,
+            )
+            els += e
         # Every guest carries the same vsock socket (host↔guest only, so no
         # fan of lines): a small violet notch straddling each VM's top edge,
         # echoing the sandbox-control port on the instance boundary.

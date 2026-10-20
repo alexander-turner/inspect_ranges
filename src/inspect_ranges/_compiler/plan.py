@@ -2,28 +2,45 @@
 
 `resolve_plan` turns a validated `RangeSpec` into everything downstream stages consume: per-guest allocations (addresses, MACs, CIDs), per-network realization facts (bridge, gateway, resolvers, search domain), image references with cache-resolved digests, host requirements, and resource totals. Unsupported combinations fail here, at planning, as `IssueError`s with stable codes — never mid-boot. The plan is pure data with no timestamps, so the same spec and options always produce byte-identical `plan.json` (see `plan_json`).
 
-Render v1 scope: guests whose configuration injector is cloud-init (Linux). Windows guests refuse at planning (`windows-render-not-supported`); their injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase.
+Render scope: Linux guests inject configuration via cloud-init; Windows HOSTS inject via a per-boot unattend seed with daemon-only readiness (windows-ad-v1 slice 1). Windows routers refuse at planning (`windows-render-not-supported`); Windows attackers cannot exist (dedicated boxes are schema-level Linux, and a Windows foothold refuses `windows-foothold-not-supported`).
 """
 
 import hashlib
 import json
+import re
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..types import AnyIPNetwork, Issue, IssueError, RangeSpec, Route
+from ..types import (
+    AnyIPNetwork,
+    Attacker,
+    Issue,
+    IssueError,
+    RangeSpec,
+    Route,
+    Vmm,
+    has_guest_content,
+)
 from .allocate import (
     Allocation,
     GuestAllocation,
     GuestKind,
     InterfaceAllocation,
+    ProbeEndpoint,
     allocate,
 )
 from .dnsmasq import resolvers_for, search_domain
 from .egress import bridge_name
 from .routing import elect_gateways
+
+DEFAULT_ROUTER_IMAGE = "ubuntu-noble"
+"""Image for routers when none is declared (module constant so pre-plan consumers, like the provider's catalog-image fetch, apply the same default)."""
+
+DEFAULT_ATTACKER_IMAGE = "attack"
+"""Image for a dedicated attack box when none is declared: the catalog's standard attack image."""
 
 
 class PlanOptions(BaseModel):
@@ -35,11 +52,26 @@ class PlanOptions(BaseModel):
     cpu_model: str = "host-passthrough"
     """Guest CPU model; checkpointed fleets use a named model (see range-build.md)."""
 
-    default_router_image: str = "noble-range-guest"
-    """Image for routers that declare none (the backend's default router appliance)."""
+    default_router_image: str = DEFAULT_ROUTER_IMAGE
+    """Image for routers when none is declared."""
+
+    default_attacker_image: str = DEFAULT_ATTACKER_IMAGE
+    """Image for a dedicated attack box when none is declared: the catalog's standard attack image (standard-images-v1), resolved like any bare name (pin, cache, then the search path, whose default tail is the public org)."""
 
     cid_base: int = Field(default=3, ge=3)
     """First vsock CID; at least 3 (0 through 2 are reserved by vsock itself). A plan-time input: CIDs are render inputs, host-kernel-global, and partitioned per realizer-v1.md (batteries at 3000 and up, the channel harness below 3000)."""
+
+    evidence_capture: bool = False
+    """Render the evidence-capture sidecar (per-segment pcap per `evidence-v1.md`). A plan-time input because the sidecar is part of the realization: the bundle's compose project and digest change with it."""
+
+    probe_segments: tuple[str, ...] = ()
+    """Networks that get a declared probe endpoint (the clamped veth of the challenge-prober spike) plus the zero-capability probe sidecar. A plan-time input for the same reason as `evidence_capture`; set by the provider from the challenge's `active-prober` requirements."""
+
+    realized_sections: frozenset[str] = frozenset()
+    """Host guest-config sections the caller realizes itself, exempted from the `guest-config-not-realized` gate. Set by the build pipeline (`provisioning` as of build-v1 slice 2); the runtime path never sets it, so unbuilt content stays honestly inert."""
+
+    realized_backings: dict[str, tuple[str, str]] = {}
+    """Per-guest (backing golden cache file, `sha256:` digest) for realized overlays, recorded into boot.json so `up` verifies the overlay's backing at boot (round-2 review: goldens re-derive in place under the same name, and the overlay's own digest cannot see its backing). Set from the consumed build manifest by every gate consumer that renders."""
 
 
 class ImageRef(BaseModel):
@@ -72,6 +104,8 @@ class PlannedNetwork(BaseModel):
     """Resolver addresses handed to this network's guests."""
     search: str | None
     """Derived search domain, for records-serving networks."""
+    probe_endpoint: ProbeEndpoint | None = None
+    """The declared probe endpoint (clamped veth), when a challenge's `active-prober` observer requested this segment."""
 
 
 class PlannedGuest(BaseModel):
@@ -86,14 +120,18 @@ class PlannedGuest(BaseModel):
     memory_mb: int
     disk_gb: int
     interfaces: list[InterfaceAllocation]
+    hostname: str
+    """The rendered in-guest hostname: the declared `hostname:` when a host carries one (realized as of windows-ad-v1 slice 4), else derived from the guest name; sanitized, and NetBIOS-truncated for Windows. Plan-resolved so render, the collision gate, and the Windows build key all consume one value."""
     routes: list[Route]
     """Static routes (routers only)."""
-    injector: Literal["cloud-init"]
+    injector: Literal["cloud-init", "unattend"]
     """How configuration reaches the guest (render v1: cloud-init only)."""
-    readiness: Literal["cloud-init"]
+    readiness: Literal["cloud-init", "daemon"]
     """What the applier waits on before the range is ready."""
     profile: Literal["strict"]
     """Device-model profile (min-devices strict; richer profiles arrive with a schema field)."""
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor: `qemu` boots from the guest's domain XML via libvirt; `cloud-hypervisor` is started directly by the boot script."""
 
 
 class Requirements(BaseModel):
@@ -104,6 +142,12 @@ class Requirements(BaseModel):
     """Host device nodes the range container needs."""
     egress_uplink: bool
     """Whether the deployment must supply an uplink network (any nat/routed network or attacker egress)."""
+
+    evidence_capture: bool = False
+    """Whether the bundle carries the evidence-capture sidecar (per-segment pcap on a `CAP_NET_RAW`-only compose service; the range container's own capability floor is unchanged by this)."""
+
+    probe_segments: tuple[str, ...] = ()
+    """Networks carrying a declared probe endpoint and the zero-capability probe sidecar (sorted; empty means no prober)."""
 
 
 class Totals(BaseModel):
@@ -145,6 +189,43 @@ def plan_json(plan: ResolvedPlan) -> str:
     return json.dumps(plan.model_dump(mode="json"), sort_keys=True, indent=2) + "\n"
 
 
+_EVIDENCE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+"""Names that fit the evidence stream grammar (`pcap/<network>`, `console/<guest>`); checked at planning when capture is enabled so a nonconforming name refuses up front instead of silently shipping no evidence."""
+
+
+def _evidence_name_issues(spec: RangeSpec) -> list[Issue]:
+    issues: list[Issue] = []
+    named: list[tuple[str, tuple[Any, ...]]] = [
+        (network.name, ("networks", index, "name"))
+        for index, network in enumerate(spec.networks)
+    ]
+    named += [
+        (host.name, ("hosts", index, "name")) for index, host in enumerate(spec.hosts)
+    ]
+    named += [
+        (router.name, ("routers", index, "name"))
+        for index, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        named.append((spec.attacker.name, ("attacker", "name")))
+    for name, path in named:
+        if _EVIDENCE_NAME.match(name) is None:
+            issues.append(
+                Issue(
+                    code="evidence-capture-name",
+                    path=path,
+                    message=f"name {name!r} does not fit the evidence stream grammar (lowercase letters, digits, '._-', starting alphanumeric), so its pcap/console streams cannot be recorded",
+                    hint="rename the network/guest, or render without --evidence-capture",
+                )
+            )
+    return issues
+
+
+def _attacker_vmm(attacker: Attacker) -> Vmm:
+    """The attacker box's effective VMM: a declared value wins; a dedicated attack box with none declared defaults to `cloud-hypervisor` (hosts and routers default to `qemu`)."""
+    return attacker.vmm or "cloud-hypervisor"
+
+
 def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> ResolvedPlan:
     """Resolve a validated spec into the immutable plan.
 
@@ -160,14 +241,80 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
     """
     options = options or PlanOptions()
     issues: list[Issue] = []
-    for index, host in enumerate(spec.hosts):
-        if host.os.type == "windows":
+    if options.evidence_capture:
+        issues.extend(_evidence_name_issues(spec))
+    declared_networks = {network.name for network in spec.networks}
+    for segment in options.probe_segments:
+        if segment not in declared_networks:
             issues.append(
                 Issue(
-                    code="windows-render-not-supported",
-                    path=("hosts", index, "os", "type"),
-                    message=f"host {host.name!r} is a Windows guest, which render v1 cannot realize",
-                    hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
+                    code="probe-segment-unknown",
+                    path=("networks",),
+                    message=f"probe segment {segment!r} is not a declared network",
+                    hint="probe segments come from the challenge's active-prober goals; the goal's host must sit on a declared network",
+                )
+            )
+    # windows HOSTS realize (windows-ad-v1 slice 1: the unattend injector and
+    # daemon readiness); windows routers still refuse below, and the attacker
+    # is linux by construction (the Attacker schema declares no `os` field)
+    for section, declared_list in (("hosts", spec.hosts), ("routers", spec.routers)):
+        for index, guest_decl in enumerate(declared_list):
+            content = any(
+                getattr(guest_decl, section_field, None)
+                for section_field in ("provisioning", "services", "vulnerabilities")
+            )
+            if guest_decl.vmm == "cloud-hypervisor" and content:
+                # the build captures provisioned guests through virsh domstate,
+                # which cannot see Cloud Hypervisor guests: fail closed until
+                # CH capture lands (parked with the CH follow-ups)
+                issues.append(
+                    Issue(
+                        code="cloud-hypervisor-content-unsupported",
+                        path=(section, index, "vmm"),
+                        message=f"guest {guest_decl.name!r} runs on cloud-hypervisor and declares guest content, which the build cannot capture yet",
+                        hint="run this guest on qemu, or drop its content sections",
+                    )
+                )
+    if options.cpu_model != "host-passthrough":
+        # Cloud Hypervisor takes no CPU model: its guests always see the host
+        # CPU, so a pinned model would silently not apply to them
+        pinned_cpu_guests: list[tuple[tuple[Any, ...], str, Any]] = [
+            (("hosts", index), host.name, host.vmm)
+            for index, host in enumerate(spec.hosts)
+        ]
+        pinned_cpu_guests += [
+            (("routers", index), r.name, r.vmm) for index, r in enumerate(spec.routers)
+        ]
+        if spec.attacker.host is None:
+            pinned_cpu_guests.append(
+                (("attacker",), spec.attacker.name, _attacker_vmm(spec.attacker))
+            )
+        issues.extend(
+            Issue(
+                code="cloud-hypervisor-cpu-model",
+                path=(*path, "vmm"),
+                message=f"guest {name!r} runs on cloud-hypervisor, which cannot apply the pinned CPU model {options.cpu_model!r}",
+                hint="use cpu_model host-passthrough, or run this guest on qemu",
+            )
+            for path, name, vmm in pinned_cpu_guests
+            if vmm == "cloud-hypervisor"
+        )
+    if spec.attacker.host is not None:
+        foothold = next(
+            (host for host in spec.hosts if host.name == spec.attacker.host), None
+        )
+        if foothold is not None and foothold.os.type == "windows":
+            # the attacker surface is POSIX by construction: behavioral chains
+            # and eval tooling exec bash on the foothold, and the dedicated
+            # attack box is schema-level Linux — a Windows foothold would plan
+            # fine and then break every chain (phase review round 1 finding
+            # A4; "no windows attacker nodes", user 2026-10-20)
+            issues.append(
+                Issue(
+                    code="windows-foothold-not-supported",
+                    path=("attacker", "host"),
+                    message=f"the attacker foothold {spec.attacker.host!r} is a Windows guest; the attacker surface is POSIX",
+                    hint="point attacker.host at a Linux guest, or declare a dedicated attack box",
                 )
             )
     for index, router in enumerate(spec.routers):
@@ -180,6 +327,82 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint="Windows injectors (unattend/qemu-ga, checkpoints) arrive with the build-manifest phase",
                 )
             )
+    for index, host in enumerate(spec.hosts):
+        if host.os.type == "windows" and has_guest_content(host):
+            # a captured Windows disk bakes its addresses (specialize runs
+            # once), and the build key can only see DECLARED addressing: an
+            # auto-allocated address shifts when the spec changes elsewhere
+            # while the key stays put, silently re-rendering a new plan
+            # against a stale disk (slice-2 review, blocking)
+            for interface_index, interface in enumerate(host.interfaces):
+                if interface.ip is None:
+                    issues.append(
+                        Issue(
+                            code="windows-ip-required",
+                            path=("hosts", index, "interfaces", interface_index),
+                            message=f"host {host.name!r} is a Windows guest with buildable content but interface {interface_index} declares no ip",
+                            hint="declare ip: on every interface of a content-carrying Windows host; its captured disk bakes the addresses, so the build key must see them",
+                        )
+                    )
+        if host.os.type == "windows" and host.vmm == "cloud-hypervisor":
+            # the unattend seed rides a removable scsi cdrom and Windows'
+            # implicit answer-file search only looks at removable media; Cloud
+            # Hypervisor attaches disks as plain virtio-blk, so such a guest
+            # would boot and never specialize — fail here, never mid-boot
+            issues.append(
+                Issue(
+                    code="windows-vmm-not-supported",
+                    path=("hosts", index, "vmm"),
+                    message=f"host {host.name!r} is a Windows guest declared on cloud-hypervisor, which cannot deliver the unattend specialize seed",
+                    hint="run Windows hosts on qemu (the default)",
+                )
+            )
+    from .render import guest_hostname, windows_hostname
+
+    hostnames: dict[str, str] = {}
+    named_guests: list[tuple[str, str, bool]] = [
+        # the declared hostname: wins when a host carries one (realized as of
+        # windows-ad-v1 slice 4); routers and the attacker derive from names
+        (host.name, host.hostname or host.name, host.os.type == "windows")
+        for host in spec.hosts
+    ]
+    named_guests += [(router.name, router.name, False) for router in spec.routers]
+    if spec.attacker.host is None:
+        named_guests.append((spec.attacker.name, spec.attacker.name, False))
+    for guest_name, declared, is_windows in named_guests:
+        # the collision gate checks the hostname each guest actually renders:
+        # Windows names also truncate to the 15-character NetBIOS limit, so two
+        # long names can collide after truncation alone
+        sanitized = (
+            windows_hostname(declared) if is_windows else guest_hostname(declared)
+        )
+        if not sanitized:
+            # a declared hostname of hostname-invalid characters only (e.g.
+            # uppercase: the sanitizer is lowercase-alphabet) renders EMPTY —
+            # an empty ComputerName breaks Windows specialize mid-boot and an
+            # empty local-hostname degrades cloud-init; fail at planning per
+            # the gate contract (phase review round 1 finding A2: slice 4
+            # removed the old not-realized gate without adding this)
+            issues.append(
+                Issue(
+                    code="hostname-empty",
+                    path=("hosts",),
+                    message=f"guest {guest_name!r}: the declared hostname {declared!r} renders empty after sanitizing",
+                    hint="hostnames sanitize to lowercase letters, digits, and hyphens; declare a hostname that keeps at least one such character",
+                )
+            )
+            continue
+        if sanitized in hostnames and hostnames[sanitized] != guest_name:
+            issues.append(
+                Issue(
+                    code="hostname-collision",
+                    path=("hosts",),
+                    message=f"guests {hostnames[sanitized]!r} and {guest_name!r} both render the in-guest hostname {sanitized!r}",
+                    hint="hostname-invalid characters sanitize to hyphens and Windows names truncate to the 15-character NetBIOS limit; rename one guest (or its declared hostname) so the rendered forms differ",
+                )
+            )
+        else:
+            hostnames[sanitized] = guest_name
     _GUEST_CONTENT_HINT = "guest configuration is applied and verified at range build; the build pipeline is the next phase (see guest-config-v0.3)"
     for index, host in enumerate(spec.hosts):
         fields = [
@@ -193,6 +416,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             "scheduled_activity",
         ]
         for field_name in fields:
+            if field_name in options.realized_sections:
+                continue
             if getattr(host, field_name):
                 issues.append(
                     Issue(
@@ -202,12 +427,45 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                         hint=_GUEST_CONTENT_HINT,
                     )
                 )
-        if host.defense is not None:
+        if (
+            (host.roles and "roles" in options.realized_sections)
+            or (host.defense is not None and "defense" in options.realized_sections)
+        ) and not host.provisioning:
+            # the build claims these sections REALIZED, and only recipes
+            # realize them: a recipe-less host would mint the claim unrealized
+            # and unverified (slice-4 review)
+            issues.append(
+                Issue(
+                    code="realized-section-unconsumed",
+                    path=("hosts", index, "provisioning"),
+                    message=f"host {host.name!r} declares roles/defense but no provisioning recipe realizes them",
+                    hint="give the host a recipe that realizes its declared roles/defense, or drop the declarations",
+                )
+            )
+        if host.defense is not None and "defense" not in options.realized_sections:
+            # realized by build recipes as of windows-ad-v1 slice 4 (Defender
+            # and update toggles are chain-load-bearing and verifiable); the
+            # runtime path keeps its gate like every build-claimed section
             issues.append(
                 Issue(
                     code="guest-config-not-realized",
                     path=("hosts", index, "defense"),
-                    message=f"host {host.name!r} declares defense toggles, which the build phase has not yet realized",
+                    message=f"host {host.name!r} declares defense toggles, which only the build realizes",
+                    hint=_GUEST_CONTENT_HINT,
+                )
+            )
+        if (
+            host.fqdn is not None
+            and "active_directory" not in options.realized_sections
+        ):
+            # an fqdn is realized by the AD recipes (promotion/join set the
+            # primary DNS suffix), so it travels with the active_directory
+            # claim rather than render (windows-ad-v1 slice 4)
+            issues.append(
+                Issue(
+                    code="guest-config-not-realized",
+                    path=("hosts", index, "fqdn"),
+                    message=f"host {host.name!r} declares fqdn, which only the build's AD recipes realize",
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
@@ -221,37 +479,82 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
-    if spec.defense is not None:
+    if spec.defense is not None and (
+        "defense" not in options.realized_sections or not spec.defense.telemetry
+    ):
+        # a bare tier is a classification with no realizable referent (the
+        # kypo precedent); only a TELEMETRY-BEARING posture earns the build
+        # lift — its flows are what recipes realize (windows-ad-v1 slice 5)
         issues.append(
             Issue(
                 code="guest-config-not-realized",
                 path=("defense",),
-                message="the range declares a defensive posture, which the build phase has not yet realized",
+                message="the range declares a defensive posture, which only the build realizes (and only when it carries telemetry flows)",
                 hint=_GUEST_CONTENT_HINT,
             )
         )
-    if spec.variables:
-        issues.append(
-            Issue(
-                code="randomization-not-realized",
-                path=("variables",),
-                message="the range declares per-instance variables; draws arrive with the generation layer (defaults are in effect until then)",
-                hint="validation substitutes defaults, so the definition realizes concretely today",
-            )
-        )
-    if spec.active_directory is not None:
+    if (
+        spec.defense is not None
+        and spec.defense.telemetry
+        and "defense" in options.realized_sections
+    ):
+        hosts_for_flows = {host.name: host for host in spec.hosts}
+        for flow_index, flow in enumerate(spec.defense.telemetry):
+            for role, flow_guest in (("source", flow.source), ("sink", flow.sink)):
+                flow_host = hosts_for_flows.get(flow_guest)
+                if flow_host is not None and not flow_host.provisioning:
+                    # flows realize through BOTH ends' recipes (the sensor and
+                    # the receiving collector); a recipe-less end would mint
+                    # the claim unrealized (the slice-4 unconsumed rule)
+                    issues.append(
+                        Issue(
+                            code="realized-section-unconsumed",
+                            path=("defense", "telemetry", flow_index, role),
+                            message=f"telemetry flow {flow_index} names {role} {flow_guest!r}, which carries no provisioning recipe to realize it",
+                            hint="give the guest a recipe that realizes its end of the flow, or drop the flow",
+                        )
+                    )
+    if spec.active_directory is not None and "active_directory" in (
+        options.realized_sections
+    ):
+        hosts_by_name = {host.name: host for host in spec.hosts}
+        for domain_index, domain in enumerate(spec.active_directory.domains):
+            dc_host = hosts_by_name.get(domain.dc)
+            if dc_host is not None and not dc_host.provisioning:
+                # the identity data realizes through the DC's recipes
+                # (IR_ACTIVE_DIRECTORY); a recipe-less DC would mint the
+                # claim unrealized (slice-4 review)
+                issues.append(
+                    Issue(
+                        code="realized-section-unconsumed",
+                        path=("active_directory", "domains", domain_index, "dc"),
+                        message=f"domain {domain.name!r} names dc {domain.dc!r}, which carries no provisioning recipe to realize the identity data",
+                        hint="give the DC a promotion/realize recipe, or drop the active_directory declaration",
+                    )
+                )
+    if (
+        spec.active_directory is not None
+        and "active_directory" not in options.realized_sections
+    ):
+        # realized by build recipes as of windows-ad-v1 slice 4: the identity
+        # data reaches recipes through the IR_ACTIVE_DIRECTORY contract env,
+        # and its hash enters every content guest's build key
         issues.append(
             Issue(
                 code="guest-config-not-realized",
                 path=("active_directory",),
-                message="the range declares Active Directory identity data, which the build phase has not yet realized",
+                message="the range declares Active Directory identity data, which only the build realizes",
                 hint=_GUEST_CONTENT_HINT,
             )
         )
     if issues:
         raise IssueError(issues)
 
-    allocation = allocate(spec, cid_base=options.cid_base)
+    allocation = allocate(
+        spec,
+        cid_base=options.cid_base,
+        probe_networks=frozenset(options.probe_segments),
+    )
     gateways = elect_gateways(spec, allocation)
 
     networks: list[PlannedNetwork] = []
@@ -266,6 +569,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 dhcp=network.dhcp,
                 gateway=gateways.get(network.name),
                 hypervisor_address=allocation.hypervisor_addresses.get(network.name),
+                probe_endpoint=allocation.probe_endpoints.get(network.name),
                 resolvers=resolvers_for(spec, allocation, network.name),
                 search=search_domain(network.name) if serves_records else None,
             )
@@ -282,23 +586,40 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         declared = specs_by_name[guest.name]
         reference = getattr(declared, "image", None)
         if reference is None:
-            reference = options.default_router_image
+            reference = (
+                options.default_attacker_image
+                if guest.kind == "attacker"
+                else options.default_router_image
+            )
         resources = getattr(declared, "resources", None)
+        vmm = _attacker_vmm(spec.attacker) if guest.kind == "attacker" else declared.vmm
+        # windows hosts realize through the unattend injector and daemon-only
+        # readiness (windows-ad-v1 slice 1); routers and attackers stay linux
+        windows = (
+            guest.kind == "host" and specs_by_name[guest.name].os.type == "windows"
+        )
+        declared_hostname = getattr(declared, "hostname", None) or guest.name
         guests.append(
             PlannedGuest(
                 name=guest.name,
                 kind=guest.kind,
                 cid=guest.cid,
-                os="linux",
+                os="windows" if windows else "linux",
                 image=_resolve_image(reference, options.image_cache),
                 cpus=resources.cpus if resources else 1,
                 memory_mb=resources.memory_mb if resources else 1024,
                 disk_gb=(resources.disk_gb if resources and resources.disk_gb else 10),
                 interfaces=guest.interfaces,
+                hostname=(
+                    windows_hostname(declared_hostname)
+                    if windows
+                    else guest_hostname(declared_hostname)
+                ),
                 routes=list(getattr(declared, "routes", [])),
-                injector="cloud-init",
-                readiness="cloud-init",
+                injector="unattend" if windows else "cloud-init",
+                readiness="daemon" if windows else "cloud-init",
                 profile="strict",
+                vmm=vmm,
             )
         )
 
@@ -319,6 +640,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             cpu_model=options.cpu_model,
             devices=["/dev/kvm", "/dev/vhost-vsock", "/dev/vhost-net", "/dev/net/tun"],
             egress_uplink=egress_uplink,
+            evidence_capture=options.evidence_capture,
+            probe_segments=tuple(sorted(options.probe_segments)),
         ),
         totals=Totals(
             guests=len(guests),
@@ -334,6 +657,30 @@ def image_file_name(reference: str) -> str:
     if normalized.endswith((".qcow2", ".img", ".iso")):
         return normalized
     return f"{normalized}.qcow2"
+
+
+def image_sidecar_file_name(file: str) -> str:
+    """The provenance sidecar name for a cache image file: the full name with `.qcow2` swapped for `.json` (not `Path.stem`: golden names may contain dots). One rule shared by the image cache and the render stages that read recorded metadata."""
+    return file.removesuffix(".qcow2") + ".json"
+
+
+def realized_sidecar_file_name(file: str) -> str:
+    """The provenance sidecar name for a captured realized image (`<file>.realized.json`, same full-name rule as `image_sidecar_file_name`). One rule shared by capture's landing and the render stages that chase realized provenance."""
+    return file.removesuffix(".qcow2") + ".realized.json"
+
+
+GUEST_UID_BASE = 1_000_000
+"""Every guest VMM runs as its own uid, `GUEST_UID_BASE + cid`: CIDs are leased host-unique, so no two VMM processes (QEMU via the DAC seclabel, Cloud Hypervisor via setpriv) share a uid, and none shares `libvirt-qemu` or root."""
+
+
+def guest_uid(cid: int) -> int:
+    """The uid the guest's VMM process runs as (see `GUEST_UID_BASE`)."""
+    return GUEST_UID_BASE + cid
+
+
+def resolve_image_reference(reference: str, cache: Path | None) -> ImageRef:
+    """Resolve a logical image reference against the cache (the shared file-name rule plus a content digest when present); the build pipeline's public entry to the same resolution planning uses."""
+    return _resolve_image(reference, cache)
 
 
 def _resolve_image(reference: str, cache: Path | None) -> ImageRef:
@@ -364,5 +711,10 @@ def guest_allocation(plan: ResolvedPlan) -> Allocation:
             network.name: network.hypervisor_address
             for network in plan.networks
             if network.hypervisor_address is not None
+        },
+        probe_endpoints={
+            network.name: network.probe_endpoint
+            for network in plan.networks
+            if network.probe_endpoint is not None
         },
     )

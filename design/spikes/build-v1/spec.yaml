@@ -1,0 +1,25 @@
+# build-v1 slice 1 battery spec: one guest to run recipes against, plus the
+# required attacker. The executor is driven directly by battery.py; the build
+# verb (slice 2) is not involved.
+range:
+  name: build-v1
+  schema_version: "0.2"
+  description: >
+    Minimal single-segment range for exercising the recipe executor against a
+    live noble guest over vsock.
+
+networks:
+  - name: lab
+    cidr: 10.90.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: build-guest
+    interfaces: [{ network: lab, ip: 10.90.10.10 }]
+
+attacker:
+  image: build-guest
+  interfaces: [{ network: lab }]
+  entry: external

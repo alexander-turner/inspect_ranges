@@ -77,5 +77,5 @@ def provider_smoke() -> Task:
         ],
         solver=smoke_solver(),
         scorer=flag_on_web(),
-        sandbox=("libvirt_range", "range.yaml"),
+        sandbox=("range", "range.yaml"),
     )

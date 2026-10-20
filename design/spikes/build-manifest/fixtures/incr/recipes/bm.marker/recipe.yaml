@@ -1,0 +1,7 @@
+name: bm.marker
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  text:
+    default: original

@@ -1,0 +1,29 @@
+# build-cmd battery fixture: one guest with ordered provisioning plus an
+# egress-proving recipe; the build verb boots this under the egress build plan.
+range:
+  name: buildme
+  schema_version: "0.3"
+  description: >
+    Battery fixture for the build verb: two ordered steps of the same recipe
+    prove declaration-order execution, and a third recipe proves build-time
+    egress (DNS and outbound TCP) from inside the guest.
+
+networks:
+  - name: lab
+    cidr: 10.91.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: build-guest
+    interfaces: [{ network: lab, ip: 10.91.10.10 }]
+    provisioning:
+      - { recipe: bc.order, vars: { marker: first } }
+      - { recipe: bc.order, vars: { marker: second } }
+      - { recipe: bc.egress }
+
+attacker:
+  image: build-guest
+  interfaces: [{ network: lab }]
+  entry: external

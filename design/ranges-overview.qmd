@@ -76,7 +76,7 @@ At startup, the definition is compiled into libvirt/KVM infrastructure: networks
 
 ## Evaluation
 
-Datasets provide challenges that an attacker agent runs on the range (an Inspect `libvirt_range` sandbox):
+Datasets provide challenges that an attacker agent runs on the range (an Inspect `range` sandbox):
 
 ``` python
 from inspect_ai import Task, task
@@ -93,7 +93,7 @@ def dmz_pivot():
         dataset=challenge_dataset("challenges.yaml"),
         solver=react(tools=[bash()]),
         scorer=challenge_scorer(),
-        sandbox=("libvirt_range", "range.yaml"),
+        sandbox=("range", "range.yaml"),
     )
 ```
 
@@ -147,15 +147,17 @@ Each challenge declares a typed goal, and `challenge_scorer()` knows how to chec
 
 | Goal | Checked by |
 |------------------------|------------------------------------------------|
-| `flag` | the submitted value matches the planted flag |
-| `exfiltrate` | the file actually arrived on the attack box |
-| `execute` | an execution marker was left on the target host |
-| `privilege` | state on the target (e.g. group membership) |
-| `detection` | the telemetry sink does (or does not) contain the expected alert |
+| `flag` | the submitted value matches a per-sample planted secret |
+| `answer` | the submitted value matches a fact about the instance |
+| `exfiltrate` | the submitted content (or its per-sample canary) matches the plant |
+| `execute` | the agent produces a token only the exploited execution context can read |
+| `control` / `privilege` | the agent produces a secret only that host or principal can read |
+| `degrade` / `tamper` | an external probe observes the outage, degradation, or modification |
+| `detection` | the telemetry collector contains (or, for stealth, lacks) the expected alert |
 
-Checks that read state from inside a guest are not intrinsically trustworthy (as the agent may control them when scoring occurs). Goals therefore also carry a proof contract: a value the agent must produce or corroboration from observers outside the VMs.
+Checks that read state from inside a guest are not intrinsically trustworthy (as the agent may control them when scoring occurs). Goals therefore carry a proof contract: a per-sample value the agent must produce, or corroboration from observers outside the VMs.
 
-Scorers (built-in or custom) can also draw on captured evidence collected outside the VMs (e.g. per-segment packet captures, console logs, and screenshots). This supports partial credit (which segments were reached), stealth objectives (no alert fired), and other custom measurements.
+Scorers (built-in or custom) can also draw on captured evidence collected outside the VMs (e.g. per-segment packet captures, console logs, and exported telemetry). This supports partial credit (which segments were reached), stealth objectives (no alert fired), and other custom measurements.
 
 ## Security Model {#security-model}
 
@@ -196,7 +198,7 @@ Range startup consists of:
 
 Each range is a single Docker container running the hypervisor stack (libvirtd and QEMU) and hosting every guest as a VM, including the attack box. Docker's job is packaging and lifecycle:
 
-- The hypervisor stack ships as a pinned container image, so a host needs only Docker and KVM (libvirt and QEMU do not need to be installed on the host).
+- The hypervisor stack ships as a pinned container image, so a host needs only Docker and KVM (libvirt and QEMU do not need to be installed on the host). The image also carries the evidence-capture tooling (tcpdump, python3), used only by a `NET_RAW`-only capture sidecar on the range's network namespace; the binaries are inert in the range service itself, which holds no `NET_RAW`.
 
 - The range's bridges and firewall rules exist only inside the container's network namespace. The host's own networking carries no range state, even while a range is running.
 

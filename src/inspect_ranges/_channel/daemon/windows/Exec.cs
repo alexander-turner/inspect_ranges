@@ -63,6 +63,24 @@ namespace VsockD
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
 
+        // finding B10: the file planes serve disk files only (a path naming a
+        // pipe or device would wedge or misbehave under the planes' bounded
+        // read/write discipline)
+        public const uint FILE_TYPE_DISK = 1;
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetFileType(IntPtr hFile);
+
+        // Serializes handle creation-to-uninherit windows against
+        // CreateProcess(bInheritHandles=true): without it, a child spawned by
+        // a concurrent exec inherits a just-accepted connection socket or a
+        // sibling exec's parent-side pipe ends in the instant before
+        // SetHandleInformation runs, reopening the finding-A1 hole
+        // intermittently. PROC_THREAD_ATTRIBUTE_HANDLE_LIST (inherit exactly
+        // the three child pipe ends) is the structural successor; the lock is
+        // the Framework-4.8-simple form, held only across non-blocking calls.
+        public static readonly object InheritLock = new object();
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit,
             uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
@@ -278,31 +296,40 @@ namespace VsockD
             sa.bInheritHandle = true;
 
             IntPtr stdinR, stdinW, stdoutR, stdoutW, stderrR, stderrW;
-            if (!Native.CreatePipe(out stdinR, out stdinW, ref sa, 0) ||
-                !Native.CreatePipe(out stdoutR, out stdoutW, ref sa, 0) ||
-                !Native.CreatePipe(out stderrR, out stderrW, ref sa, 0))
-                return ExecOutcome.Error("EIO", "pipe creation failed");
-            Native.SetHandleInformation(stdinW, Native.HANDLE_FLAG_INHERIT, 0);
-            Native.SetHandleInformation(stdoutR, Native.HANDLE_FLAG_INHERIT, 0);
-            Native.SetHandleInformation(stderrR, Native.HANDLE_FLAG_INHERIT, 0);
-
-            Native.STARTUPINFO si = new Native.STARTUPINFO();
-            si.cb = Marshal.SizeOf(typeof(Native.STARTUPINFO));
-            si.dwFlags = Native.STARTF_USESTDHANDLES;
-            si.hStdInput = stdinR;
-            si.hStdOutput = stdoutW;
-            si.hStdError = stderrW;
-            si.lpDesktop = "";
-
-            IntPtr envBlock = BuildEnvBlock(envOverrides);
-            uint flags = Native.CREATE_SUSPENDED | Native.CREATE_NO_WINDOW | Native.CREATE_UNICODE_ENVIRONMENT;
-
+            IntPtr envBlock;
             Native.PROCESS_INFORMATION pi;
             bool ok;
-            if (token == IntPtr.Zero)
-                ok = Native.CreateProcessW(null, cmdline, IntPtr.Zero, IntPtr.Zero, true, flags, envBlock, cwd, ref si, out pi);
-            else
-                ok = Native.CreateProcessAsUserW(token, null, cmdline, IntPtr.Zero, IntPtr.Zero, true, flags, envBlock, cwd, ref si, out pi);
+            // Native.InheritLock: see its declaration. The span from pipe
+            // creation through CreateProcess is the window where a CONCURRENT
+            // launcher's bInheritHandles=true snapshot would capture these
+            // not-yet-uninherited handles (and, symmetrically, where our
+            // snapshot must not capture a just-accepted connection socket).
+            lock (Native.InheritLock)
+            {
+                if (!Native.CreatePipe(out stdinR, out stdinW, ref sa, 0) ||
+                    !Native.CreatePipe(out stdoutR, out stdoutW, ref sa, 0) ||
+                    !Native.CreatePipe(out stderrR, out stderrW, ref sa, 0))
+                    return ExecOutcome.Error("EIO", "pipe creation failed");
+                Native.SetHandleInformation(stdinW, Native.HANDLE_FLAG_INHERIT, 0);
+                Native.SetHandleInformation(stdoutR, Native.HANDLE_FLAG_INHERIT, 0);
+                Native.SetHandleInformation(stderrR, Native.HANDLE_FLAG_INHERIT, 0);
+
+                Native.STARTUPINFO si = new Native.STARTUPINFO();
+                si.cb = Marshal.SizeOf(typeof(Native.STARTUPINFO));
+                si.dwFlags = Native.STARTF_USESTDHANDLES;
+                si.hStdInput = stdinR;
+                si.hStdOutput = stdoutW;
+                si.hStdError = stderrW;
+                si.lpDesktop = "";
+
+                envBlock = BuildEnvBlock(envOverrides);
+                uint flags = Native.CREATE_SUSPENDED | Native.CREATE_NO_WINDOW | Native.CREATE_UNICODE_ENVIRONMENT;
+
+                if (token == IntPtr.Zero)
+                    ok = Native.CreateProcessW(null, cmdline, IntPtr.Zero, IntPtr.Zero, true, flags, envBlock, cwd, ref si, out pi);
+                else
+                    ok = Native.CreateProcessAsUserW(token, null, cmdline, IntPtr.Zero, IntPtr.Zero, true, flags, envBlock, cwd, ref si, out pi);
+            }
 
             Marshal.FreeHGlobal(envBlock);
             if (!ok)
@@ -358,15 +385,15 @@ namespace VsockD
             stdinWriter.IsBackground = true;
             stdinWriter.Start();
 
-            long deadlineTicks;
-            long now = DateTime.UtcNow.Ticks;
-            if (commandMs > (long.MaxValue - now) / TimeSpan.TicksPerMillisecond)
-                deadlineTicks = long.MaxValue; // clamp: huge budgets never wrap negative
+            long deadlineMs; // monotonic ms: see Mono (quality-review B8)
+            long now = Mono.NowMs();
+            if (commandMs > long.MaxValue - now)
+                deadlineMs = long.MaxValue; // clamp: huge budgets never wrap negative
             else
-                deadlineTicks = now + commandMs * TimeSpan.TicksPerMillisecond;
+                deadlineMs = now + commandMs;
 
             bool timedOut = false;
-            if (Native.WaitForSingleObject(pi.hProcess, RemainingMs(deadlineTicks)) == Native.WAIT_TIMEOUT)
+            if (Native.WaitForSingleObject(pi.hProcess, RemainingMs(deadlineMs)) == Native.WAIT_TIMEOUT)
                 timedOut = true;
             if (!timedOut)
             {
@@ -376,8 +403,7 @@ namespace VsockD
                 // a blocked anonymous-pipe read; the real guarantee is that
                 // the reply returns now, and a lingering reader is a bounded
                 // background thread that dies with the pipe's write handles.
-                long reapDeadline = DateTime.UtcNow.Ticks +
-                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                long reapDeadline = Mono.NowMs() + (long)Daemon.WaitDelayMs;
                 if (!outReader.Thread.Join(RemainingJoinMs(reapDeadline)))
                     outReader.ForceClose();
                 if (!errReader.Thread.Join(RemainingJoinMs(reapDeadline)))
@@ -396,8 +422,7 @@ namespace VsockD
                 // stdin join = 11 s, inside the host's 12 s observation grace.
                 Native.TerminateJobObject(job, 1);
                 Native.WaitForSingleObject(pi.hProcess, (uint)Daemon.KillGraceMs);
-                long killReapDeadline = DateTime.UtcNow.Ticks +
-                    (long)Daemon.WaitDelayMs * TimeSpan.TicksPerMillisecond;
+                long killReapDeadline = Mono.NowMs() + (long)Daemon.WaitDelayMs;
                 outReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 errReader.Thread.Join(RemainingJoinMs(killReapDeadline));
                 outcome.TimedOut = true;
@@ -424,15 +449,15 @@ namespace VsockD
             return outcome;
         }
 
-        private static uint RemainingMs(long deadlineTicks)
+        private static uint RemainingMs(long deadlineMs)
         {
-            long ms = (deadlineTicks - DateTime.UtcNow.Ticks) / TimeSpan.TicksPerMillisecond;
+            long ms = deadlineMs - Mono.NowMs();
             return ms <= 0 ? 0 : (uint)Math.Min(ms, uint.MaxValue - 1);
         }
 
-        private static int RemainingJoinMs(long deadlineTicks)
+        private static int RemainingJoinMs(long deadlineMs)
         {
-            long ms = (deadlineTicks - DateTime.UtcNow.Ticks) / TimeSpan.TicksPerMillisecond;
+            long ms = deadlineMs - Mono.NowMs();
             return ms <= 0 ? 0 : (int)Math.Min(ms, int.MaxValue);
         }
 

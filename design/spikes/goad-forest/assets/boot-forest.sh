@@ -31,7 +31,7 @@ done
 virsh -c qemu:///system destroy attacker 2>/dev/null || true
 virsh -c qemu:///system undefine attacker 2>/dev/null || true
 rm -f /scratch/attacker.qcow2 /scratch/attacker-seed.iso
-qemu-img create -f qcow2 -F qcow2 -b /images/noble-range-guest.qcow2 /scratch/attacker.qcow2 10G
+qemu-img create -f qcow2 -F qcow2 -b /images/ubuntu-noble.qcow2 /scratch/attacker.qcow2 10G
 cloud-localds -N /plan/network-config /scratch/attacker-seed.iso /plan/user-data /plan/meta-data
 virt-install \
   --connect qemu:///system \

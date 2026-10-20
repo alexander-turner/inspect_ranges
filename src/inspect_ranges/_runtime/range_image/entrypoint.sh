@@ -9,8 +9,10 @@ set -euo pipefail
 chown root:kvm /dev/kvm /dev/vhost-net /dev/vhost-vsock
 chmod 660 /dev/kvm /dev/vhost-net /dev/vhost-vsock
 
+# no multicast snooping: a snooping bridge joins 224.0.0.106 and sends an
+# IGMP report from its own MAC onto the segment
 while read -r name; do
-  ip link add "$name" type bridge
+  ip link add "$name" type bridge mcast_snooping 0
   ip link set "$name" up
 done < /render/netns/bridges.txt
 # no IPs on bridges except where the allocator reserved a hypervisor address
@@ -19,6 +21,19 @@ if [[ -s /render/netns/addresses.txt ]]; then
   while read -r dev addr; do
     ip addr add "$addr" dev "$dev"
   done < /render/netns/addresses.txt
+fi
+
+# declared probe endpoints (challenges-v1.md, challenge-prober spike A2): a
+# clamped veth per requested segment; the clamp rules ride range.nft below
+if [[ -s /render/netns/probes.txt ]]; then
+  while read -r dev peer br mac addr; do
+    ip link add "$dev" type veth peer name "$peer"
+    ip link set "$dev" address "$mac"
+    ip link set "$peer" master "$br"
+    ip link set "$peer" up
+    ip link set "$dev" up
+    ip addr add "$addr" dev "$dev"
+  done < /render/netns/probes.txt
 fi
 
 if [[ -d /render/netns/dnsmasq ]]; then
@@ -30,9 +45,12 @@ fi
 
 nft -f /render/netns/range.nft
 
-# serial consoles land here from first boot (QEMU runs as libvirt-qemu)
+# serial consoles land here from first boot; the boot script pre-creates each
+# log owned by its guest's per-VM uid (issue #5), so the directory itself only
+# needs traversal, never VMM writes
 mkdir -p /scratch/console
-chown libvirt-qemu:kvm /scratch/console
+chown root:kvm /scratch/console
+chmod 0755 /scratch/console
 
 mkdir -p /run/libvirt
 /usr/sbin/virtlogd -d

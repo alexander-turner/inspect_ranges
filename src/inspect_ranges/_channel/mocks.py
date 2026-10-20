@@ -13,7 +13,13 @@ import struct
 from collections.abc import Callable
 
 from .channel import ByteStream, MemoryStream, Transport, stream_pair
-from .codec import FrameType, MessageStreamReader, canonical_json, encode_message
+from .codec import (
+    FrameType,
+    MessageStreamReader,
+    canonical_json,
+    decode_frames,
+    encode_message,
+)
 from .protocol import (
     DEFAULT_BULK_CAP,
     ErrorReply,
@@ -243,6 +249,27 @@ def _honest_stages(request: Message) -> bytes:
     return frames
 
 
+class _RstAfterReadyStream:
+    """`ByteStream` that answers a realize with an honest full stage stream, then resets on the drain read (abnormal applier death right after the terminal report)."""
+
+    def __init__(self) -> None:
+        self._sent = bytearray()
+        self._replied = False
+
+    async def send(self, data: bytes) -> None:
+        self._sent.extend(data)
+
+    async def receive(self) -> bytes:
+        if not self._replied:
+            self._replied = True
+            [(request, _)] = decode_frames(bytes(self._sent), bulk_cap=DEFAULT_BULK_CAP)
+            return _honest_stages(request)
+        raise ConnectionResetError("peer reset after the terminal report")
+
+    async def aclose(self) -> None:
+        pass
+
+
 def _refusal_wrong_id(request: Message) -> bytes:
     # a "refusal" carrying a forged id is tamper, never a typed HostRefused
     reply = ErrorReply(id="e" * 32, errno="EAGAIN", message="forged refusal")
@@ -272,14 +299,14 @@ HOSTILE_APPLIER_SCENARIOS: dict[str, Callable[[Message], bytes]] = {
     "heartbeat-wrong-kind": _heartbeat_wrong_kind,
 }
 
-HOSTILE_APPLIER_HANGS = ("hang-connect", "no-close-after-ready")
+HOSTILE_APPLIER_HANGS = ("hang-connect", "no-close-after-ready", "rst-after-ready")
 """Scenarios that previously hung realize forever; now bounded by the budget layers."""
 
 
 class HostileApplierTransport:
     """A `Transport` whose host-plane endpoint streams forged stage reports or hangs.
 
-    The hang scenarios pin that every realize transport interaction is budget-bounded: `hang-connect` never completes the connection; `no-close-after-ready` streams an honest report sequence and then never closes the stream.
+    The non-crafting scenarios pin that every realize transport interaction is budget-bounded and loss-tolerant after the terminal report: `hang-connect` never completes the connection (previously hung realize); `no-close-after-ready` streams an honest report sequence and then never closes the stream (previously hung the drain); `rst-after-ready` streams it and then resets instead of closing (previously escaped as a raw ConnectionResetError, failing a succeeded realize).
     """
 
     def __init__(self, scenario: str) -> None:
@@ -294,6 +321,8 @@ class HostileApplierTransport:
     async def connect(self, endpoint: str) -> ByteStream:
         if self.scenario == "hang-connect":
             await asyncio.Event().wait()  # never set: bounded only by the caller
+        if self.scenario == "rst-after-ready":
+            return _RstAfterReadyStream()
         client_side, server_side = stream_pair()
         task = asyncio.create_task(self._serve(server_side))
         self._tasks.add(task)

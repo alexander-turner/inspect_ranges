@@ -1,6 +1,6 @@
 """Public types for `range.yaml` schema v0.1: the strict, runtime-consumed core of a range definition.
 
-These models are the typed form of the sandbox configuration: `sandbox=("libvirt_range", RangeSpec(...))` and `sandbox=("libvirt_range", "range.yaml")` are equally supported, and both surfaces are governed by `schema_version`. Construction reads like the YAML (strings coerce to address types, literals take plain strings, nested dicts are accepted via `model_validate`); the one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
+These models are the typed form of the sandbox configuration: `sandbox=("range", RangeSpec(...))` and `sandbox=("range", "range.yaml")` are equally supported, and both surfaces are governed by `schema_version`. Construction reads like the YAML (strings coerce to address types, literals take plain strings, nested dicts are accepted via `model_validate`); the one spelling divergence is `AclRule`'s `from_=` keyword for the YAML `from:`.
 
 Address fields are dual-stack (`AnyIPAddress`/`AnyIPNetwork`) so the type surface never migrates, but IPv6 values are rejected by the `ipv6-not-realized` gate until each construct's realization lands (networking-v0.2 §4).
 
@@ -321,6 +321,10 @@ class Interface(_StrictModel):
         ) -> None: ...
 
 
+Vmm = Literal["qemu", "cloud-hypervisor"]
+"""The virtual machine monitors a guest can run under."""
+
+
 class Os(_StrictModel):
     """Guest operating system."""
 
@@ -390,6 +394,9 @@ class Service(_StrictModel):
 
     version: str | None = None
     """Expected version, when the scenario depends on it."""
+
+    package: str | None = None
+    """The dpkg package that embodies the service, for build-time version verification when the listening process cannot attribute it (e.g. a PHP frontend served by apache: `package: zabbix-frontend-php`)."""
 
     credentials: Credentials | None = None
     """Credentials the service accepts, when scenario-relevant."""
@@ -491,7 +498,7 @@ class ScheduledActivity(_StrictModel):
 class Variable(_StrictModel):
     """A named per-instance value: drawn fresh for each generated instance, with a required default.
 
-    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely; the per-instance draw arrives with the generation layer (gated at planning by `randomization-not-realized`). Python authors draw values and construct concretely instead of using references.
+    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: v1 semantics ARE defaults-resolution (linux-examples-v1), per-sample secrets are the challenge plant layer's job, and a per-instance generation layer that redraws non-secret values is deferred (see linux-examples-v1-parked-decisions.md). Python authors draw values and construct concretely instead of using references.
     """
 
     default: str | int | bool
@@ -636,6 +643,11 @@ class Route(_StrictModel):
         ) -> None: ...
 
 
+def has_guest_content(host: "Host") -> bool:
+    """Whether a host declares buildable guest content (provisioning, services, or vulnerabilities): the one predicate the build gate, the push closure, and the provider's fetch tiers share."""
+    return bool(host.provisioning or host.services or host.vulnerabilities)
+
+
 class Router(_StrictModel):
     """A gateway guest joining two or more networks, carrying the inter-segment ACL."""
 
@@ -651,6 +663,9 @@ class Router(_StrictModel):
     resources: Resources | None = None
     """Sizing; omitted means backend defaults."""
 
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor that runs this guest: `qemu` (default, via libvirt) or `cloud-hypervisor` (smaller device model; started directly, reached over its hybrid-vsock Unix socket)."""
+
     interfaces: list[Interface] = Field(min_length=2)
     """One attachment per joined network (at least two)."""
 
@@ -661,7 +676,7 @@ class Router(_StrictModel):
     """Local accounts (converged state; applied and verified at build)."""
 
     acl: list[AclRule] = []
-    """Inter-segment policy enforced on this router (default-deny, stateful; endpoints may be routed, not only attached)."""
+    """Inter-segment policy enforced on this router (stateful; endpoints may be routed, not only attached). EMPTY means a plain router (everything forwards, the KYPO/CyRIS pure-router shape); declaring ANY rule flips the router to default-drop, forwarding only the declared allows plus established/related."""
 
 
 class Host(_StrictModel):
@@ -684,6 +699,9 @@ class Host(_StrictModel):
 
     resources: Resources | None = None
     """Sizing; omitted means backend defaults."""
+
+    vmm: Vmm = "qemu"
+    """Virtual machine monitor that runs this guest: `qemu` (default, via libvirt) or `cloud-hypervisor` (smaller device model; started directly, reached over its hybrid-vsock Unix socket)."""
 
     interfaces: list[Interface] = Field(min_length=1)
     """Network attachments (explicit; v0.1 has no implicit attachment)."""
@@ -729,10 +747,13 @@ class Attacker(_StrictModel):
     """Name of a declared host to use as the foothold instead of a dedicated box."""
 
     image: str | None = None
-    """Attack box image; omitted means the backend's standard attack image."""
+    """Attack box image; omitted means the backend's standard attack image (the catalog's `attack`: the kali-class toolset image published under the org). Declare an image to opt out."""
 
     resources: Resources | None = None
     """Attack box sizing."""
+
+    vmm: Vmm | None = None
+    """Attack box virtual machine monitor (see `Host.vmm`); unset, a dedicated attack box resolves to `cloud-hypervisor` at planning (unlike hosts and routers, which default to `qemu`). With `host` set, the foothold host's own `vmm` applies and declaring one here is refused."""
 
     interfaces: list[Interface] | None = None
     """Attack box network attachments (required unless `host` is set)."""
@@ -751,6 +772,8 @@ class Attacker(_StrictModel):
                 for field in ("image", "resources", "interfaces")
                 if getattr(self, field) is not None
             ]
+            if self.vmm is not None:
+                extras.append("vmm")
             if extras:
                 raise IssueError(
                     [
@@ -910,6 +933,11 @@ class RangeSpec(_StrictModel):
     variables: dict[str, Variable] = {}
     """Per-instance randomized values, referenced as `{{name}}` in YAML scalars (defaults substitute at load)."""
 
+    @property
+    def foothold_guest(self) -> str:
+        """The agent's foothold guest name: the declared `attacker.host`, else the attack box itself. The one place the foothold-resolution rule lives; every consumer (registration, egress, disclosure, the patch re-run) reads it here."""
+        return self.attacker.host or self.attacker.name
+
     @model_validator(mode="after")
     def _check_references(self) -> "RangeSpec":
         errors = [issue for issue in semantic_issues(self) if issue.severity == "error"]
@@ -985,6 +1013,83 @@ def _ipv6_gate(
     )
 
 
+_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+"""Legal guest and network names: these flow into Linux device names, filesystem paths, domain XML, and evidence stream keys, so the grammar is the safe intersection (lowercase letters, digits, `._-`, starting alphanumeric; `\\Z` so a trailing newline cannot ride through `$`). Underscores and dots are legal spec identifiers (recorded fixtures use them) even though RFC-1123 hostname labels exclude them: Linux accepts such hostnames, and DNS-grade conformance is the fqdn realization's concern when the images arc lands it."""
+
+_NAME_MAX = 63
+"""Name length cap: generous for guests (hostname-label scale); network DEVICE uniqueness is checked separately because `br-`/`pr-`/`prb-` prefixed devices truncate at the kernel's 15-character limit."""
+
+_RANGE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+"""Legal range names: the CLI `up` path embeds the raw name in its compose project (`ir-<name>-<12 hex of the spec digest>`), which docker compose restricts to lowercase letters, digits, `_-` starting alphanumeric (dots, legal in guest and network names, are refused there), and which also becomes a state-directory path segment that `write_owner` creates and teardown removes, so the grammar must exclude traversal (quality review R2-1; the provider arm sanitizes separately in `_provider/naming.py`, which stays the authority on its path)."""
+
+_RANGE_NAME_MAX = 47
+"""Range name length cap: the CLI project wraps the name in the 3-character `ir-` prefix plus a 13-character digest suffix, so 47 keeps the derived project within the shared 63-character bound the other names observe."""
+
+_DEVICE_PREFIXES = ("br-", "pr-", "prb-")
+"""Device names derived from a network name (bridge, probe veth, probe veth peer), each truncated to the kernel's 15-character limit. The compiler derives through `derive_device`, so the collision check below and the realization can never drift."""
+
+
+def derive_device(prefix: str, network_name: str) -> str:
+    """The Linux device name for a network-derived interface, truncated to the kernel limit."""
+    return f"{prefix}{network_name}"[:15]
+
+
+def _name_issues(spec: "RangeSpec") -> list[Issue]:
+    """Grammar, length, and derived-device-name collision checks for every authored name."""
+    issues: list[Issue] = []
+    range_name = spec.meta.name
+    if _RANGE_NAME.match(range_name) is None or len(range_name) > _RANGE_NAME_MAX:
+        issues.append(
+            Issue(
+                code="invalid-name",
+                path=("range", "name"),
+                message=f"range name {range_name!r} is not a legal range name (lowercase letters, digits, '_-', starting alphanumeric, at most {_RANGE_NAME_MAX} characters)",
+                hint="the range name becomes the compose project and a state-directory path segment; rename the range",
+            )
+        )
+    named: list[tuple[str, tuple[PathElement, ...], str]] = [
+        (network.name, ("networks", index, "name"), "network")
+        for index, network in enumerate(spec.networks)
+    ]
+    named += [
+        (host.name, ("hosts", index, "name"), "host")
+        for index, host in enumerate(spec.hosts)
+    ]
+    named += [
+        (router.name, ("routers", index, "name"), "router")
+        for index, router in enumerate(spec.routers)
+    ]
+    if spec.attacker.host is None:
+        named.append((spec.attacker.name, ("attacker", "name"), "attacker"))
+    for name, path, kind in named:
+        if _NAME.match(name) is None or len(name) > _NAME_MAX:
+            issues.append(
+                Issue(
+                    code="invalid-name",
+                    path=path,
+                    message=f"{kind} name {name!r} is not a legal name (lowercase letters, digits, '._-', starting alphanumeric, at most {_NAME_MAX} characters)",
+                    hint="names become device names, filesystem paths, and XML identity; rename the declaration",
+                )
+            )
+    devices: dict[str, str] = {}
+    for index, network in enumerate(spec.networks):
+        reported: set[str] = set()
+        for prefix in _DEVICE_PREFIXES:
+            device = derive_device(prefix, network.name)
+            prior = devices.setdefault(device, network.name)
+            if prior != network.name and prior not in reported:
+                reported.add(prior)
+                issues.append(
+                    Issue(
+                        code="device-name-collision",
+                        path=("networks", index, "name"),
+                        message=f"networks {prior!r} and {network.name!r} both derive device {device!r} (device names truncate at 15 characters), which would silently merge their segments onto one bridge",
+                        hint="network names must differ within their first 11 characters",
+                    )
+                )
+    return issues
+
+
 def semantic_issues(spec: RangeSpec) -> list[Issue]:
     """Run every cross-reference check on a structurally valid spec, collecting all findings.
 
@@ -997,6 +1102,7 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
         Every semantic issue found, each with a path into the spec (empty when the spec is consistent).
     """
     issues: list[Issue] = []
+    issues += _name_issues(spec)
     networks: dict[str, Network] = {}
     network_names = [network.name for network in spec.networks]
     for index, network in enumerate(spec.networks):
@@ -1393,6 +1499,17 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # guest-content cross references
     for host_index, host in enumerate(spec.hosts):
         service_names = sorted(service.name for service in host.services)
+        seen_services: set[str] = set()
+        for service_index, service in enumerate(host.services):
+            if service.name in seen_services:
+                issues.append(
+                    Issue(
+                        code="duplicate-service-name",
+                        path=("hosts", host_index, "services", service_index, "name"),
+                        message=f"host {host.name!r} declares service {service.name!r} more than once (service names are unique on a host; vulnerabilities reference them)",
+                    )
+                )
+            seen_services.add(service.name)
         for vuln_index, vulnerability in enumerate(host.vulnerabilities):
             if (
                 vulnerability.service is not None
@@ -1421,6 +1538,21 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                         path=("defense", "telemetry", telemetry_index, "source"),
                         message=f"telemetry source {telemetry.source!r} is not a declared guest",
                         hint=did_you_mean(telemetry.source, sorted(guest_networks)),
+                    )
+                )
+            if telemetry.sink not in guest_networks:
+                # a WARNING, not the source's error (windows-ad-v1 slice 5):
+                # a sink may be an abstract collector name (the challenge
+                # schema's legal-collector set is collector UNION sink), but a
+                # realized flow normally lands on a declared guest — the
+                # plan-time unconsumed check only reaches guest-named sinks
+                issues.append(
+                    Issue(
+                        code="telemetry-undeclared-guest",
+                        severity="warning",
+                        path=("defense", "telemetry", telemetry_index, "sink"),
+                        message=f"telemetry sink {telemetry.sink!r} is not a declared guest",
+                        hint=did_you_mean(telemetry.sink, sorted(guest_networks)),
                     )
                 )
     if spec.active_directory is not None:
@@ -1452,8 +1584,6 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # placing a value. Braces naming nothing declared are left alone (they may
     # be legitimate scenario content, e.g. an SSTI payload in a planted file).
     if spec.variables:
-        import json
-
         reference = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
         def _scan(value: Any, path: tuple[PathElement, ...]) -> None:
@@ -1489,4 +1619,25 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                 hint=did_you_mean(spec.attacker.host, host_names),
             )
         )
+    if spec.attacker.egress != "none":
+        foothold_interfaces = spec.attacker.interfaces or []
+        if spec.attacker.host is not None:
+            foothold_host = next(
+                (host for host in spec.hosts if host.name == spec.attacker.host), None
+            )
+            foothold_interfaces = foothold_host.interfaces if foothold_host else []
+        attached_modes = {
+            networks[interface.network].mode
+            for interface in foothold_interfaces
+            if interface.network in networks
+        }
+        if attached_modes and not attached_modes & {"nat", "routed"}:
+            issues.append(
+                Issue(
+                    code="attacker-egress-requires-nat",
+                    path=("attacker", "egress"),
+                    message="the attacker declares egress but no attached network is mode nat or routed, so no flow could ever leave (nothing masquerades or routes back)",
+                    hint="set an attached network's mode to nat (or routed), or declare egress: none",
+                )
+            )
     return issues

@@ -1,0 +1,39 @@
+range:
+  name: win-domain
+  schema_version: "0.3"
+  description: a two-guest windows domain (DC promote + member join), the slice-2 proof
+
+networks:
+  - name: corp
+    cidr: 10.30.0.0/24
+    mode: isolated
+    dns:
+      authoritative: [dc]
+
+hosts:
+  - name: dc
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    resources: { cpus: 2, memory_mb: 4096 }
+    interfaces: [{ network: corp, ip: 10.30.0.10 }]
+    services:
+      - { name: dns, port: 53 }
+      - { name: ldap, port: 389 }
+      - { name: kerberos, port: 88 }
+      - { name: smb, port: 445 }
+    provisioning:
+      - recipe: win.dc-promote
+  - name: srv
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    resources: { cpus: 2, memory_mb: 2048 }
+    interfaces: [{ network: corp, ip: 10.30.0.20 }]
+    services:
+      - { name: smb, port: 445 }
+    provisioning:
+      - recipe: win.domain-join
+
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: corp }]
+  entry: external

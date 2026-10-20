@@ -1,0 +1,5 @@
+/* The inspect-docs extension always emits a footer Changelog link and Quarto
+   merges footer arrays by union, so it cannot be removed via config. */
+.nav-footer li.nav-item:has(> a[href*="CHANGELOG"]) {
+  display: none;
+}

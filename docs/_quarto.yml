@@ -1,34 +1,92 @@
 project:
   type: meridianlabs-ai/inspect-docs
+  render:
+    - "*.qmd"
+    - "**/*.qmd"
+    - "examples/*.md"
+    - "!CHANGELOG.md"
 
 inspect-docs:
   title: Inspect Ranges
   description: |
-    Inspect AI extension for ranges.
+    Inspect AI extension for cyber ranges.
   url: https://meridianlabs-ai.github.io/inspect_ranges
   module: inspect_ranges
   repo: meridianlabs-ai/inspect_ranges
   org: Meridian Labs
   navigation:
-    - text: Getting Started
+    - text: Home
       href: index.qmd
-    - text: Defining Ranges
+    - text: Building
       contents:
         - text: Overview
+          href: building.qmd
+        - text: Development
+          href: development.qmd
+        - text: Ranges
           href: ranges.qmd
         - text: Guests
           href: guests.qmd
         - text: Networks
           href: networks.qmd
-    - text: Running Ranges
-      href: cli.qmd
-    - text: Sandbox Provider
-      href: provider.qmd
-    - text: Host Topology
-      href: topology.qmd
+    - text: Evaluation
+      contents:
+        - text: Challenges
+          href: challenges.qmd
+        - text: Custom Goals
+          href: goals.qmd
+        - text: Evidence
+          href: evidence.qmd
+    - text: Running
+      contents:
+        - text: Images
+          href: images.qmd
+        - text: Distribution
+          href: distribution.qmd
+        - text: Security
+          href: security.qmd
+        - text: Range Host
+          href: topology.qmd
+        - text: Range Sandbox
+          href: provider.qmd
+        - text: Operations
+          href: cli.qmd
+    - text: Examples
+      contents:
+        - text: dmz-pivot
+          href: examples/dmz-pivot.md
+        - text: vulhub-zabbix
+          href: examples/vulhub-zabbix.md
+        - text: kypo-demo
+          href: examples/kypo-demo.md
+        - text: cyris-basic
+          href: examples/cyris-basic.md
+        - text: mhbench-equifax-small
+          href: examples/mhbench-equifax-small.md
+        - text: goad-light
+          href: examples/goad-light.md
+        - text: attack-range-windows
+          href: examples/attack-range-windows.md
   sidebar: unified
+  navbar:
+    right:
+      - icon: github
+        href: https://github.com/meridianlabs-ai/inspect_ranges
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk
 
-comments:
-  hypothesis: true
+format:
+  inspect-docs-html:
+    css: styles.css
+
+website:
+  page-footer:
+    center:
+      - text: Code
+        href: https://github.com/meridianlabs-ai/inspect_ranges
+      - text: License
+        href: https://github.com/meridianlabs-ai/inspect_ranges/blob/main/LICENSE
+      - text: Issues
+        href: https://github.com/meridianlabs-ai/inspect_ranges/issues
+
+

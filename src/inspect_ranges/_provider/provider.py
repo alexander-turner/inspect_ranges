@@ -1,13 +1,13 @@
-"""`LibvirtRangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
+"""`RangeSandboxEnvironment`: the Inspect sandbox provider for libvirt ranges.
 
-Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), environments keyed by guest name with the attacker first (the first key is Inspect's default sandbox), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages.
-
-The op surface (`exec`, `read_file`, `write_file`) lands in slice 3 of the phase; until then the methods raise `NotImplementedError`.
+Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased CID base, explicit project name, `up` in a worker thread), the FOOTHOLD alone registered as the sample's sandbox by default (the agent/target wall from challenges-overview.qmd: targets are reachable only through the range network and the scoring oracle; `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out that registers every guest, attacker first), teardown deferred to `task_cleanup` for interrupted samples (the Docker convention; an interrupted range stays booted but hypervisor-isolated and egress-controlled until run end), `cleanup=False` honored by leaving ranges up with the recovery commands logged, and `cli_cleanup` driving entirely from on-disk state in a fresh process. Teardown and cleanup paths never retry; acquisition (render plus up) gets one layer-3 respin with a FRESH project name on transient stages. The op surface (`exec`, `read_file`, `write_file`) rides the raw channel through `_provider/ops.py` with the layered retry and session-confirmation contract documented there.
 """
 
 import asyncio
 import logging
+import os
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -21,10 +21,19 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._channel.channel import TamperError
-from .._compiler.plan import ResolvedPlan, resolve_plan
+from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
+from .._evidence.sealer import seal_abandoned
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
+from .._metadata import (
+    PROBE_SEGMENTS_METADATA_KEY as _PROBE_SEGMENTS_METADATA_KEY,
+)
 from .._runtime.ownership import (
     list_projects,
     read_owner,
@@ -35,11 +44,15 @@ from .._runtime.up import UpError, UpOptions, UpResult, bundle_digest
 from ..schema import load_range, revalidate_range
 from ..types import RangeSpec
 from .admission import default_max_sandboxes
+from .evidence import EvidenceSession, resolve_evidence_session
 from .naming import sample_project
 from .ops import provider_exec, provider_read_file, provider_write_file
-from .state import ProviderRuntime, SampleHandle, provider_runtime
+from .state import ProviderRuntime, SampleHandle, ensure_pulled, provider_runtime
 
 logger = logging.getLogger("inspect_ranges.provider")
+
+PROBE_SEGMENTS_METADATA_KEY = _PROBE_SEGMENTS_METADATA_KEY
+"""Re-export of `_metadata.PROBE_SEGMENTS_METADATA_KEY` (the shared, provider-free home)."""
 
 TRANSIENT_UP_STAGES = frozenset(
     {"range-container", "guest-boot", "readiness", "admission"}
@@ -55,21 +68,41 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
         return revalidate_range(config)
     if isinstance(config, BaseModel):
         raise TypeError(
-            f"libvirt_range config must be a RangeSpec or a range.yaml path, "
+            f"range config must be a RangeSpec or a range.yaml path, "
             f"got {type(config).__name__}"
         )
-    raise ValueError(
-        "libvirt_range requires a config: a range.yaml path or a RangeSpec object"
-    )
+    raise ValueError("range requires a config: a range.yaml path or a RangeSpec object")
 
 
 def _default_guest(spec: RangeSpec) -> str:
     """The default sandbox: the attacker's foothold host, or the attacker box itself."""
-    return spec.attacker.host or spec.attacker.name
+    return spec.foothold_guest
 
 
-@sandboxenv(name="libvirt_range")  # pyright: ignore[reportUntypedClassDecorator]
-class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
+def _register_all_guests() -> bool:
+    """The development opt-out that weakens the agent/target wall.
+
+    By default only the foothold is registered as an Inspect sandbox, so an agent tool loop cannot reach targets by name (`sandbox("target")`): targets are reachable solely through the range network (tradecraft) and the oracle (scoring). Setting `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest, which is useful when developing ranges interactively and is logged loudly because it removes that wall.
+    """
+    value = os.environ.get("INSPECT_RANGES_REGISTER_ALL_GUESTS", "")
+    return value.strip().lower() in ("1", "true", "yes")
+
+
+def _registered_guests(spec: RangeSpec, guest_names: Iterable[str]) -> list[str]:
+    """Sandbox registration order: the foothold alone by default (the wall), every guest first-is-default under the opt-out."""
+    default = _default_guest(spec)
+    if not _register_all_guests():
+        return [default]
+    logger.warning(
+        "INSPECT_RANGES_REGISTER_ALL_GUESTS is set: every guest is registered "
+        "as a named Inspect sandbox, which removes the agent/target wall "
+        "(challenges-overview.qmd); development only"
+    )
+    return [default, *(name for name in guest_names if name != default)]
+
+
+@sandboxenv(name="range")  # pyright: ignore[reportUntypedClassDecorator]
+class RangeSandboxEnvironment(SandboxEnvironment):
     """One guest of one sample's range, driven over the vsock channel."""
 
     def __init__(self, guest: str, handle: SampleHandle) -> None:
@@ -107,10 +140,29 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         """Validate the config once and resolve the plan so a broken range fails at startup, not per sample."""
         runtime = provider_runtime()
         if isinstance(config, (str, RangeSpec)):
-            spec, plan = runtime.resolve_config(config, lambda: _resolve_spec(config))
+            # off the event loop (round-4 N5): a cold pull is a possibly
+            # minutes-long transfer, and inspect's control surfaces (the
+            # resizable sandbox limiter among them) need the loop alive
+            spec, plan, _, _ = await asyncio.to_thread(
+                runtime.resolve_config, config, lambda: _resolve_spec(config)
+            )
         else:
             spec = _resolve_spec(config)
-            plan = resolve_plan(spec, runtime.plan_options())
+            await asyncio.to_thread(
+                ensure_pulled, spec, image_cache=runtime.image_cache
+            )
+            spec, sections, consumed = apply_build_manifest(
+                spec,
+                image_cache=runtime.image_cache,
+                build_cache=default_build_cache(),
+            )
+            plan = resolve_plan(
+                spec,
+                runtime.plan_options(
+                    realized_sections=sections,
+                    realized_backings=realized_backings(consumed) if consumed else {},
+                ),
+            )
         del spec
         logger.info(
             "task_init %s: range %s (%d guests, %d vCPUs, %d MiB)",
@@ -132,21 +184,70 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         runtime = provider_runtime()
         # inspect-ai injects int ids for default datasets: always stringify
         sample_id = str(metadata.get("__sample_id__", "sample"))
+        probe_segments = tuple(
+            sorted(
+                segment
+                for segment in str(metadata.get(PROBE_SEGMENTS_METADATA_KEY, "")).split(
+                    ","
+                )
+                if segment
+            )
+        )
         cache_key = config if isinstance(config, (str, RangeSpec)) else None
         if cache_key is not None:
-            spec, plan = runtime.resolve_config(
+            spec, plan, realized_sections, backings = runtime.resolve_config(
                 cache_key, lambda: _resolve_spec(config)
             )
         else:
             spec = _resolve_spec(config)
-            plan = resolve_plan(spec, runtime.plan_options())
+            await asyncio.to_thread(
+                ensure_pulled, spec, image_cache=runtime.image_cache
+            )
+            spec, realized_sections, consumed = apply_build_manifest(
+                spec,
+                image_cache=runtime.image_cache,
+                build_cache=default_build_cache(),
+            )
+            backings = realized_backings(consumed) if consumed else {}
+            plan = resolve_plan(
+                spec,
+                runtime.plan_options(
+                    realized_sections=realized_sections, realized_backings=backings
+                ),
+            )
 
-        await runtime.admission.acquire(plan.totals)
+        # evidence resolves before admission: its buffer caps join the memory
+        # charge, and failure to resolve must disable evidence, never the
+        # sample (resolve returns None with one INFO line)
+        session = resolve_evidence_session(
+            sample_id=sample_id,
+            run_hint=task_name,
+            capture_local=not runtime.host_backend.startswith("uds:"),
+        )
+        charged_totals = plan.totals
+        if session is not None:
+            charged_totals = plan.totals.model_copy(
+                update={
+                    "memory_mb": plan.totals.memory_mb + session.admission_memory_mb()
+                }
+            )
+        await runtime.admission.acquire(charged_totals)
         handle: SampleHandle | None = None
         try:
-            handle = await cls._acquire_range(runtime, spec, plan, task_name, sample_id)
+            handle = await cls._acquire_range(
+                runtime,
+                spec,
+                plan,
+                task_name,
+                sample_id,
+                session,
+                charged_totals,
+                probe_segments,
+                realized_sections,
+                backings,
+            )
         except BaseException:
-            await runtime.admission.release(plan.totals)
+            await runtime.admission.release(charged_totals)
             raise
         handle.admission_charged = True
 
@@ -169,6 +270,8 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         ) from tamper
                     raise
                 handle.sessions[guest] = pong.session
+            if handle.evidence is not None:
+                await handle.evidence.record_session_pins(handle.sessions)
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes
@@ -178,8 +281,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 raise failure from teardown_error
             raise
 
-        default = _default_guest(spec)
-        ordered = [default, *(name for name in handle.guest_cids if name != default)]
+        ordered = _registered_guests(spec, handle.guest_cids)
         return {name: cls(name, handle) for name in ordered}
 
     @classmethod
@@ -190,14 +292,25 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         plan: ResolvedPlan,
         task_name: str,
         sample_id: str,
+        session: EvidenceSession | None,
+        charged_totals: Totals,
+        probe_segments: tuple[str, ...] = (),
+        realized_sections: frozenset[str] = frozenset(),
+        realized_backings: dict[str, tuple[str, str]] | None = None,
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
         On every failure path the attempt's lease, staging, registry entry, and any
         partially created project are unwound before the error (or the respin) proceeds.
+        `charged_totals` is what admission charged (plan totals plus the evidence buffer
+        memory), stored on the handle so the release is symmetric. The evidence session's
+        writers open only after a successful boot (respins reuse the sample's location,
+        so earlier writes would turn a retry into write-once conflicts); its stage
+        recorder observes every attempt through the up seam.
         """
         attempts = max(1, runtime.retry_config.up_attempts)
         last_error: UpError | None = None
+        on_stage = session.recorder.on_stage if session is not None else None
         for attempt in range(1, attempts + 1):
             project = sample_project(spec.meta.name, sample_id)
             # the allocator takes a blocking cross-process flock: off the loop.
@@ -212,9 +325,11 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 project=project,
                 task_name=task_name,
                 staging=staging,
-                totals=plan.totals,
+                totals=charged_totals,
                 cid_base=lease.base,
                 retry=runtime.retry_config,
+                plan=plan,
+                spec=spec,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
@@ -237,7 +352,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                         runtime.render_fn,
                         spec,
                         staging / "bundle",
-                        runtime.plan_options(cid_base=lease.base),
+                        runtime.plan_options(
+                            cid_base=lease.base,
+                            evidence_capture=session is not None,
+                            probe_segments=probe_segments,
+                            realized_sections=realized_sections,
+                            realized_backings=realized_backings,
+                        ),
                     )
                 )
                 boot: asyncio.Future[UpResult] | None = None
@@ -250,7 +371,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                     # the handle for the unwind to release.
                     acquire = asyncio.ensure_future(
                         cls._acquire_host(
-                            runtime, handle, plan, task_name, sample_id, staging
+                            runtime,
+                            handle,
+                            plan,
+                            task_name,
+                            sample_id,
+                            staging,
+                            session.location if session is not None else None,
                         )
                     )
                     await asyncio.shield(acquire)
@@ -263,9 +390,15 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                                 image_cache=runtime.image_cache,
                                 state_dir=runtime.state_dir,
                             ),
+                            on_stage,
                         )
                     )
                     result: UpResult = await asyncio.shield(boot)
+                    rendered_plan: ResolvedPlan = render.result()
+                    # the rendered plan is the truthful one (it carries
+                    # evidence_capture and realized allocations); the oracle's
+                    # available_observers reads it off the handle
+                    handle.plan = rendered_plan
                 except asyncio.CancelledError:
                     # none of these can be aborted and all keep creating
                     # resources; drain them (up is internally bounded) so the
@@ -316,12 +449,29 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             handle.booted = True
             try:
                 handle.guest_cids = {state.name: state.cid for state in result.guests}
-                handle.channel = runtime.channel_factory(handle.guest_cids, project)
+                handle.guest_sockets = {
+                    state.name: state.hybrid_vsock
+                    for state in result.guests
+                    if state.hybrid_vsock is not None
+                }
+                handle.channel = runtime.channel_factory(
+                    handle.guest_cids, project, handle.guest_sockets
+                )
                 if handle.host is not None:
                     # the RangeHost contract: the local backend's channel is
                     # attached post-boot (None only between acquire and boot)
                     handle.host.channel = handle.channel
                 cls._mark_provider_owned(runtime, handle, sample_id)
+                if session is not None:
+                    # open() never raises (a session that cannot open disables
+                    # itself); the handle carries it for ops and _destroy
+                    await session.open(
+                        lease_id=cls._lease_id(handle),
+                        project=project,
+                        bundle=staging / "bundle",
+                        plan=rendered_plan,
+                    )
+                    handle.evidence = session
             except BaseException as failure:
                 # the range is BOOTED: a post-boot failure destroys it rather
                 # than leaving it running until task_cleanup while the sample's
@@ -343,6 +493,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         task_name: str,
         sample_id: str,
         staging: Path,
+        evidence_location: str | None,
     ) -> None:
         """Digest the rendered bundle and lease a host for it (the backend gates on readiness, writes the lease, logs the isolation claim, and starts renewal).
 
@@ -361,6 +512,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
                 project=handle.project,
                 bundle_path=str(staging / "bundle"),
                 staging=str(staging),
+                evidence_location=evidence_location,
             ),
         )
 
@@ -372,6 +524,13 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         if handle.host is not None:
             await runtime.host_provider.release(handle.host)
             handle.host = None
+
+    @classmethod
+    def _lease_id(cls, handle: SampleHandle) -> str | None:
+        """The sample's host-lease id when the backend exposes one (both v1 backends do); evidence records carry it for the cross-binding."""
+        lease = getattr(handle.host, "lease", None)
+        lease_id = getattr(lease, "lease_id", None)
+        return lease_id if isinstance(lease_id, str) else None
 
     @classmethod
     def _mark_provider_owned(
@@ -420,9 +579,16 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     async def _destroy(cls, runtime: ProviderRuntime, handle: SampleHandle) -> None:
         """Tear one sample down: single attempt, no retry.
 
-        Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
+        `finalize evidence` runs first (bounded, idempotent, never raises: evidence failure must never alter teardown), then `down`; the binding is written only after a successful teardown (in the separated topology the host's seal digest is read back then, since the applier seals at teardown). Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
         """
+        if handle.evidence is not None:
+            await handle.evidence.finalize()
         await asyncio.to_thread(runtime.down_fn, handle.project, runtime.state_dir)
+        if handle.evidence is not None:
+            if not handle.evidence.capture_local:
+                await handle.evidence.read_host_seal()
+            handle.evidence.write_binding()
+            handle.evidence = None
         await asyncio.to_thread(runtime.allocator.release, handle.project)
         await cls._release_host(runtime, handle)
         shutil.rmtree(handle.staging, ignore_errors=True)
@@ -444,7 +610,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         handles = {
             env._handle.project: env._handle  # pyright: ignore[reportPrivateUsage]
             for env in environments.values()
-            if isinstance(env, LibvirtRangeSandboxEnvironment)
+            if isinstance(env, RangeSandboxEnvironment)
         }
         for handle in handles.values():
             if interrupted:
@@ -468,20 +634,51 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         remaining = list(runtime.registry.values())
         if not cleanup:
             for handle in remaining:
+                if handle.evidence is not None:
+                    # the range stays up, so seal what this process delivered
+                    # (honest to the abandonment point) and surface the
+                    # binding. Local topology: the same finalize() stops the
+                    # capture sidecar and seals the host writer in this
+                    # process, so nothing keeps capturing. Separated (uds:)
+                    # topology: the applier-side writer keeps capturing and
+                    # the reaper reap-seals it after lease expiry.
+                    await handle.evidence.finalize()
+                    handle.evidence.write_binding()
+                    handle.evidence = None
                 if handle.host is not None:
                     # the deliberate keep-it-running path: stop renewing but
                     # LEAVE the lease, so the independent reaper reclaims the
                     # range after the lease expires
                     await runtime.host_provider.abandon(handle.host)
-                logger.warning(
-                    "range %s left up (--no-sandbox-cleanup); its host lease is "
-                    "no longer renewed, so 'inspect-ranges reaper' reclaims it "
-                    "after expiry; remove it sooner with: inspect-ranges down %s  "
-                    "(or: inspect sandbox cleanup libvirt_range %s)",
-                    handle.project,
-                    handle.project,
-                    handle.project,
-                )
+                if runtime.host_backend.startswith("uds:"):
+                    # a direct `inspect-ranges down` bypasses the applier and
+                    # leaks its admission charge and relay map (the recorded
+                    # direct-down hazard); the recovery advice must not
+                    # recommend it on this topology (quality-review B18)
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host lease "
+                        "is no longer renewed, so 'inspect-ranges reaper' "
+                        "reclaims it through the applier after expiry; remove "
+                        "it sooner with: INSPECT_RANGES_HOST=%s "
+                        "inspect sandbox cleanup range %s  (the env "
+                        "prefix is what routes the teardown THROUGH the "
+                        "applier; without it the cleanup is a direct down and "
+                        "leaks the applier's admission charge)",
+                        handle.project,
+                        runtime.host_backend,
+                        handle.project,
+                    )
+                else:
+                    logger.warning(
+                        "range %s left up (--no-sandbox-cleanup); its host "
+                        "lease is no longer renewed, so 'inspect-ranges "
+                        "reaper' reclaims it after expiry; remove it sooner "
+                        "with: inspect-ranges down %s  (or: inspect sandbox "
+                        "cleanup range %s)",
+                        handle.project,
+                        handle.project,
+                        handle.project,
+                    )
             return
         failures: list[str] = []
         for handle in remaining:
@@ -492,7 +689,7 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
         if failures:
             raise RuntimeError(
                 "task_cleanup could not tear down every range (retry with "
-                "'inspect sandbox cleanup libvirt_range'):\n  " + "\n  ".join(failures)
+                "'inspect sandbox cleanup range'):\n  " + "\n  ".join(failures)
             )
 
     @classmethod
@@ -525,6 +722,27 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
             await asyncio.to_thread(runtime.allocator.release, project)
             for lease in host_leases:
                 if lease.project == project:
+                    if lease.evidence_location is not None:
+                        # the reaper's rule applies here too: after teardown,
+                        # before release, a record the dead driver never sealed
+                        # gets its reaped seal; releasing the lease first would
+                        # delete the only pointer to it (quality-review A7).
+                        # Best-effort like the reaper: evidence trouble never
+                        # blocks reclamation.
+                        try:
+                            await seal_abandoned(
+                                lease.evidence_location,
+                                lease_id=lease.lease_id,
+                                sample_id=lease.sample_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "cli_cleanup reap-seal failed for %s at %s "
+                                "(record stays unsealed, reported as such by "
+                                "verify)",
+                                project,
+                                lease.evidence_location,
+                            )
                     await asyncio.to_thread(lease_store.release, lease.lease_id)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)
@@ -581,6 +799,37 @@ class LibvirtRangeSandboxEnvironment(SandboxEnvironment):
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
         raise NotImplementedError(
-            "libvirt_range provides no interactive connection yet (a console "
+            "range provides no interactive connection yet (a console "
             "command is a recorded follow-up in provider-v1.md)"
         )
+
+
+def sample_handle_for(environment: SandboxEnvironment) -> SampleHandle:
+    """The sample handle behind a `range` sandbox environment.
+
+    Scoring-internal: the oracle factory (`challenges-v1.md`) resolves the current sample's handle through the default sandbox. Never expose the handle to solver-visible surfaces.
+
+    Args:
+        environment: A sandbox environment obtained from the sample context.
+
+    Returns:
+        The sample's handle.
+
+    Raises:
+        TypeError: `environment` is not a `range` environment.
+    """
+    # In a live eval, inspect_ai hands out sandboxes wrapped in its event
+    # proxy; unwrap it to reach the provider environment. Private API,
+    # isolated here with a CI pin (like `sample_active()` in location.py).
+    try:
+        from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
+        if isinstance(environment, SandboxEnvironmentProxy):
+            environment = environment._sandbox  # pyright: ignore[reportPrivateUsage]
+    except ImportError:  # pragma: no cover - inspect_ai moved the proxy
+        pass
+    if not isinstance(environment, RangeSandboxEnvironment):
+        raise TypeError(
+            f"expected a range sandbox environment, got {type(environment).__name__}"
+        )
+    return environment._handle  # pyright: ignore[reportPrivateUsage]

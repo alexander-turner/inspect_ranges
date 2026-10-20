@@ -8,30 +8,30 @@ timestamp: 2026-09-30
 
 # Upstream licenses and attribution
 
-Each example range vendors verbatim copies of its source's configuration (and, where available, task/prompt) files under `ranges/<name>/upstream/`, for provenance and so tooling can read the originals alongside our `range.yaml` translation. All were fetched 2026-09-30. Copyright remains with the upstream authors; each project's full license text is at the linked repository root.
+Each example range vendors verbatim copies of its source's configuration (and, where available, task/prompt) files under its own `upstream/` directory (`../../examples/<name>/upstream/`), for provenance and so tooling can read the originals alongside our `range.yaml` translation. All were fetched 2026-09-30. Copyright remains with the upstream authors; each project's full license text is at the linked repository root.
 
 | Vendored under | Upstream project | Copyright | License |
 |---|---|---|---|
-| `ranges/vulhub-zabbix/upstream/` | [vulhub](https://github.com/vulhub/vulhub) (`zabbix/CVE-2016-10134/`) | Vulhub contributors | MIT |
-| `ranges/kypo-demo/upstream/` | [kypo-crp-demo-training](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) | 2020 Masaryk University | MIT |
-| `ranges/cyris-basic/upstream/` | [CyRIS](https://github.com/crond-jaist/cyris) (`examples/`) | 2016–2021 Japan Advanced Institute of Science and Technology | BSD-3-Clause |
-| `ranges/mhbench-equifax-small/upstream/` (topology, specs, playbook) | [MHBench](https://github.com/bsinger98/MHBench) | 2025 Brian Singer | MIT |
-| `ranges/mhbench-equifax-small/upstream/incalmo-prompts/` | [Incalmo](https://github.com/cylabcyberautonomy/Incalmo) | 2025 Brian Singer | MIT |
-| `ranges/goad-light/upstream/` (inventory, config.json, provider files) | [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (`ad/GOAD-Light/`) | Orange Cyberdefense | GPL-3.0 |
-| `ranges/goad-light/upstream/cochise/` | [cochise](https://github.com/andreashappe/cochise) | 2025 Andreas Happe | MIT |
-| `ranges/attack-range-windows/upstream/` | [attack_range](https://github.com/splunk/attack_range) (`templates/aws/`) | Splunk Inc. | Apache-2.0 |
+| `examples/vulhub-zabbix/upstream/` | [vulhub](https://github.com/vulhub/vulhub) (`zabbix/CVE-2016-10134/`) | Vulhub contributors | MIT |
+| `../../examples/kypo-demo/upstream/` | [kypo-crp-demo-training](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) | 2020 Masaryk University | MIT |
+| `../../examples/cyris-basic/upstream/` | [CyRIS](https://github.com/crond-jaist/cyris) (`examples/`) | 2016–2021 Japan Advanced Institute of Science and Technology | BSD-3-Clause |
+| `../../examples/mhbench-equifax-small/upstream/` (topology, specs, playbook) | [MHBench](https://github.com/bsinger98/MHBench) | 2025 Brian Singer | MIT |
+| `../../examples/mhbench-equifax-small/upstream/incalmo-prompts/` | [Incalmo](https://github.com/cylabcyberautonomy/Incalmo) | 2025 Brian Singer | MIT |
+| `../../examples/goad-light/upstream/` (inventory, config.json, provider files) | [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (`ad/GOAD-Light/`) | Orange Cyberdefense | GPL-3.0 |
+| `../../examples/goad-light/upstream/cochise/` | [cochise](https://github.com/andreashappe/cochise) | 2025 Andreas Happe | MIT |
+| `../../examples/attack-range-windows/upstream/` | [attack_range](https://github.com/splunk/attack_range) (`templates/aws/`) | Splunk Inc. | Apache-2.0 |
 
 Notes:
 
 - The GOAD files are unmodified copies of configuration data distributed under GPL-3.0; this folder redistributes them with attribution and this notice. Our `range.yaml`/`challenges.yaml`/`notes.md` are independent factual descriptions, not derivative code.
-- `ranges/vulhub-zabbix/upstream/README.txt` and `ranges/goad-light/upstream/cochise/scenario.txt` are upstream Markdown files renamed to `.txt` (kept byte-identical).
+- `examples/vulhub-zabbix/upstream/README.txt` and `../../examples/goad-light/upstream/cochise/scenario.txt` are upstream Markdown files renamed to `.txt` (kept byte-identical).
 - Our own files in this folder (every `range.yaml`, `challenges.yaml`, `notes.md`, and the documents at the folder root) carry this repository's license.
 
 ## Pinned upstream sources
 
 Every vendored file was matched to its upstream repository by git blob hash (checked 2026-09-30): each is byte-identical to the file at the path below in the pinned commit, which was that repository's HEAD at the time. These pins let the `upstream/` copies be replaced by references once a range's translation has been verified and the copies are no longer needed; files a range needs at runtime (e.g. cochise's username list) move into that range's assets instead.
 
-| Upstream repository @ commit | Vendored file (under `ranges/`) | Upstream path |
+| Upstream repository @ commit | Vendored file (under `../../examples/`) | Upstream path |
 |---|---|---|
 | `github.com/vulhub/vulhub` @ `8fd63916f7a8711e2e01dda0d27237e4d6175d38` | `vulhub-zabbix/upstream/docker-compose.yml` | `zabbix/CVE-2016-10134/docker-compose.yml` |
 | | `vulhub-zabbix/upstream/README.txt` | `zabbix/CVE-2016-10134/README.md` |

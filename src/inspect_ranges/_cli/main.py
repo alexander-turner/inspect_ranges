@@ -3,8 +3,11 @@ import click
 from .. import __version__
 from .._devbox import devbox_group
 from .appliercmd import applier
+from .buildcmd import build
 from .daemonbundle import daemon_bundle
+from .distcmd import mirror, publish, pull, push
 from .doctor import doctor
+from .evidencecmd import evidence
 from .imagescmd import images
 from .plancmd import plan, render
 from .reapercmd import reaper
@@ -13,18 +16,24 @@ from .upcmd import down, up
 from .validate import validate
 
 
-@click.group()
+@click.group(name="inspect-ranges")
 @click.version_option(version=__version__, prog_name="inspect-ranges")
 def ranges() -> None:
     """Inspect Ranges CLI."""
 
 
 ranges.add_command(applier)
+ranges.add_command(build)
 ranges.add_command(daemon_bundle)
 ranges.add_command(devbox_group)
 ranges.add_command(doctor)
+ranges.add_command(evidence)
 ranges.add_command(images)
+ranges.add_command(mirror)
 ranges.add_command(plan)
+ranges.add_command(publish)
+ranges.add_command(pull)
+ranges.add_command(push)
 ranges.add_command(reaper)
 ranges.add_command(render)
 ranges.add_command(schema)

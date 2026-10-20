@@ -7,12 +7,21 @@ Applier contract (in order): create bridges from `netns/bridges.txt`; add `netns
 
 import hashlib
 import json
+import logging
+import re
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from xml.sax.saxutils import escape
 
 import yaml
 
+from .._evidence.supervisor import (
+    BRIDGES_FILENAME,
+    SUPERVISOR_FILENAME,
+    SUPERVISOR_SOURCE,
+    render_bridges_tsv,
+)
 from ..types import Issue, IssueError, RangeSpec
 from .allocate import Allocation
 from .dnsmasq import render_dnsmasq_conf
@@ -20,14 +29,25 @@ from .egress import render_egress_nftables
 from .nftables import render_router_nftables
 from .plan import (
     PlannedGuest,
+    PlannedNetwork,
     PlanOptions,
     ResolvedPlan,
     guest_allocation,
+    guest_uid,
+    image_sidecar_file_name,
     plan_json,
+    realized_sidecar_file_name,
     resolve_plan,
 )
+from .probe import (
+    PROBECLIENT_FILENAME,
+    PROBECLIENT_SOURCE,
+    PROBES_FILENAME,
+    render_probe_clamp_nftables,
+    render_probes_txt,
+)
 
-_DOMAIN_XML = """<domain type='kvm'>
+_DOMAIN_XML = """<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
   <name>{name}</name>
   <memory unit='MiB'>{memory_mb}</memory>
   <vcpu>{cpus}</vcpu>
@@ -35,11 +55,22 @@ _DOMAIN_XML = """<domain type='kvm'>
     <type arch='x86_64' machine='q35'>hvm</type>
     <boot dev='hd'/>
   </os>
-  <features><acpi/><apic/></features>
+  <features><acpi/><apic/><vmport state='off'/></features>
   {cpu}
+  <clock offset='utc'>
+    <timer name='hpet' present='no'/>
+  </clock>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>destroy</on_crash>
+  <!-- per-guest DAC principal (issue #5): sVirt AppArmor cannot load profiles
+       inside the hardened container (CAP_MAC_ADMIN + securityfs are denied by
+       the outer jail), so per-VM confinement is per-VM IDENTITY instead: each
+       QEMU runs as its own uid, the same scheme Cloud Hypervisor guests use;
+       relabel stays off because the boot script pre-owns the guest's files -->
+  <seclabel type='static' model='dac' relabel='no'>
+    <label>+{uid}:kvm</label>
+  </seclabel>
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
@@ -47,13 +78,7 @@ _DOMAIN_XML = """<domain type='kvm'>
       <source file='/scratch/{name}.qcow2'/>
       <target dev='vda' bus='virtio'/>
     </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='raw'/>
-      <source file='/scratch/{name}-seed.iso'/>
-      <target dev='vdb' bus='virtio'/>
-      <readonly/>
-    </disk>
-{interfaces}    <vsock model='virtio'>
+{seed_stanza}{interfaces}    <vsock model='virtio'>
       <cid auto='no' address='{cid}'/>
     </vsock>
     <serial type='file'>
@@ -66,6 +91,15 @@ _DOMAIN_XML = """<domain type='kvm'>
     <memballoon model='none'/>
     <controller type='usb' model='none'/>
   </devices>
+  <!-- q35 legacy devices no guest uses and libvirt 10.0 has no element for
+       (the AHCI controller, the SMBus and its SPD EEPROMs, the i8042 keyboard
+       controller, the kvmvapic option ROM); the PIT and PIC stay on -->
+  <qemu:commandline>
+    <qemu:arg value='-machine'/>
+    <qemu:arg value='sata=off,smbus=off,i8042=off'/>
+    <qemu:arg value='-global'/>
+    <qemu:arg value='kvm-apic.vapic=false'/>
+  </qemu:commandline>
 </domain>
 """
 
@@ -76,6 +110,34 @@ _INTERFACE_XML = """    <interface type='bridge'>
     </interface>
 """
 
+_SEED_STANZA_LINUX = """\
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='/scratch/{name}-seed.iso'/>
+      <target dev='vdb' bus='virtio'/>
+      <readonly/>
+    </disk>
+"""
+
+# Windows' implicit answer-file search covers removable media only, and the
+# strict profile strips SATA, so the unattend seed rides a virtio-scsi cdrom
+# (the vioscsi driver ships in the golden's guest tools)
+_SEED_STANZA_WINDOWS = """\
+    <controller type='scsi' model='virtio-scsi'/>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='/scratch/{name}-seed.iso'/>
+      <target dev='sda' bus='scsi'/>
+      <readonly/>
+    </disk>
+    <!-- windows setup passes (specialize/OOBE) hang without a display
+         adapter (measured: the installer and the first clone boot both);
+         the VNC listener binds the range container's loopback, which no
+         guest segment can reach -->
+    <graphics type='vnc' listen='127.0.0.1' autoport='yes'/>
+    <video><model type='vga'/></video>
+"""
+
 _COMPOSE_ISOLATED = """# Generated realization bundle: hardened range container profile
 # (see design/spikes/hardened-container). Docker provides no networking.
 services:
@@ -83,6 +145,7 @@ services:
     image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
     init: true
     network_mode: none
+    sysctls: [__SYSCTLS__]
     cap_drop: [ALL]
     cap_add: [__CAPS__]
     security_opt:
@@ -106,12 +169,67 @@ volumes:
   scratch:
 """
 
+_COMPOSE_CAPTURE_SERVICE = """\
+  # evidence-capture sidecar (evidence-v1.md, evidence-capture spike): shares
+  # the range netns with CAP_NET_RAW alone, so the range container's measured
+  # capability floor does not grow and pre-stream pcap chunks live on a volume
+  # the range container never mounts
+  capture:
+    image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
+    init: true
+    network_mode: service:range
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["python3", "/render/capture/capture.py"]
+    environment:
+      - CAPTURE_CHUNK_MB=${CAPTURE_CHUNK_MB:-10}
+      - CAPTURE_CAP_MB=${CAPTURE_CAP_MB:-2048}
+      - CAPTURE_MAX_RESTARTS=${CAPTURE_MAX_RESTARTS:-5}
+    volumes:
+      - capture:/capture
+      - .:/render:ro
+"""
+
+
+def _compose_with_capture(compose: str) -> str:
+    """Insert the capture sidecar service and its private volume into a rendered compose text."""
+    compose = compose.replace(
+        "volumes:\n  scratch:\n", "volumes:\n  scratch:\n  capture:\n"
+    )
+    marker = "\nnetworks:\n" if "\nnetworks:\n" in compose else "\nvolumes:\n"
+    return compose.replace(marker, "\n" + _COMPOSE_CAPTURE_SERVICE + marker, 1)
+
+
+_COMPOSE_PROBE_SERVICE = """\
+  # active-prober sidecar (challenges-v1.md, challenge-prober spike): shares
+  # the range netns with ZERO capabilities (the clamped probe veth already
+  # exists; the kernel stack does the protocol work), so probes originate from
+  # the declared probe identity without growing any capability floor
+  probe:
+    image: ${RANGE_IMAGE:-inspect-ranges-range:dev}
+    init: true
+    network_mode: service:range
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - .:/render:ro
+"""
+
+
+def _compose_with_probe(compose: str) -> str:
+    """Insert the zero-capability probe sidecar into a rendered compose text."""
+    marker = "\nnetworks:\n" if "\nnetworks:\n" in compose else "\nvolumes:\n"
+    return compose.replace(marker, "\n" + _COMPOSE_PROBE_SERVICE + marker, 1)
+
+
 _COMPOSE_UPLINK = _COMPOSE_ISOLATED.replace(
     "    network_mode: none\n",
     """    # this range requests egress: the deployment supplies the uplink network
     networks: [uplink]
-    sysctls:
-      - net.ipv4.ip_forward=1
 """,
 ).replace(
     "volumes:\n  scratch:\n",
@@ -185,7 +303,41 @@ def render_bundle(
     if any(network.dhcp for network in plan.networks):
         caps.append("NET_RAW")
     template = _COMPOSE_UPLINK if plan.requirements.egress_uplink else _COMPOSE_ISOLATED
-    write("compose.yaml", template.replace("__CAPS__", ", ".join(caps)))
+    # interfaces created later in the range netns (bridges, taps) inherit
+    # `default`, so none holds an IPv6 address on a segment; set at container
+    # create because /proc/sys is read-only inside the container
+    sysctls = ["net.ipv6.conf.default.disable_ipv6=1"]
+    if plan.requirements.egress_uplink:
+        sysctls.append("net.ipv4.ip_forward=1")
+    compose = template.replace("__CAPS__", ", ".join(caps)).replace(
+        "__SYSCTLS__", ", ".join(sysctls)
+    )
+    if any(guest.vmm == "cloud-hypervisor" for guest in plan.guests):
+        # Cloud Hypervisor exposes guest vsock as a Unix socket per guest, not
+        # through the host kernel's vhost-vsock: the sockets land in a host
+        # directory the applier supplies, so host-side dialers can reach them
+        anchor = "      - .:/render:ro\n"
+        if compose.count(anchor) != 1:
+            raise RuntimeError(
+                f"compose template has {compose.count(anchor)} {anchor.strip()!r} mounts; "
+                "expected exactly one to anchor the cloud-hypervisor vsock mount"
+            )
+        compose = compose.replace(
+            anchor,
+            anchor
+            + "      - ${CH_VSOCK_DIR:?this range has cloud-hypervisor guests; set CH_VSOCK_DIR}:/run/ch-vsock\n",
+        )
+    if plan.requirements.evidence_capture:
+        compose = _compose_with_capture(compose)
+        write(
+            f"capture/{BRIDGES_FILENAME}",
+            render_bridges_tsv({n.name: n.bridge for n in plan.networks}),
+        )
+        write(f"capture/{SUPERVISOR_FILENAME}", SUPERVISOR_SOURCE)
+    if plan.requirements.probe_segments:
+        compose = _compose_with_probe(compose)
+        write(f"probe/{PROBECLIENT_FILENAME}", PROBECLIENT_SOURCE)
+    write("compose.yaml", compose)
 
     write("netns/bridges.txt", "".join(f"{n.bridge}\n" for n in plan.networks))
     write(
@@ -196,7 +348,16 @@ def render_bundle(
             if n.hypervisor_address is not None
         ),
     )
-    write("netns/range.nft", render_egress_nftables(spec, allocation, uplink="eth0"))
+    if allocation.probe_endpoints:
+        subnets = {
+            network.name: network.cidr
+            for network in plan.networks
+            if isinstance(network.cidr, IPv4Network)
+        }
+        write(f"netns/{PROBES_FILENAME}", render_probes_txt(allocation, subnets))
+    nft = render_egress_nftables(spec, allocation, uplink="eth0")
+    clamp = render_probe_clamp_nftables(allocation)
+    write("netns/range.nft", nft + clamp if clamp else nft)
     for network in plan.networks:
         conf = render_dnsmasq_conf(spec, allocation, network.name)
         if conf is not None:
@@ -215,47 +376,76 @@ def render_bundle(
             )
             for interface in guest.interfaces
         )
-        write(
-            f"guests/{guest.name}/domain.xml",
-            _DOMAIN_XML.format(
-                name=guest.name,
-                memory_mb=guest.memory_mb,
-                cpus=guest.cpus,
-                cpu=cpu,
-                cid=guest.cid,
-                interfaces=interfaces,
-            ),
-        )
-        write(
-            f"guests/{guest.name}/seed/meta-data",
-            f"instance-id: {plan.range.name}-{guest.name}\nlocal-hostname: {guest.name}\n",
-        )
-        write(
-            f"guests/{guest.name}/seed/network-config",
-            yaml.safe_dump(_netplan(plan, guest), sort_keys=False),
-        )
-        write(
-            f"guests/{guest.name}/seed/user-data",
-            "#cloud-config\n"
-            + yaml.safe_dump(
-                _user_data(spec, plan, guest, allocation), sort_keys=False
-            ),
-        )
+        if guest.vmm == "qemu":
+            write(
+                f"guests/{guest.name}/domain.xml",
+                _DOMAIN_XML.format(
+                    name=guest.name,
+                    memory_mb=guest.memory_mb,
+                    cpus=guest.cpus,
+                    cpu=cpu,
+                    cid=guest.cid,
+                    uid=guest_uid(guest.cid),
+                    interfaces=interfaces,
+                    seed_stanza=(
+                        _SEED_STANZA_WINDOWS
+                        if guest.os == "windows"
+                        else _SEED_STANZA_LINUX
+                    ).format(name=guest.name),
+                ),
+            )
+        if guest.injector == "unattend":
+            # the file MUST be named unattend.xml: the specialize/OOBE passes'
+            # implicit answer-file search matches that name on removable media
+            # (autounattend.xml is the installation-media name; measured:
+            # specialize ignored it and booted with defaults)
+            # the seed carries the admin password (escaped but plaintext); the
+            # provider's bundles sit under a 0700 state root, but a CLI
+            # `render --out` path is user-chosen — 0600 BEFORE the bytes land,
+            # no transient wide window (phase review rounds 1-2)
+            seed_path = out / f"guests/{guest.name}/seed/unattend.xml"
+            seed_path.parent.mkdir(parents=True, exist_ok=True)
+            seed_path.touch(mode=0o600)
+            seed_path.chmod(0o600)  # touch mode is umask-masked; pin it
+            write(
+                f"guests/{guest.name}/seed/unattend.xml",
+                _windows_unattend(plan, guest, options),
+            )
+        else:
+            write(
+                f"guests/{guest.name}/seed/meta-data",
+                # the image file keys the instance-id (parked-decisions item 2):
+                # a realized image's name embeds its build key, so a new build
+                # generation is a NEW instance and cloud-init re-applies runtime
+                # seeds instead of skipping them as already-run
+                f"instance-id: {plan.range.name}-{guest.name}-{hashlib.sha256(guest.image.file.encode()).hexdigest()[:8]}\n"
+                f"local-hostname: {guest.hostname}\n",
+            )
+            write(
+                f"guests/{guest.name}/seed/network-config",
+                yaml.safe_dump(_netplan(plan, guest), sort_keys=False),
+            )
+            write(
+                f"guests/{guest.name}/seed/user-data",
+                "#cloud-config\n"
+                + yaml.safe_dump(
+                    _user_data(spec, plan, guest, allocation), sort_keys=False
+                ),
+            )
 
+    backings = options.realized_backings if options is not None else {}
     write(
         "boot.json",
         json.dumps(
             {
                 "parallel": True,
                 "guests": [
-                    {
-                        "name": guest.name,
-                        "cid": guest.cid,
-                        "image_file": guest.image.file,
-                        "image_digest": guest.image.digest,
-                        "overlay_gb": guest.disk_gb,
-                        "readiness": guest.readiness,
-                    }
+                    _boot_guest(
+                        guest,
+                        networks,
+                        backings,
+                        options.image_cache if options is not None else None,
+                    )
                     for guest in plan.guests
                 ],
                 "verify": {"reserved": True},
@@ -283,6 +473,58 @@ def render_bundle(
         json.dumps(manifest, sort_keys=True, indent=2) + "\n"
     )
     return plan
+
+
+def _overlay_gb(guest: PlannedGuest, image_cache: Path | None) -> int:
+    """The guest overlay's virtual size: the declared `disk_gb`, clamped up to the backing image's own virtual size (a smaller overlay truncates the disk under the guest)."""
+    if image_cache is None:
+        return guest.disk_gb
+    backing = _qcow2_virtual_gb(image_cache / guest.image.file)
+    if backing is None:
+        return guest.disk_gb
+    return max(guest.disk_gb, backing)
+
+
+def _qcow2_virtual_gb(path: Path) -> int | None:
+    """The qcow2 header's virtual size, in whole GiB rounded up; `None` for raw or unreadable images. An overlay created SMALLER than its backing truncates the guest's disk (Windows refuses to boot with 0xc0000001; measured, windows-ad-v1 slice 1), so boot overlays clamp to this."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+    except OSError:
+        return None
+    if len(header) < 32 or header[:4] != b"QFI\xfb":
+        return None
+    size = int.from_bytes(header[24:32], "big")
+    return max(1, -(-size // (1 << 30)))
+
+
+def _boot_guest(
+    guest: PlannedGuest,
+    networks: dict[str, PlannedNetwork],
+    backings: dict[str, tuple[str, str]],
+    image_cache: Path | None,
+) -> dict[str, Any]:
+    """One guest's `boot.json` entry; a Cloud Hypervisor guest also carries what its command line needs (it has no domain XML), and a realized guest carries its backing golden (verified by `up`: the overlay digest cannot see its backing)."""
+    entry: dict[str, Any] = {
+        "name": guest.name,
+        "cid": guest.cid,
+        "image_file": guest.image.file,
+        "image_digest": guest.image.digest,
+        "backing_file": backings.get(guest.name, (None, None))[0],
+        "backing_digest": backings.get(guest.name, (None, None))[1],
+        "overlay_gb": _overlay_gb(guest, image_cache),
+        "readiness": guest.readiness,
+        "injector": guest.injector,
+        "vmm": guest.vmm,
+    }
+    if guest.vmm == "cloud-hypervisor":
+        entry["cpus"] = guest.cpus
+        entry["memory_mb"] = guest.memory_mb
+        entry["interfaces"] = [
+            {"bridge": networks[interface.network].bridge, "mac": interface.mac}
+            for interface in guest.interfaces
+        ]
+    return entry
 
 
 def _require_cached_images(spec: RangeSpec, plan: ResolvedPlan) -> None:
@@ -334,7 +576,46 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                     entry["routes"] = static
             else:
                 if network.gateway is not None:
-                    entry["routes"] = [{"to": "default", "via": str(network.gateway)}]
+                    gatewayed = [
+                        networks[other.network]
+                        for other in guest.interfaces
+                        if networks[other.network].gateway is not None
+                    ]
+                    if len(gatewayed) == 1:
+                        entry["routes"] = [
+                            {"to": "default", "via": str(network.gateway)}
+                        ]
+                    else:
+                        # a multi-homed guest (the build uplink shape) must
+                        # elect its default deterministically: the NAT-mode
+                        # attachment wins; deprioritized router-gatewayed
+                        # attachments tie-break by interface index and keep
+                        # explicit sibling-subnet routes so cross-segment
+                        # traffic still crosses the router. Siblings exclude
+                        # the guest's own attachments (connected routes win)
+                        # and, until multi-router plans exist (parked: router
+                        # provisioning), every non-NAT segment routes via this
+                        # gateway.
+                        default_metric = 50 if network.mode == "nat" else 200 + index
+                        routes = [
+                            {
+                                "to": "default",
+                                "via": str(network.gateway),
+                                "metric": default_metric,
+                            }
+                        ]
+                        if network.mode != "nat":
+                            attached = {other.network for other in guest.interfaces}
+                            routes.extend(
+                                {
+                                    "to": str(sibling.cidr),
+                                    "via": str(network.gateway),
+                                }
+                                for sibling in plan.networks
+                                if sibling.name not in attached
+                                and sibling.mode != "nat"
+                            )
+                        entry["routes"] = routes
                 nameservers: dict[str, Any] = {}
                 if network.resolvers:
                     nameservers["addresses"] = [
@@ -348,10 +629,283 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
     return {"version": 2, "ethernets": ethernets}
 
 
+def guest_hostname(name: str) -> str:
+    """The in-guest hostname for a guest name: hostname-invalid characters become hyphens and trailing separators drop. Spec names allow underscores and dots (terraform-derived ranges use them heavily), RFC hostnames do not, and an unsanitized name makes cloud-init's set-hostname module fail — which noble's cloud-init reports as DEGRADED, so `cloud-init status --wait` exits 2 and readiness refuses the guest (linux-examples-v1 slice 3). Planning refuses two guests whose names sanitize identically (`hostname-collision`)."""
+    return re.sub(r"[^a-z0-9-]", "-", name).rstrip("-")
+
+
+logger = logging.getLogger("inspect_ranges.render")
+
+DEFAULT_WINDOWS_ADMIN_PASSWORD = "RangeAdm!n2026"
+"""The Windows golden's built-in Administrator password when none was recorded: deliberate scenario content (ranges authenticate in-guest with it; the CONTROL plane is the vsock daemon as SYSTEM and never uses it). The install recipe (`winimage`) shares this constant, so a default-derived golden and a default-rendered seed agree."""
+
+_WINDOWS_UNATTEND_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<!-- Per-boot specialize seed for a sysprep'd inspect-ranges Windows golden:
+     hostname, static addressing (interfaces keyed by MAC), and the OOBE
+     answers that keep the first boot unattended. Rendered per guest. -->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>{hostname}</ComputerName>
+      <TimeZone>UTC</TimeZone>
+    </component>
+    <component name="Microsoft-Windows-TCPIP" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{tcpip_interfaces}      </Interfaces>
+    </component>
+    <component name="Microsoft-Windows-DNS-Client" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <Interfaces>
+{dns_interfaces}      </Interfaces>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <UserAccounts>
+        <AdministratorPassword>
+          <Value>{admin_password}</Value><PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+    </component>
+  </settings>
+</unattend>
+"""
+
+_TCPIP_INTERFACE = """\
+        <Interface wcm:action="add">
+          <Identifier>{mac}</Identifier>
+          <Ipv4Settings>
+            <DhcpEnabled>false</DhcpEnabled>
+            <RouterDiscoveryEnabled>false</RouterDiscoveryEnabled>
+          </Ipv4Settings>
+          <UnicastIpAddresses>
+            <IpAddress wcm:action="add" wcm:keyValue="1">{ip}/{prefix}</IpAddress>
+          </UnicastIpAddresses>
+{routes}        </Interface>
+"""
+
+_TCPIP_ROUTES_WRAPPER = """\
+          <Routes>
+{routes}          </Routes>
+"""
+
+_TCPIP_ROUTE = """\
+            <Route wcm:action="add">
+              <Identifier>{identifier}</Identifier>
+              <Prefix>{prefix}</Prefix>
+              <NextHopAddress>{via}</NextHopAddress>
+{metric}            </Route>
+"""
+
+_DNS_INTERFACE = """\
+        <Interface wcm:action="add">
+          <Identifier>{mac}</Identifier>
+{domain}          <DNSServerSearchOrder>
+{servers}          </DNSServerSearchOrder>
+        </Interface>
+"""
+
+
+def windows_hostname(name: str) -> str:
+    """The NetBIOS-safe in-guest name: the sanitized hostname truncated to 15 characters (the NetBIOS limit; longer names make specialize warn and truncate unpredictably)."""
+    return guest_hostname(name)[:15].rstrip("-")
+
+
+def windows_seed_facts(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, object]:
+    """Every PLAN-RESOLVED fact the specialize seed bakes into a Windows disk, as a canonical JSON-able dict.
+
+    This is both the renderer's input (`_windows_unattend` assembles its XML from exactly this) and the Windows build key's `network_state` (phase review round 2): keying on spec declarations missed resolution — resolver ADDRESSES come from `dns.authoritative` guests' allocated IPs, gateways from router election and hypervisor-address allocation, sibling routes from NON-attached networks — so an edit there re-rendered against a stale disk with no rebuild. One function feeding both consumers makes renderer/key drift impossible. The admin password is deliberately absent: it rides the golden digest in the key already, and key material must never carry it.
+    """
+    networks = {network.name: network for network in plan.networks}
+    gatewayed = [
+        networks[other.network]
+        for other in guest.interfaces
+        if networks[other.network].gateway is not None
+    ]
+    interfaces: list[dict[str, object]] = []
+    for index, interface in enumerate(guest.interfaces):
+        network = networks[interface.network]
+        route_specs: list[tuple[str, str, int | None]] = []
+        if network.gateway is not None:
+            # Windows treats 169.254/16 as on-link (APIPA) and ARPs for it
+            # instead of routing it, so a link-local resolver (the VPC-resolver
+            # shape the build hands guests) needs an explicit host route via
+            # the gateway — the route Linux takes implicitly (measured live:
+            # resolution dead without it, instant with it)
+            route_specs.extend(
+                (f"{resolver}/32", str(network.gateway), None)
+                for resolver in network.resolvers
+                if resolver.is_link_local
+            )
+            if len(gatewayed) == 1:
+                route_specs.append(("0.0.0.0/0", str(network.gateway), None))
+            else:
+                # the linux election, mirrored (the build uplink shape): the
+                # NAT-mode attachment wins the default; deprioritized
+                # router-gatewayed attachments tie-break by interface index
+                # and keep explicit sibling-subnet routes so cross-segment
+                # traffic still crosses the router
+                default_metric = 50 if network.mode == "nat" else 200 + index
+                route_specs.append(("0.0.0.0/0", str(network.gateway), default_metric))
+                if network.mode != "nat":
+                    attached = {other.network for other in guest.interfaces}
+                    route_specs.extend(
+                        (str(sibling.cidr), str(network.gateway), None)
+                        for sibling in plan.networks
+                        if sibling.name not in attached and sibling.mode != "nat"
+                    )
+        interfaces.append(
+            {
+                "mac": interface.mac,
+                "ip": str(interface.ip),
+                "prefixlen": network.cidr.prefixlen,
+                "routes": [list(route) for route in route_specs],
+                "resolvers": [str(address) for address in network.resolvers],
+                "search": network.search,
+            }
+        )
+    return {"hostname": guest.hostname, "interfaces": interfaces}
+
+
+def _windows_unattend(
+    plan: ResolvedPlan, guest: PlannedGuest, options: "PlanOptions | None"
+) -> str:
+    """The per-boot specialize answer file for a Windows guest: hostname, MAC-keyed static addressing, resolvers, and the OOBE answers, assembled from `windows_seed_facts`. The Administrator password comes from the golden's recorded metadata (scenario content, local-only), falling back to the documented default."""
+    facts = windows_seed_facts(plan, guest)
+    tcpip: list[str] = []
+    dns: list[str] = []
+    for interface_facts in cast("list[dict[str, Any]]", facts["interfaces"]):
+        mac = cast(str, interface_facts["mac"]).upper().replace(":", "-")
+        route_specs = cast("list[list[Any]]", interface_facts["routes"])
+        routes = ""
+        if route_specs:
+            rendered = "".join(
+                _TCPIP_ROUTE.format(
+                    identifier=identifier,
+                    prefix=prefix,
+                    via=via,
+                    metric=(
+                        f"              <Metric>{metric}</Metric>\n"
+                        if metric is not None
+                        else ""
+                    ),
+                )
+                for identifier, (prefix, via, metric) in enumerate(route_specs, start=1)
+            )
+            routes = _TCPIP_ROUTES_WRAPPER.format(routes=rendered)
+        tcpip.append(
+            _TCPIP_INTERFACE.format(
+                mac=mac,
+                ip=interface_facts["ip"],
+                prefix=interface_facts["prefixlen"],
+                routes=routes,
+            )
+        )
+        resolvers = cast("list[str]", interface_facts["resolvers"])
+        if resolvers:
+            servers = "".join(
+                f'            <IpAddress wcm:action="add" wcm:keyValue="{server_index + 1}">{address}</IpAddress>\n'
+                for server_index, address in enumerate(resolvers)
+            )
+            # the connection-specific DNS suffix (AD short-name resolution
+            # needs it; the Linux analogue is netplan's nameservers.search)
+            domain = (
+                f"          <DNSDomain>{interface_facts['search']}</DNSDomain>\n"
+                if interface_facts["search"] is not None
+                else ""
+            )
+            dns.append(_DNS_INTERFACE.format(mac=mac, domain=domain, servers=servers))
+    return _WINDOWS_UNATTEND_TEMPLATE.format(
+        hostname=facts["hostname"],
+        tcpip_interfaces="".join(tcpip),
+        dns_interfaces="".join(dns),
+        # the password is the one spec-side value a template cannot constrain:
+        # XML-escape it so no password can break (or smuggle elements into)
+        # the answer file
+        admin_password=escape(_windows_admin_password(options, guest)),
+    )
+
+
+def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) -> str:
+    """The golden's recorded Administrator password (its provenance sidecar, local-only scenario content), else `DEFAULT_WINDOWS_ADMIN_PASSWORD`. A realized image (a captured Windows build, windows-ad-v1 slice 2) carries no password itself: its `.realized.json` sidecar names the backing golden, and the chase lands on that golden's record — the password lives in exactly one place. Every fallback logs: a seed carrying the wrong password RESETS the clone's Administrator at OOBE, so silence here would diverge a range from its golden invisibly."""
+    if options is None or options.image_cache is None:
+        logger.warning(
+            "windows guest %r renders without an image cache; the seed carries the default Administrator password",
+            guest.name,
+        )
+        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    cache = options.image_cache
+    sidecar = cache / image_sidecar_file_name(guest.image.file)
+    realized = cache / realized_sidecar_file_name(guest.image.file)
+    try:
+        if sidecar.is_file():
+            loaded: object = json.loads(sidecar.read_text())
+        elif realized.is_file():
+            realized_loaded: object = json.loads(realized.read_text())
+            golden_file = (
+                cast(dict[str, object], realized_loaded).get("golden_file")
+                if isinstance(realized_loaded, dict)
+                else None
+            )
+            if not isinstance(golden_file, str) or not golden_file:
+                logger.warning(
+                    "windows guest %r: realized sidecar %s names no backing golden; the seed carries the default Administrator password",
+                    guest.name,
+                    realized.name,
+                )
+                return DEFAULT_WINDOWS_ADMIN_PASSWORD
+            loaded = json.loads(
+                (cache / image_sidecar_file_name(golden_file)).read_text()
+            )
+        else:
+            logger.warning(
+                "windows guest %r: image %s has no provenance sidecar; the seed carries the default Administrator password",
+                guest.name,
+                guest.image.file,
+            )
+            return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    except (OSError, ValueError):
+        logger.warning(
+            "windows guest %r: the provenance records for %s are unreadable; the seed carries the default Administrator password",
+            guest.name,
+            guest.image.file,
+        )
+        return DEFAULT_WINDOWS_ADMIN_PASSWORD
+    if isinstance(loaded, dict):
+        password = cast(dict[str, object], loaded).get("admin_password")
+        if isinstance(password, str) and password:
+            return password
+    logger.warning(
+        "windows guest %r: golden %s records no Administrator password; the seed carries the default",
+        guest.name,
+        guest.image.file,
+    )
+    return DEFAULT_WINDOWS_ADMIN_PASSWORD
+
+
 def _user_data(
     spec: RangeSpec, plan: ResolvedPlan, guest: PlannedGuest, allocation: Allocation
 ) -> dict[str, Any]:
-    user_data: dict[str, Any] = {"hostname": guest.name}
+    user_data: dict[str, Any] = {"hostname": guest.hostname}
     if guest.kind == "router":
         ruleset = "flush ruleset\n" + render_router_nftables(
             spec, guest.name, allocation

@@ -47,11 +47,11 @@ cd "$ROOT"
 $IR down --all >/dev/null 2>&1 || true
 rm -rf "$SPIKE/tmp" && mkdir -p "$SPIKE/tmp"
 
-echo "=== shared setup: daemon artifact + v3 golden (named noble-range-guest, as the specs reference) ==="
+echo "=== shared setup: daemon artifact + v3 golden (named ubuntu-noble, as the specs reference) ==="
 DB_OUT=$($IR daemon-bundle -o "$SPIKE/tmp/artifacts")
 DAEMON_SHA=$(echo "$DB_OUT" | grep -o 'bundle sha256:[0-9a-f]*' | cut -d: -f2)
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name noble-range-guest \
+$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name ubuntu-noble \
   --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
 
 BUNDLE=""; PROJECT=""

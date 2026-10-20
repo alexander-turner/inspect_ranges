@@ -8,6 +8,7 @@ from .images import (
     DaemonPin,
     DeriveError,
     ImageMetadata,
+    default_image_cache,
     derive_golden,
     list_images,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "UpOptions",
     "UpResult",
     "bundle_digest",
+    "default_image_cache",
     "derive_golden",
     "down",
     "down_all",

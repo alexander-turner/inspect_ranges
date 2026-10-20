@@ -1,6 +1,6 @@
 """Slice-3 milestone: inspect-ai's full `self_check` suite against the provider on CI, zero VMs.
 
-Every check from `inspect_ai.util._sandbox.self_check` runs as a pytest case against a `LibvirtRangeSandboxEnvironment` whose channel reaches a `LocalEndpoint` (real argv on this host under a temp root). The xfail pin is TWO-SIDED: a pinned check that passes fails the run, so the list can never rot. A second parametrization runs the identical suite through `LatencyTransport`, the chatty-regression milestone range-channel.md requires, with a per-check exchange budget asserted from `ChannelStats` (deterministic, unlike wall clock).
+Every check from `inspect_ai.util._sandbox.self_check` runs as a pytest case against a `RangeSandboxEnvironment` whose channel reaches a `LocalEndpoint` (real argv on this host under a temp root). The xfail pin is TWO-SIDED: a pinned check that passes fails the run, so the list can never rot. A second parametrization runs the identical suite through `LatencyTransport`, the chatty-regression milestone range-channel.md requires, with a per-check exchange budget asserted from `ChannelStats` (deterministic, unlike wall clock).
 
 The checks run through the house convention (`asyncio.run` per case) rather than pytest-asyncio, which the repo deliberately does not use.
 """
@@ -27,7 +27,7 @@ from inspect_ranges._channel.channel import (
 from inspect_ranges._channel.mocks import LatencyTransport
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._host import LeasePlacement, RemoteHostProvider, SampleSpec
-from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
+from inspect_ranges._provider.provider import RangeSandboxEnvironment
 from inspect_ranges._provider.state import SampleHandle
 
 from tests.applier_fixture import wait_for_socket
@@ -93,7 +93,7 @@ def make_env(
         guest_cids={"box": 10_000},
         channel=channel,
     )
-    return LibvirtRangeSandboxEnvironment("box", handle), channel
+    return RangeSandboxEnvironment("box", handle), channel
 
 
 _LATENCY_SKIPS = frozenset(
@@ -182,7 +182,7 @@ def _run_uds_check(fixture: UdsSelfCheckFixture, check: Check, tmp_path: Path) -
                 channel=host.channel,  # pyright: ignore[reportArgumentType] - MessageChannel in practice
                 host=host,
             )
-            env = LibvirtRangeSandboxEnvironment("box", handle)
+            env = RangeSandboxEnvironment("box", handle)
             await check(env)
         finally:
             await provider.release(host)

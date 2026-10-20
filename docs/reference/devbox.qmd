@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges devbox"
+description: "Provision and manage an inspect_ranges development box on EC2."
+reference: inspect-ranges devbox
+---

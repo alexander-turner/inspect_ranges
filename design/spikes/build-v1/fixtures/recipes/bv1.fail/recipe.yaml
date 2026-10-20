@@ -1,0 +1,4 @@
+name: bv1.fail
+version: "1"
+entrypoint: run.sh
+mode: online

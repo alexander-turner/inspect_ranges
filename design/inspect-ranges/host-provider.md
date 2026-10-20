@@ -49,7 +49,7 @@ What crosses the seam is the **realization bundle**: the resolved plan plus the 
 
 - **Self-sufficiency rule**: the bundle plus a backend-supplied *fetch grant* per image digest must be sufficient to realize the range with zero further driver round trips. If realization has to ask the driver anything mid-flight, the plan was incomplete; treat that as a compiler bug, in the same spirit as "unsupported feature combinations fail at planning, not mid-boot". (Strictly host-side realization is only *required* for connectionless backends; the rule that matters everywhere is bundle self-sufficiency.)
 - **Render inputs are host-class declarations, never per-instance probes**: the canonical cache layout ([image-distribution](image-distribution.md)), CIDs allocated in the plan, the named CPU model per fleet ([range-build](range-build.md)). A backend that cannot meet the conventions refuses at planning, like any other capability mismatch.
-- **Secrets stay out of the bundle**: proof material is generated driver-side (the scorer needs it), planted after verify through channel verbs, and recorded only at the evidence sink (per range-build and [scoring-integrity](scoring-integrity.md)). The bundle is a function of range version, host class, and per-sample allocations, with no confidentiality requirement beyond the intermediary's access scoping.
+- **Secrets stay out of the bundle**: proof material is generated driver-side (the scorer needs it), planted after verify through channel verbs, and recorded only at the evidence sink (per range-build and [scoring-integrity](challenges-scoring-integrity.md)). The bundle is a function of range version, host class, and per-sample allocations, with no confidentiality requirement beyond the intermediary's access scoping.
 
 ### Lifecycle is messages, not calls
 
@@ -91,6 +91,8 @@ class HostProvider(Protocol):
     async def release(self, host: RangeHost) -> None: ...           # release is destruction
 ```
 
+*As built ([range-host-v1](range-host-v1.md), 2026-10-10): the sketch held with four recorded deviations. `channel` is `RangeChannel | None` (the co-resident backend attaches it after boot), `RangeHost` gained `check_lease()` (ops surface lease loss loudly), `acquire` takes a `LeasePlacement` second argument (driver-side placement facts the lease record needs that `SampleSpec` deliberately omits), and `HostProvider` gained `abandon()` for the `cleanup=False` path. Code: `src/inspect_ranges/_host/host.py`.*
+
 Providers register through the same entry-point mechanism as other inspect_ranges components; `acquire` gates on `doctor` readiness and fails the sample fast with the report. The message-level contract the channel's transports must satisfy (request IDs, idempotent retry, durable replies, bulk data, error taxonomy, reply validation) is specified in [range-channel](range-channel.md); every transport is subject to the same conformance testing (`self_check`) as the local fast path.
 
 ### Deployment capability declarations
@@ -104,6 +106,8 @@ Backend capability declarations (handoff §9: `l2_broadcast`, Windows guests, ne
 ### Evidence is a declared output
 
 Evidence (pcaps, consoles, verification results, scoring artifacts) is a first-class output of the host with its own delivery contract: durable, append-only, writable-not-rewritable by the host. This makes the integrity rule from agent-containment ("the evidence path must not depend on the scaffold's continued honesty") a property of the seam instead of a plan, and moves the mid-run sync requirement from backlog to contract terms every backend must meet. Backends whose transport is already durable, append-only object storage get it nearly free.
+
+*Implemented by [evidence-v1](evidence-v1.md) (2026-10-15): capture outside every VM, a hash-chained write-once record beside the eval log with the seal digest bound into the sample store, the applier as the host-side capture writer in the separated topology, and the reaper sealing abandoned records. The mid-run sync dependency on Inspect sharding is closed for evidence (the sink is the host's own writer) and remains open only for eval logs.*
 
 ### Latency is a declared budget
 

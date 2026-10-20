@@ -14,10 +14,13 @@ PLATFORM = "Platform"
 REALIZER = "Realizer"
 PROVIDER = "Provider"
 HOST = "Host"
+EVIDENCE = "Evidence"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
 NETWORKING = "Networking"
+DISTRIBUTION = "Distribution"
 IMAGE_TOOLING = "Image tooling"
+BUILD = "Build"
 
 # same minimums as inspect_ai's Docker sandbox provider (Compose 2.22.0 is its `pull --policy` floor)
 DOCKER_ENGINE_MIN_VERSION = (24, 0, 6)
@@ -48,9 +51,25 @@ def run_checks() -> list[CheckResult]:
         state_dir=_provider_state_dir(),
         backend=os.environ.get("INSPECT_RANGES_HOST", "local"),
     )
+    results += check_evidence(
+        sink_override=os.environ.get("INSPECT_RANGES_EVIDENCE_SINK"),
+        log_dir=os.environ.get("INSPECT_LOG_DIR"),
+    )
+    from .._build.manifest import default_build_cache
+    from .._build.recipes import default_recipe_cache
+
+    results += check_build(default_build_cache(), default_recipe_cache())
+    results += check_distribution(_provider_image_cache())
     if host.status != "ok":
         results.append(_skip(REALIZER, "all checks", "requires Linux x86_64"))
     else:
+        from .._runtime.rangeimage import RangeImageError, pinned_range_image
+
+        try:
+            range_image_ref = pinned_range_image() or _range_image_tag()
+        except RangeImageError:
+            # check_realizer fails the row itself; nothing worth inspecting
+            range_image_ref = _range_image_tag()
         docker_probe = _run(["docker", "version", "--format", "ok"])
         results += check_realizer(
             image_inspect=(
@@ -59,7 +78,7 @@ def run_checks() -> list[CheckResult]:
                         "docker",
                         "image",
                         "inspect",
-                        _range_image_tag(),
+                        range_image_ref,
                         "--format",
                         "ok",
                     ]
@@ -68,6 +87,107 @@ def run_checks() -> list[CheckResult]:
                 else None
             ),
         )
+    return results
+
+
+def check_distribution(image_cache: Path) -> list[CheckResult]:
+    """The distribution rows: configured locations parse (directory forms exist and are valid layouts), and the cache's provenance chains are whole (every realized image's golden present, every golden's vendor present)."""
+    from .._dist.errors import DistError
+    from .._dist.location import REGISTRY_ENV, registry_locations
+
+    results: list[CheckResult] = []
+    configured = os.environ.get(REGISTRY_ENV)
+    try:
+        locations = registry_locations(configured)
+        broken: list[str] = []
+        for location in locations:
+            if location.directory is not None:
+                try:
+                    from .._dist.oci import OciLayout
+
+                    OciLayout(location.directory).open()
+                except DistError as error:
+                    broken.append(f"{location.describe()}: {error}")
+        if broken:
+            results.append(
+                CheckResult(
+                    DISTRIBUTION,
+                    "locations",
+                    "fail",
+                    "; ".join(broken),
+                    fix="fix or remove the broken location from INSPECT_RANGES_REGISTRY (a broken first location aborts pulls rather than de-shadowing)",
+                )
+            )
+        else:
+            source = "INSPECT_RANGES_REGISTRY" if configured else "default"
+            results.append(
+                CheckResult(
+                    DISTRIBUTION,
+                    "locations",
+                    "ok",
+                    f"{', '.join(location.describe() for location in locations)} "
+                    f"({source}; parse-only, registry reachability surfaces on first use)",
+                )
+            )
+    except DistError as error:
+        results.append(
+            CheckResult(
+                DISTRIBUTION,
+                "locations",
+                "fail",
+                str(error),
+                fix="fix INSPECT_RANGES_REGISTRY (comma-separated locations)",
+            )
+        )
+    import json as json_module
+
+    missing: list[str] = []
+    for sidecar in sorted(image_cache.glob("*.realized.json")):
+        try:
+            golden = json_module.loads(sidecar.read_text()).get("golden_file")
+        except (OSError, ValueError):
+            continue
+        if isinstance(golden, str) and not (image_cache / golden).is_file():
+            missing.append(f"{sidecar.name} -> {golden}")
+    for sidecar in sorted(image_cache.glob("*.json")):
+        if sidecar.name.endswith(".realized.json"):
+            continue
+        try:
+            meta = json_module.loads(sidecar.read_text())
+        except (OSError, ValueError):
+            continue
+        vendor = meta.get("vendor_file")
+        file = meta.get("file")
+        if (
+            isinstance(vendor, str)
+            and isinstance(file, str)
+            and (image_cache / file).is_file()
+            and not (image_cache / vendor).is_file()
+        ):
+            missing.append(f"{file} -> {vendor}")
+    try:
+        from .._build.manifest import default_build_cache as _builds
+        from .._dist.gc import unreferenced_chain_files
+
+        # a dirty (lock-free) read is fine for a warn row; the GC itself
+        # always re-scans under its exclusive lock
+        _, frozen = unreferenced_chain_files(image_cache, _builds(), set())
+    except Exception:
+        frozen = []
+    for reason in frozen[:3]:
+        missing.append(f"frozen: {reason}")
+    if missing:
+        results.append(
+            CheckResult(
+                DISTRIBUTION,
+                "cache chains",
+                "warn",
+                f"{len(missing)} issue(s): {'; '.join(missing[:4])}",
+                fix="re-pull or re-derive the named chains (up refuses mixed chains; a frozen chain also skips the vendor-edge boot check until fixed)",
+            )
+        )
+    else:
+        results.append(CheckResult(DISTRIBUTION, "cache chains", "ok", "whole"))
     return results
 
 
@@ -105,7 +225,7 @@ def _provider_state_dir() -> Path:
 
 
 def _provider_image_cache() -> Path:
-    from .._provider.state import default_image_cache
+    from .._runtime.images import default_image_cache
 
     return default_image_cache()
 
@@ -121,9 +241,7 @@ def check_provider(state_dir: Path, image_cache: Path) -> list[CheckResult]:
     # entry point: the only registration path `inspect eval` has
     entries = {e.name: e.value for e in metadata.entry_points(group="inspect_ai")}
     if entries.get("inspect_ranges") == "inspect_ranges._registry":
-        results.append(
-            CheckResult(PROVIDER, "entry point", "ok", "libvirt_range registered")
-        )
+        results.append(CheckResult(PROVIDER, "entry point", "ok", "range registered"))
     else:
         results.append(
             CheckResult(
@@ -308,7 +426,7 @@ def _strict_registry_check(
             f"{path} unreadable or corrupt ({error}): {hazard}",
             fix=(
                 "tear everything down, then remove the registry: "
-                f"inspect sandbox cleanup libvirt_range && rm {path}"
+                f"inspect sandbox cleanup range && rm {path}"
             ),
         )
 
@@ -453,6 +571,345 @@ def _range_image_tag() -> str:
     return RANGE_IMAGE_TAG
 
 
+def check_evidence(
+    sink_override: str | None,
+    log_dir: str | None,
+    *,
+    s3_client: Any | None = None,
+) -> list[CheckResult]:
+    """The evidence surface (`evidence-v1.md`): knob validity, a writability probe of the standing sink override when one is set, and whether evidence resolves off-instance.
+
+    Doctor never requires AWS: a probe that cannot reach the sink (no credentials, no network) is a stated condition (`warn`), not a host failure. The off-instance row is guidance for untrusted-model runs, where instance-local evidence does not survive instance compromise; it warns rather than fails because local evidence is the normal development state.
+    """
+    from .._provider.evidence import (
+        EVIDENCE_BUFFER_MB_VAR,
+        EVIDENCE_MAX_MB_VAR,
+        evidence_buffer_bytes,
+        evidence_max_bytes,
+    )
+
+    # the runtime treats an empty override as unset (`if override:` in
+    # location.py); doctor must evaluate the same sink the runtime will
+    sink_override = sink_override or None
+    log_dir = log_dir or None
+
+    results: list[CheckResult] = []
+    # each knob in its own try, naming its variable: int() errors carry no
+    # variable name, and one broken knob must not mask the other
+    knob_failures: list[str] = []
+    values: dict[str, int] = {}
+    for var, read in (
+        (EVIDENCE_BUFFER_MB_VAR, evidence_buffer_bytes),
+        (EVIDENCE_MAX_MB_VAR, evidence_max_bytes),
+    ):
+        try:
+            values[var] = read() // (1024 * 1024)
+        except ValueError as error:
+            knob_failures.append(f"{var} ({error})")
+    if knob_failures:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "knobs",
+                "fail",
+                f"invalid evidence knob: {'; '.join(knob_failures)}; the provider disables evidence for every sample rather than failing them",
+                fix=(
+                    f"unset or set {EVIDENCE_BUFFER_MB_VAR} and "
+                    f"{EVIDENCE_MAX_MB_VAR} to positive integers (MB)"
+                ),
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "knobs",
+                "ok",
+                f"buffer {values[EVIDENCE_BUFFER_MB_VAR]} MB, per-writer cap {values[EVIDENCE_MAX_MB_VAR]} MB",
+            )
+        )
+
+    from .._evidence.s3 import valid_sink_location
+
+    if sink_override is None:
+        # the derived arm needs the same guard as the override arm: evidence
+        # derives from the log location, and a location sink_for_location
+        # refuses (gs://-class schemes, a malformed s3://) disables evidence
+        # for every sample at run time; valid_sink_location is the runtime's
+        # own predicate, so the two cannot drift
+        if log_dir is not None and not valid_sink_location(log_dir):
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "fail",
+                    f"evidence derives from the eval log location, and the sink does not support {log_dir!r}; the runtime would disable evidence for every sample",
+                    fix=(
+                        "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                        "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                        "or a filesystem path"
+                    ),
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    EVIDENCE,
+                    "sink",
+                    "ok",
+                    "derived from the eval log location at run time (no standing sink to probe)",
+                )
+            )
+    elif sink_override.startswith("s3://"):
+        from .s3probe import probe_s3_sink
+
+        results.append(probe_s3_sink(EVIDENCE, sink_override, client=s3_client))
+    elif "://" in sink_override:
+        # mirror sink_for_location's scheme validation: at run time an
+        # unsupported scheme disables evidence for every sample, so a green
+        # local-path probe here would bless the exact misconfiguration
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "sink",
+                "fail",
+                f"unsupported evidence location scheme in {sink_override!r}; the runtime would disable evidence for every sample",
+                fix="use s3://bucket/prefix or a filesystem path for INSPECT_RANGES_EVIDENCE_SINK",
+            )
+        )
+    else:
+        results.append(_probe_local_sink(sink_override))
+
+    # the off-instance row consumes the sink row's verdict rather than
+    # re-deriving validity: "never bless a value the sink row rejected" is
+    # then structural, not re-asserted per branch
+    sink_result = results[-1]
+    resolved = sink_override or log_dir
+    remote_shaped = (
+        resolved is not None
+        and re.match(r"^[a-z0-9+.-]+://", resolved)
+        and not resolved.startswith("file://")
+    )
+    if (
+        remote_shaped
+        and resolved is not None
+        and sink_result.status != "fail"
+        and valid_sink_location(resolved)
+    ):
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "ok",
+                f"evidence resolves off-instance ({resolved})",
+            )
+        )
+    elif remote_shaped:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "warn",
+                f"evidence names an off-instance location ({resolved}) the runtime cannot write; the sink row carries the failure",
+                fix=(
+                    "use an s3:// or filesystem INSPECT_LOG_DIR, or set "
+                    "INSPECT_RANGES_EVIDENCE_SINK to s3://bucket/prefix "
+                    "or a filesystem path"
+                ),
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                EVIDENCE,
+                "off-instance",
+                "warn",
+                "evidence resolves to instance-local storage; fine for development, but the pre-compromise record only survives instance compromise when it streams off-instance, so untrusted-model runs need a remote log dir or sink",
+                fix=(
+                    "point INSPECT_LOG_DIR (preferred: evidence then lives beside "
+                    "the logs) or INSPECT_RANGES_EVIDENCE_SINK at s3://..."
+                ),
+            )
+        )
+    return results
+
+
+def check_build(build_cache: Path, recipe_cache: Path) -> list[CheckResult]:
+    """The build surface (`build-v1.md`): caches writable, cached manifests and recipe bundles parseable, and the build nameserver derivable from this host.
+
+    Caches that do not exist yet are fine (first `build` creates them); what fails is a cache that exists but cannot be used, or recorded state that no longer parses (a manifest or cached recipe that loads with an error would otherwise surface mid-build, minutes in).
+    """
+    results: list[CheckResult] = [
+        _probe_cache_dir("builds cache", build_cache),
+        _probe_cache_dir("recipe cache", recipe_cache),
+    ]
+    if build_cache.is_dir():
+        broken: list[str] = []
+        # slashed range names nest one level deeper (builds/org/name/manifest.json)
+        manifest_files = sorted(build_cache.glob("*/manifest.json")) + sorted(
+            build_cache.glob("*/*/manifest.json")
+        )
+        for manifest_file in manifest_files:
+            try:
+                from .._build.manifest import BuildManifest
+
+                BuildManifest.model_validate_json(manifest_file.read_text())
+            except Exception as error:
+                broken.append(f"{manifest_file.parent.name} ({error})")
+        if broken:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "manifests",
+                    "fail",
+                    f"unparseable build manifest(s): {'; '.join(broken[:3])}",
+                    fix="delete the broken manifest directory and run `inspect-ranges build` again",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "manifests",
+                    "ok",
+                    f"{len(manifest_files)} recorded build(s) parse",
+                )
+            )
+    if recipe_cache.is_dir():
+        bad: list[str] = []
+        bundles = sorted(path.parent for path in recipe_cache.glob("*/recipe.yaml"))
+        for bundle in bundles:
+            try:
+                from .._build.recipes import load_recipe
+
+                load_recipe(bundle, source="cache")
+            except Exception as error:
+                bad.append(f"{bundle.name} ({error})")
+        if bad:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "cached recipes",
+                    "fail",
+                    f"unloadable cached recipe(s): {'; '.join(bad[:3])}",
+                    fix="remove the broken bundle from the recipe cache; range-local ./recipes/ bundles are unaffected",
+                )
+            )
+        elif bundles:
+            results.append(
+                CheckResult(
+                    BUILD, "cached recipes", "ok", f"{len(bundles)} bundle(s) load"
+                )
+            )
+    from .._build.manifest import recorded_realized_files
+    from .._runtime.images import default_image_cache
+
+    image_cache = default_image_cache()
+    if image_cache.is_dir():
+        from .._build.capture import live_project_files
+        from .._runtime.ownership import default_state_dir
+
+        recorded = recorded_realized_files(build_cache) | live_project_files(
+            default_state_dir()
+        )
+        reclaimable = 0
+        for sidecar in image_cache.glob("*.realized.json"):
+            image = image_cache / (
+                sidecar.name.removesuffix(".realized.json") + ".qcow2"
+            )
+            if image.name not in recorded and image.is_file():
+                try:
+                    meta = json.loads(sidecar.read_text())
+                    from .._build.manifest import is_catalog_realized
+
+                    if is_catalog_realized(
+                        str(meta.get("range_name", "")),
+                        str(meta.get("guest", "")),
+                        str(meta.get("build_key", "")),
+                        image.name,
+                    ):
+                        continue  # pulled catalog images are sticky, not reclaim bait
+                except (OSError, ValueError):
+                    continue
+                reclaimable += image.stat().st_size
+        mb = reclaimable / (1024 * 1024)
+        if reclaimable:
+            results.append(
+                CheckResult(
+                    BUILD,
+                    "reclaimable",
+                    "warn" if mb > 20_480 else "ok",
+                    f"{mb:.0f} MB of realized images no manifest references",
+                    fix="inspect-ranges images prune",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(BUILD, "reclaimable", "ok", "no superseded realized images")
+            )
+
+    from .._build.orchestrate import FALLBACK_BUILD_NAMESERVER, default_build_nameserver
+
+    nameserver = default_build_nameserver()
+    if nameserver == FALLBACK_BUILD_NAMESERVER:
+        results.append(
+            CheckResult(
+                BUILD,
+                "build nameserver",
+                "warn",
+                f"no host resolver derivable from resolv.conf; builds fall back to {nameserver}, which VPC-restricted deployments often block",
+                fix="pass --build-nameserver <ip> to `inspect-ranges build` (your VPC's resolver)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(BUILD, "build nameserver", "ok", f"host-derived {nameserver}")
+        )
+    return results
+
+
+def _probe_cache_dir(name: str, root: Path) -> CheckResult:
+    """A cache dir is healthy when absent (first use creates it) or writable."""
+    import uuid
+
+    if not root.exists():
+        return CheckResult(BUILD, name, "ok", f"{root} (absent; created on first use)")
+    try:
+        probe = root / f".doctor-probe-{uuid.uuid4().hex}"
+        probe.write_bytes(b"doctor")
+        probe.unlink()
+        return CheckResult(BUILD, name, "ok", f"writable at {root}")
+    except OSError as error:
+        return CheckResult(
+            BUILD,
+            name,
+            "fail",
+            f"{root} is not writable ({error})",
+            fix=f"make {root} writable by this user, or point the cache env var elsewhere",
+        )
+
+
+def _probe_local_sink(base: str) -> CheckResult:
+    """Writability probe of a filesystem sink override: create the base (first use would anyway), write and remove one probe file."""
+    import uuid
+
+    try:
+        root = Path(base)
+        root.mkdir(parents=True, exist_ok=True)
+        probe = root / f".doctor-probe-{uuid.uuid4().hex}"
+        probe.write_bytes(b"doctor")
+        probe.unlink()
+        return CheckResult(EVIDENCE, "sink", "ok", f"writable at {base}")
+    except (OSError, ValueError) as error:  # ValueError: e.g. an embedded NUL
+        return CheckResult(
+            EVIDENCE,
+            "sink",
+            "fail",
+            f"{base} is not writable ({error}); every sample would run with evidence disabled",
+            fix="make the sink directory writable by the eval user, or change INSPECT_RANGES_EVIDENCE_SINK",
+        )
+
+
 def _artifact_state(sidecar: Path) -> str:
     """`ok`, `tar-missing`, or `absent`: the sidecar names the tarball that must exist beside it."""
     from .._channel.bundle import DaemonBundleInfo, bundle_file_name
@@ -476,9 +933,25 @@ def check_realizer(
     """Realizer host surface: the hardened range image, the daemon artifact, and the Go toolchain that builds it (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact)."""
     from .._channel.bundle import GO_PIN, locate_go
     from .._runtime.images import DEFAULT_ARTIFACT_DIR
+    from .._runtime.rangeimage import RangeImageError, pinned_range_image
 
     results: list[CheckResult] = []
-    if image_inspect is None:
+    pinned_image: str | None = None
+    pin_error: RangeImageError | None = None
+    try:
+        pinned_image = pinned_range_image()
+    except RangeImageError as error:
+        pin_error = error
+    if pin_error is not None:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "fail",
+                f"{pin_error}; `up` refuses this value before anything boots",
+            )
+        )
+    elif image_inspect is None:
         results.append(
             CheckResult(
                 REALIZER,
@@ -488,7 +961,25 @@ def check_realizer(
             )
         )
     elif image_inspect.returncode == 0:
-        results.append(CheckResult(REALIZER, "range image", "ok", _range_image_tag()))
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "ok",
+                f"pinned {pinned_image}"
+                if pinned_image
+                else f"local {_range_image_tag()}",
+            )
+        )
+    elif pinned_image:
+        results.append(
+            CheckResult(
+                REALIZER,
+                "range image",
+                "warn",
+                f"pinned {pinned_image} not pulled yet; `inspect-ranges up` pulls it on first use",
+            )
+        )
     else:
         results.append(
             CheckResult(

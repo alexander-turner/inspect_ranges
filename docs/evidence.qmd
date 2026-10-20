@@ -1,0 +1,90 @@
+---
+title: "Evidence"
+description: "What the range records outside every VM, where it streams, the tamper-evidence guarantee and its exact scope, and how to verify a record."
+llms-description: "The evidence layer: per-segment pcap, consoles, stage and verification streams, and in-guest telemetry export captured outside every VM; the per-sample location beside the eval log; the hash-chained write-once format with its seal and the sample-store binding; gap and seal semantics; dual-clock records; inspect-ranges evidence verify including --expect-seal; deployment guidance for store-side prevention; the environment knob table."
+---
+
+## Overview
+
+Scoring a cyber range cannot trust what guests report: the agent owns the attack box from the first prompt and owns each target it compromises. Evidence is the record captured **outside every VM**: per-segment packet captures taken on the bridges, serial consoles, the realization stage stream, readiness and verification results, daemon session continuity, and exported in-guest telemetry. It streams off the sample as it is generated, so the record received before a compromise cannot be rewritten afterward.
+
+Scoring consumes the record through the oracle's read-only accessors: [Custom Goals](goals.qmd#the-oracle-surface) covers reading it from a goal type, and [Corroborating Against Evidence](goals.qmd#corroborating-against-evidence) is the worked pattern.
+
+Evidence is on by default inside an eval: when a sample runs under Inspect, the provider derives a location beside the eval log and records automatically. Outside an eval context (CLI experiments, batteries), set `INSPECT_RANGES_EVIDENCE_SINK` to enable it; with neither, evidence is off and one INFO line says so.
+
+## Captured Streams
+
+| Stream | Contents |
+|---|---|
+| `pcap/<segment>` | One packet capture per bridge, full snaplen, rotated and shipped live. The capture runs in a `NET_RAW`-only sidecar sharing the range's network namespace: nothing is added to any guest, and the range container's own capability floor is unchanged. |
+| `console/<guest>` | Each guest's serial console, streamed continuously (not only on failure). |
+| `capture-stderr/<segment>` | The capture tool's own diagnostics, including the kernel-drop summaries tcpdump prints on exit. |
+| `stages`, `verify` | The realization stage stream (with host emit clocks) and the readiness/verification results. |
+| `session` | Daemon session pins and re-pins: a guest daemon restart is itself evidence. |
+| `telemetry/<collector>`, `telemetry-meta/<collector>` | Exported in-guest telemetry deltas and the per-poll watermark records that make coverage decidable (below). |
+| `heartbeat`, `clock` | Capture liveness and watermarks for our own collectors, and wall-clock anomaly records. |
+
+## Storage
+
+The per-sample location is derived, never configured per sample:
+
+```
+<evallogstem>.evidence/<sample_id>_<epoch>_<attempt>/
+```
+
+Local beside a local log in development; in the log's S3 bucket when the log dir is `s3://` (Inspect supports S3 log dirs natively). Durability therefore inherits from the log location, and anything that finds the log finds the evidence. Each attempt gets a fresh prefix, so retries never rewrite an earlier attempt's record. `INSPECT_RANGES_EVIDENCE_SINK` overrides the base for deployments whose evidence needs a different bucket or retention than their logs.
+
+At finalize, the sample's Inspect store receives the binding under `inspect_ranges:evidence`: the evidence pointer, each writer's seal digest, and the per-stream chain heads. The same values are mirrored to an INFO log line, which is all that remains if the sample context is gone by teardown time (deferred teardown, `cleanup=False`).
+
+## Tamper Evidence
+
+Collectors in the range container are trusted **while the instance is uncompromised**, and their output is preserved off-instance as it streams. The record itself is tamper-evident by format: write-once chunks, a per-stream hash chain over every record's full metadata, explicit in-chain gap records, and a terminal seal per writer binding chain heads and counts.
+
+The format's own guarantee has an exact scope. Everything **at or below the seal** is tamper-evident from the location alone: any rewrite, reorder, deletion, or hole breaks the chain and `evidence verify` names the first break. The **seal tier itself** (its fields, its presence, the record's location) is anchored only by the seal digest held outside the record, which is exactly what the sample-store binding provides: run `evidence verify --expect-seal` with the binding's digests and the full claim holds. Without a binding, verify attests internal consistency only, and an **unsealed** record is extendable as well as truncatable. The lifecycle makes unsealed-at-rest an anomaly: finalize seals (`complete`, or `incomplete` when something could not flush inside the budget), and the independent reaper process ([Operations](cli.qmd#reaper)) seals abandoned records (`reaped`), so even a `kill -9` of the driver leaves a verifiable record of everything streamed before the kill.
+
+Two bounded windows are part of the design and visible in the record rather than silent:
+
+- **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with a named cause (for example `buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, or `applier-shutdown`; the verifier inventories every gap in the record). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
+- **Manifest batching has a crash window.** Chunks deliver on every flush, but manifest parts are cut on a bounded cadence (15 seconds or 256 records, and always at seal). A crash can leave up to one interval of records whose chunks survive as listed, unreferenced residue rather than chain-committed records; the record never claims the missing window.
+
+## Telemetry Export
+
+Scenario telemetry (journald, application logs, EDR event files) lives inside guests because defenders are supposed to see it. The exporter polls declared collectors through the existing control-channel verbs on a cadence and ships each poll's delta, with a watermark record per poll. The export path is the vsock control plane: nothing in-range can observe or firewall it, and the range's network isolation is never punctured.
+
+The assurance claim: **export upgrades the timeline, not the source.** Pre-compromise telemetry becomes immutable once streamed. Producer silencing shows as a watermark stall (polls keep succeeding while the watermark stays flat); an unreachable guest shows as poll-gap records; log truncation or rewrite shows as a watermark regression record. All three are decidable from the sealed record alone, and all three are distinct from "no events". The read itself remains a guest read: a compromised host can forge what it exports from the moment it falls, which is why detection-type goals consume the watermarks as a completeness precondition rather than treating exported content as proof.
+
+Operational note: the guest daemon reaps each command's process group when the command returns, so an in-guest background producer started over the channel must detach with `setsid` to outlive its starting exec.
+
+## Verifying a Record
+
+```{.bash .fragment}
+# internal consistency: replay every chain, report coverage and gaps
+inspect-ranges evidence verify ./logs/mytask.evidence/sample1_1_1
+
+# the full guarantee: anchor each writer's seal to the digest from the
+# eval log's binding (store key inspect_ranges:evidence)
+inspect-ranges evidence verify \
+  s3://bucket/logs/run.evidence/sample1_1_1 \
+  --expect-seal driver=sha256:... --expect-seal host=sha256:...
+```
+
+Output names the first chain break with its neighborhood, per-stream coverage spans, the gap inventory, and each seal's claimed lease and sample ids; `--json` emits the report for tooling. Exit status is 0 only when every chain replays and every supplied binding matches. Timestamps come from both clocks: capture records carry the range host's wall and monotonic clocks, driver records carry the driver's, and paired records around stage reports bound the offset between them, so cross-clock comparisons carry a tolerance instead of a hidden assumption.
+
+## Deployment Guidance {#deployment-guidance-store-side-prevention}
+
+The format detects tampering; preventing it is the store's job, and the writer already helps: on S3 every put is conditional (`If-None-Match: *`), so rewrites of delivered objects are refused by the store itself with a 412. To make the store refuse unconditional rewrites from **any** writer holding the credential, apply a bucket policy denying `s3:PutObject` without the conditional header (the exact policy JSON ships in `design/spikes/evidence-v1-s3/README.md`); Object Lock is the stricter alternative where retention rules demand it. Grant the capture host put-only credentials: the writer never reads back, by design.
+
+Local evidence (a local log dir, no override) is fine for development and does not survive instance compromise: for untrusted-model runs, point the log dir or the sink override at off-instance storage. `inspect-ranges doctor` warns about this in its Evidence group.
+
+## Environment Vars
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INSPECT_RANGES_EVIDENCE_SINK` | unset | Override base for evidence locations; unset derives from the eval log location (the default and the recommendation). Also enables evidence outside an eval context. |
+| `INSPECT_RANGES_EVIDENCE_BUFFER_MB` | 64 | Per-writer in-memory buffer cap; past it the oldest unstreamed chunk drops with an in-chain gap record. Joins the sample's admission memory charge. |
+| `INSPECT_RANGES_EVIDENCE_MAX_MB` | 4096 | Per-writer volume cap (a sample has at most two writers: `driver` and `host`). Breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never a failed sample. |
+| `CAPTURE_CHUNK_MB`, `CAPTURE_CAP_MB`, `CAPTURE_MAX_RESTARTS`, `CAPTURE_POLL_S` | 10 / 2048 / 5 / 0.5 | Capture sidecar tuning, read from the environment at `up`: rotation chunk size, per-segment disk cap, tcpdump restart budget, supervisor poll cadence. |
+
+The finalize flush budget (30 seconds) and the manifest batching cadence (15 seconds / 256 records) are constants: teardown is never hostage to a slow uplink, and what cannot flush inside the budget is recorded in the seal rather than silently dropped.
+
+Evidence never destabilizes the sample it observes: a sink that cannot open, a knob that cannot parse, or a mid-run delivery failure disables or gaps the record with loud logging, and the sample proceeds and scores normally.

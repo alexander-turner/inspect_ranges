@@ -1,0 +1,4 @@
+name: era.touch
+version: "1"
+entrypoint: run.sh
+mode: online

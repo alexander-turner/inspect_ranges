@@ -5,16 +5,21 @@ from pathlib import Path
 
 import click
 
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._compiler import PlanOptions, render_bundle
 from .._runtime.down import DownError, down_all
 from .._runtime.down import down as run_down
+from .._runtime.images import default_image_cache
 from .._runtime.ownership import default_state_dir
 from .._runtime.up import UpError, UpOptions
 from .._runtime.up import up as run_up
 from ..schema import load_range
 from ..types import IssueError
-
-_DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
+from .specpath import resolve_spec_path
 
 
 @click.command()
@@ -33,8 +38,8 @@ _DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
 )
 @click.option(
     "--cid-base",
@@ -58,7 +63,7 @@ def up(
     bundle: Path | None,
     from_spec: Path | None,
     project: str | None,
-    image_cache: Path,
+    image_cache: Path | None,
     cid_base: int,
     readiness_timeout: float,
     keep: bool,
@@ -70,6 +75,8 @@ def up(
     """
     if (bundle is None) == (from_spec is None):
         raise click.UsageError("pass a BUNDLE directory or --from-spec, not both")
+    if image_cache is None:
+        image_cache = default_image_cache()
     options = UpOptions(
         project=project,
         image_cache=image_cache,
@@ -86,11 +93,23 @@ def up(
             with tempfile.TemporaryDirectory(
                 prefix="ir-bundle-", dir=staging_root
             ) as temp:
-                spec = load_range(from_spec)
+                spec = load_range(resolve_spec_path(from_spec))
+                spec, realized_sections, consumed = apply_build_manifest(
+                    spec,
+                    image_cache=image_cache,
+                    build_cache=default_build_cache(),
+                )
                 render_bundle(
                     spec,
                     Path(temp) / "bundle",
-                    PlanOptions(image_cache=image_cache, cid_base=cid_base),
+                    PlanOptions(
+                        image_cache=image_cache,
+                        cid_base=cid_base,
+                        realized_sections=realized_sections,
+                        realized_backings=(
+                            realized_backings(consumed) if consumed else {}
+                        ),
+                    ),
                 )
                 result = run_up(Path(temp) / "bundle", options)
         else:
@@ -99,7 +118,13 @@ def up(
     except UpError as error:
         raise click.ClickException(str(error)) from error
     except IssueError as error:
-        raise click.ClickException(str(error)) from error
+        # the refusal's remedy travels with it (round-2: plan/render print the
+        # hint through the planning report; this arm dropped it)
+        detail = "; ".join(
+            f"{issue.message}" + (f" ({issue.hint})" if issue.hint else "")
+            for issue in error.issues
+        )
+        raise click.ClickException(detail) from error
     click.echo(
         f"ready: project {result.project} ({result.range_name}) in {result.seconds}s"
     )

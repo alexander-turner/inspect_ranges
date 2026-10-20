@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges doctor"
+description: "Check that this machine can run and develop ranges."
+reference: inspect-ranges doctor
+---

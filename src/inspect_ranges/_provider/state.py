@@ -15,46 +15,57 @@ from inspect_ai.util._sandbox.lifecycle import (
     sandbox_lifecycle_state,
 )
 
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+)
 from .._channel.channel import MessageChannel
+from .._channel.vsock import HybridEndpoint
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
 from .._host.host import HostProvider, RangeHost
 from .._runtime.down import DownResult, down
+
+# the canonical default lives in the (light) runtime layer so CLI commands
+# share it without importing the provider stack; re-exported here for the
+# provider-side consumers
+from .._runtime.images import default_image_cache as default_image_cache
 from .._runtime.ownership import default_state_dir
-from .._runtime.up import UpOptions, UpResult, up
+from .._runtime.up import OnStage, UpOptions, UpResult, up
 from ..types import RangeSpec
 from .admission import HostCapacity, WeightedAdmission
 from .naming import CidAllocator
 from .retry import RetryConfig, RetryStats
 
 if TYPE_CHECKING:
+    from .._challenges.plants import PlantStore
     from .._channel.channel import Transport
+    from .evidence import EvidenceSession
 
 logger = logging.getLogger("inspect_ranges.provider")
 
-UpFn = Callable[[Path, UpOptions], UpResult]
+UpFn = Callable[[Path, UpOptions, OnStage | None], UpResult]
+"""The boot seam. The third argument observes stage events (`evidence-v1.md`'s `stages`/`verify` streams and clock-offset pairs): the local backend passes it to `up(on_stage=...)` (host emit clocks), the uds backend invokes it per folded stage report (driver receive clocks). `None` when evidence is off."""
 DownFn = Callable[[str, Path], DownResult]
 RenderFn = Callable[["RangeSpec", Path, PlanOptions | None], ResolvedPlan]
-ChannelFactory = Callable[[dict[str, int], str], MessageChannel]
+ChannelFactory = Callable[
+    [dict[str, int], str, dict[str, HybridEndpoint]], MessageChannel
+]
+"""(guest CIDs, label, hybrid-vsock sockets of Cloud Hypervisor guests) -> channel."""
 
 
-def default_image_cache() -> Path:
-    """`INSPECT_RANGES_IMAGE_CACHE`, or the CLI's `~/.cache/inspect-ranges/images` default."""
-    override = os.environ.get("INSPECT_RANGES_IMAGE_CACHE")
-    if override:
-        return Path(override)
-    return Path.home() / ".cache" / "inspect-ranges" / "images"
-
-
-def _default_channel_factory(cids: dict[str, int], label: str) -> MessageChannel:
+def _default_channel_factory(
+    cids: dict[str, int], label: str, hybrid_sockets: dict[str, HybridEndpoint]
+) -> MessageChannel:
     from .._channel.vsock import VsockTransport
 
-    transport: "Transport" = VsockTransport(cids)
+    transport: "Transport" = VsockTransport(cids, hybrid_sockets=hybrid_sockets)
     return MessageChannel(transport, label=label)
 
 
-def _default_up(bundle: Path, options: UpOptions) -> UpResult:
-    return up(bundle, options)
+def _default_up(bundle: Path, options: UpOptions, on_stage: OnStage | None) -> UpResult:
+    return up(bundle, options, on_stage=on_stage)
 
 
 def _default_down(project: str, state_dir: Path) -> DownResult:
@@ -71,6 +82,10 @@ class SampleHandle:
     totals: Totals
     cid_base: int
     guest_cids: dict[str, int] = field(default_factory=dict[str, int])
+    guest_sockets: dict[str, HybridEndpoint] = field(
+        default_factory=dict[str, HybridEndpoint]
+    )
+    """Hybrid-vsock sockets of the Cloud Hypervisor guests (QEMU guests are reached by CID)."""
     channel: MessageChannel | None = None
     sessions: dict[str, str] = field(default_factory=dict[str, str])
     stats: RetryStats = field(default_factory=RetryStats)
@@ -80,6 +95,57 @@ class SampleHandle:
     admission_charged: bool = False
     host: RangeHost | None = None
     """The sample's leased host, set between render and boot; `None` again once the lease is released."""
+    evidence: "EvidenceSession | None" = None
+    """The sample's evidence session (`evidence-v1.md`), `None` when evidence is off; finalized by `_destroy` before `down`."""
+    plan: ResolvedPlan | None = None
+    """The sample's resolved plan, set at `sample_init`; the oracle's `resolved()` reads it (`challenges-v1.md`)."""
+    spec: "RangeSpec | None" = None
+    """The sample's validated range spec, set beside `plan`; the oracle's `range_spec()` reads it for declared variables and scenario content (`challenges-v1.md`). Carries the resolved per-instance values once the generation layer lands."""
+    plants: "PlantStore | None" = None
+    """The sample's plant store, created lazily by the oracle factory; plant VALUES live only here, in memory (`challenges-v1.md`)."""
+
+
+def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
+    """The implicit resolve-verify-fetch at init (Journey B): once per distinct sandbox config, before the eval UI comes up, with docker-pull-shaped progress; the warm path costs one spec hash plus artifact-presence checks and zero network. Failures surface as inspect's clean prerequisite refusals (the coded message, never a traceback) and abort the run before any sample starts."""
+    from .._build.recipes import default_recipe_cache
+    from .._dist.errors import DistError
+    from .._dist.progress import TransferDisplay
+    from .._dist.resolve import ensure_build_available, ensure_images_available
+
+    display = TransferDisplay()
+    try:
+        report = ensure_build_available(
+            spec,
+            image_cache=image_cache,
+            build_cache=default_build_cache(),
+            recipe_cache=default_recipe_cache(),
+            progress=display,
+        )
+        # the catalog tier: images outside the build closure (the attacker's
+        # default `attack`, bare-name goldens) pull the same implicit way, so
+        # a clean machine's first eval needs no explicit pull verbs
+        pulled_images = ensure_images_available(
+            spec, image_cache=image_cache, progress=display
+        )
+    except DistError as error:
+        display.close()
+        raise _prerequisite(str(error)) from error
+    if report is not None:
+        display.final(f"pull OK   {spec.meta.name}@{report.root} ({report.location})")
+    if pulled_images:
+        display.final(f"pull OK   catalog image(s): {', '.join(pulled_images)}")
+
+
+def _prerequisite(message: str) -> Exception:
+    """Inspect renders `PrerequisiteError` as the bare message (the docker provider's init precedent); the private-API pin is isolated with a fallback like the repo's other inspect pins."""
+    try:
+        from inspect_ai._util.error import PrerequisiteError
+
+        return PrerequisiteError(message)
+    except ImportError:  # the pin's fallback: the coded error still carries it all
+        from .._dist.errors import DistError
+
+        return DistError("init", message)
 
 
 class ProviderRuntime:
@@ -99,7 +165,10 @@ class ProviderRuntime:
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None
         self._host_provider: HostProvider | None = None
-        self._resolved: dict[str | RangeSpec, tuple[RangeSpec, ResolvedPlan]] = {}
+        self._resolved: dict[
+            str | RangeSpec,
+            tuple[RangeSpec, ResolvedPlan, frozenset[str], dict[str, tuple[str, str]]],
+        ] = {}
         if self.host_backend.startswith("uds:"):
             # the derived seams install at construction, not lazily: paths
             # that never touch host_provider (cli_cleanup foremost) must
@@ -166,23 +235,53 @@ class ProviderRuntime:
 
     def resolve_config(
         self, config: "str | RangeSpec", resolver: Callable[[], RangeSpec]
-    ) -> tuple[RangeSpec, ResolvedPlan]:
-        """The validated spec and base plan for one config, resolved once per batch.
+    ) -> tuple[RangeSpec, ResolvedPlan, frozenset[str], dict[str, tuple[str, str]]]:
+        """The validated spec, base plan, and realized sections for one config, resolved once per batch.
 
-        Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample.
+        Keyed by the config path or the (hashable) `RangeSpec` itself; `resolver` runs only on a miss, so per-sample YAML loads and plan resolution happen once per task rather than once per sample. The build-aware gate applies here (build-v1 slice 6): a spec with guest content consumes its build manifest (hosts swap to the captured realized images; the manifest's sections count as realized at planning) or refuses `range-not-built` before anything boots.
         """
         cached = self._resolved.get(config)
         if cached is not None:
             return cached
         spec = resolver()
-        plan = resolve_plan(spec, self.plan_options())
-        self._resolved[config] = (spec, plan)
-        return spec, plan
+        ensure_pulled(spec, image_cache=self.image_cache)
+        spec, realized_sections, consumed = apply_build_manifest(
+            spec, image_cache=self.image_cache, build_cache=default_build_cache()
+        )
+        backings = realized_backings(consumed) if consumed else {}
+        plan = resolve_plan(
+            spec,
+            self.plan_options(
+                realized_sections=realized_sections, realized_backings=backings
+            ),
+        )
+        self._resolved[config] = (spec, plan, realized_sections, backings)
+        return spec, plan, realized_sections, backings
 
-    def plan_options(self, cid_base: int | None = None) -> PlanOptions:
+    def plan_options(
+        self,
+        cid_base: int | None = None,
+        evidence_capture: bool = False,
+        probe_segments: tuple[str, ...] = (),
+        realized_sections: frozenset[str] = frozenset(),
+        realized_backings: dict[str, tuple[str, str]] | None = None,
+    ) -> PlanOptions:
         if cid_base is None:
-            return PlanOptions(image_cache=self.image_cache)
-        return PlanOptions(image_cache=self.image_cache, cid_base=cid_base)
+            return PlanOptions(
+                image_cache=self.image_cache,
+                evidence_capture=evidence_capture,
+                probe_segments=probe_segments,
+                realized_sections=realized_sections,
+                realized_backings=realized_backings or {},
+            )
+        return PlanOptions(
+            image_cache=self.image_cache,
+            cid_base=cid_base,
+            evidence_capture=evidence_capture,
+            probe_segments=probe_segments,
+            realized_sections=realized_sections,
+            realized_backings=realized_backings or {},
+        )
 
 
 _fallback_state: SandboxLifecycleState | None = None

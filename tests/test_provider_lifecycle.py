@@ -18,6 +18,7 @@ from inspect_ranges._channel.channel import (
     TamperError,
 )
 from inspect_ranges._channel.mocks import HostileTransport
+from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler.plan import (
     PlanOptions,
     ResolvedPlan,
@@ -25,6 +26,7 @@ from inspect_ranges._compiler.plan import (
     resolve_plan,
 )
 from inspect_ranges._host import (
+    HostFacts,
     HostLease,
     HostNotReadyError,
     LeaseLostError,
@@ -34,11 +36,17 @@ from inspect_ranges._host import (
     SampleSpec,
 )
 from inspect_ranges._provider.admission import AdmissionRefused, HostCapacity
-from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment as Env
+from inspect_ranges._provider.provider import RangeSandboxEnvironment as Env
 from inspect_ranges._provider.state import ProviderRuntime, provider_runtime
 from inspect_ranges._runtime.down import DownResult
 from inspect_ranges._runtime.ownership import owner_record, read_owner, write_owner
-from inspect_ranges._runtime.up import GuestState, UpError, UpOptions, UpResult
+from inspect_ranges._runtime.up import (
+    GuestState,
+    OnStage,
+    UpError,
+    UpOptions,
+    UpResult,
+)
 from inspect_ranges.types import (
     Attacker,
     Host,
@@ -105,12 +113,18 @@ class FakeSeams:
         self.plans[str(out)] = plan
         return plan
 
-    def up(self, bundle: Path, options: UpOptions) -> UpResult:
+    def up(
+        self, bundle: Path, options: UpOptions, on_stage: OnStage | None = None
+    ) -> UpResult:
         assert options.project is not None
         self.up_calls.append(options)
         self.registered_at_up.append(options.project in self.runtime.registry)
         if self.up_errors:
             raise self.up_errors.pop(0)
+        if on_stage is not None:
+            # mirror the real up: stage events reach the observer seam
+            on_stage("guest-boot", "ok", {})
+            on_stage("readiness", "ok", {})
         plan = self.plans[str(bundle)]
         # mimic the real up: ownership registers before resources
         write_owner(
@@ -140,12 +154,17 @@ def rigged_runtime(tmp_path: Path) -> tuple[ProviderRuntime, FakeSeams]:
     runtime.state_dir = tmp_path / "projects"
     runtime.state_dir.mkdir(parents=True, exist_ok=True)
     runtime.image_cache = tmp_path / "images"
+    runtime.image_cache.mkdir(parents=True, exist_ok=True)
+    # init's implicit fetch reads the cache (slice 4): the fixture spec's
+    # host image and the defaulted attack image must be present, not pulled
+    for name in ("img.qcow2", "attack.qcow2"):
+        (runtime.image_cache / name).write_bytes(b"fake golden: " + name.encode())
     runtime.capacity = HostCapacity(cpus=8, memory_mb=16_384)
     seams = FakeSeams(runtime)
     runtime.up_fn = seams.up
     runtime.down_fn = seams.down
     runtime.render_fn = seams.render
-    runtime.channel_factory = lambda cids, label: MessageChannel(
+    runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
         LoopbackTransport(guests=tuple(cids)), label=label
     )
     # a REAL local host provider over a real lease store; only the doctor
@@ -166,13 +185,20 @@ def renewal_tasks() -> list["asyncio.Task[None]"]:
     ]
 
 
-def test_sample_init_boots_and_orders_the_default_first(tmp_path: Path) -> None:
+def test_sample_init_boots_and_orders_the_default_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the default-registration assertion must not depend on the developer's
+    # ambient environment (CLAUDE.md: tests are isolated)
+    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
             envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "s1"})
-            assert list(envs) == ["attacker", "web"], (
-                "the attacker is the default sandbox and must come first"
+            assert list(envs) == ["attacker"], (
+                "foothold-only registration is the default: the attacker is the "
+                "one sandbox, and targets are not reachable by name (the wall)"
             )
             assert all(isinstance(env, Env) for env in envs.values())
             assert len(seams.up_calls) == 1
@@ -313,7 +339,7 @@ def test_cleanup_false_leaves_ranges_up_with_recovery_commands(
             assert len(runtime.registry) == 1, "the range stays registered"
             messages = " ".join(record.getMessage() for record in caplog.records)
             assert "inspect-ranges down" in messages
-            assert "inspect sandbox cleanup libvirt_range" in messages
+            assert "inspect sandbox cleanup range" in messages
             # the lease stays (the reaper reclaims after expiry) but renewal
             # stops, and the recovery note names the reaper
             assert "inspect-ranges reaper" in messages
@@ -400,13 +426,67 @@ def test_cli_cleanup_recovers_from_on_disk_state(
     asyncio.run(scenario())
 
 
+def test_cli_cleanup_reap_seals_evidence_before_releasing_the_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The documented kill-9 recovery path must not strand a permanently unsealed record: cli_cleanup reap-seals through the sealer BEFORE deleting the lease that holds the only pointer (quality-review A7)."""
+    import inspect_ranges._provider.state as state_module
+    from inspect_ranges._evidence.manifest import Seal
+    from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
+
+    monkeypatch.setattr(state_module, "_fallback_state", None)
+
+    async def scenario() -> None:
+        runtime = provider_runtime()
+        runtime.state_dir = tmp_path / "projects"
+        runtime.state_dir.mkdir(parents=True, exist_ok=True)
+        seams = FakeSeams(runtime)
+        runtime.down_fn = seams.down
+        evidence_root = tmp_path / "evidence"
+        # a dead driver's record: one delivered part, never sealed
+        writer = EvidenceWriter(
+            LocalDirSink(evidence_root),
+            writer="driver",
+            lease_id="feedfeedfeedfeedfeedfeedfeedfeed",
+            sample_id="s1",
+            part_interval_s=0,
+        )
+        await writer.append("session", b'{"event": "pinned"}\n')
+        await writer.checkpoint()
+        runtime.allocator.lease("ir-killed-9", 2)
+        store = lease_store(runtime)
+        lease = store.acquire(
+            project="ir-killed-9",
+            task_name="t",
+            sample_id="s1",
+            isolation="shared",
+            origin="local",
+            bundle_path=str(tmp_path),
+            bundle_digest="0" * 64,
+            staging=str(tmp_path / "staging"),
+            host_facts=HostFacts(arch="x86_64", hostname="h", host_class="test"),
+            ttl_s=600,
+            evidence_location=str(evidence_root),
+        )
+        await Env.cli_cleanup(None)
+        assert "ir-killed-9" in seams.down_calls
+        assert store.leases() == [], "the lease is released after the seal"
+        seal = Seal.model_validate_json(
+            (evidence_root / "manifests" / "driver" / "seal.json").read_bytes()
+        )
+        assert seal.status == "reaped"
+        assert seal.lease_id == lease.lease_id
+
+    asyncio.run(scenario())
+
+
 def test_config_forms_and_registration() -> None:
     import inspect_ranges._registry as registry_module
     from inspect_ai.util._sandbox.registry import registry_find_sandboxenv
 
-    assert registry_module.LibvirtRangeSandboxEnvironment is Env
+    assert registry_module.RangeSandboxEnvironment is Env
 
-    assert registry_find_sandboxenv("libvirt_range") is Env
+    assert registry_find_sandboxenv("range") is Env
     assert Env.config_files() == ["range.yaml"]
     assert Env.is_docker_compatible() is False
     spec = small_spec()
@@ -471,7 +551,9 @@ def _rig_exhausted_transient_failures(
 
 
 def _rig_channel_factory_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
-    def broken(cids: dict[str, int], label: str) -> MessageChannel:
+    def broken(
+        cids: dict[str, int], label: str, hybrid_sockets: dict[str, HybridEndpoint]
+    ) -> MessageChannel:
         raise RuntimeError("no channel")
 
     runtime.channel_factory = broken
@@ -479,7 +561,7 @@ def _rig_channel_factory_failure(runtime: ProviderRuntime, seams: FakeSeams) -> 
 
 def _rig_ping_failure(runtime: ProviderRuntime, seams: FakeSeams) -> None:
     # a channel whose transport knows no guests: the boot-confirmation ping fails
-    runtime.channel_factory = lambda cids, label: MessageChannel(
+    runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
         LoopbackTransport(guests=()), label=label
     )
 
@@ -749,7 +831,7 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
-            runtime.channel_factory = lambda cids, label: MessageChannel(
+            runtime.channel_factory = lambda cids, label, hybrid: MessageChannel(
                 HostileTransport("sessionless-pong"), label=label
             )
             with pytest.raises(TamperError) as info:
@@ -758,3 +840,76 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
             assert seams.down_calls, "the booted range must be destroyed"
 
     asyncio.run(scenario())
+
+
+class TestFootholdOnlyRegistration:
+    """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
+
+    def test_single_env_fallback_lands_on_the_foothold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """inspect_ai's single-environment fallback returns the registered env for ANY name, so the honest pin asserts `sandbox(<any name>)` IS the foothold env object (an earlier must-raise pin shipped with wrong semantics and only the live battery caught it; this guards fallback drift at CI cost zero)."""
+        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+        from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
+            sandbox,
+            sandbox_default_context_var,
+            sandbox_environments_context_var,
+        )
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init(
+                    "task", small_spec(), {"__sample_id__": "wallpin"}
+                )
+                assert list(envs) == ["attacker"]
+                token = sandbox_environments_context_var.set(dict(envs))
+                default_token = sandbox_default_context_var.set(next(iter(envs)))
+                try:
+                    assert sandbox() is envs["attacker"]
+                    assert sandbox("web") is envs["attacker"]
+                    assert sandbox("absolutely-not-a-guest") is envs["attacker"]
+                finally:
+                    sandbox_default_context_var.reset(default_token)
+                    sandbox_environments_context_var.reset(token)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
+
+    def test_opt_out_registers_all_guests_foothold_first(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", "1")
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
+                    envs = await Env.sample_init(
+                        "task", small_spec(), {"__sample_id__": "w1"}
+                    )
+                assert list(envs) == ["attacker", "web"]
+                assert any("wall" in record.message for record in caplog.records)
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())
+
+    def test_foothold_on_existing_host_is_the_one_registered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
+        spec = small_spec().model_copy(
+            update={"attacker": Attacker(host="web", entry="assumed-breach")}
+        )
+
+        async def scenario() -> None:
+            with sandbox_lifecycle_scope():
+                rigged_runtime(tmp_path)
+                envs = await Env.sample_init("task", spec, {"__sample_id__": "w2"})
+                assert list(envs) == ["web"]
+                await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+        asyncio.run(scenario())

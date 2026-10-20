@@ -1,0 +1,32 @@
+# Attacker-scoped egress conformance (quality-review finding A2): the attacker
+# declares its own allowlist, which must compose as "exactly this, nothing
+# else" ahead of the network allowlist. Pre-fix, attacker flows missing the
+# attacker's own list fell through to the network allowlist and left.
+range:
+  name: egress-scoped
+  schema_version: "0.2"
+  description: >
+    The corp segment allows 198.51.100.7:tcp/443 network-wide; the attacker is
+    scoped to 198.51.100.7:tcp/80 only. The attacker must reach exactly port
+    80 (its own entry) and must NOT inherit the network's 443.
+
+networks:
+  - name: corp
+    cidr: 10.90.10.0/24
+    mode: nat
+    egress:
+      allow:
+        - "198.51.100.7:tcp/443"
+
+hosts:
+  - name: workstation
+    os: { type: linux }
+    image: ubuntu-noble
+    interfaces: [{ network: corp }]   # allocated: 10.90.10.10 (gateway .1, attacker .2)
+
+attacker:
+  interfaces: [{ network: corp }]
+  entry: assumed-breach
+  egress:
+    allow:
+      - "198.51.100.7:tcp/80"

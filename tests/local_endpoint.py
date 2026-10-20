@@ -4,9 +4,11 @@ Test infrastructure (deliberately not shipped in the package: it executes arbitr
 """
 
 import asyncio
+import errno
 import os
 import pwd
 import signal
+import stat
 from pathlib import Path
 
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
@@ -67,7 +69,12 @@ class LocalEndpoint(FakeGuest):
 
     def _read(self, request: ReadFileRequest) -> _StoredReply:
         try:
-            with open(self.translate(request.path), "rb") as handle:
+            descriptor = os.open(
+                self.translate(request.path),
+                os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC,
+            )
+            with open(descriptor, "rb") as handle:
+                self._refuse_wedging_type(handle.fileno())
                 limit = request.max_bytes
                 data = handle.read(limit + 1) if limit is not None else handle.read()
         except OSError as error:
@@ -98,20 +105,45 @@ class LocalEndpoint(FakeGuest):
                 # any content lands (a pre-existing file's old, wider bits must
                 # never cover the fresh bytes), so open without truncating,
                 # fchmod, then truncate and write
-                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT, request.mode)
+                descriptor = os.open(
+                    target,
+                    os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK | os.O_CLOEXEC,
+                    request.mode,
+                )
                 with open(descriptor, "wb") as handle:
+                    self._refuse_wedging_type(handle.fileno())
                     os.fchmod(handle.fileno(), request.mode)
                     handle.truncate(0)
                     handle.write(data)
             else:
-                with open(target, "wb") as handle:
+                descriptor = os.open(
+                    target, os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK | os.O_CLOEXEC
+                )
+                with open(descriptor, "wb") as handle:
+                    self._refuse_wedging_type(handle.fileno())
+                    handle.truncate(0)
                     handle.write(data)
         except OSError as error:
             return _StoredReply(self._errno_reply(request.id, error), None)
         return _StoredReply(OkReply(id=request.id), None)
 
     @staticmethod
+    def _refuse_wedging_type(descriptor: int) -> None:
+        """Mirror the daemons' B10 contract: FIFOs and sockets refuse EINVAL (regular files and devices serve; a reader-less FIFO write is ENXIO at open)."""
+        mode = os.fstat(descriptor).st_mode
+        if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+            raise OSError(errno.EINVAL, "refusing non-regular file type")
+
+    @staticmethod
     def _errno_reply(request_id: str, error: OSError) -> Message:
+        if error.errno == errno.EINVAL:
+            return ErrorReply(
+                id=request_id, errno="EINVAL", message="refusing non-regular file type"
+            )
+        if error.errno == errno.ENXIO:
+            return ErrorReply(
+                id=request_id, errno="ENXIO", message="no reader on the FIFO"
+            )
         match error:
             case FileNotFoundError():
                 errno_name, message = "ENOENT", "No such file or directory"

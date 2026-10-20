@@ -1,0 +1,9 @@
+name: vulhub.zabbix-web
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  db_host:
+    default: mysql
+  server_host:
+    default: server

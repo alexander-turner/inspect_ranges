@@ -298,6 +298,7 @@ def test_check_realizer_branches(
 
     artifact = tmp_path / "artifacts"
     monkeypatch.setattr(images_module, "DEFAULT_ARTIFACT_DIR", artifact)
+    monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
 
     def status_of(results: "list[CheckResult]", name: str) -> str:
         return next(r.status for r in results if r.name == name)
@@ -322,6 +323,50 @@ def test_check_realizer_branches(
     # full artifact present
     write_bundle(artifact, b"fake", version="9.9.9-test")
     assert status_of(check_realizer(image_inspect=ok_proc), "daemon artifact") == "ok"
+
+
+@pytest.mark.parametrize(
+    ("pin", "inspect_rc", "status", "fragment"),
+    [
+        (
+            "docker.io/meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32,
+            0,
+            "ok",
+            "pinned docker.io",
+        ),
+        (
+            "docker.io/meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32,
+            1,
+            "warn",
+            "pulls it on first use",
+        ),
+        ("meridianlabsai/inspect-ranges-range:latest", 0, "fail", "digest-pinned"),
+        (None, 1, "warn", "builds it on first use"),
+    ],
+)
+def test_check_realizer_range_image_pin_states(
+    pin: "str | None",
+    inspect_rc: int,
+    status: str,
+    fragment: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The range-image row follows the pin: present ok, absent warns it pulls on first use, an unpinned value fails exactly where `up` would refuse (slice-3 review blocking: doctor must never gate on the local tag while a pin is set, nor bless a value `up` refuses)."""
+    import inspect_ranges._runtime.images as images_module
+    from inspect_ranges._doctor.checks import check_realizer
+
+    monkeypatch.setattr(images_module, "DEFAULT_ARTIFACT_DIR", tmp_path / "artifacts")
+    if pin is None:
+        monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
+    else:
+        monkeypatch.setenv("INSPECT_RANGES_RANGE_IMAGE", pin)
+    proc = subprocess.CompletedProcess(
+        ["docker"], inspect_rc, "ok\n" if inspect_rc == 0 else "", ""
+    )
+    row = next(r for r in check_realizer(image_inspect=proc) if r.name == "range image")
+    assert row.status == status
+    assert fragment in row.detail
 
 
 def _provider_results(tmp_path: Path) -> dict[str, CheckResult]:
@@ -552,3 +597,210 @@ def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
     assert closing.status == "ok", closing.detail
     acking = asyncio.run(scenario(b"\x06", tmp_path / "acking.sock"))
     assert acking.status == "warn", acking.detail
+
+
+# -- evidence group ------------------------------------------------------------
+
+
+def _evidence_results(
+    sink_override: str | None,
+    log_dir: str | None,
+    s3_client: object | None = None,
+) -> dict[str, CheckResult]:
+    from inspect_ranges._doctor.checks import check_evidence
+
+    return {
+        r.name: r for r in check_evidence(sink_override, log_dir, s3_client=s3_client)
+    }
+
+
+def test_check_evidence_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No override, no log dir: knobs ok, sink derived, local-only warned."""
+    monkeypatch.delenv("INSPECT_RANGES_EVIDENCE_BUFFER_MB", raising=False)
+    monkeypatch.delenv("INSPECT_RANGES_EVIDENCE_MAX_MB", raising=False)
+    results = _evidence_results(None, None)
+    assert results["knobs"].status == "ok"
+    assert results["sink"].status == "ok"
+    assert "derived from the eval log location" in results["sink"].detail
+    assert results["off-instance"].status == "warn"
+    assert results["off-instance"].fix is not None
+
+
+def test_check_evidence_bad_knob_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_RANGES_EVIDENCE_MAX_MB", "zero")
+    results = _evidence_results(None, None)
+    assert results["knobs"].status == "fail"
+    assert "INSPECT_RANGES_EVIDENCE_MAX_MB" in (results["knobs"].fix or "")
+
+
+def test_check_evidence_local_sink_probe(tmp_path: Path) -> None:
+    """A filesystem override is probed by writing and removing one file; the base is created like first use would."""
+    base = tmp_path / "evidence"
+    results = _evidence_results(str(base), None)
+    assert results["sink"].status == "ok"
+    assert base.is_dir()
+    assert list(base.iterdir()) == []  # probe file removed
+    assert results["off-instance"].status == "warn"
+
+
+def test_check_evidence_unwritable_local_sink_fails(tmp_path: Path) -> None:
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a file where the sink dir should be")
+    results = _evidence_results(str(blocker), None)
+    assert results["sink"].status == "fail"
+    assert "evidence disabled" in results["sink"].detail
+
+
+def test_check_evidence_off_instance_resolution() -> None:
+    """The override wins over the log dir; only a scheme the runtime supports counts as off-instance."""
+    s3_log = _evidence_results(None, "s3://bucket/logs")
+    assert s3_log["sink"].status == "ok"
+    assert s3_log["off-instance"].status == "ok"
+    local_override = _evidence_results("/tmp/evidence-x", "s3://bucket/logs")
+    assert local_override["off-instance"].status == "warn"
+
+
+def test_check_evidence_derived_unsupported_scheme_fails() -> None:
+    """A fsspec log store the runtime cannot write (gs://, az://) must fail the derived sink row: the runtime would disable evidence for every sample, and a green row here blesses the exact misconfiguration (the override arm was already hardened; this is its derived sibling)."""
+    for log_dir in ("gs://acme-evals/logs", "az://evals/logs", "file:///var/logs"):
+        results = _evidence_results(None, log_dir)
+        assert results["sink"].status == "fail", log_dir
+        assert "disable evidence for every sample" in results["sink"].detail
+        assert results["off-instance"].status != "ok", log_dir
+
+
+def test_check_evidence_off_instance_never_blesses_a_rejected_sink() -> None:
+    """When the sink row rejects a value, the off-instance row must not report ok for the same value: the row consumes the sink verdict, so this holds for every rejection shape, not just unsupported schemes."""
+    for override in ("gs://bucket/evidence", "s3://", "s3:///prefix"):
+        results = _evidence_results(override, None)
+        assert results["sink"].status == "fail", override
+        assert results["off-instance"].status == "warn", override
+        assert "sink row carries the failure" in results["off-instance"].detail
+
+
+def test_check_evidence_derived_malformed_s3_fails() -> None:
+    """A bucket-less s3:// log dir is the same silent-disable class one input left of gs://: the derived arm shares the runtime's own predicate, so it must refuse."""
+    results = _evidence_results(None, "s3://")
+    assert results["sink"].status == "fail"
+    assert results["off-instance"].status != "ok"
+
+
+def test_check_evidence_empty_override_is_unset(tmp_path: Path) -> None:
+    """The runtime treats an empty override as unset; doctor must evaluate the same sink (and never probe the cwd)."""
+    results = _evidence_results("", "s3://bucket/logs")
+    assert "derived from the eval log location" in results["sink"].detail
+    assert results["off-instance"].status == "ok"
+
+
+def test_check_evidence_unsupported_scheme_fails() -> None:
+    """A scheme the runtime would refuse is a config fail, never a green local-path probe (which would mkdir a literal 'gs:/...' tree)."""
+    for base in ("gs://bucket/evidence", "S3://bucket/evidence"):
+        results = _evidence_results(base, None)
+        assert results["sink"].status == "fail", base
+        assert "unsupported" in results["sink"].detail
+
+
+def test_check_evidence_each_bad_knob_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One broken knob never masks the other, and the fail row names the variables."""
+    monkeypatch.setenv("INSPECT_RANGES_EVIDENCE_BUFFER_MB", "64MB")
+    monkeypatch.setenv("INSPECT_RANGES_EVIDENCE_MAX_MB", "-1")
+    results = _evidence_results(None, None)
+    assert results["knobs"].status == "fail"
+    assert "INSPECT_RANGES_EVIDENCE_BUFFER_MB" in results["knobs"].detail
+    assert "INSPECT_RANGES_EVIDENCE_MAX_MB" in results["knobs"].detail
+
+
+def test_check_evidence_local_probe_value_error_is_a_row() -> None:
+    """Doctor's contract is a row per check: a NUL-bearing path must fail, not traceback."""
+    results = _evidence_results("/tmp/evi\x00dence", None)
+    assert results["sink"].status == "fail"
+
+
+# the stubbed probe of an s3:// sink lives in tests/test_evidence_s3.py
+# (that file carries the per-file boto pragmas)
+
+
+def test_check_build_absent_caches_are_healthy(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_build
+
+    results = check_build(tmp_path / "builds", tmp_path / "recipes")
+    by_name = {r.name: r for r in results}
+    assert by_name["builds cache"].status == "ok"
+    assert by_name["recipe cache"].status == "ok"
+    assert "first use" in by_name["builds cache"].detail
+    # ok and warn are the only statuses the check emits; what this pins is
+    # that the row exists and the fallback case warns (round-1: the membership
+    # assert was tautological)
+    assert by_name["build nameserver"].status in ("ok", "warn")
+    if by_name["build nameserver"].status == "warn":
+        assert "--build-nameserver" in (by_name["build nameserver"].fix or "")
+
+
+def test_check_build_flags_broken_recorded_state(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_build
+
+    builds = tmp_path / "builds"
+    (builds / "goodless").mkdir(parents=True)
+    (builds / "goodless" / "manifest.json").write_text("{not json")
+    recipes = tmp_path / "recipes"
+    (recipes / "acme.broken").mkdir(parents=True)
+    (recipes / "acme.broken" / "recipe.yaml").write_text("name: [unterminated")
+    results = check_build(builds, recipes)
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "fail"
+    assert "goodless" in by_name["manifests"].detail
+    assert by_name["cached recipes"].status == "fail"
+    assert "acme.broken" in by_name["cached recipes"].detail
+
+
+def test_check_build_passes_healthy_recorded_state(tmp_path: Path) -> None:
+    from inspect_ranges._build.manifest import (
+        BuildManifest,
+        VerificationRecord,
+        save_manifest,
+    )
+    from inspect_ranges._doctor.checks import check_build
+
+    from tests.test_build_recipes import write_recipe
+
+    builds = tmp_path / "builds"
+    manifest = BuildManifest(
+        range_name="healthy",
+        schema_version="0.3",
+        spec_sha256="0" * 64,
+        built_at="2026-10-18T00:00:00Z",
+        guests=(),
+        verification=VerificationRecord(
+            verified_at="2026-10-18T00:00:00Z", declarations=()
+        ),
+    )
+    save_manifest(manifest, builds)
+    recipes = tmp_path / "recipes"
+    write_recipe(recipes.parent / "range-shim", name="acme.ok")
+    (recipes).mkdir(exist_ok=True)
+    (recipes / "acme.ok").symlink_to(
+        recipes.parent / "range-shim" / "recipes" / "acme.ok"
+    )
+    results = check_build(builds, recipes)
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "ok"
+    assert by_name["cached recipes"].status == "ok"
+
+
+def test_check_build_parses_nested_slashed_name_manifests(tmp_path: Path) -> None:
+    """Round-1: slashed range names nest manifests one level deeper, which the glob missed."""
+    from inspect_ranges._doctor.checks import check_build
+
+    builds = tmp_path / "builds"
+    (builds / "acme" / "payroll").mkdir(parents=True)
+    (builds / "acme" / "payroll" / "manifest.json").write_text("{broken")
+    results = check_build(builds, tmp_path / "recipes")
+    by_name = {r.name: r for r in results}
+    assert by_name["manifests"].status == "fail"
+    assert "payroll" in by_name["manifests"].detail

@@ -15,7 +15,14 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Literal, NoReturn, Protocol
 
@@ -30,6 +37,8 @@ from .codec import (
 from .protocol import (
     DAEMON_INBOUND_BULK_CAP,
     DEFAULT_BULK_CAP,
+    DEFAULT_CHANNEL_BUDGET_MS,
+    DEFAULT_UNTIMED_BOUND_MS,
     EXEC_OBSERVATION_GRACE_S,
     AckRequest,
     Budget,
@@ -227,8 +236,8 @@ class MessageChannel:
         transport: Transport,
         *,
         label: str = "channel",
-        channel_budget_s: float = 180.0,
-        untimed_bound_s: float = 14_400.0,
+        channel_budget_s: float = DEFAULT_CHANNEL_BUDGET_MS / 1000,
+        untimed_bound_s: float = DEFAULT_UNTIMED_BOUND_MS / 1000,
         grace_s: float = _CHANNEL_GRACE_S,
     ) -> None:
         self._transport = transport
@@ -284,10 +293,17 @@ class MessageChannel:
         endpoint: str,
         reason: str,
         cause: BaseException | None = None,
+        *,
+        attempts: int | None = None,
     ) -> NoReturn:
-        """Every tamper verdict goes through here: dump the trace tail, then raise."""
+        """Every tamper verdict goes through here: dump the trace tail, then raise.
+
+        `attempts` stamps the delivery count when the caller is on the counting path (a post-delivery tamper demonstrably had its frames sent); `None` means the counting path was never reached.
+        """
         self._dump_trace(request, endpoint, reason)
-        raise TamperError(f"{request.kind} id={request.id}: {reason}") from cause
+        error = TamperError(f"{request.kind} id={request.id}: {reason}")
+        error.attempts = attempts
+        raise error from cause
 
     # -- budgets -------------------------------------------------------------
 
@@ -358,6 +374,12 @@ class MessageChannel:
                     connected=connected,
                 )
                 deliveries += 1
+            except TamperError as failure:
+                # a tamper verdict from inside the exchange is post-delivery
+                # when the frames went out: stamp the honest count
+                if connected[0]:
+                    deliveries += 1
+                raise stamped(failure) from failure.__cause__
             except TimeoutError:
                 if connected[0]:
                     # the frames went out; only the reply is missing. A window
@@ -413,6 +435,7 @@ class MessageChannel:
                     request,
                     endpoint,
                     f"reply carries id {reply.id}, request was id {request.id}",
+                    attempts=deliveries,
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
@@ -439,9 +462,10 @@ class MessageChannel:
                 await self._ack(endpoint, request.id)
             return reply, reply_bulk, deliveries
         self._dump_trace(request, endpoint, last_failure)
+        verdict = "reply lost" if deliveries else "unreachable"
         raise stamped(
             TransportFailure(
-                f"{request.kind} id={request.id}: reply lost after {_RETRY_ATTEMPTS} attempts ({last_failure})"
+                f"{request.kind} id={request.id}: {verdict} after {_RETRY_ATTEMPTS} attempts ({last_failure})"
             )
         )
 
@@ -498,13 +522,21 @@ class MessageChannel:
         return reply, reply_bulk
 
     def _expect[ReplyT: Message](
-        self, reply: Message, expected: type[ReplyT], request: Message, endpoint: str
+        self,
+        reply: Message,
+        expected: type[ReplyT],
+        request: Message,
+        endpoint: str,
+        *,
+        attempts: int | None = None,
     ) -> ReplyT:
+        """Narrow a reply to its expected type; a mismatch is a post-delivery tamper verdict carrying `attempts` from the caller's counting path."""
         if not isinstance(reply, expected):
             self._tamper(
                 request,
                 endpoint,
                 f"expected {expected.__name__}, got {reply.kind}",
+                attempts=attempts,
             )
         return reply
 
@@ -512,8 +544,8 @@ class MessageChannel:
         """Acknowledge a consumed durable result. Loss is best-effort (logged); tamper re-raises."""
         ack = AckRequest(id=request_id(), target_id=target_id)
         try:
-            reply, _, _ = await self._exchange(endpoint, ack)
-            self._expect(reply, OkReply, ack, endpoint)
+            reply, _, attempts = await self._exchange(endpoint, ack)
+            self._expect(reply, OkReply, ack, endpoint, attempts=attempts)
         except TamperError:
             raise
         except ChannelError as failure:
@@ -530,8 +562,8 @@ class MessageChannel:
     async def ping(self, guest: str) -> PongReply:
         """Liveness and protocol-version probe for one guest."""
         request = PingRequest(id=request_id())
-        reply, _, _ = await self._exchange(guest, request)
-        return self._expect(reply, PongReply, request, guest)
+        reply, _, attempts = await self._exchange(guest, request)
+        return self._expect(reply, PongReply, request, guest, attempts=attempts)
 
     async def session(self, guest: str) -> str:
         """The guest daemon's current session id, via a fresh ping.
@@ -637,28 +669,42 @@ class MessageChannel:
             else:
                 probe = request
                 send_frames = frames
+            connected = [False]
             try:
                 reply, bulk = await self._once(
-                    guest, probe, send_frames, window, bulk_cap=bulk_cap
+                    guest,
+                    probe,
+                    send_frames,
+                    window,
+                    bulk_cap=bulk_cap,
+                    connected=connected,
                 )
                 if probe is request:
                     deliveries += 1
+            except TamperError as failure:
+                if connected[0] and probe is request:
+                    deliveries += 1  # post-delivery verdict: the frames went out
+                raise stamped(failure) from failure.__cause__
             except TimeoutError:
-                if probe is request:
-                    deliveries += 1  # sent; only the reply is missing
-                # no reply within the allowance: switch to liveness polling
-                polling = True
-                if last_pending_at is None:
-                    silent_windows += 1
-                    if silent_windows >= _SILENT_WINDOW_LIMIT:
-                        self._dump_trace(request, guest, "silent transport")
-                        raise stamped(
-                            ChannelBudgetError(
-                                "channel",
-                                f"exec id={request.id}: {silent_windows} allowance "
-                                "windows with zero liveness evidence",
-                            )
-                        ) from None
+                if connected[0]:
+                    if probe is request:
+                        deliveries += 1  # sent; only the reply is missing
+                    # no reply within the allowance: switch to liveness polling
+                    polling = True
+                # a window that expired still inside connect provably sent
+                # nothing: not a delivery, and polling is not engaged by it
+                # (when polling is not already active, the request itself is
+                # resent same-id, which dedupe makes at-most-once-safe)
+                silent_windows += 1  # consecutive: any successful reply resets
+                if silent_windows >= _SILENT_WINDOW_LIMIT:
+                    self._dump_trace(request, guest, "silent transport")
+                    raise stamped(
+                        ChannelBudgetError(
+                            "channel",
+                            f"exec id={request.id}: {silent_windows} consecutive "
+                            "allowance windows with zero liveness evidence",
+                        )
+                    ) from None
                 continue
             except _ConnectFailure as failure:
                 losses += 1
@@ -735,6 +781,7 @@ class MessageChannel:
                     request,
                     guest,
                     f"reply carries id {reply.id}, request was id {request.id}",
+                    attempts=deliveries,
                 )
             if isinstance(reply, ErrorReply):
                 if reply.errno == "ESTALE":
@@ -753,7 +800,7 @@ class MessageChannel:
         self._log(
             logging.DEBUG, "reply", rid=request.id, endpoint=guest, detail=reply.kind
         )
-        result = self._expect(reply, ExecResult, request, guest)
+        result = self._expect(reply, ExecResult, request, guest, attempts=deliveries)
         await self._ack(guest, request.id)
         payload = bulk or b""
         stdout = payload[: result.stdout_size]
@@ -777,10 +824,10 @@ class MessageChannel:
             GuestError: Errno-tagged guest failure (`ENOENT`, `EISDIR`, ...).
         """
         request = ReadFileRequest(id=request_id(), path=path, max_bytes=cap)
-        reply, bulk, _ = await self._exchange(
+        reply, bulk, attempts = await self._exchange(
             guest, request, bulk_cap=cap, ack_consumed=True
         )
-        data = self._expect(reply, FileData, request, guest)
+        data = self._expect(reply, FileData, request, guest, attempts=attempts)
         if data.truncated:
             raise FileLimitExceeded(path, bulk or b"")
         return bulk or b""
@@ -808,7 +855,7 @@ class MessageChannel:
         reply, _, deliveries = await self._exchange(
             guest, request, data, ack_consumed=True
         )
-        self._expect(reply, OkReply, request, guest)
+        self._expect(reply, OkReply, request, guest, attempts=deliveries)
         return deliveries
 
     async def forward(self, guest: str, host: str, port: int) -> ForwardReply:
@@ -821,8 +868,8 @@ class MessageChannel:
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply:
         """Read the daemon's diagnostics: the in-guest ring buffer tail plus the supervised listener-restart count."""
         request = DiagRequest(id=request_id(), max_entries=max_entries)
-        reply, _, _ = await self._exchange(guest, request)
-        return self._expect(reply, DiagReply, request, guest)
+        reply, _, attempts = await self._exchange(guest, request)
+        return self._expect(reply, DiagReply, request, guest, attempts=attempts)
 
     # -- host lifecycle plane -----------------------------------------------
 
@@ -832,15 +879,21 @@ class MessageChannel:
         The seam's "periodic heartbeat" (`host-provider.md`) is driver-polled: a pull verb fits per-operation-connect and connectionless transports where an unsolicited push does not. The poll reuses the existing `PingRequest` to the host endpoint and expects the existing `Heartbeat` reply with the matching id, so no wire kind was added; a dedicated `HeartbeatRequest` kind is the recorded multi-host growth path (`range-host-v1.md`).
         """
         request = PingRequest(id=request_id())
-        reply, _, _ = await self._exchange(HOST_APPLIER, request)
-        return self._expect(reply, Heartbeat, request, HOST_APPLIER)
+        reply, _, attempts = await self._exchange(HOST_APPLIER, request)
+        return self._expect(reply, Heartbeat, request, HOST_APPLIER, attempts=attempts)
 
     async def realize(
-        self, bundle_digest: Sha256Hex, grants: Sequence[str]
+        self,
+        bundle_digest: Sha256Hex,
+        grants: Sequence[str],
+        *,
+        gap_allowances: Mapping[str | None, float] | None = None,
     ) -> AsyncIterator[StageReport]:
         """Stream stage reports until `ready` or `failed`.
 
         Hardened per the realize policy: every transport interaction (connect, send, each report read, the terminal drain, close) sits inside the layered budgets (per-report channel allowance, untimed outer total); reports are capped in count and must follow strictly increasing stage order; an early stream end is loss and is resumed by resending the same request id (the applier deduplicates and replays; already-yielded reports must replay identically); anything else is tamper.
+
+        `gap_allowances` widens the per-report allowance per gap, keyed by the stage the gap follows (`None` keys the gap before the first report). The applier legally emits nothing while a gap's occupant runs (the first-use range-image build before any report, `compose up --wait` after `construct`, the guest-boot exec after `boot`, the sequential readiness pass after `verify`), so the caller supplies each occupied gap's plan-derived envelope; the channel allowance stays the floor, every unlisted gap keeps it, and each gap stays bounded (a wedged occupant still fails at its envelope, not at the untimed total) (quality-review A10, extended to the sibling gaps by R2-3).
 
         Stage-order leniency, deliberate: skipping stages is allowed (a cache-hitting applier legitimately jumps ahead) and `failed` is allowed anywhere including first (an honest fast failure); only `ready` as the very first report is tamper. A hostile applier can emit the honest sequence anyway, so tightening buys no security.
         """
@@ -902,10 +955,16 @@ class MessageChannel:
                         raise ChannelBudgetError(
                             "untimed", f"realize id={request.id}: total bound expired"
                         )
+                    allowance = self._channel_budget_s
+                    if gap_allowances is not None:
+                        # a gap is keyed by the stage it follows (None before
+                        # the first report); its legitimate occupant emits no
+                        # intermediate report while it runs
+                        widened = gap_allowances.get(seen[-1].stage if seen else None)
+                        if widened is not None:
+                            allowance = max(allowance, widened)
                     try:
-                        async with asyncio.timeout(
-                            min(self._channel_budget_s, remaining)
-                        ):
+                        async with asyncio.timeout(min(allowance, remaining)):
                             message, _ = await reader.next()
                     except TimeoutError:
                         layer = (
@@ -950,7 +1009,9 @@ class MessageChannel:
                             detail=f"{message.errno}: {message.message}",
                         )
                         raise HostRefused(message.errno, message.message)
-                    report = self._expect(message, StageReport, request, HOST_APPLIER)
+                    report = self._expect(
+                        message, StageReport, request, HOST_APPLIER, attempts=attempt
+                    )
                     if report.id != request.id:
                         self._tamper(
                             request,
@@ -1003,15 +1064,16 @@ class MessageChannel:
                                         HOST_APPLIER,
                                         "data after the terminal stage",
                                     )
-                        except TimeoutError:
+                        except (TimeoutError, OSError) as drain_failure:
                             # the terminal report is already delivered; a stream
-                            # that never closes is logged, not a failure
+                            # that never closes, or resets instead of closing
+                            # (abnormal applier death), is logged, not a failure
                             self._log(
                                 logging.WARNING,
                                 "realize-no-close",
                                 rid=request.id,
                                 endpoint=HOST_APPLIER,
-                                detail="stream not closed after terminal stage",
+                                detail=f"stream not cleanly closed after terminal stage ({type(drain_failure).__name__})",
                             )
                         return
             finally:
@@ -1028,8 +1090,8 @@ class MessageChannel:
     async def teardown(self) -> None:
         """Tear the range down. Teardown is contractually idempotent: callers may retry with a fresh id."""
         request = TeardownRequest(id=request_id())
-        reply, _, _ = await self._exchange(HOST_APPLIER, request)
-        self._expect(reply, OkReply, request, HOST_APPLIER)
+        reply, _, attempts = await self._exchange(HOST_APPLIER, request)
+        self._expect(reply, OkReply, request, HOST_APPLIER, attempts=attempts)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,7 +1289,7 @@ class _StoredReply:
 class FakeGuest:
     """A deterministic in-memory guest endpoint speaking protocol v3.
 
-    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): EVERY request kind deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
+    Implements the daemon-side contract the conformance suite checks (two deliberate gaps: no per-stream `OutputCap`, so daemon-side truncation flags never fire here, and no `partial` tail on budget-expiry errors, because a cancelled handler has produced no observable output; `LocalEndpoint` and the real daemon cover both paths): every durable kind (`exec`, `read_file`, `write_file`) deduplicates on id (a resent id attaches to the running command or returns the stored result; the effect runs once), while `ack`, `poll`, `ping`, and `diag` are answered fresh without touching the durable store, exactly as both daemons dispatch; durable replies (including durable errors) held until acked, in-guest command budgets, `max_bytes`-honoring truncated reads, and errno-tagged file errors. `drop_next_reply` simulates a reply lost in flight; `close_mid_run` simulates a connection dying while the command runs.
     """
 
     exec_count: int
@@ -1273,7 +1335,7 @@ class FakeGuest:
     # -- daemon behavior ----------------------------------------------------
 
     async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-        """Produce the reply for one request; every kind dedupes on id."""
+        """Produce the reply for one request; durable kinds dedupe on id, control kinds answer fresh."""
         if isinstance(message, AckRequest):
             self._stored.pop(message.target_id, None)
             self._tombstones.pop(message.target_id, None)
@@ -1305,6 +1367,10 @@ class FakeGuest:
                 ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
                 None,
             )
+        if isinstance(message, (PingRequest, DiagRequest)):
+            # answered fresh, never charged to the durable store: both daemons
+            # dispatch ack/poll/ping/diag before the store acquire
+            return self._handle_fresh(message, bulk)
         if (stored := self._stored.get(message.id)) is not None:
             return stored
         if message.id in self._tombstones:

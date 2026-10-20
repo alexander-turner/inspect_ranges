@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges daemon-bundle"
+description: "Build the byte-deterministic daemon bundle the realizer bakes into goldens."
+reference: inspect-ranges daemon-bundle
+---

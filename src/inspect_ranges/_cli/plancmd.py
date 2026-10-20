@@ -4,15 +4,21 @@ from pathlib import Path
 
 import click
 
+from .._build.manifest import (
+    apply_build_manifest,
+    default_build_cache,
+    realized_backings,
+    stamp_bundle_sha256,
+)
 from .._compiler import PlanOptions, plan_json, render_bundle, resolve_plan
 from .._diagnostics import IssueError, ValidationReport, locate, parse_marked
+from .._runtime.images import default_image_cache
 from ..schema import validate_range
 from ..types import Issue, RangeSpec
+from .specpath import resolve_spec_path
 
-_DEFAULT_CACHE = Path.home() / ".cache" / "inspect-ranges" / "images"
 
-
-def _load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
+def load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
     report = validate_range(path)
     if not report.valid or report.spec is None:
         click.echo(report.render())
@@ -21,7 +27,7 @@ def _load_or_exit(ctx: click.Context, path: Path) -> RangeSpec:
     return report.spec
 
 
-def _planning_report(path: Path, error: IssueError) -> ValidationReport:
+def planning_report(path: Path, error: IssueError) -> ValidationReport:
     """Position planning issues against the source, through the same report machinery as validation."""
     try:
         _, node = parse_marked(path.read_text())
@@ -42,13 +48,13 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.argument("path", required=False, type=click.Path(exists=True, path_type=Path))
 @click.option("--json", "as_json", is_flag=True, help="Emit the plan as JSON.")
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
@@ -62,24 +68,33 @@ def _planning_report(path: Path, error: IssueError) -> ValidationReport:
 @click.pass_context
 def plan(
     ctx: click.Context,
-    path: Path,
+    path: Path | None,
     as_json: bool,
-    image_cache: Path,
+    image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
 ) -> None:
-    """Resolve a `range.yaml` into its immutable plan (allocations, requirements, totals).
+    """Resolve PATH (default `.`, a range directory or spec file) into its immutable plan.
 
     Unsupported constructs fail here, at planning, with the same diagnostics as `validate`.
     """
-    spec = _load_or_exit(ctx, path)
-    options = PlanOptions(
-        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
-    )
+    path = resolve_spec_path(path)
+    spec = load_or_exit(ctx, path)
+    if image_cache is None:
+        image_cache = default_image_cache()
     try:
+        spec, realized_sections, _ = apply_build_manifest(
+            spec, image_cache=image_cache, build_cache=default_build_cache()
+        )
+        options = PlanOptions(
+            image_cache=image_cache,
+            cpu_model=cpu_model,
+            cid_base=cid_base,
+            realized_sections=realized_sections,
+        )
         resolved = resolve_plan(spec, options)
     except IssueError as error:
-        click.echo(_planning_report(path, error).render())
+        click.echo(planning_report(path, error).render())
         ctx.exit(1)
     if as_json:
         click.echo(plan_json(resolved), nl=False)
@@ -109,7 +124,7 @@ def plan(
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.argument("path", required=False, type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--output",
     "-o",
@@ -121,8 +136,8 @@ def plan(
 @click.option(
     "--image-cache",
     type=click.Path(path_type=Path),
-    default=_DEFAULT_CACHE,
-    show_default="~/.cache/inspect-ranges/images",
+    default=None,
+    show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
 @click.option("--cpu-model", default="host-passthrough", show_default=True)
@@ -133,28 +148,55 @@ def plan(
     show_default=True,
     help="First vsock CID (plan-time input; realizer batteries use 3000+).",
 )
+@click.option(
+    "--evidence-capture",
+    is_flag=True,
+    default=False,
+    help="Render the evidence-capture sidecar (per-segment pcap; evidence-v1).",
+)
 @click.pass_context
 def render(
     ctx: click.Context,
-    path: Path,
+    path: Path | None,
     out: Path,
-    image_cache: Path,
+    image_cache: Path | None,
     cpu_model: str,
     cid_base: int,
+    evidence_capture: bool,
 ) -> None:
-    """Render a `range.yaml` into its realization bundle (plan + every artifact `apply` needs)."""
-    spec = _load_or_exit(ctx, path)
-    options = PlanOptions(
-        image_cache=image_cache, cpu_model=cpu_model, cid_base=cid_base
-    )
+    """Render PATH (default `.`, a range directory or spec file) into its realization bundle."""
+    path = resolve_spec_path(path)
+    spec = load_or_exit(ctx, path)
+    if image_cache is None:
+        image_cache = default_image_cache()
     try:
+        spec, realized_sections, consumed = apply_build_manifest(
+            spec, image_cache=image_cache, build_cache=default_build_cache()
+        )
+        options = PlanOptions(
+            image_cache=image_cache,
+            cpu_model=cpu_model,
+            cid_base=cid_base,
+            evidence_capture=evidence_capture,
+            realized_sections=realized_sections,
+            realized_backings=realized_backings(consumed) if consumed else {},
+        )
         render_bundle(spec, out, options)
     except IssueError as error:
-        click.echo(_planning_report(path, error).render())
+        click.echo(planning_report(path, error).render())
         ctx.exit(1)
     manifest_bytes = (out / "manifest.json").read_bytes()
     manifest = json_module.loads(manifest_bytes)
     digest = hashlib.sha256(manifest_bytes).hexdigest()
+    if consumed is not None:
+        # wraps-by-reference: the build manifest records the runtime bundle
+        # rendered from it (the spine's two-manifest decision); the stamp is a
+        # locked read-modify-write that lands only while the on-disk manifest
+        # is still the revision this render consumed, so a concurrent rebuild
+        # is never clobbered (round-1 review)
+        stamp_bundle_sha256(
+            default_build_cache(), consumed.range_name, consumed.spec_sha256, digest
+        )
     click.echo(
         f"{click.style('✓', fg='green')} {out}  bundle sha256:{digest[:16]}  ({len(manifest['files']) + 1} files)"
     )

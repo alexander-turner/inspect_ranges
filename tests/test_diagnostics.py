@@ -100,6 +100,30 @@ def test_dual_stack_union_error_collapses_to_one_issue(tmp_path: Path) -> None:
     assert "IPv4 or IPv6 network" in report.issues[0].message
 
 
+def test_scalar_union_error_collapses_with_authored_path(tmp_path: Path) -> None:
+    # One mistake against Variable.default (str | int | bool) must report ONE
+    # issue at the authored path, not one per union member with pydantic's
+    # machine tags in the path.
+    report = report_with(
+        "variables: { foo: { default: [1, 2] } }",
+        tmp_path,
+    )
+    union_issues = [i for i in report.issues if i.path_str.startswith("variables")]
+    assert [i.path_str for i in union_issues] == ["variables.foo.default"]
+    assert "matches none of the field's allowed types" in union_issues[0].message
+    assert "str" in union_issues[0].message
+
+
+def test_did_you_mean_inside_dict_valued_models(tmp_path: Path) -> None:
+    report = report_with(
+        "variables: { foo: { default: warm, mni: 1 } }",
+        tmp_path,
+    )
+    issue = next(i for i in report.issues if i.code == "unknown-key")
+    assert issue.path_str == "variables.foo.mni"
+    assert issue.hint is not None and "min" in issue.hint
+
+
 ACL_BASE = """
 networks:
   - {{ name: lab, cidr: 10.0.0.0/24, mode: isolated }}
@@ -734,6 +758,106 @@ def test_structural_errors_suppress_semantic_stage(tmp_path: Path) -> None:
             "attacker",
             id="attacker-no-foothold",
         ),
+        pytest.param(
+            """
+            attacker:
+              interfaces: [{ network: lab }]
+              entry: external
+              egress: open
+            """,
+            "attacker-egress-requires-nat",
+            "attacker.egress",
+            id="attacker-egress-requires-nat",
+        ),
+        pytest.param(
+            """
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+                services:
+                  - { name: httpd, port: 80 }
+                  - { name: httpd, port: 8080 }
+            """,
+            "duplicate-service-name",
+            "hosts[0].services[1].name",
+            id="duplicate-service-name",
+        ),
+        pytest.param(
+            """
+            hosts:
+              - name: ../../escape
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: lab }]
+            """,
+            "invalid-name",
+            "hosts[0].name",
+            id="invalid-name-traversal",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: Corp, cidr: 10.0.0.0/24, mode: isolated }
+            hosts:
+              - name: web
+                os: { type: linux }
+                image: img
+                interfaces: [{ network: Corp }]
+            attacker:
+              interfaces: [{ network: Corp }]
+              entry: external
+            """,
+            "invalid-name",
+            "networks[0].name",
+            id="invalid-name-uppercase",
+        ),
+        pytest.param(
+            f"""
+            hosts:
+              - name: {"a" * 64}
+                os: {{ type: linux }}
+                image: img
+                interfaces: [{{ network: lab }}]
+            """,
+            "invalid-name",
+            "hosts[0].name",
+            id="invalid-name-too-long",
+        ),
+        pytest.param(
+            """
+            networks:
+              - { name: lab, cidr: 10.0.0.0/24, mode: isolated }
+              - { name: corp-internal-east, cidr: 10.0.1.0/24, mode: isolated }
+              - { name: corp-internal-west, cidr: 10.0.2.0/24, mode: isolated }
+            """,
+            "device-name-collision",
+            "networks[2].name",
+            id="device-name-collision",
+        ),
+        pytest.param(
+            # the range name becomes the compose project and a state-directory
+            # path segment the CLI mkdirs and rmtrees (quality review R2-1)
+            "range: { name: ../../../../escaped, description: traversal }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-traversal",
+        ),
+        pytest.param(
+            # dots are legal in guest and network names but compose refuses
+            # them in project names, so the range name grammar excludes them
+            "range: { name: zabbix.v3, description: dotted }",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-dot",
+        ),
+        pytest.param(
+            f"range: {{ name: {'a' * 48}, description: long }}",
+            "invalid-name",
+            "range.name",
+            id="invalid-range-name-too-long",
+        ),
     ],
 )
 def test_semantic_codes(
@@ -746,6 +870,22 @@ def test_semantic_codes(
     # (semantic_checked behavior is pinned separately: nested-validator errors suppress
     # the root pass, see test_structural_errors_suppress_semantic_stage and the
     # invalid-allow-entry test)
+
+
+def test_undeclared_telemetry_sink_warns_but_stays_valid(tmp_path: Path) -> None:
+    """A sink may be an abstract collector name (windows-ad-v1 slice 5), so an undeclared sink is a WARNING on the sink path and the spec stays valid."""
+    report = report_with(
+        """
+        defense:
+          tier: D2
+          telemetry: [{ source: web, collector: sysmon, sink: ghost }]
+        """,
+        tmp_path,
+    )
+    assert report.valid
+    issue = next(i for i in report.issues if i.code == "telemetry-undeclared-guest")
+    assert issue.severity == "warning"
+    assert issue.path_str == "defense.telemetry[0].sink"
 
 
 def test_semantic_report_is_complete(tmp_path: Path) -> None:
@@ -816,6 +956,16 @@ def test_yaml_syntax_error_has_position(tmp_path: Path) -> None:
     report = report_for("range:\n  name: [unclosed\n", tmp_path)
     assert codes(report) == ["yaml-syntax"]
     assert report.issues[0].line is not None
+
+
+def test_unreadable_file_reports_not_raises(tmp_path: Path) -> None:
+    """A directory or non-UTF-8 file becomes a `file-unreadable` issue, never a raise."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    for path in (tmp_path, binary):
+        report = validate_range(path)
+        assert not report.valid
+        assert codes(report) == ["file-unreadable"]
 
 
 def test_variables_substitute_defaults_before_validation(tmp_path: Path) -> None:

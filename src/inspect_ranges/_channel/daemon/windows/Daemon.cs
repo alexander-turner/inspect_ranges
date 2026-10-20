@@ -118,21 +118,12 @@ namespace VsockD
     sealed class SockSource : Wire.IByteSource
     {
         private readonly Socket _s;
-        private byte[] _buf = new byte[0];
-        private int _pos;
 
         public SockSource(Socket s) { _s = s; }
 
         public void ReadExact(byte[] dest, int count)
         {
             int got = 0;
-            int avail = _buf.Length - _pos;
-            if (avail > 0)
-            {
-                int take = Math.Min(avail, count);
-                Array.Copy(_buf, _pos, dest, 0, take);
-                _pos += take; got = take;
-            }
             while (got < count)
             {
                 int n = Io.Recv(_s, dest, got, count - got);
@@ -149,12 +140,12 @@ namespace VsockD
         public const int Bound = 256;
         private readonly object _lock = new object();
         private readonly List<Dictionary<string, object>> _entries = new List<Dictionary<string, object>>();
-        private readonly long _started = DateTime.UtcNow.Ticks;
+        private readonly long _started = Mono.NowMs();
 
         public void Add(string level, string eventName, string requestId, string detail)
         {
             Dictionary<string, object> entry = new Dictionary<string, object>();
-            entry["ts_ms"] = (DateTime.UtcNow.Ticks - _started) / TimeSpan.TicksPerMillisecond;
+            entry["ts_ms"] = Mono.NowMs() - _started; // monotonic: see Mono (B8)
             entry["level"] = level;
             entry["event"] = eventName;
             if (requestId != null) entry["request_id"] = requestId;
@@ -164,7 +155,15 @@ namespace VsockD
                 _entries.Add(entry);
                 if (_entries.Count > Bound) _entries.RemoveAt(0);
             }
-            Daemon.Log(level + " " + eventName + " " + detail);
+            // -console runs only: without this echo a persistent listen
+            // failure is undiagnosable (the ring is readable only over the
+            // channel the listener provides). Stdout of an interactive
+            // console, never a guest-visible file (B7).
+            if (Daemon.ConsoleEcho)
+            {
+                try { Console.WriteLine(level + " " + eventName + " " + detail); }
+                catch (Exception) { }
+            }
         }
 
         public List<object> Tail(long limit)
@@ -235,16 +234,16 @@ namespace VsockD
         // change rather than a silent loss of exactly-once (provider-v1
         // layer 2b)
         public static readonly string Session = Guid.NewGuid().ToString("N");
+        // set by -console mode only: echo diag entries to stdout (B7 keeps
+        // everything else off guest-visible surfaces)
+        public static bool ConsoleEcho;
 
-        public static void Log(string msg)
-        {
-            try
-            {
-                File.AppendAllText(Path.Combine(BaseDir, "vsockd.log"),
-                    DateTime.UtcNow.ToString("o") + " " + msg + "\r\n");
-            }
-            catch (Exception) { }
-        }
+        // quality-review B7: diagnostics live ONLY in the in-memory ring
+        // (read over the channel via diag_result). The daemon used to also
+        // append every entry to C:\vsockd\vsockd.log, a file any in-guest
+        // reader could see, contradicting the recorded diag posture
+        // ("an in-guest ring buffer, never written anywhere the range can
+        // see"); nothing is written to disk now.
 
         // ---------------------------------------------------------- listener
 
@@ -264,6 +263,13 @@ namespace VsockD
                 try
                 {
                     listener = new Socket((AddressFamily)VSockEndPoint.AF_VSOCK, SocketType.Stream, ProtocolType.Unspecified);
+                    // quality-review A1: .NET Framework creates socket handles
+                    // inheritable (WSASocketW without NO_HANDLE_INHERIT), and
+                    // Exec launches children with bInheritHandles=true, so an
+                    // exec'd child could otherwise accept() driver connections
+                    // on the inherited listener. Un-inherit, mirroring the
+                    // pipe-end handling in Exec.cs.
+                    Native.SetHandleInformation(listener.Handle, Native.HANDLE_FLAG_INHERIT, 0);
                     listener.Bind(new VSockEndPoint(VSockEndPoint.VMADDR_CID_ANY, PORT));
                     listener.Listen(64);
                 }
@@ -298,7 +304,16 @@ namespace VsockD
                 }
                 if (!readable) { wedgeSignals = 0; continue; }
 
-                Socket conn;
+                Socket conn = null;
+                int retrySleepMs = 0;
+                // Native.InheritLock closes the accept-to-uninherit window
+                // against a concurrent exec's bInheritHandles=true snapshot
+                // (review finding on A1); Accept here is non-blocking (Poll
+                // said readable) and the error-path backoff sleeps run below,
+                // after the lock releases, so the lock is held only across
+                // fast calls.
+                lock (Native.InheritLock)
+                {
                 try { conn = listener.Accept(); }
                 catch (SocketException se)
                 {
@@ -316,27 +331,49 @@ namespace VsockD
                                 "readable but unacceptable x" + wedgeSignals);
                             return; // supervisor rebinds
                         }
-                        Thread.Sleep(2);
-                        continue;
+                        retrySleepMs = 2;
                     }
-                    consecutiveFailures++;
-                    Ring.Add("warn", "accept-failed", null, se.Message);
-                    if (consecutiveFailures >= 8) return; // supervisor rebinds
-                    Thread.Sleep(10);
-                    continue;
+                    else
+                    {
+                        consecutiveFailures++;
+                        Ring.Add("warn", "accept-failed", null, se.Message);
+                        if (consecutiveFailures >= 8) return; // supervisor rebinds
+                        retrySleepMs = 10;
+                    }
                 }
                 catch (Exception e)
                 {
                     consecutiveFailures++;
                     Ring.Add("warn", "accept-failed", null, e.Message);
                     if (consecutiveFailures >= 8) return;
-                    Thread.Sleep(10);
+                    retrySleepMs = 10;
+                }
+                // quality-review A1: un-inherit each accepted connection so a
+                // child spawned mid-request cannot hold the stream open past
+                // our close (stranding the host's residual read) or write
+                // forged bytes into it
+                if (conn != null)
+                {
+                    try { Native.SetHandleInformation(conn.Handle, Native.HANDLE_FLAG_INHERIT, 0); } catch (Exception) { }
+                }
+                }
+                if (conn == null)
+                {
+                    // accept failed: back off outside the lock so an error
+                    // storm here never serializes concurrent exec launches
+                    Thread.Sleep(retrySleepMs);
                     continue;
                 }
                 consecutiveFailures = 0;
                 wedgeSignals = 0;
 
                 try { conn.Blocking = true; } catch (Exception) { }
+                // quality-review B9: idle deadlines matching the Go daemon's
+                // 60 s SO_RCVTIMEO/SNDTIMEO, so a connected-silent peer (the
+                // nested-virt storm's half-open shape) cannot pin a thread
+                // and socket forever; the timeout surfaces as a
+                // SocketException, which HandleConn's catch closes.
+                try { conn.ReceiveTimeout = 60000; conn.SendTimeout = 60000; } catch (Exception) { }
                 try { conn.SendBufferSize = 4 << 20; conn.ReceiveBufferSize = 4 << 20; } catch (Exception) { }
                 VSockEndPoint peer = null;
                 try { peer = conn.RemoteEndPoint as VSockEndPoint; } catch (Exception) { }
@@ -382,7 +419,7 @@ namespace VsockD
                 }
                 Io.SendAll(conn, wire, 0, wire.Length);
             }
-            catch (Exception e) { Log("conn: " + e.GetType().Name + ": " + e.Message); }
+            catch (Exception e) { Ring.Add("warn", "conn-failed", null, e.GetType().Name + ": " + e.Message); }
             finally { try { conn.Close(); } catch (Exception) { } }
         }
 
@@ -491,7 +528,7 @@ namespace VsockD
             {
                 Dictionary<string, object> pending = Base(id, "pending");
                 pending["target_id"] = target;
-                pending["elapsed_ms"] = (DateTime.UtcNow.Ticks - running.StartTicks) / TimeSpan.TicksPerMillisecond;
+                pending["elapsed_ms"] = Mono.NowMs() - running.StartMs;
                 return new StoredReply(pending, null);
             }
             return ErrorReply(id, "ENOENT", "no stored result", null);
@@ -586,6 +623,8 @@ namespace VsockD
                 // incremental, bounded: at most limit+1 bytes ever in memory
                 using (FileStream fs = File.OpenRead(path))
                 {
+                    StoredReply refusal = RefuseNonDisk(id, fs, path);
+                    if (refusal != null) return refusal;
                     MemoryStream data = new MemoryStream();
                     byte[] chunk = new byte[1 << 20];
                     while (data.Length <= limit)
@@ -626,10 +665,29 @@ namespace VsockD
                 // "mode" is accepted by the codec for cross-codec parity but
                 // POSIX permission bits have no NTFS equivalent (ACLs), so
                 // the Windows daemon deliberately ignores it
-                File.WriteAllBytes(path, data);
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                {
+                    StoredReply refusal = RefuseNonDisk(id, fs, path);
+                    if (refusal != null) return refusal;
+                    fs.Write(data, 0, data.Length);
+                }
                 return OkReply(id);
             }
             catch (Exception e) { return FileError(id, e, path); }
+        }
+
+        // finding B10: the Windows file planes serve FILE_TYPE_DISK only
+        // (FileMode.Create on a \\.\pipe\ path connects as a pipe client).
+        // Deliberate per-platform deviation, recorded in the B10 commit: the
+        // Go daemon keeps serving character/block devices because a battery
+        // pins its bounded /dev/zero read as a contract; Windows has no such
+        // pinned contract, and device paths (NUL, CON) are not oracle or
+        // provider inputs, so the stricter refusal stands here.
+        static StoredReply RefuseNonDisk(string id, FileStream fs, string path)
+        {
+            if (Native.GetFileType(fs.SafeFileHandle.DangerousGetHandle()) != Native.FILE_TYPE_DISK)
+                return ErrorReply(id, "EINVAL", "refusing non-disk file (pipes and devices wedge the file plane): " + path, null);
+            return null;
         }
 
         static StoredReply FileError(string id, Exception e, string path)

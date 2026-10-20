@@ -1,6 +1,7 @@
 """Slice-3 battery: the op surface's mapping details, per-call limits, and the wrapper path."""
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from inspect_ai.util._sandbox.limits import (
     override_max_read_file_size,
 )
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
+    GuestError,
     LoopbackTransport,
     MessageChannel,
     TamperError,
@@ -27,7 +29,7 @@ from inspect_ranges._channel.protocol import (
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._provider.errors import SessionChangedError
 from inspect_ranges._provider.ops import AGENT_HOME, resolve_guest_path
-from inspect_ranges._provider.provider import LibvirtRangeSandboxEnvironment
+from inspect_ranges._provider.provider import RangeSandboxEnvironment
 from inspect_ranges._provider.retry import RetryConfig, RetryPolicy
 from inspect_ranges._provider.state import SampleHandle
 
@@ -42,7 +44,7 @@ FAST_RETRY = RetryConfig(
 
 def make_env(
     root: Path,
-) -> tuple[LibvirtRangeSandboxEnvironment, LoopbackTransport]:
+) -> tuple[RangeSandboxEnvironment, LoopbackTransport]:
     transport = LoopbackTransport(guests=())
     transport.guests["box"] = LocalEndpoint("box", root)
     channel = MessageChannel(transport, label="ops-test")
@@ -56,7 +58,7 @@ def make_env(
         channel=channel,
         retry=FAST_RETRY,
     )
-    return LibvirtRangeSandboxEnvironment("box", handle), transport
+    return RangeSandboxEnvironment("box", handle), transport
 
 
 def test_path_resolution() -> None:
@@ -214,7 +216,7 @@ def test_estale_retry_reruns_a_fresh_wrapper(tmp_path: Path) -> None:
             channel=channel,
             retry=FAST_RETRY,
         )
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         chunk = "w" * 40_000  # forces the wrapper path
         result = await env.exec(["printf", "%s", chunk])
         assert result.success, f"fabricated failure leaked: {result.stderr!r}"
@@ -253,6 +255,23 @@ def test_unavailable_after_retries_against_a_dead_endpoint(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
+def test_dead_daemon_at_confirm_time_still_maps_read_file(tmp_path: Path) -> None:
+    """With a PINNED session, the confirm ping hits the same dead daemon: its own failure must not replace the mapped SandboxUnavailableError (quality-review B4; exec and write_file already behaved)."""
+
+    async def scenario() -> None:
+        env, transport = make_env(tmp_path)
+        env._handle.sessions["box"] = "a" * 32  # pyright: ignore[reportPrivateUsage]
+        transport.guests = {}  # dead: op fails, and the confirm ping fails too
+        with pytest.raises(SandboxUnavailableError):
+            await env.read_file("x", text=False)
+        with pytest.raises(SandboxUnavailableError):
+            await env.exec(["echo", "hi"])
+        with pytest.raises(SandboxUnavailableError):
+            await env.write_file("x", b"data")
+
+    asyncio.run(scenario())
+
+
 def test_tamper_is_never_unavailable(tmp_path: Path) -> None:
     """A tampering guest fails the sample hard; it must never read as 'temporarily unavailable'."""
 
@@ -269,7 +288,7 @@ def test_tamper_is_never_unavailable(tmp_path: Path) -> None:
             channel=channel,
             retry=FAST_RETRY,
         )
-        env = LibvirtRangeSandboxEnvironment("web", handle)
+        env = RangeSandboxEnvironment("web", handle)
         with pytest.raises(TamperError):
             await env.exec(["echo", "hi"])
 
@@ -291,23 +310,24 @@ def test_daemon_stream_truncation_raises_output_limit(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+class RestartAcrossDelivery(LocalEndpoint):
+    """Loses the first exec reply in flight and restarts before the resend arrives."""
+
+    def __init__(self, name: str, root: Path) -> None:
+        super().__init__(name, root)
+        self.interrupted = False
+
+    async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
+        reply = await super().handle(message, bulk)
+        if isinstance(message, ExecRequest) and not self.interrupted:
+            self.interrupted = True
+            self.drop_next_reply = True  # the reply is lost in flight...
+            self.restart()  # ...and the daemon restarts before the resend
+        return reply
+
+
 def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> None:
     """Layer 2b: an exec whose delivery needed a same-id resend across a daemon restart surfaces `SessionChangedError` (the restart emptied the dedupe store, so exactly-once no longer holds); the re-pin lets the next op proceed."""
-
-    class RestartAcrossDelivery(LocalEndpoint):
-        """Loses the first exec reply in flight and restarts before the resend arrives."""
-
-        def __init__(self, name: str, root: Path) -> None:
-            super().__init__(name, root)
-            self.interrupted = False
-
-        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-            reply = await super().handle(message, bulk)
-            if isinstance(message, ExecRequest) and not self.interrupted:
-                self.interrupted = True
-                self.drop_next_reply = True  # the reply is lost in flight...
-                self.restart()  # ...and the daemon restarts before the resend
-            return reply
 
     async def scenario() -> None:
         transport = LoopbackTransport(guests=())
@@ -326,7 +346,7 @@ def test_session_pin_detects_daemon_restart_across_resend(tmp_path: Path) -> Non
         )
         pinned = endpoint.session  # what sample_init pins at boot
         handle.sessions["box"] = pinned
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError) as info:
             await env.exec(["echo", "hi"])
         assert info.value.pinned == pinned
@@ -427,19 +447,6 @@ def test_resent_exec_that_times_out_still_confirms_the_session(
 ) -> None:
     """A resent delivery that lands as a command-layer budget expiry is exactly as restart-risky as a resent success: the session verdict outranks the timeout verdict."""
 
-    class RestartAcrossDelivery(LocalEndpoint):
-        def __init__(self, name: str, root: Path) -> None:
-            super().__init__(name, root)
-            self.interrupted = False
-
-        async def handle(self, message: Message, bulk: bytes | None) -> _StoredReply:
-            reply = await super().handle(message, bulk)
-            if isinstance(message, ExecRequest) and not self.interrupted:
-                self.interrupted = True
-                self.drop_next_reply = True
-                self.restart()
-            return reply
-
     async def scenario() -> None:
         transport = LoopbackTransport(guests=())
         endpoint = RestartAcrossDelivery("box", tmp_path)
@@ -456,7 +463,7 @@ def test_resent_exec_that_times_out_still_confirms_the_session(
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             await env.exec(["sh", "-c", "sleep 30"], timeout=1)
 
@@ -525,7 +532,7 @@ def test_fresh_id_retry_across_restart_confirms_even_on_errno_failure(
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             # the retry's second attempt fails ENOENT (missing cwd), an errno
             # shape that previously skipped the confirm entirely
@@ -566,7 +573,7 @@ def test_resent_write_across_restart_confirms_the_session(tmp_path: Path) -> Non
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SessionChangedError):
             await env.write_file("note.txt", "contents")
         fresh = await env.exec(["echo", "ok"])
@@ -609,8 +616,29 @@ def test_uncertifiable_success_downgrades_to_unavailable(tmp_path: Path) -> None
             retry=FAST_RETRY,
         )
         handle.sessions["box"] = endpoint.session
-        env = LibvirtRangeSandboxEnvironment("box", handle)
+        env = RangeSandboxEnvironment("box", handle)
         with pytest.raises(SandboxUnavailableError):
             await env.exec(["echo", "hi"])
+
+    asyncio.run(scenario())
+
+
+def test_local_endpoint_mirrors_the_daemon_fifo_refusal(tmp_path: Path) -> None:
+    """The CI endpoint mirrors the daemons' B10 contract: file ops on a FIFO refuse EINVAL instead of wedging (quality-review integration: the Go/C# refusal landed without a mock mirror)."""
+
+    async def scenario() -> None:
+        transport = LoopbackTransport(guests=())
+        endpoint = LocalEndpoint("box", tmp_path)
+        transport.guests["box"] = endpoint
+        channel = MessageChannel(transport, label="fifo-refusal")
+        fifo = tmp_path / "tmp" / "wedge.fifo"
+        fifo.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(fifo)
+        with pytest.raises(GuestError) as read_error:
+            await channel.read_file("box", "/tmp/wedge.fifo")
+        assert read_error.value.errno == "EINVAL"
+        with pytest.raises(GuestError) as write_error:
+            await channel.write_file("box", "/tmp/wedge.fifo", b"x")
+        assert write_error.value.errno in ("EINVAL", "ENXIO")
 
     asyncio.run(scenario())

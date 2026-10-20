@@ -7,10 +7,11 @@ The primary consumers are models authoring specs, so the design optimizes for co
 
 import difflib
 from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic.fields import FieldInfo
 from pydantic_core import ErrorDetails
 
 Severity = Literal["error", "warning"]
@@ -271,6 +272,13 @@ def issues_from_yaml_error(error: yaml.YAMLError) -> list[Issue]:
     return [Issue(code="yaml-syntax", path=(), line=line, col=col, message=message)]
 
 
+def issues_from_read_error(error: OSError | UnicodeDecodeError) -> list[Issue]:
+    """Translate a file read failure (a directory, permissions, non-UTF-8 content) into a single `file-unreadable` issue."""
+    return [
+        Issue(code="file-unreadable", path=(), message=f"cannot read file: {error}")
+    ]
+
+
 def issues_from_validation_error(
     error: ValidationError, root_model: type[BaseModel], node: yaml.Node | None
 ) -> tuple[list[Issue], bool]:
@@ -295,12 +303,43 @@ def issues_from_validation_error(
                 message=f"{value!r} is not a valid IPv4 or IPv6 {kind}",
             )
         )
-    cleaned = [(detail, _clean_loc(detail["loc"])) for detail in details]
+    cleaned = [(detail, _reported_loc(root_model, detail["loc"])) for detail in details]
     carried_locs = {
         loc for detail, loc in cleaned if _carried_issues(detail) is not None
     }
+    # One authored mistake against a plain scalar union (str | int | bool)
+    # produces one pydantic error per member, each loc carrying a bare member
+    # tag the walk consumed; fold each such group into a single issue.
+    union_tags: dict[tuple[PathElement, ...], list[str]] = {}
+    for detail, loc in cleaned:
+        if _carried_issues(detail) is not None:
+            continue
+        raw_clean = _clean_loc(detail["loc"])
+        if len(raw_clean) == len(loc) + 1 and isinstance(raw_clean[-1], str):
+            union_tags.setdefault(loc, []).append(str(raw_clean[-1]))
+    collapsed = {loc: tags for loc, tags in union_tags.items() if len(tags) > 1}
+    if collapsed:
+        # field-level errors suppressed the root cross-reference pass
+        semantic_checked = False
+    collapsed_emitted: set[tuple[PathElement, ...]] = set()
     for detail, loc in cleaned:
         carried = _carried_issues(detail)
+        if carried is None and loc in collapsed:
+            if loc in collapsed_emitted:
+                continue
+            collapsed_emitted.add(loc)
+            position = locate(node, loc)
+            value = detail.get("input")
+            issues.append(
+                Issue(
+                    code="invalid-type",
+                    path=loc,
+                    line=position[0] if position else None,
+                    col=position[1] if position else None,
+                    message=f"{value!r} matches none of the field's allowed types ({', '.join(collapsed[loc])})",
+                )
+            )
+            continue
         if (
             carried is None
             and detail["type"] == "literal_error"
@@ -316,7 +355,10 @@ def issues_from_validation_error(
                 semantic_checked = False
             for issue in carried:
                 full_path = loc + issue.path
-                position = locate(node, full_path)
+                # unknown-key issues point at the key itself, matching the
+                # direct extra_forbidden path (registry-dispatched goal specs
+                # carry their strict-field refusals through IssueError)
+                position = locate(node, full_path, key=issue.code == "unknown-key")
                 issues.append(
                     issue.model_copy(
                         update={
@@ -328,7 +370,7 @@ def issues_from_validation_error(
                 )
             continue
         semantic_checked = False
-        issues.append(_structural_issue(detail, loc, root_model, node))
+        issues.append(_structural_issue(detail, loc, detail["loc"], root_model, node))
     return issues, semantic_checked
 
 
@@ -366,6 +408,7 @@ def _carried_issues(detail: ErrorDetails) -> list[Issue] | None:
 def _structural_issue(
     detail: ErrorDetails,
     loc: tuple[PathElement, ...],
+    raw_loc: tuple[int | str, ...],
     root_model: type[BaseModel],
     node: yaml.Node | None,
 ) -> Issue:
@@ -387,7 +430,9 @@ def _structural_issue(
             hint = deferred_hint
         else:
             message = f"unknown key '{key_name}'"
-            hint = did_you_mean(key_name, _candidate_keys(root_model, loc[:-1]))
+            hint = did_you_mean(
+                key_name, _candidate_keys(root_model, _clean_loc(raw_loc)[:-1])
+            )
     elif error_type == "missing":
         message = "missing required field"
     elif error_type == "ip_v4_network":
@@ -436,6 +481,19 @@ def _model_at(
     for element in path:
         if isinstance(element, int):
             continue  # indices do not change the model type; lists are unwrapped below
+        union = _discriminated_union(current)
+        if union is not None:
+            if element in union:
+                current = union[element]
+                continue
+            return None
+        members = _plain_union_members(current)
+        if members is not None and element in members:
+            current = members[element]
+            continue
+        if get_origin(current) is dict:
+            current = _unwrap_annotation(get_args(current)[1])
+            continue  # mapping keys do not change the value type
         if not (isinstance(current, type) and issubclass(current, BaseModel)):
             return None
         field = None
@@ -461,3 +519,103 @@ def _unwrap_annotation(annotation: Any) -> Any:
         if len(args) == 1:
             return _unwrap_annotation(args[0])
     return annotation
+
+
+def _plain_union_members(annotation: Any) -> dict[str, Any] | None:
+    """Member types of a plain (non-discriminated) union, keyed by pydantic's loc tag.
+
+    Pydantic reports an error against `str | int | bool` once per member, with the member's name as an extra loc element; recognizing those tags lets the loc walk consume them so reported paths name only keys the author wrote.
+    """
+    if get_origin(annotation) not in (Union, UnionType):
+        return None
+    members: dict[str, Any] = {}
+    for arg in get_args(annotation):
+        if arg is type(None):
+            continue
+        name = getattr(arg, "__name__", None)
+        if isinstance(name, str):
+            members[name] = arg
+    return members or None
+
+
+def _discriminated_union(annotation: Any) -> dict[str, type[BaseModel]] | None:
+    """Member models of an `Annotated[A | B, Field(discriminator=...)]`, keyed by tag.
+
+    Pydantic reports errors inside such a union with the matched tag as an extra loc element; these helpers let traversal consume the tag and loc cleaning drop it from reported paths.
+    """
+    if get_origin(annotation) is not Annotated:
+        return None
+    args = get_args(annotation)
+    inner = args[0]
+    discriminator = next(
+        (
+            metadata.discriminator
+            for metadata in args[1:]
+            if isinstance(metadata, FieldInfo)
+            and isinstance(metadata.discriminator, str)
+        ),
+        None,
+    )
+    if discriminator is None or get_origin(inner) not in (Union, UnionType):
+        return None
+    members: dict[str, type[BaseModel]] = {}
+    for arg in get_args(inner):
+        member = _unwrap_annotation(arg)
+        if not (isinstance(member, type) and issubclass(member, BaseModel)):
+            continue
+        field = member.model_fields.get(discriminator)
+        if field is None:
+            continue
+        for tag in get_args(field.annotation):
+            if isinstance(tag, str):
+                members[tag] = member
+    return members or None
+
+
+def _reported_loc(
+    root_model: type[BaseModel], raw: tuple[int | str, ...]
+) -> tuple[PathElement, ...]:
+    """The authored path for an error loc: function tags and discriminator tags stripped.
+
+    Walks the loc against the model tree so a discriminator tag ("flag" inside the goal union) is recognized positionally and dropped, keeping reported paths, source positions, and hints pointed at keys the author wrote.
+    """
+    current: Any = root_model
+    kept: list[PathElement] = []
+    for element in raw:
+        if isinstance(element, str) and "[" in element:
+            continue
+        if isinstance(element, int):
+            kept.append(element)
+            continue
+        union = _discriminated_union(current) if current is not None else None
+        if union is not None:
+            if element in union:
+                current = union[element]
+                continue
+            current = None
+            kept.append(element)
+            continue
+        members = _plain_union_members(current) if current is not None else None
+        if members is not None and element in members:
+            # a bare scalar-union member tag ("str", "int", "bool"): machine
+            # noise, not an authored key
+            current = members[element]
+            continue
+        if current is not None and get_origin(current) is dict:
+            # a mapping key (e.g. variables.<name>): keep it, descend to values
+            current = _unwrap_annotation(get_args(current)[1])
+            kept.append(element)
+            continue
+        if isinstance(current, type) and issubclass(current, BaseModel):
+            field = None
+            for name, candidate in current.model_fields.items():
+                if element in (name, candidate.alias):
+                    field = candidate
+                    break
+            current = (
+                _unwrap_annotation(field.annotation) if field is not None else None
+            )
+        else:
+            current = None
+        kept.append(element)
+    return tuple(kept)

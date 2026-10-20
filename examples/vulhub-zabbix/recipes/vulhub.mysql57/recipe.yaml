@@ -1,0 +1,7 @@
+name: vulhub.mysql57
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  agent_ip:
+    description: the agent host's address, written into the seeded Zabbix host interface so server-driven agent commands reach it

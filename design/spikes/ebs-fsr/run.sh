@@ -64,7 +64,7 @@ phase_prepare() {
   DEV=$(attach "$VOL_SRC" f)
   sudo mkfs.ext4 -q "$DEV"
   sudo mkdir -p /mnt/fsr-src && sudo mount "$DEV" /mnt/fsr-src
-  sudo cp "$IMAGE_CACHE/noble-server-cloudimg-amd64.img" "$IMAGE_CACHE/noble-range-guest.qcow2" /mnt/fsr-src/
+  sudo cp "$IMAGE_CACHE/noble-server-cloudimg-amd64.img" "$IMAGE_CACHE/ubuntu-noble.qcow2" /mnt/fsr-src/
   sudo dd if=/dev/urandom of=/mnt/fsr-src/filler.bin bs=1M count=5120 status=none
   sudo chmod -R a+r /mnt/fsr-src
   df -h /mnt/fsr-src | tail -1
@@ -132,7 +132,7 @@ phase_baseline() {
   echo "=== baseline: same files from the local root volume (gp3), cold page cache ==="
   sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
   mkdir -p tmp/baseline-cache
-  cp "$IMAGE_CACHE/noble-server-cloudimg-amd64.img" "$IMAGE_CACHE/noble-range-guest.qcow2" tmp/baseline-cache/ 2>/dev/null || true
+  cp "$IMAGE_CACHE/noble-server-cloudimg-amd64.img" "$IMAGE_CACHE/ubuntu-noble.qcow2" tmp/baseline-cache/ 2>/dev/null || true
   sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
   timed_read "$(pwd)/tmp/baseline-cache"
   rm -rf tmp/baseline-cache

@@ -1,14 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 from inspect_ranges import __version__
 from inspect_ranges._cli.main import ranges
 
-EXAMPLE = str(
-    Path(__file__).parent.parent
-    / "design/inspect-ranges/ranges/vulhub-zabbix/range.yaml"
-)
+EXAMPLE = str(Path(__file__).parent.parent / "examples/vulhub-zabbix/range.yaml")
 
 
 def test_version() -> None:
@@ -26,6 +24,42 @@ def test_validate_accepts_example_and_rejects_bad_file(tmp_path: Path) -> None:
     failed = CliRunner().invoke(ranges, ["validate", EXAMPLE, str(bad)])
     assert failed.exit_code == 1
     assert "unknown_section" in failed.output
+
+
+def test_validate_unreadable_path_is_a_clean_error(tmp_path: Path) -> None:
+    """A binary argument renders a positioned issue and the run keeps going per-file, no traceback."""
+    binary = tmp_path / "binary.yaml"
+    binary.write_bytes(b"\xd8\x00\x00\x00")
+    result = CliRunner().invoke(ranges, ["validate", str(binary), EXAMPLE])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_spec_verbs_accept_a_range_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory argument means its range.yaml (Journey A); one without range.yaml is a usage error."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
+    range_dir = Path(EXAMPLE).parent
+    ok = CliRunner().invoke(ranges, ["validate", str(range_dir)])
+    assert ok.exit_code == 0 and "vulhub-zabbix" in ok.output
+    plan_result = CliRunner().invoke(ranges, ["plan", str(range_dir)])
+    assert plan_result.exit_code == 1
+    assert "declares guest content but" in plan_result.output  # the build-aware gate
+    empty = CliRunner().invoke(ranges, ["validate", str(tmp_path)])
+    assert empty.exit_code == 2 and "range.yaml" in empty.output
+
+
+def test_validate_defaults_to_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "range.yaml").write_text(Path(EXAMPLE).read_text())
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(ranges, ["validate"])
+    assert result.exit_code == 0 and "vulhub-zabbix" in result.output
+    monkeypatch.chdir(tmp_path.parent)
+    bare = CliRunner().invoke(ranges, ["validate"])
+    assert bare.exit_code == 2 and "range.yaml" in bare.output
 
 
 def test_validate_json_contract(tmp_path: Path) -> None:
@@ -53,20 +87,23 @@ def test_plan_json_contract(tmp_path: Path) -> None:
     assert plan["totals"]["guests"] == len(plan["guests"])
 
 
-def test_plan_gates_migrated_guest_content() -> None:
+def test_plan_gates_migrated_guest_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build-aware gate (slice 6): unbuilt content refuses range-not-built, pointing at build."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
     result = CliRunner().invoke(ranges, ["plan", EXAMPLE])
     assert result.exit_code == 1
-    assert (
-        "guest-config-not-realized" in result.output
-        or "not yet realized" in result.output
-    )
+    assert "declares guest content but" in result.output
+    assert "inspect-ranges build" in result.output
 
 
 def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
     spec = Path(__file__).parent.parent / "design/spikes/acl-v2/spec.yaml"
-    (cache / "noble-range-guest.qcow2").write_bytes(b"fake")
+    (cache / "ubuntu-noble.qcow2").write_bytes(b"fake")
+    (cache / "attack.qcow2").write_bytes(b"fake attack")
     out = tmp_path / "bundle"
     result = CliRunner().invoke(
         ranges,
@@ -78,17 +115,15 @@ def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
     assert "plan.json" in manifest["files"]
 
 
-def test_plan_refuses_windows_examples() -> None:
-    goad = str(
-        Path(__file__).parent.parent
-        / "design/inspect-ranges/ranges/goad-light/range.yaml"
-    )
+def test_plan_refuses_windows_examples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Content-carrying Windows examples hit the build-aware gate first (the Windows-specific refusals — vmm, foothold, ip-required — are unit-covered in test_plan.py)."""
+    monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
+    goad = str(Path(__file__).parent.parent / "examples/goad-light/range.yaml")
     result = CliRunner().invoke(ranges, ["plan", goad])
     assert result.exit_code == 1
-    assert (
-        "windows-render-not-supported" in result.output
-        or "Windows guest" in result.output
-    )
+    assert "declares guest content but" in result.output
 
 
 def test_devbox_command_registered() -> None:
@@ -128,3 +163,49 @@ def test_doctor_json_exit_code_reflects_result() -> None:
         "fail",
         "skip",
     }
+
+
+def test_image_cache_knob_reaches_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`INSPECT_RANGES_IMAGE_CACHE` is the one cache default for every surface: the CLI must resolve through it, or the docs' claim ("images derive writes here") sends goldens to the wrong cache and doctor's printed fix reproduces the miss."""
+    knob_cache = tmp_path / "knob-cache"
+    knob_cache.mkdir()
+    monkeypatch.setenv("INSPECT_RANGES_IMAGE_CACHE", str(knob_cache))
+    result = CliRunner().invoke(ranges, ["images", "list"])
+    assert result.exit_code == 0
+    assert str(knob_cache) in result.output
+
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    overridden = CliRunner().invoke(
+        ranges, ["images", "list", "--image-cache", str(explicit)]
+    )
+    assert overridden.exit_code == 0
+    assert str(explicit) in overridden.output
+
+
+def test_applier_startup_refusal_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unhealthy host's documented refusal surfaces as a one-line error with a nonzero exit, not a traceback (every other command converts expected failures the same way)."""
+    from inspect_ranges._cli import appliercmd
+    from inspect_ranges._host.local import HostNotReadyError
+
+    class RefusingApplier:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def start(self) -> None:
+            raise HostNotReadyError("host not ready: docker daemon (fail)")
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr(appliercmd, "Applier", RefusingApplier)
+    result = CliRunner().invoke(
+        ranges, ["applier", "--socket", str(tmp_path / "applier.sock")]
+    )
+    assert result.exit_code == 1
+    assert "host not ready" in result.output
+    assert "Traceback" not in result.output

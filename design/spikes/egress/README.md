@@ -2,7 +2,7 @@
 
 > **Superseded as a battery (2026-10-08):** this spike's apply glue is historical reference; the conformance checks now run against realizer-booted ranges via [realizer-batteries](../realizer-batteries/README.md).
 
-*The lockstep conformance leg for slice 4 of [networking-v0.2](../../inspect-ranges/networking-v0.2.md), and the queued NAT-conformance item from [architecture.md](../../inspect-ranges/architecture.md) §13: `EgressPolicy` lives in the schema with its validators (`invalid-egress-entry`, `egress-requires-nat`, `egress-with-router-not-realized`, the `egress-fqdn-not-realized` and IPv6 gates), the allocator reserves a hypervisor gateway on routerless `mode: nat` networks, and `render_egress_nftables` realizes the allowlist in the range netns, where no guest can reach it. The hardened-container spike proved the no-egress case; this proves the granted case is exactly the allowlist. Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down.*
+*The lockstep conformance leg for slice 4 of [networking-v0.2](../../inspect-ranges/networking-v0.2.md), and the queued NAT-conformance item from [architecture.md](../../inspect-ranges/architecture.md) §13: `EgressPolicy` lives in the schema with its validators (`invalid-egress-entry`, `egress-requires-nat`, `egress-with-router-not-realized`, the `egress-fqdn-not-realized` and IPv6 gates), the allocator reserves a hypervisor gateway on routerless `mode: nat` networks, and `render_egress_nftables` realizes the allowlist in the range netns, where no guest can reach it. The hardened-container spike proved the no-egress case; this proves the granted case is exactly the allowlist. Run on the m6i.metal devbox, 2026-10-06. `./run.sh` reproduces; `./run.sh down` tears down. Round 2 (2026-10-16): `run.sh` now sweeps the compose stack on any exit via a trap (cleaned even on failure, matching the other battery wrappers); `./run.sh down` remains for manual cleanup. Re-run green the same day on the integrated round-2 code after the check revisions: all 12 checks (the 8-check battery plus the 4-check attacker-scoped phase), exit 0, enforced-ready 48.5 s, and the EXIT-trap teardown fired on success leaving zero compose residue.*
 
 ## Verdict
 
@@ -21,6 +21,17 @@
 | E7 workstation's default route is `10.90.10.1` | the allocator-reserved hypervisor gateway on the bridge |
 | E8 zero range bridges in the host netns | host invisibility unchanged (the uplink is the container's own eth0) |
 
+## Attacker-scoped composition (quality-review A2, 2026-10-16)
+
+The original battery's E3 covered only `egress: none`; the quality review found the scoped `EgressPolicy` branch rendered no trailing attacker drop, so attacker flows missing the attacker's own allowlist fell through to the network allowlist and left. The fix (a trailing attacker drop after the scoped accepts) ships with `spec-scoped.yaml` and a second battery phase, run 2026-10-16 (full run exit 0 under `set -euo pipefail`, so every E and ES check gated it; zero residue after `run.sh down`):
+
+| check | result |
+|---|---|
+| ES1 attacker's own entry (`198.51.100.7:tcp/80`) connects, masqueraded | PASS |
+| ES2 the network allowlist (`:443`, live listener) does NOT leak to the attacker | PASS |
+| ES3 workstation still reaches the network-allowed `:443` | PASS |
+| ES4 trailing attacker drop live in the netns ruleset | PASS |
+
 ## Realization notes
 
 - Enforcement lives in the range container's netns, not on any guest: an agent that roots every VM still cannot widen egress (consistent with the hardened-container finding that the netns, not the router, is the external containment authority).
@@ -30,9 +41,9 @@
 
 ## Files
 
-- `spec.yaml` — the v0.2 NAT allowlist spec (validates green)
-- `compile.py` — production stages for allocation + NAT gateway election + the netns egress ruleset; spike glue for seeds/bridges/boot
-- `compose.yaml` — range + upstream on a static-subnet simulated internet; `ip_forward` via sysctls
-- `range/` — entrypoint extended to put the reserved gateway address on nat bridges
-- `run.sh` — validate, compile, boot, the 8-check battery
-- `tmp/run1.log` — the clean first-try run
+- `spec.yaml`: the v0.2 NAT allowlist spec (validates green)
+- `compile.py`: production stages for allocation + NAT gateway election + the netns egress ruleset; spike glue for seeds/bridges/boot
+- `compose.yaml`: range + upstream on a static-subnet simulated internet; `ip_forward` via sysctls
+- `range/`: entrypoint extended to put the reserved gateway address on nat bridges
+- `run.sh`: validate, compile, boot, the 8-check battery, then the 4-check attacker-scoped phase (`spec-scoped.yaml`)
+- `tmp/run1.log`: the clean first-try run

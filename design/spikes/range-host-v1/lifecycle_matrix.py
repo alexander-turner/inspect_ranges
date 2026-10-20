@@ -261,7 +261,7 @@ async def main() -> int:
     from inspect_ranges._runtime.ownership import default_state_dir
 
     ensure_entry_points()
-    env_type = registry_find_sandboxenv("libvirt_range")
+    env_type = registry_find_sandboxenv("range")
     state_dir = default_state_dir()
     (SPIKE / "tmp" / "logs").mkdir(parents=True, exist_ok=True)
     procs: "dict[str, subprocess.Popen[bytes]]" = {

@@ -53,7 +53,7 @@ DAEMON_SHA=$(echo "$DB_OUT" | { grep -o 'bundle sha256:[0-9a-f]*' || true; } | c
 [[ -n "$DAEMON_SHA" ]] && ok "daemon-bundle built (sha256 $DAEMON_SHA)" \
   || { echo "$DB_OUT"; bad "daemon-bundle"; exit 1; }
 VENDOR_SHA=$(sha256sum "$VENDOR" | cut -d' ' -f1)
-$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name noble-range-guest \
+$IR images derive "$VENDOR" --sha256 "$VENDOR_SHA" --name ubuntu-noble \
   --image-cache "$CACHE" --daemon-bundle "$TMP/artifacts" --daemon-sha256 "$DAEMON_SHA" \
   >"$TMP/logs/derive.log" 2>&1 \
   && ok "golden derived with the pinned daemon" || { cat "$TMP/logs/derive.log"; bad "derive"; exit 1; }

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler import PlanOptions, render_bundle, resolve_plan
 from inspect_ranges._compiler.plan import image_file_name
 from inspect_ranges._runtime import (
@@ -44,12 +45,28 @@ def tiny_spec() -> RangeSpec:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_range_image_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dev machine's exported `INSPECT_RANGES_RANGE_IMAGE` must not leak into the local-build-path tests (slice-3 review)."""
+    monkeypatch.delenv("INSPECT_RANGES_RANGE_IMAGE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_ch_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The updown spec's attacker defaults to cloud-hypervisor now, so up() prepares a vsock dir under tempfile.gettempdir(): keep unit tests off the real /tmp (round-2 review)."""
+    import tempfile as tempfile_module
+
+    monkeypatch.setattr(tempfile_module, "gettempdir", lambda: str(tmp_path / "chtmp"))
+    (tmp_path / "chtmp").mkdir(exist_ok=True)
+
+
 @pytest.fixture()
 def cache(tmp_path: Path) -> Path:
     cache = tmp_path / "cache"
     cache.mkdir()
     (cache / "tiny-golden.qcow2").write_bytes(b"golden")
-    (cache / "noble-range-guest.qcow2").write_bytes(b"attacker-golden")
+    (cache / "ubuntu-noble.qcow2").write_bytes(b"attacker-golden")
+    (cache / "attack.qcow2").write_bytes(b"attack-golden")
     return cache
 
 
@@ -61,10 +78,11 @@ def bundle(tmp_path: Path, cache: Path) -> Path:
 
 
 class FakeDocker:
-    """Scriptable runner: records every argv; answers per command prefix."""
+    """Scriptable runner: records every argv (with its subprocess `timeout`, the B21 bound an injected runner must honor); answers per command prefix."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.timeouts: list[float | None] = []  # parallel to `calls`
         self.ps_output = ""
         self.ps_sequence: list[str] | None = None
         self.fail_prefix: tuple[str, ...] | None = None
@@ -76,8 +94,10 @@ class FakeDocker:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "subprocess.CompletedProcess[str]":
         self.calls.append(argv)
+        self.timeouts.append(timeout)
         self.last_env = env
         self.last_input = input
         if (
@@ -154,7 +174,9 @@ class FakeChannel:
 
 
 def use_channel(monkeypatch: pytest.MonkeyPatch, channel: FakeChannel) -> None:
-    def factory(cids: dict[str, int]) -> FakeChannel:
+    def factory(
+        cids: dict[str, int], hybrid_sockets: dict[str, HybridEndpoint] | None = None
+    ) -> FakeChannel:
         return channel
 
     monkeypatch.setattr(up_module(), "make_channel", factory)
@@ -228,6 +250,38 @@ def test_up_happy_path_env_and_stages(
         "range-container",
     ]
     assert stages[-1] == "ready"
+    # up() is internally bounded (quality-review B21): compose up carries a
+    # --wait-timeout aligned to the readiness envelope
+    up_argv = next(call for call in docker.calls if "up" in call and "--wait" in call)
+    assert "--wait-timeout" in up_argv
+    assert up_argv[up_argv.index("--wait-timeout") + 1] == "1"
+
+    # ...and every legitimately slow docker call carries a subprocess timeout,
+    # so a wedged daemon surfaces as a stage-named failure instead of hanging
+    # up() forever (quality-review B21, pinned by R2-10)
+    def timeout_of(call: list[str]) -> float | None:
+        return docker.timeouts[docker.calls.index(call)]
+
+    assert timeout_of(up_argv) == pytest.approx(61.0), (
+        "compose up bounded at readiness + 60"
+    )
+    boot_argv = next(c for c in docker.calls if "exec" in c and "bash" in c)
+    assert timeout_of(boot_argv) == pytest.approx(1.0), (
+        "guest-boot exec bounded at readiness"
+    )
+    image_calls = [
+        c for c in docker.calls if c[:2] in (["docker", "image"], ["docker", "build"])
+    ]
+    assert image_calls and all(timeout_of(c) is not None for c in image_calls), (
+        "the range-image inspect/build calls carry the image-build bound"
+    )
+
+
+def test_run_command_timeout_surfaces_as_rc_124() -> None:
+    """A wedged subprocess returns rc 124 with the timeout named, feeding the normal stage-named failure path instead of hanging up() (quality-review B21)."""
+    result = up_module().run_command(["sleep", "5"], timeout=0.2)
+    assert result.returncode == 124
+    assert "timed out after" in result.stderr
 
 
 def test_up_refuses_duplicate_project_naming_down_command(
@@ -305,6 +359,9 @@ def test_down_removes_by_label_and_is_idempotent(tmp_path: Path) -> None:
     assert result.containers == 2
     rm = docker.commands("docker", "rm", "-f")[0]
     assert rm[-2:] == ["c1", "c2"]
+    # every teardown call is bounded, so a wedged daemon surfaces as a
+    # DownError the retry machinery owns (quality-review B21, pinned by R2-10)
+    assert docker.timeouts and all(t is not None for t in docker.timeouts)
     docker2 = FakeDocker()
     again = down("ir-tiny-abc", state_dir=tmp_path / "state", runner=docker2)
     assert (again.containers, again.volumes, again.networks) == (0, 0, 0)
@@ -319,6 +376,7 @@ def test_down_all_sweeps_ir_only(tmp_path: Path) -> None:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "subprocess.CompletedProcess[str]":
         docker.calls.append(argv)
         if argv[:3] == ["docker", "ps", "-a"] and "--format" in argv:
@@ -434,6 +492,7 @@ def test_down_all_continues_past_a_failing_project(tmp_path: Path) -> None:
         argv: list[str],
         env: dict[str, str] | None = None,
         input: str | None = None,
+        timeout: float | None = None,
     ) -> "sp.CompletedProcess[str]":
         calls.append(argv)
         joined = " ".join(argv)
@@ -506,26 +565,10 @@ def test_boot_json_shape_is_enforced(bundle: Path) -> None:
             load_boot(bundle)
 
 
-def test_boot_script_shell_quotes_values(bundle: Path) -> None:
-    from inspect_ranges._runtime.up import BootGuest, BootPlan
-    from inspect_ranges._runtime.up import boot_script as script
-
-    plan = BootPlan(
-        parallel=True,
-        verify={},
-        guests=[
-            BootGuest(
-                name="we.b-1",
-                cid=3000,
-                image_file="img.qcow2",
-                image_digest=None,
-                overlay_gb=10,
-                readiness="cloud-init",
-            )
-        ],
-    )
-    text = script(plan)
-    assert "we.b-1" in text and ";" not in text.replace(";\n", "")
+# NOTE: no quoting pin for boot_script. BootGuest's name/image grammar
+# forecloses shell metacharacters (pinned above) and shlex.quote is the
+# identity on every legal name, so a quoting test cannot fail through the
+# public API; the quoting is defense in depth only (quality-review R2-24).
 
 
 def test_cloud_init_probe_command_behaves(
@@ -601,6 +644,90 @@ def test_range_image_rebuilds_on_content_mismatch() -> None:
     assert any(argv[:2] == ["docker", "build"] for argv in calls), (
         "a tag whose content label mismatches must rebuild"
     )
+
+
+def test_range_image_pin_uses_the_published_image_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A digest pin already present locally is used as-is: no pull, no build."""
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import RANGE_IMAGE_ENV, ensure_range_image
+
+    pin = "meridianlabsai/inspect-ranges-range@sha256:" + "ab" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, "ok\n", "")
+
+    assert ensure_range_image(scripted) == pin
+    assert calls == [["docker", "image", "inspect", pin, "--format", "ok"]]
+
+
+def test_range_image_pin_pulls_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import RANGE_IMAGE_ENV, ensure_range_image
+
+    pin = "127.0.0.1:5065/inspect-ranges-range@sha256:" + "cd" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        rc = 1 if argv[:3] == ["docker", "image", "inspect"] else 0
+        return sp.CompletedProcess(argv, rc, "", "")
+
+    assert ensure_range_image(scripted) == pin
+    assert ["docker", "pull", pin] in calls
+    assert not any(argv[:2] == ["docker", "build"] for argv in calls)
+
+
+def test_range_image_pin_refuses_when_the_pull_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import (
+        RANGE_IMAGE_ENV,
+        RangeImageError,
+        ensure_range_image,
+    )
+
+    pin = "example.com/gone@sha256:" + "ef" * 32
+    monkeypatch.setenv(RANGE_IMAGE_ENV, pin)
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        return sp.CompletedProcess(argv, 1, "", "manifest unknown")
+
+    with pytest.raises(RangeImageError, match="manifest unknown"):
+        ensure_range_image(scripted)
+
+
+def test_range_image_pin_refuses_mutable_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unpinned value never reaches docker: a mutable tag could swap the jail."""
+    import subprocess as sp
+
+    from inspect_ranges._runtime.rangeimage import (
+        RANGE_IMAGE_ENV,
+        RangeImageError,
+        ensure_range_image,
+    )
+
+    monkeypatch.setenv(RANGE_IMAGE_ENV, "meridianlabsai/inspect-ranges-range:latest")
+    calls: list[list[str]] = []
+
+    def scripted(argv: list[str]) -> "sp.CompletedProcess[str]":
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, "", "")
+
+    with pytest.raises(RangeImageError, match="digest-pinned"):
+        ensure_range_image(scripted)
+    assert calls == []
 
 
 def test_make_channel_uses_the_readiness_allowance() -> None:
@@ -736,3 +863,91 @@ def test_raising_on_stage_callback_never_alters_up(
     assert (broken_state / result.project / "stages.jsonl").read_bytes() == (
         plain_state / plain.project / "stages.jsonl"
     ).read_bytes()
+
+
+def test_up_verifies_the_realized_overlays_backing_golden(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Round-2 blocking: the overlay's digest cannot see its backing, and goldens re-derive in place under the same name, so boot.json records the backing and up re-verifies it."""
+    import hashlib as hashlib_module
+    import json as json_module
+
+    (cache / "web-backing.qcow2").write_bytes(b"backing")
+    backing_digest = f"sha256:{hashlib_module.sha256(b'backing').hexdigest()}"
+    out = tmp_path / "backed-bundle"
+    render_bundle(
+        tiny_spec(),
+        out,
+        PlanOptions(
+            image_cache=cache,
+            cid_base=3000,
+            realized_backings={"web": ("web-backing.qcow2", backing_digest)},
+        ),
+    )
+    boot = json_module.loads((out / "boot.json").read_text())
+    web = next(guest for guest in boot["guests"] if guest["name"] == "web")
+    assert web["backing_file"] == "web-backing.qcow2"
+    assert web["backing_digest"] == backing_digest
+    # a golden re-derived in place under the same name: refuse naming the cause
+    (cache / "web-backing.qcow2").write_bytes(b"backing-v2")
+    with pytest.raises(
+        UpError, match=r"\[verify-images\] guest 'web'.*backing golden.*rebuild"
+    ):
+        up(out, options(cache, tmp_path), runner=FakeDocker())
+    # a missing backing: refuse naming the remedy
+    (cache / "web-backing.qcow2").unlink()
+    with pytest.raises(
+        UpError,
+        match=r"\[verify-images\] guest 'web'.*backing golden.*not in the cache",
+    ):
+        up(out, options(cache, tmp_path), runner=FakeDocker())
+
+
+def test_up_verifies_the_golden_to_vendor_edge(tmp_path: Path, cache: Path) -> None:
+    """Round-3 distribution review B4: a mixed chain (vendor moved under an older golden, e.g. an interrupted refresh) must refuse at verify-images, never boot silently corrupted."""
+    import hashlib as hashlib_module
+    import json as json_module
+
+    (cache / "web-backing.qcow2").write_bytes(b"backing")
+    backing_digest = f"sha256:{hashlib_module.sha256(b'backing').hexdigest()}"
+    (cache / "web-vendor.img").write_bytes(b"vendor-bytes")
+    vendor_sha = hashlib_module.sha256(b"vendor-bytes").hexdigest()
+    (cache / "web-backing.json").write_text(
+        json_module.dumps(
+            {
+                "name": "web-backing",
+                "file": "web-backing.qcow2",
+                "recipe_version": "4",
+                "derivation_key": "k" * 64,
+                "vendor_file": "web-vendor.img",
+                "vendor_sha256": vendor_sha,
+                "daemon": {"name": "vsockd", "version": "3.1.0", "sha256": "d" * 64},
+                "golden_sha256": hashlib_module.sha256(b"backing").hexdigest(),
+                "created": "2026-10-18T00:00:00Z",
+            }
+        )
+    )
+    out = tmp_path / "edge-bundle"
+    render_bundle(
+        tiny_spec(),
+        out,
+        PlanOptions(
+            image_cache=cache,
+            cid_base=3000,
+            realized_backings={"web": ("web-backing.qcow2", backing_digest)},
+        ),
+    )
+    # the agreeing chain passes verify-images (failing later, at readiness,
+    # proves the chain check was green)
+    with pytest.raises(UpError, match=r"\[readiness\]"):
+        up(out, options(cache, tmp_path / "ok"), runner=FakeDocker())
+    # the vendor moves under the same name: the mixed chain refuses loudly
+    (cache / "web-vendor.img").write_bytes(b"vendor-bytes-v2")
+    with pytest.raises(UpError, match=r"\[verify-images\].*chain is mixed"):
+        up(out, options(cache, tmp_path / "mixed"), runner=FakeDocker())
+    # a missing vendor refuses with the remedy
+    (cache / "web-vendor.img").unlink()
+    with pytest.raises(
+        UpError, match=r"\[verify-images\].*vendor base.*not in the cache"
+    ):
+        up(out, options(cache, tmp_path / "gone"), runner=FakeDocker())

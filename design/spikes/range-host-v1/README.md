@@ -40,7 +40,7 @@ The separated topology costs nothing measurable on one host: UDS boot+teardown l
 
 ## Files
 
-- `range.yaml`: the two-guest battery spec (image `noble-range-guest`)
+- `range.yaml`: the two-guest battery spec (image `ubuntu-noble`)
 - `run.sh`: the orchestrator (setup, battery main, lifecycle matrix, residue sweep)
 - `battery_main.py`, `lifecycle_matrix.py`, `boot_and_die.py`: the scenarios
 - `applier_proc.py`: shared applier spawning and readiness probing

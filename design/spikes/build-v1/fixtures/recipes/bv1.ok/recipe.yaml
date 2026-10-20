@@ -1,0 +1,9 @@
+name: bv1.ok
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  marker:
+    description: value planted into /etc/recipe.conf to prove vars flow
+  verbose:
+    default: false

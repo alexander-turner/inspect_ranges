@@ -40,7 +40,8 @@ attacker:
 
 ``` python
 from inspect_ranges.types import (
-    Attacker, Host, Interface, Network, Os, RangeMeta, RangeSpec,
+    AclRule, Attacker, DnsConfig, DnsRecord, EgressPolicy, Host,
+    Interface, Network, Os, RangeMeta, RangeSpec, Route, Router,
 )
 
 flat = RangeSpec(
@@ -97,7 +98,7 @@ hosts:
     interfaces: [{ network: lab }]  # allocated: 10.10.10.10
 
 attacker:
-  interfaces: [{ network: lab }]  # allocated: 10.10.10.2
+  interfaces: [{ network: lab }]  # allocated: 10.10.10.1
   entry: external
 ```
 
@@ -172,7 +173,8 @@ dhcp = RangeSpec(
     ),
     networks=[
         Network(
-            name="lab", cidr="10.10.10.0/24", mode="isolated", dhcp=True
+            name="lab", cidr="10.10.10.0/24",
+            mode="isolated", dhcp=True
         )
     ],
     hosts=[
@@ -192,7 +194,7 @@ dhcp = RangeSpec(
 
 ## Name Resolution
 
-A network can declare DNS in three ways. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
+A network declares DNS through `records`, `nameservers`, or `authoritative`. `records` serves names from the range itself (for name-based discovery on flat networks); a record without an `ip` resolves to the named guest's address:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -267,10 +269,12 @@ Networks with `records` hand their guests a derived search domain (`<network>.in
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 
-``` yaml
+``` {.yaml .plan-invalid}
 range:
   name: dns-ad
-  description: An authoritative guest serves DNS, chaining to an upstream forwarder.
+  description: >
+    An authoritative guest serves DNS, chaining to an upstream
+    forwarder.
 
 networks:
   - name: corp
@@ -299,7 +303,7 @@ attacker:
 
 ### Python
 
-``` python
+``` {.python .plan-invalid}
 dns_ad = RangeSpec(
     meta=RangeMeta(
         name="dns-ad",
@@ -337,21 +341,27 @@ dns_ad = RangeSpec(
 ```
 :::
 
+The DC's `fqdn` is build-phase content: declaring it refuses at planning (`guest-config-not-realized`) until a build's Active Directory recipes realize it (produce it on the actual guest at build time; see [Building Ranges](building.qmd)); `hostname` renders directly, as described under [Hosts](guests.qmd#hosts).
+
 ::: callout-warning
-## `.local` zones
+## `.local` Zones
 
 Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide whether to keep them:
 
 ```         
 ✓ range.yaml  1 warning
-  12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is under '.local', which
-                        Linux stub resolvers reserve for mDNS and never send to unicast DNS
+  12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is
+                        under '.local', which Linux stub resolvers
+                        reserve for mDNS and never send to unicast
+                        DNS
 ```
 :::
 
 ## Segmentation
 
-Routers join segments and carry the inter-segment policy. Rules are default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
+Routers join segments and carry the inter-segment policy. A router with no `acl` is a plain router: everything forwards (the KYPO/CyRIS pure-router shape). Declaring any rule flips it to default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
+
+![](diagrams/dmz-pivot.excalidraw.png){fig-alt="The dmz-pivot topology: an attacker VM and web server on the DMZ segment, a database on the internal segment, and a router joining the two segments whose ACL allows only tcp/5432 from dmz to internal."}
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -360,8 +370,9 @@ Routers join segments and carry the inter-segment policy. Rules are default-deny
 range:
   name: dmz-pivot
   description: >
-    An external attacker compromises a web server in the DMZ, then pivots to a
-    database on an internal segment reachable only through the router.
+    An external attacker compromises a web server in the DMZ, then
+    pivots to a database on an internal segment reachable only
+    through the router.
 
 networks:
   - name: dmz
@@ -406,7 +417,9 @@ dmz_pivot = RangeSpec(
     ),
     networks=[
         Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
-        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        Network(
+            name="internal", cidr="10.80.20.0/24", mode="isolated"
+        ),
     ],
     routers=[
         Router(
@@ -453,7 +466,9 @@ Rules evaluate first-match in declaration order, and each rule carries exactly o
 ``` yaml
 range:
   name: policy
-  description: Ordered rules with carve-outs, guest endpoints, and CIDR endpoints.
+  description: >
+    Ordered rules with carve-outs, guest endpoints, and CIDR
+    endpoints.
 
 networks:
   - name: dmz
@@ -470,7 +485,9 @@ routers:
       - { from: dmz, to: db, deny: [tcp/22] } # <1>
       - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
       - { from: web, to: internal, allow: [tcp/80] } # <2>
-      - { from: 10.80.10.0/28, to: internal, allow: [tcp/8080-8090] } # <3>
+      - from: 10.80.10.0/28    # <3>
+        to: internal
+        allow: [tcp/8080-8090]
 
 hosts:
   - name: web
@@ -502,7 +519,9 @@ policy = RangeSpec(
     ),
     networks=[
         Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
-        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        Network(
+            name="internal", cidr="10.80.20.0/24", mode="isolated"
+        ),
     ],
     routers=[
         Router(
@@ -558,7 +577,7 @@ Networks and guests share one namespace (a guest may not take a network's name),
 
 ## Topology
 
-Larger networks chain routers. Each network's default gateway is elected implicitly when exactly one router attaches; a segment with more than one router must declare its `gateway:` (declaring none is an error; the compiler does not guess). Routers carry static `routes:` to segments they reach through other routers, and their rules may name routed segments as well as attached ones (each transit router enforces its own policy):
+Larger networks chain routers. Each network's default gateway is elected implicitly when exactly one router attaches; a segment with more than one router must declare its `gateway:` (declaring none is an error). Routers carry static `routes:` to segments they reach through other routers, and their rules may name routed segments as well as attached ones (each transit router enforces its own policy):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -670,11 +689,11 @@ chained = RangeSpec(
 ```
 :::
 
-## Leaving the range {#egress}
+## Leaving the Range {#egress}
 
 Each network declares its egress posture through `mode`:
 
-- `isolated`: nothing leaves. The default posture.
+- `isolated`: nothing leaves.
 - `nat`: traffic leaves through hypervisor NAT, scoped by an explicit allowlist.
 - `routed`: the segment is routed toward the deployment's uplink, in both directions, with real source addresses and no NAT.
 
@@ -686,7 +705,9 @@ A `nat` network lists what may leave; everything else is dropped. Entries are `C
 ``` yaml
 range:
   name: egress
-  description: A corp segment that may reach one https host and NTP, nothing else.
+  description: >
+    A corp segment that may reach one https host and NTP, nothing
+    else.
 
 networks:
   - name: corp
@@ -745,14 +766,14 @@ egress = RangeSpec(
 ```
 :::
 
-The attacker's own `egress` composes ahead of network policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
+The attacker's own `egress` is enforced before the network's policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
 
-Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with a specific code:
+Egress-by-name (FQDN entries) is accepted by the schema but not yet implemented, so a definition using it is rejected with `egress-fqdn-not-realized`:
 
 ``` {.yaml .invalid-example}
 range:
   name: egress-fqdn
-  description: FQDN entries are in the vocabulary but gated.
+  description: FQDN egress entries parse but are not yet implemented.
 networks:
   - name: corp
     cidr: 10.90.10.0/24
@@ -771,7 +792,7 @@ attacker:
 
 ## Attacker
 
-The attacker either boots as a dedicated attack box (declare `interfaces`, optionally `name`, `image`, and `resources`) or starts from a foothold on a declared host (assumed breach):
+The attacker either boots as a dedicated attack box (declare `interfaces`, optionally `name`, `image`, `resources`, and `vmm`) or starts from a foothold on a declared host (assumed breach):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

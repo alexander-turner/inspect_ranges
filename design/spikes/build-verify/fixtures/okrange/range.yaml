@@ -1,0 +1,28 @@
+# build-verify battery fixture: nginx installed by recipe, declared as a
+# service with port and version, plus a vulnerability linked to it. All green.
+range:
+  name: bvok
+  schema_version: "0.3"
+  description: Verification all-green fixture (nginx 1.18 on focal).
+
+networks:
+  - name: lab
+    cidr: 10.95.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.95.10.10 }]
+    provisioning:
+      - { recipe: bv.nginx }
+    services:
+      - { name: nginx, port: 80, version: "1.18", package: nginx-core }
+    vulnerabilities:
+      - { id: demo-vuln, service: nginx, description: battery fixture linkage }
+
+attacker:
+  image: focal-guest
+  interfaces: [{ network: lab }]
+  entry: external

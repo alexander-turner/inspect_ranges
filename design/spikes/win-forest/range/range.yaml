@@ -1,0 +1,46 @@
+range:
+  name: win-forest
+  schema_version: "0.3"
+  description: a two-domain forest (root, child with DNS delegation, member), the slice-3 converged-capture proof
+
+networks:
+  - name: lab
+    cidr: 10.40.0.0/24
+    mode: isolated
+    dns:
+      authoritative: [dc01, dc02]
+
+hosts:
+  - name: dc01
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    resources: { cpus: 2, memory_mb: 4096 }
+    interfaces: [{ network: lab, ip: 10.40.0.10 }]
+    services:
+      - { name: dns, port: 53 }
+      - { name: ldap, port: 389 }
+    provisioning:
+      - recipe: win.forest-root
+  - name: dc02
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    resources: { cpus: 2, memory_mb: 4096 }
+    interfaces: [{ network: lab, ip: 10.40.0.11 }]
+    services:
+      - { name: ldap, port: 389 }
+    provisioning:
+      - recipe: win.child-promote
+  - name: srv02
+    os: { type: windows, version: server-2022 }
+    image: windows-2022
+    resources: { cpus: 2, memory_mb: 2048 }
+    interfaces: [{ network: lab, ip: 10.40.0.12 }]
+    services:
+      - { name: smb, port: 445 }
+    provisioning:
+      - recipe: win.child-join
+
+attacker:
+  image: ubuntu-noble
+  interfaces: [{ network: lab }]
+  entry: external

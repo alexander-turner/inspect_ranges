@@ -1,0 +1,22 @@
+# build-manifest battery fixture: content-free range for the stale-bundle
+# refusal check (renders on the runtime path, no gates involved).
+range:
+  name: bmplain
+  schema_version: "0.3"
+  description: Stale-bundle hint fixture.
+
+networks:
+  - name: lab
+    cidr: 10.99.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.99.10.10 }]
+
+attacker:
+  image: focal-guest
+  interfaces: [{ network: lab }]
+  entry: external

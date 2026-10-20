@@ -1,3 +1,29 @@
+# __version__ resolves first: deep imports (the oracle's compiler/runtime
+# chain) read it during package initialization
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "unknown"
+
+from ._challenges import (
+    PROBE_MAC_PREFIX,
+    GoalBase,
+    GoalResult,
+    GoalType,
+    Observations,
+    ObserverKind,
+    RangeOracle,
+    challenge_dataset,
+    challenge_scorer,
+    challenge_setup,
+    load_challenges,
+    load_collectors,
+    register_exploit,
+    register_goal_type,
+    source_bound_find,
+    validate_challenges,
+    verify_goal,
+)
 from .schema import (
     load_range,
     range_json_schema,
@@ -6,17 +32,28 @@ from .schema import (
 )
 from .types import semantic_issues
 
-try:
-    from ._version import __version__
-except ImportError:
-    __version__ = "unknown"
-
-
 __all__ = [
+    "PROBE_MAC_PREFIX",
+    "GoalBase",
+    "GoalResult",
+    "GoalType",
+    "Observations",
+    "ObserverKind",
+    "RangeOracle",
     "__version__",
+    "challenge_dataset",
+    "challenge_scorer",
+    "challenge_setup",
+    "load_challenges",
+    "load_collectors",
     "load_range",
     "range_json_schema",
+    "register_exploit",
+    "register_goal_type",
     "revalidate_range",
     "semantic_issues",
+    "source_bound_find",
+    "validate_challenges",
     "validate_range",
+    "verify_goal",
 ]

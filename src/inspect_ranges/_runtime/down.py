@@ -3,12 +3,14 @@
 Everything a project owns is found by its compose label (containers, volumes, networks) or its deterministic name, so `down` works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and compose volume names, and never touches other prefixes (the channel track's `chan-` batteries run concurrently on shared hosts).
 """
 
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from .ownership import (
     PROJECT_PREFIX,
+    ch_vsock_dir,
     default_state_dir,
     list_projects,
     remove_project,
@@ -20,15 +22,19 @@ class DownError(Exception):
     """Teardown failure: a docker query or removal did not succeed, so the project may still own resources (ownership state is kept so a retry can find them)."""
 
 
+DOCKER_CALL_TIMEOUT_S = 120.0
+"""Bound on every teardown docker call: a wedged daemon surfaces as a DownError the caller's retry machinery (reaper, cli_cleanup, task_cleanup) owns, instead of hanging teardown forever (quality-review B21 review round: the failure path must be as bounded as the boot path)."""
+
+
 def _ids(run: Runner, argv: list[str]) -> list[str]:
-    result = run(argv)
+    result = run(argv, timeout=DOCKER_CALL_TIMEOUT_S)
     if result.returncode != 0:
         raise DownError(f"{' '.join(argv[:3])} failed: {result.stderr.strip()[-400:]}")
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def _remove(run: Runner, argv: list[str], relist: list[str]) -> None:
-    result = run(argv)
+    result = run(argv, timeout=DOCKER_CALL_TIMEOUT_S)
     if result.returncode != 0:
         # a resource that vanished between the listing and the removal (an
         # auto-removed container, a parallel down) is success, not failure
@@ -69,69 +75,27 @@ def down(
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
 
-    containers = _ids(
-        run,
-        [
-            "docker",
-            "ps",
-            "-a",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    container_query = [
-        "docker",
-        "ps",
-        "-a",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    label_filter = ["--filter", f"label=com.docker.compose.project={project}"]
+    container_query = ["docker", "ps", "-a", "-q", *label_filter]
+    containers = _ids(run, container_query)
     if containers:
         _remove(run, ["docker", "rm", "-f", *containers], container_query)
-    volumes = _ids(
-        run,
-        [
-            "docker",
-            "volume",
-            "ls",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    volume_query = [
-        "docker",
-        "volume",
-        "ls",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    volume_query = ["docker", "volume", "ls", "-q", *label_filter]
+    volumes = _ids(run, volume_query)
     if volumes:
         _remove(run, ["docker", "volume", "rm", "-f", *volumes], volume_query)
-    networks = _ids(
-        run,
-        [
-            "docker",
-            "network",
-            "ls",
-            "-q",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-        ],
-    )
-    network_query = [
-        "docker",
-        "network",
-        "ls",
-        "-q",
-        "--filter",
-        f"label=com.docker.compose.project={project}",
-    ]
+    network_query = ["docker", "network", "ls", "-q", *label_filter]
+    networks = _ids(run, network_query)
     if networks:
         _remove(run, ["docker", "network", "rm", *networks], network_query)
+    sockets = ch_vsock_dir(project)
+    if sockets.exists():
+        try:
+            shutil.rmtree(sockets)
+        except OSError as error:
+            raise DownError(
+                f"cannot remove cloud-hypervisor socket dir {sockets}: {error}"
+            ) from error
     if not keep_state:
         remove_project(state, project)
     return DownResult(
@@ -175,8 +139,6 @@ def down_all(
     # sweep --from-spec staging leftovers (a SIGKILLed up cannot clean its own)
     staging = state.parent / "staging"
     if staging.is_dir():
-        import shutil
-
         for leftover in staging.iterdir():
             shutil.rmtree(leftover, ignore_errors=True)
     results: list[DownResult] = []

@@ -1,0 +1,93 @@
+# range.yaml — schema v0.3 (remaining deferred content in ./deferred.yaml)
+# Faithful translation of the KYPO CRP demo training sandbox (Masaryk University).
+# Every value is sourced from ./upstream/ unless marked "default:" (invented), "realized:" (substrate realization, 2026-10-19), or "to-verify".
+# Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
+
+range:
+  name: kypo-demo
+  schema_version: "0.3"
+  description: >
+    The KYPO Cyber Range Platform demo sandbox: a client (foothold) and a
+    server on two routed /24 subnets joined by an explicit Debian router.
+    The server exposes telnetd on a per-instance randomized port with a
+    weak-password account; privilege escalation is a planted sudoers rule
+    (less on a root-readable flag). Two flags, both randomized per instance.
+    The smallest public example of an explicitly routed, IP-pinned topology
+    with a variables/randomization layer.
+
+variables:                       # KYPO APG variables — regenerated per sandbox instance
+  telnet_port: { type: port, min: 1500, default: 2323 }     # default from the role
+  alice_flag:  { type: text, default: Top_Secret_Flag }     # default from the role
+  root_flag:   { type: text, default: Cant_Guess_This }     # default from the role
+
+networks:
+  # mode is the EGRESS posture (isolated: nothing leaves the range); the
+  # declared router below provides the inter-subnet routing regardless.
+  # Upstream KYPO NATs egress at the platform layer (to-verify, notes.md);
+  # our declared posture is none, so the segments are isolated.
+  - name: server-switch
+    cidr: 192.168.20.0/24
+    mode: isolated
+  - name: client-switch
+    cidr: 192.168.30.0/24
+    mode: isolated
+
+routers:
+  - name: router
+    os: { type: linux, distro: ubuntu-24.04 }  # realized: upstream debian-9; routing semantics preserved on the catalog guest
+    image: ubuntu-noble                   # realized: the catalog golden (upstream image debian-9-x86_64)
+    resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
+    interfaces:
+      - { network: server-switch, ip: 192.168.20.1 }
+      - { network: client-switch, ip: 192.168.30.1 }
+
+hosts:
+  - name: server
+    os: { type: linux, distro: ubuntu-20.04 }
+    image: ubuntu-focal                        # realized: the catalog golden (upstream ubuntu-focal-x86_64)
+    resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
+    interfaces:
+      - { network: server-switch, ip: 192.168.20.5 }
+    provisioning:
+      # upstream roles/server/tasks/main.yml, realized as one recipe; the flag
+      # FILES are deliberately not baked (the challenge plant layer re-plants
+      # them with proof entropy per sample, so defaults never score)
+      - { recipe: kypo.server, vars: { telnet_port: "{{telnet_port}}" } }
+    users:
+      - { name: alice, password: bacon }        # role defaults; weak, present in passlist
+    services:
+      - name: telnetd
+        port: "{{telnet_port}}"          # randomized per instance; default 2323
+        note: /etc/services rewritten; served by xinetd
+    vulnerabilities:
+      - id: weak-telnet-password
+        service: telnetd
+        description: alice's password is guessable from the provided wordlist.
+    misconfigurations:
+      - id: sudo-less-privesc
+        description: >
+          Sudoers line "alice ALL=(ALL) /usr/bin/less /home/alice/flag.txt" —
+          GTFOBins-style escalation from alice to root via less.
+    data:
+      - { path: /home/alice/flag.txt, description: user flag (randomized per instance), contents: "{{alice_flag}}", sensitive: true }
+      - { path: /root/flag.txt,       description: root flag (randomized per instance), contents: "{{root_flag}}",  sensitive: true }
+
+  - name: client
+    os: { type: linux, distro: ubuntu-20.04 }
+    image: ubuntu-focal                        # realized: the catalog golden (upstream ubuntu-focal-x86_64)
+    resources: { cpus: 1, memory_mb: 2048 }   # default: translated from flavor standard.small
+    interfaces:
+      - { network: client-switch, ip: 192.168.30.5 }
+    provisioning:
+      # upstream playbook.yml + roles/client (kypo-user-access, tools, passlist)
+      - { recipe: kypo.client }
+    users:
+      - { name: user, password: Password123, groups: [sudo] }  # kypo-user-access role; upstream "sudo: true"
+    data:
+      - { path: /home/user/passlist.txt, description: password wordlist containing "bacon" }
+
+attacker:
+  host: client                   # the trainee's foothold IS the client VM
+  entry: assumed-breach
+  egress: none                   # to-verify: KYPO NATs egress via the platform; not stated in these files (default: none)
+

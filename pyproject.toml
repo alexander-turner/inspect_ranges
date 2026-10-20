@@ -39,6 +39,7 @@ dev = [
     "pytest-dotenv",
     "pytest-timeout>=2.4.0",
     "anthropic>=1.11.0",
+    "pytest-cov>=7.1.0",
     {include-group = "doc"},
 ]
 doc = [
@@ -71,7 +72,18 @@ local_scheme = "no-local-version" # Important for PyPI compatibility
 managed = true
 
 [tool.ruff]
-extend-exclude = ["docs", "design"]
+# explicit exclude list: ruff's DEFAULT excludes contain "_build", which
+# silently blinded the lint/format gate to src/inspect_ranges/_build (caught
+# by the slice-5 fresh-context review)
+exclude = [
+    ".git",
+    ".venv",
+    "docs",
+    "design",
+    # vendored upstream provenance under the examples is FROZEN: neither
+    # linted nor reformatted (linux-examples-v1 phase review round 1)
+    "examples/*/upstream",
+]
 src = ["."]
 
 [tool.ruff.lint]

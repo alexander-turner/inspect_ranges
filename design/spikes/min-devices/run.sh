@@ -17,7 +17,7 @@ if [[ "${1:-}" == "down" ]]; then
   exit 0
 fi
 
-[[ -f "$IMAGE_CACHE/noble-range-guest.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
+[[ -f "$IMAGE_CACHE/ubuntu-noble.qcow2" ]] || { echo "missing guest image; run ../net-compile/run.sh once first"; exit 1; }
 [[ -f ../net-compile/tmp/render/allocation.json ]] || { echo "missing compiled render; run ../net-compile/run.sh once first"; exit 1; }
 
 python3 gen-xml.py
@@ -29,7 +29,7 @@ PCI_LIST='for d in /sys/bus/pci/devices/*; do printf "%s %s %s\n" $(cat $d/vendo
 echo "=== baseline: one guest with virt-install defaults (what we are removing) ==="
 docker compose exec -T range sh -c '
 set -e
-qemu-img create -f qcow2 -F qcow2 -b /images/noble-range-guest.qcow2 /scratch/baseline.qcow2 10G >/dev/null
+qemu-img create -f qcow2 -F qcow2 -b /images/ubuntu-noble.qcow2 /scratch/baseline.qcow2 10G >/dev/null
 cloud-localds -N /render/vms/agent/network-config /scratch/baseline-seed.iso /render/vms/agent/user-data /render/vms/agent/meta-data
 virt-install --connect qemu:///system --name baseline --memory 1024 --vcpus 1 --cpu host-passthrough \
   --disk path=/scratch/baseline.qcow2,format=qcow2,bus=virtio \

@@ -1,0 +1,5 @@
+name: catalog.attack-tools
+version: "3"
+entrypoint: run.sh
+mode: online
+inputs: {}

@@ -1,0 +1,26 @@
+# build-verify battery fixture: a declared service nothing installs, plus a
+# vulnerability linked to it: both must fail, by listening and by linkage.
+range:
+  name: bvdead
+  schema_version: "0.3"
+  description: Verification dead-service fixture.
+
+networks:
+  - name: lab
+    cidr: 10.97.10.0/24
+    mode: isolated
+
+hosts:
+  - name: web
+    os: { type: linux }
+    image: focal-guest
+    interfaces: [{ network: lab, ip: 10.97.10.10 }]
+    services:
+      - { name: redis, port: 6379 }
+    vulnerabilities:
+      - { id: dead-vuln, service: redis, description: battery fixture linkage }
+
+attacker:
+  image: focal-guest
+  interfaces: [{ network: lab }]
+  entry: external

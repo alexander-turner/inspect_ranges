@@ -1,0 +1,4 @@
+name: bv.nginx
+version: "1"
+entrypoint: run.sh
+mode: online

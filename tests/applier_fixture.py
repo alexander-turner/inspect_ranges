@@ -25,7 +25,13 @@ from inspect_ranges._host.applier import Applier
 from inspect_ranges._host.leases import LeaseStore
 from inspect_ranges._provider.admission import HostCapacity
 from inspect_ranges._runtime.down import DownResult
-from inspect_ranges._runtime.up import GuestState, OnStage, UpOptions, UpResult
+from inspect_ranges._runtime.up import (
+    GuestState,
+    OnStage,
+    UpError,
+    UpOptions,
+    UpResult,
+)
 
 from tests.local_endpoint import LocalEndpoint
 
@@ -33,8 +39,8 @@ FIXTURE_GUEST_CID = 20_000
 """First CID the fixture assigns (the range-host battery band, 20000+)."""
 
 
-def make_bundle(out: Path, name: str = "uds-fixture") -> str:
-    """A minimal CI bundle (manifest.json + plan.json) at `out`; returns its canonical digest."""
+def make_bundle(out: Path, name: str = "uds-fixture", *, evidence: bool = False) -> str:
+    """A minimal CI bundle (manifest.json + plan.json) at `out`; returns its canonical digest. With `evidence`, the plan carries `requirements.evidence_capture` so the applier's host-writer path engages."""
     import hashlib
     import json
 
@@ -63,7 +69,12 @@ def make_bundle(out: Path, name: str = "uds-fixture") -> str:
         attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
     )
     plan = resolve_plan(
-        spec, PlanOptions(image_cache=out / "cache", cid_base=FIXTURE_GUEST_CID + 500)
+        spec,
+        PlanOptions(
+            image_cache=out / "cache",
+            cid_base=FIXTURE_GUEST_CID + 500,
+            evidence_capture=evidence,
+        ),
     )
     out.mkdir(parents=True, exist_ok=True)
     (out / "plan.json").write_text(plan_json(plan))
@@ -141,18 +152,27 @@ class FakeGuestConnector:
         return client_side
 
 
+PRE_STAGE_LOG_STAGES = frozenset(
+    {"verify-bundle", "prepare", "verify-images", "range-image"}
+)
+"""Stages whose failures real `up()` raises BEFORE its stage log (and the `on_stage` tee) exists, so they never reach `on_stage`; the applier's synthetic `(error.stage, "fail")` feed is the only path to the driver's `failed` report (quality-review R2-9)."""
+
+
 def fake_up(bundle: Path, options: UpOptions, on_stage: OnStage) -> UpResult:
-    """The honest up flow with zero docker: stage events through `on_stage`, guests from `plan.json`."""
+    """The honest up flow with zero docker: stage events through `on_stage`, guests from `plan.json`.
+
+    A `fail-at-stage` marker file in the bundle injects an `UpError` at that stage with the real flow's ordering: `PRE_STAGE_LOG_STAGES` raise before any `on_stage` event, exactly as `up()` raises before its stage log exists; later stages log the `fail` event through the tee first, as `up()`'s `fail()` does.
+    """
     from inspect_ranges._compiler.plan import ResolvedPlan
 
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     marker = bundle / "fail-at-stage"
     fail_at = marker.read_text().strip() if marker.exists() else None
+    if fail_at in PRE_STAGE_LOG_STAGES:
+        raise UpError(fail_at, f"injected failure at {fail_at}")
     for stage, status in HONEST_UP_EVENTS:
         if fail_at is not None and stage == fail_at:
             on_stage(stage, "fail", {"error": f"injected failure at {stage}"})
-            from inspect_ranges._runtime.up import UpError
-
             raise UpError(stage, f"injected failure at {stage}")
         on_stage(stage, status, {})
     return UpResult(

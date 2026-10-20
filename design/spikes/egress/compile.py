@@ -19,7 +19,7 @@ from inspect_ranges.schema import load_range
 
 HERE = Path(__file__).parent
 RENDER = HERE / "tmp" / "render"
-GOLDEN = "/images/noble-range-guest.qcow2"
+GOLDEN = "/images/ubuntu-noble.qcow2"
 
 
 def bridge(network: str) -> str:
@@ -27,7 +27,8 @@ def bridge(network: str) -> str:
 
 
 def main() -> None:
-    spec = load_range(HERE / "spec.yaml")
+    spec_name = sys.argv[1] if len(sys.argv) > 1 else "spec.yaml"
+    spec = load_range(HERE / spec_name)
     allocation = allocate(spec)
     networks = {network.name: network for network in spec.networks}
 
