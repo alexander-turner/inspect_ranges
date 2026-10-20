@@ -61,7 +61,7 @@ attacker:
   egress: none
 ```
 
-## The Foothold Sandbox
+## Foothold Sandbox
 
 `sandbox()` is the attacker's foothold host (or the attacker box itself), and by default it is the ONLY registered sandbox: targets are not addressable by name from the agent's tool loop, which is the structural wall challenge scoring relies on (see [Challenges](challenges.qmd)).
 
@@ -77,7 +77,7 @@ For interactive range development, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` regist
 
 Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts.
 
-## The Retry Contract {#the-retry-contract}
+## Retry Contract {#the-retry-contract}
 
 Infrastructure flakes, and losing an entire sample when a retry would have recovered it is worse than the double-execution risk of retrying, so sandbox operations retry transient infrastructure failures by default. The caveat from `inspect_k8s_sandbox` applies verbatim: "Note that retries cannot guarantee idempotency — if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the em dash inside the quotation is the source's own punctuation, preserved for quote fidelity.)
 

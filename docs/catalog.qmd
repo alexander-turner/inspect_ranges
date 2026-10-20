@@ -10,7 +10,7 @@ The catalog is the set of standard images published at the project location (`do
 
 Nothing about the catalog is special-cased: these are ordinary distribution artifacts (see [Distribution](distribution.qmd)), published with `inspect-ranges publish`, resolved pin first, then the local cache, then the search path, whose default tail is the public org. A deployment that prepends its own registry shadows any catalog name deterministically.
 
-## The Attack Image
+## Attack Image
 
 `attack` is the standard attack box: a kali-class toolset built by a pinned recipe over the noble golden, with metasploit from its official apt repository (release key pinned by fingerprint). The toolset: nmap, netcat/socat, curl/wget, tcpdump, python3 with impacket and requests, sqlmap, hydra, john, gobuster, ffuf, smbclient, ldap-utils, dnsutils, and metasploit-framework (6.x floor, asserted at build).
 
@@ -31,7 +31,7 @@ $ inspect-ranges daemon-bundle --pull -o dist/daemon
 
 It also travels with whole-location mirrors, so air-gapped fleets derive goldens too.
 
-## The Hardened Range Container Image
+## Range Container Image
 
 The range container publishes as a conventional Docker image (`meridianlabsai/inspect-ranges-range`). Consumption is the digest pin described in [Distribution](distribution.qmd#the-hardened-range-container-image): set `INSPECT_RANGES_RANGE_IMAGE` to the published `repo@sha256:` reference and `up` pulls it once and boots every range inside it; unset, the local build remains the default.
 
@@ -41,6 +41,6 @@ An eval needs no explicit fetch verbs: init pulls whatever the range resolves th
 
 Fleets pin: `inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out pins.json` records every catalog name's current root digest, and a host running with `INSPECT_RANGES_PIN_FILE` set lands exactly the pinned roots, refusing `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through, the same posture as the search path).
 
-## The Republish Discipline
+## Republish Discipline
 
 Published bytes never change under a name silently: every consumer-held artifact is digest-verified, and a republished image is a new digest. The attack image's recipe version MUST bump for each republish, so the realized identity re-keys; between publish days the catalog deliberately drifts from upstream feeds (the manifest records what shipped). Moving a fleet forward is the explicit act: `images refresh <name>`, or regenerating the pin file.

@@ -26,7 +26,7 @@ Both backends behave identically at the eval surface: same sandboxes, same ops, 
 
 Keep socket paths short: `AF_UNIX` paths cap at about 107 bytes, so prefer `/run/user/<uid>/...` or a short `/tmp` directory over deeply nested trees.
 
-## The Lease Contract {#the-lease-contract}
+## Lease Contract {#the-lease-contract}
 
 Every sample holds a **host lease**: an identity plus an absolute expiry, recorded in `leases.json` beside the CID registry under the shared state dir. The driver renews it at a third of the TTL (`INSPECT_RANGES_LEASE_TTL_S`, default 600 seconds); renewal is an on-disk compare-and-swap, so there is zero hot-path wire chatter. Release is destruction: a lease is removed only after a successful teardown, and a used host is never returned to a pool.
 
@@ -53,11 +53,11 @@ Realize is gated: the requested bundle digest must match the lease's rendered bu
 
 **Applier restart is a recorded v1 limitation**: the replay log, guest relay map, and admission charges live in process memory and die with it (logged loudly at startup when live leases exist). Running samples keep their VMs; their teardowns recover from disk (the driver's teardown, the reaper, or `inspect sandbox cleanup range`), and new samples are served cleanly. When the applier is fully dead and a lease still exists, `inspect sandbox cleanup range` fails loudly by design (teardown for a leased project routes through the applier); recovery is reaper-only, via its direct-teardown fallback and the logged charge-leak warning.
 
-## The Grants Convention {#the-grants-convention}
+## Grants Convention {#the-grants-convention}
 
 `realize` carries a list of fetch grants for image delivery. In v1 the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
 
-## The Isolation Claim
+## Isolation Claim
 
 Every lease records an isolation claim, and the provider logs it once per sample acquisition. Both v1 backends claim **`isolation="shared"`**: one host's kernel, device emulation, and caches are reused across samples, so a guest-to-host escape in one sample could reach another sample's resources. The claim is honest labeling for the eval log, not a control. `isolation="instance"` (a fresh host per sample) arrives only with a real fleet provider; nothing in v1 pretends otherwise.
 

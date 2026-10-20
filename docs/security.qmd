@@ -37,7 +37,7 @@ Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control pla
 
 Two planning refusals bound the opt-in: a Cloud Hypervisor guest cannot carry guest content yet (`cloud-hypervisor-content-unsupported`: the build captures provisioned guests through libvirt, which cannot see CH guests), and a pinned `cpu_model` refuses (`cloud-hypervisor-cpu-model`: CH guests always see the host CPU).
 
-## The Control Plane
+## Control Plane
 
 Guest control rides virtio-vsock, not a management network. The rules:
 

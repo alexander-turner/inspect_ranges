@@ -77,7 +77,7 @@ $ inspect-ranges images refresh ubuntu-focal  # explicitly move forward
 
 A plain `images pull` of a name whose published chain moved refuses rather than silently replacing the cache; `refresh` replaces the whole chain (image, provenance sidecar, vendor base) together, and the next build's keys change accordingly.
 
-## The Hardened Range Container Image {#the-hardened-range-container-image}
+## Range Container Image {#the-hardened-range-container-image}
 
 The range container (the hardened jail every guest boots inside) is an ordinary Docker image, not an OCI-artifact qcow2, so it distributes as one: the project publishes it to a conventional Docker repo (`docker.io/meridianlabsai/inspect-ranges-range`), and a consumer opts in by pinning it:
 

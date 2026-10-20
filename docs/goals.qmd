@@ -10,7 +10,7 @@ A goal type is the unit of verification mechanics behind a challenge goal: it de
 
 The engine treats third-party types exactly like built-ins: the same registry, the same scorer loop, the same latching and aggregation. This page documents that contract. One part of the story is an open concern, stated plainly under [Registration](#registration): the `challenges.yaml` goal-type union is closed in v1, so a custom type's YAML `type:` name does not parse yet.
 
-## The Contract
+## GoalType Contract
 
 A goal type is a stateless object, registered once per process and shared across samples; everything per-sample lives in the plant store and the sample store. It binds four pieces:
 
@@ -49,7 +49,7 @@ Three mechanical rules follow from it and from the scoring-integrity design:
 
 A `GoalResult` carries `achieved`, optional `partial` credit in [0, 1] for types that declare a measure, `corroborated` (outside evidence confirmed the result; `None` when no corroborating observer is declared), `indeterminate`, and a value-free `reason`. Results latch per goal with first-pass-wins semantics: an achieved record is never downgraded or re-timestamped, earned partial credit never regresses, and a fresh indeterminate replaces a stale observed-fail. One timing consequence to design for: the mid-run poller is cheap-tier and covers only a fixed allowlist of built-in submission-proof types, so a custom type verifies once, at end of run. A proof that depends on transient guest state (a service momentarily down, a lock briefly held) will miss it; make the achievement durable in the proof design, the way the built-ins trade transient access for a submitted per-sample token.
 
-## The Oracle Surface
+## Oracle Surface {#the-oracle-surface}
 
 `setup` and `check` receive a `RangeOracle`, the privileged scoring-only surface. It is never registered as a sandbox nor handed to a solver's tools; a custom type must preserve that by not stashing it anywhere agent-reachable.
 
