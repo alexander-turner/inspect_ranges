@@ -30,7 +30,9 @@ timestamp: 2026-10-19
 
 **Slice 5: the defense-telemetry tier.** attack-range-windows's substrate: the Splunk server (a Linux host recipe), the Windows endpoint with sysmon and the universal forwarder, telemetry flows declared and consumed by `detection` goals (the challenges-v1 machinery exists; this slice realizes a live collector for it).
 
-**Slice 6: attack-range-windows solved + the exit.** The second fixture end to end, then the phase exit: both fixtures from clean caches, every reference eval green, docs (the examples page grows its Windows rows; Windows-specific operational notes), CHANGELOG, the house two-round phase review.
+**Slice 6: attack-range-windows solved + the exit.** The second fixture end to end, then the phase exit: both fixtures from clean caches, every reference eval green, docs (the examples page grows its Windows rows; Windows-specific operational notes), CHANGELOG, then the phase review (below).
+
+**Phase review (ratified addition, user 2026-10-20): a LINE-BY-LINE review of the entire phase diff** (everything since `64cc921`, the phase plan commit), in the house two-round shape — round 1 reads every changed line (the Windows substrate: winimage installer, plan/render/up Windows paths, guesttool/verify/capture branches, converged capture, the challenges oracle's Windows plant shape; both fixtures with their recipes and checks; the batteries; docs), with explicit security probes on the surfaces that accumulated ACROSS slices (the admin password's full journey from derive to seed to metadata, every PowerShell interpolation against the shared `ps_quote` rule, plant residue rules, the installer and VNC postures, eval-media operational facts only); findings fixed and re-batteried where behavior changed; round 2 is a fresh-context verification of round 1's fixes and claims. Per-slice reviews covered each diff in isolation; this pass exists for the cross-slice seams and drift they structurally cannot see. Expected to run past a single overnight together with slices 5-6; the staged batteries and ledger rows are the continuity mechanism.
 
 ## Non-goals
 
