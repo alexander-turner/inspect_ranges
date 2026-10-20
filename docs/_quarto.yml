@@ -51,6 +51,8 @@ inspect-docs:
           href: provider.qmd
     - text: Examples
       contents:
+        - text: dmz-pivot
+          href: examples/dmz-pivot.md
         - text: vulhub-zabbix
           href: examples/vulhub-zabbix.md
         - text: kypo-demo
