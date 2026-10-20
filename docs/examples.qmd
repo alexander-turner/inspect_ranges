@@ -10,6 +10,7 @@ The `examples/` directory holds ranges translated faithfully from published defi
 
 | Example | Upstream | The chain | Foothold |
 |---|---|---|---|
+| `dmz-pivot` | original (the docs home page example) | wordlist ssh guess on the web host, planted database credentials, pivot through the router's single ACL hole to postgres, exfiltration and flag | dedicated attack box |
 | `vulhub-zabbix` | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution on server and agent | dedicated attack box |
 | `kypo-demo` | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation | the client host (assumed breach) |
 | `cyris-basic` | CyRIS reference (JAIST) | weak-root-password privesc; firewall-policy recon; forensics triage of planted captures | the desktop host (assumed breach) |
@@ -19,6 +20,7 @@ The `examples/` directory holds ranges translated faithfully from published defi
 
 ## What the examples demonstrate
 
+- **dmz-pivot** is the hello-world reference: the smallest solvable built range (a no-CVE weak-credential chain over a routed ACL), purpose-built as the documentation home page example.
 - **kypo-demo** is the routed-topology reference: two subnets joined by a declared router, per-instance `variables:` resolving to defaults, a milestone ladder challenge, and the plant layer owning the flags (checked-in defaults never score).
 - **cyris-basic** is the firewall-ACL reference: a plain-router guest carrying the upstream 25/53 forwarding rules, deterministic synthesized evidence artifacts (pcaps, log noise, a resident dummy process), and a weights-scored forensics challenge.
 - **mhbench-equifax-small** is the scale and catalog reference: six targets, the attacker as the schema default (no `image:` line, the catalog's `attack`), a real CVE entry asserted live at build, and coverage-scored exfiltration with source-bound pcap corroboration.

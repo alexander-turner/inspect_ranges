@@ -33,7 +33,7 @@ class MarkerType(GoalType):
 
 **`compare(goal, obs, store)`** is a pure, host-side function from the observations and the plant record to a `GoalResult`. It is the only place the expected value is consulted, read from the in-memory `PlantStore` in the same process that planted it.
 
-**`uses_submissions`** (class attribute, default `True`) declares whether `check` reads the submissions view. The scorer verifies at most 8 distinct submitted candidates per goal, earliest first, calling `check` once per candidate with a single-entry view, so `submissions.value(goal.id)` inside `check` sees one candidate at a time. Set `uses_submissions = False` for types whose check never reads submissions (an evidence scan, an exploit re-run): the scorer then runs exactly one check per goal, so an agent cannot multiply your type's scoring cost by flooding `challenge_submit`.
+**`uses_submissions`** (class attribute, default `True`) declares whether `check` reads the submissions view. The scorer verifies at most 8 distinct submitted candidates per goal, earliest first, calling `check` once per candidate with a single-entry view, so `submissions.value(goal.id)` inside `check` sees one candidate at a time. Set `uses_submissions = False` for types whose check never reads submissions (an evidence scan, an exploit re-run): the scorer then runs exactly one check per goal, so an agent cannot multiply your type's scoring cost by flooding `verify_goal`.
 
 ## Designing the proof
 

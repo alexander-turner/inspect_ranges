@@ -1,7 +1,7 @@
 ---
 title: "Challenges"
 description: "Defining what an agent is asked to do on a range and how success is verified: challenges.yaml, the goal types and their proof contracts, submissions, scoring, and the trust boundaries stated plainly."
-llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes, hints), the fourteen built-in goal types with proof contracts and assurance labels, the challenge_submit tool, the plant/poll/latch/corroborate scoring lifecycle and validity states, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
+llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes, hints), the fourteen built-in goal types with proof contracts and assurance labels, the verify_goal tool, the plant/poll/latch/corroborate scoring lifecycle and validity states, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
 ---
 
 ## Overview
@@ -17,7 +17,7 @@ from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
-    challenge_submit,
+    verify_goal,
 )
 
 @task
@@ -27,7 +27,7 @@ def zabbix() -> Task:
             "challenges.yaml", range_spec="range.yaml"
         ),
         setup=challenge_setup(),
-        solver=react(tools=[bash(), challenge_submit()]),
+        solver=react(tools=[bash(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
@@ -85,11 +85,20 @@ Verification follows one rule throughout: the agent controls the attack box from
 
 The active probe behind `degrade`, `tamper`, `availability`, and `patch` runs from a declared, clamped endpoint on the segment: addressable but silent (no ping reply, no RST, scans read filtered), with its reserved IP and `02:50:...` MAC recorded in the plan so probe traffic is excluded from agent-traffic reasoning by spec. The probed service must answer `GET <path>?nonce=` with the nonce's sha256 (the v1 probe surface, a contract the range author owns).
 
-## Submitting proofs
+## Verifying goals
 
-Proofs travel through one channel: the `challenge_submit(goal_id, value)` tool, which the task author passes to the agent. For react-style agents that is `react(tools=[..., challenge_submit()])`; for coding-agent scaffolds run via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/) it is `bridged_tools=[challenge_submit()]`. The dataset appends a paragraph to every challenge prompt naming the tool and the goal id(s), so the agent always knows how to submit. There is no fallback: a sample that ends with no recorded submissions logs a loud warning naming both wiring idioms, since that is either an empty-handed agent or a task that forgot to wire the tool.
+Proofs travel through one channel: the `verify_goal(goal_id, value)` tool, which the task author passes to the agent. For react-style agents that is `react(tools=[..., verify_goal()])`; for coding-agent scaffolds run via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/) it is `bridged_tools=[verify_goal()]`. The dataset appends a paragraph to every challenge prompt naming the tool and the goal id(s), so the agent always knows how to submit. There is no fallback: a sample that ends with no recorded calls logs a loud warning naming both wiring idioms, since that is either an empty-handed agent or a task that forgot to wire the tool.
 
-Submissions are recorded, not judged, at submission time: the scorer verifies at most 8 distinct values per goal, earliest first, and records any overflow in the score metadata (a flooding agent is visible to reviewers, and scoring cost cannot be amplified by submission volume). Types whose verification never reads submissions (the prober types, `detection`, `evade`, `hijack`, `patch`) run exactly one check however many values arrive.
+Submission-proof goal types (the same cheap tier the mid-run poller covers) verify at the moment of the call: the value is checked driver-side against the planted proof, the result latches first-pass-wins, and the outcome returns in the tool result, so the agent knows whether a goal is achieved without waiting for scoring. Types whose verification needs end-of-run machinery return "recorded" instead and verify at scoring time, and types that never read submissions (the prober types, `detection`, `evade`, `hijack`, `patch`) need no `verify_goal` call at all. `verify_goal(feedback=False)` disables the in-band outcome for evals that want submission silence; values are still recorded and latched.
+
+Dedup and caps run before verification: at most 8 distinct values per goal are ever verified, earliest first, with overflow recorded in the score metadata (a flooding agent is visible to reviewers, scoring cost cannot be amplified by submission volume, and the cap is what bounds the tool as an oracle: per-sample proof values are high-entropy, so eight guesses buy nothing).
+
+## Agents and the loop
+
+The agent loop owns termination; verifying goals never requires ending the run. The appended prompt paragraph tells the agent to verify each proof as it is obtained and finish normally once its goals are confirmed or it is out of ideas. Two notes for specific loops:
+
+- **react**: its built-in `submit` tool ends the run, and with `attempts > 1` each submission is scored by the task scorer to decide whether to continue. Use the default `attempts=1` with `challenge_scorer()`: the scorer is an end-of-run authority (probers, corroboration windows, `patch` exploit re-runs) and is not designed for per-attempt invocation; with in-band `verify_goal` feedback the agent already knows its goal status and attempts buy nothing. react's `submit` answer is not a goal submission; goals travel only through `verify_goal`.
+- **Coding-agent scaffolds** (Claude Code, Codex via inspect_swe): pass `verify_goal()` through `bridged_tools`; the scaffold's own completion ends the run.
 
 ## How scoring works
 
