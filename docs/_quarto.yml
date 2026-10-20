@@ -61,8 +61,8 @@ inspect-docs:
           href: examples/kypo-demo.md
         - text: cyris-basic
           href: examples/cyris-basic.md
-        - text: mhbench-equifax-small
-          href: examples/mhbench-equifax-small.md
+        - text: equifax
+          href: examples/equifax.md
         - text: goad-light
           href: examples/goad-light.md
         - text: splunk-detection

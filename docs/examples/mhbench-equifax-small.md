@@ -1,1 +1,0 @@
-../../examples/mhbench-equifax-small/README.md
