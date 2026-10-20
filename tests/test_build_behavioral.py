@@ -385,9 +385,9 @@ def test_attacker_guest_resolution_prefers_the_attack_box_then_the_foothold() ->
 def test_collectors_file_loads_and_feeds_the_checks_digest(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Windows-ad-v1 slice 5: collectors.yaml parses into CollectorSpecs (command and file sources, name grammar enforced) and participates in checks_digest — an edited export command must re-run the trio."""
+    """Windows-ad-v1 slice 5: collectors.yaml parses into CollectorSpecs (command and file sources, name grammar enforced) and participates in checks_digest — an edited export command must re-run the trio. The loader imports from `inspect_ranges` (its public export: the `challenge_setup(telemetry_collectors=...)` wiring needs it)."""
+    from inspect_ranges import load_collectors
     from inspect_ranges._build.behavioral import checks_digest
-    from inspect_ranges._evidence.telemetry import load_collectors
 
     collectors_yaml = tmp_path / "collectors.yaml"
     collectors_yaml.write_text(

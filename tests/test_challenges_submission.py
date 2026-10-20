@@ -1,13 +1,13 @@
-"""Slice-2 battery (CI half): the `challenge_submit` tool's store records and the scorer-side reader, the only submission channel (the completion fallback was removed 2026-10-20)."""
+"""Slice-2 battery (CI half): the `verify_goal` tool's store records and the scorer-side reader, the only submission channel (the completion fallback was removed 2026-10-20; call-time verification rides `test_challenges_verify.py`)."""
 
 import asyncio
 
 from inspect_ai.model import ModelName, ModelOutput
 from inspect_ai.solver import TaskState
 from inspect_ai.util._store import Store, init_subtask_store
+from inspect_ranges import verify_goal
 from inspect_ranges._challenges.submission import (
     SUBMISSIONS_STORE_KEY,
-    challenge_submit,
     submissions_from,
 )
 
@@ -26,11 +26,11 @@ def make_state(store: Store | None = None, completion: str | None = None) -> Tas
     return state
 
 
-def test_challenge_submit_tool_appends_records() -> None:
+def test_verify_goal_tool_appends_records() -> None:
     async def scenario() -> None:
         store = Store()
         init_subtask_store(store)
-        execute = challenge_submit()
+        execute = verify_goal()
         await execute(goal_id="user", value="abc")
         await execute(goal_id="user", value="def")
         await execute(goal_id="root", value="xyz")

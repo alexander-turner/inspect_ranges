@@ -1,6 +1,11 @@
 """Challenges and goals: typed `challenges.yaml`, the dataset, the oracle and plants, and the goal-type engine."""
 
-from .._evidence.telemetry import CollectorSpec, CommandSource, FileSource
+from .._evidence.telemetry import (
+    CollectorSpec,
+    CommandSource,
+    FileSource,
+    load_collectors,
+)
 from .corroborate import PROBE_MAC_PREFIX, CorroborationReport, corroborate
 from .dataset import challenge_dataset
 from .engine import (
@@ -57,13 +62,14 @@ from .schema import (
 )
 from .scorer import challenge_scorer, score_challenge
 from .setup import challenge_setup, plant_secret_file
-from .submission import Submission, Submissions, challenge_submit, submissions_from
+from .submission import Submission, Submissions, submissions_from
 from .timings import (
     TIMINGS_STORE_KEY,
     add_timing,
     render_timing_table,
     timings_snapshot,
 )
+from .verify import verify_goal
 
 __all__ = [
     "ASSURANCE_RANK",
@@ -111,11 +117,11 @@ __all__ = [
     "challenge_issues",
     "challenge_scorer",
     "challenge_setup",
-    "challenge_submit",
     "goal_type",
     "latch",
     "latched_records",
     "load_challenges",
+    "load_collectors",
     "plant_secret_file",
     "range_oracle",
     "register_exploit",
@@ -125,6 +131,7 @@ __all__ = [
     "score_challenge",
     "submissions_from",
     "validate_challenges",
+    "verify_goal",
     "CorroborationReport",
     "GoalPoller",
     "PROBE_MAC_PREFIX",

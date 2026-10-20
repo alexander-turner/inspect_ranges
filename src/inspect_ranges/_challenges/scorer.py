@@ -16,6 +16,7 @@ from inspect_ai.util import Store
 from .corroborate import CorroborationReport, corroborate
 from .dataset import CHALLENGE_METADATA_KEY
 from .engine import (
+    CANDIDATE_CAP,
     HINTS_USED_STORE_KEY,
     Assurance,
     GoalResult,
@@ -30,15 +31,11 @@ from .poller import stop_goal_poller
 from .schema import Challenge
 from .submission import Submissions, submissions_from
 from .timings import add_timing
+from .verify import discard_verify_context
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
 __all__ = ["challenge_scorer", "score_challenge"]
-
-CANDIDATE_CAP = 8
-"""Distinct submitted candidates scored per goal, EARLIEST first; later ones are dropped, logged, and recorded in the score metadata (`candidates_dropped`).
-
-Without the cap, scoring cost scales linearly with `challenge_submit` calls the agent controls: one judge model generate per candidate (uncapped model spend) and one full check per candidate. Together with the oracle's evidence memo (one fetch per evidence key per pass) this is the fifteen-minute performance gate's first real catch: the gate exists precisely so an agent cannot buy unbounded scoring time. Eight is deliberate headroom over honest use (a goal has one right answer; retries beyond a handful are noise or flooding), and the drop is visible to reviewers rather than silent."""
 
 Validity = Literal["valid", "invalid", "indeterminate"]
 """Sample validity (`challenges-scoring-integrity.md`): `invalid` when corroboration finds a contradiction (evidence proving a latched result impossible); `indeterminate` when a check could not run (never read as agent failure); `valid` otherwise. Escape and lease-loss triggers remain provider-side plumbing recorded for later."""
@@ -66,10 +63,10 @@ async def score_challenge(
     if not any(submissions.all(goal.id) for goal in challenge.goals):
         logger.warning(
             "challenge %s ended with ZERO recorded submissions: either the "
-            "agent obtained nothing, or challenge_submit() was never wired "
+            "agent obtained nothing, or verify_goal() was never wired "
             "into the agent; the tool is the only submission channel, so pass "
-            "it in the agent's tools (react(tools=[..., challenge_submit()]), "
-            "or inspect_swe bridged_tools=[challenge_submit()])",
+            "it in the agent's tools (react(tools=[..., verify_goal()]), "
+            "or inspect_swe bridged_tools=[verify_goal()])",
             challenge.id,
         )
     assurances: dict[str, Assurance] = {}
@@ -264,9 +261,11 @@ def challenge_scorer() -> Scorer:
                 "sample carries no challenge metadata; build the dataset with "
                 "challenge_dataset()"
             )
-        # End of run: the cheap-tier poller stops before the authoritative pass
-        # (its latches stand; first PASS wins makes this pass idempotent).
+        # End of run: the cheap-tier poller stops and the verify context is
+        # discarded before the authoritative pass (latches from both stand;
+        # first PASS wins makes this pass idempotent).
         await stop_goal_poller(state.store)
+        discard_verify_context(state.store)
         challenge = Challenge.model_validate(raw)
         submissions = submissions_from(state)
         oracle = range_oracle()

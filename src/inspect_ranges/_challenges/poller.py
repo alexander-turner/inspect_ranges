@@ -45,6 +45,40 @@ _POLLABLE_TYPES = frozenset(
 _POLLERS: dict[int, "GoalPoller"] = {}
 
 
+def cheap_verifiable(goal: Goal) -> bool:
+    """Whether the goal verifies on the cheap tier: a submission-proof compare against in-memory plants or declared values, zero guest or evidence I/O.
+
+    The fixed allowlist (`_POLLABLE_TYPES`, minus `answer` goals with the oracle-read source) is shared by the mid-run poller and `verify_goal`'s call-time verification (`verify.py`), so the two can never drift.
+    """
+    if goal.type not in _POLLABLE_TYPES:
+        return False
+    if isinstance(goal, AnswerGoal) and goal.host is not None:
+        return False
+    return True
+
+
+def cheap_observations(oracle: "RangeOracle", goal: Goal, value: str) -> Observations:
+    """The cheap-tier observations for one submitted value, shared by the poller's tick and `verify_goal`'s call-time check.
+
+    Args:
+        oracle: The sample's oracle (in-memory plants and the declared range spec; nothing is read from a guest or from evidence).
+        goal: A `cheap_verifiable` goal.
+        value: The submitted value to compare.
+
+    Returns:
+        The observations `compare` consumes.
+    """
+    reads = {"v": value.encode()}
+    if isinstance(goal, AnswerGoal):
+        if goal.variable is not None:
+            declared = oracle.range_spec().variables[goal.variable]
+            reads["expected"] = str(declared.default).encode()
+        else:
+            assert goal.value is not None  # oracle-read answers are not cheap-tier
+            reads["expected"] = goal.value.encode()
+    return Observations(source="submission", reads=reads)
+
+
 def _poll_s() -> float:
     raw = os.environ.get(POLL_S_ENV)
     if raw is None:
@@ -67,14 +101,6 @@ def _poll_s() -> float:
         )
         return DEFAULT_POLL_S
     return value
-
-
-def _pollable(goal: Goal) -> bool:
-    if goal.type not in _POLLABLE_TYPES:
-        return False
-    if isinstance(goal, AnswerGoal) and goal.host is not None:
-        return False
-    return True
 
 
 class GoalPoller:
@@ -174,7 +200,7 @@ class GoalPoller:
             existing = records.get(goal.id)
             if existing is not None and existing.achieved:
                 continue
-            if not _pollable(goal):
+            if not cheap_verifiable(goal):
                 continue
             entries = [entry for entry in raw if str(entry["goal_id"]) == goal.id]
             if not entries:
@@ -224,15 +250,7 @@ class GoalPoller:
             )
 
     def _observations(self, goal: Goal, value: str) -> Observations:
-        reads = {"v": value.encode()}
-        if isinstance(goal, AnswerGoal):
-            if goal.variable is not None:
-                declared = self._oracle.range_spec().variables[goal.variable]
-                reads["expected"] = str(declared.default).encode()
-            else:
-                assert goal.value is not None  # oracle-read answers are not pollable
-                reads["expected"] = goal.value.encode()
-        return Observations(source="submission", reads=reads)
+        return cheap_observations(self._oracle, goal, value)
 
 
 def start_goal_poller(
@@ -244,7 +262,7 @@ def start_goal_poller(
         The poller, or `None` when disabled (`INSPECT_RANGES_POLL_S=0`), nothing is pollable, or one is already running for this store.
     """
     poll_s = _poll_s()
-    if poll_s <= 0 or not any(_pollable(goal) for goal in challenge.goals):
+    if poll_s <= 0 or not any(cheap_verifiable(goal) for goal in challenge.goals):
         return None
     if id(store) in _POLLERS:
         return _POLLERS[id(store)]

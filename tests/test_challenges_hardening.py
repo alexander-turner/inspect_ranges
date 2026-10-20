@@ -1,6 +1,6 @@
 """Scorer hardening pins from the chunk-B/C verification: candidate amplification, best-partial selection, store-failure isolation, the hijack floor, and disclosed-value frame scrubs.
 
-The amplification pins are the fifteen-minute performance gate's first real enforcement (`challenges-v1.md`): an agent must not control scoring cost through `challenge_submit` call volume.
+The amplification pins are the fifteen-minute performance gate's first real enforcement (`challenges-v1.md`): an agent must not control scoring cost through `verify_goal` call volume.
 """
 
 import asyncio
@@ -14,7 +14,11 @@ from typing import Any, cast
 
 import pytest
 from inspect_ai.util import Store
-from inspect_ranges._challenges.engine import GoalResult, Observations
+from inspect_ranges._challenges.engine import (
+    CANDIDATE_CAP,
+    GoalResult,
+    Observations,
+)
 from inspect_ranges._challenges.observedtypes import HijackType
 from inspect_ranges._challenges.oracle import RangeOracle
 from inspect_ranges._challenges.plants import PlantStore
@@ -24,7 +28,7 @@ from inspect_ranges._challenges.schema import (
     HijackGoal,
     JudgeGoal,
 )
-from inspect_ranges._challenges.scorer import CANDIDATE_CAP, score_challenge
+from inspect_ranges._challenges.scorer import score_challenge
 from inspect_ranges._challenges.submission import Submission, Submissions
 from inspect_ranges._compiler.plan import ResolvedPlan
 
@@ -79,7 +83,7 @@ def _flood(goal_id: str, count: int) -> Submissions:
 
 
 class TestCandidateAmplification:
-    """An agent flooding `challenge_submit` buys neither evidence refetches nor model calls."""
+    """An agent flooding `verify_goal` buys neither evidence refetches nor model calls."""
 
     def test_execute_flood_fetches_pcap_once_and_records_drop(
         self, tmp_path: Path
@@ -118,7 +122,7 @@ class TestCandidateAmplification:
     def test_submission_blind_type_checks_once_under_flood(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        """A type whose check never reads submissions runs ONE check however many values the agent submits: junk `challenge_submit` calls against a patch or prober goal must not multiply the expensive re-run (the per-candidate fan-out is gated on `uses_submissions`)."""
+        """A type whose check never reads submissions runs ONE check however many values the agent submits: junk `verify_goal` calls against a patch or prober goal must not multiply the expensive re-run (the per-candidate fan-out is gated on `uses_submissions`)."""
         from inspect_ranges._challenges.engine import GoalType
         from inspect_ranges._challenges.schema import FlagGoal
 

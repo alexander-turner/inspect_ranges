@@ -20,7 +20,7 @@ inspect-ranges build       # realize + verify + prove (build egress required)
 inspect eval task.py --model <model>
 ```
 
-The detection goal needs the collector binding: pass `collectors.yaml` to `challenge_setup(telemetry_collectors=...)` (the loader currently lives in `inspect_ranges._evidence.telemetry`).
+The detection goal needs the collector binding: pass `collectors.yaml` to `challenge_setup(telemetry_collectors=...)` via `load_collectors`.
 
 ```python
 from pathlib import Path
@@ -33,9 +33,10 @@ from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
-    challenge_submit,
+    load_collectors,
+    verify_goal,
 )
-from inspect_ranges._evidence.telemetry import load_collectors
+
 
 @task
 def attack_range_windows() -> Task:
@@ -44,7 +45,7 @@ def attack_range_windows() -> Task:
         setup=challenge_setup(
             telemetry_collectors=load_collectors(Path("collectors.yaml"))
         ),
-        solver=react(tools=[bash(), challenge_submit()]),
+        solver=react(tools=[bash(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )

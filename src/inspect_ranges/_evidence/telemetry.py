@@ -109,7 +109,21 @@ class CollectorsFile(EvidenceModel):
 
 
 def load_collectors(path: "Path") -> list[CollectorSpec]:
-    """Parse a `collectors.yaml` into collector specs; a malformed declaration refuses with the validation detail (a silently dropped collector would turn a detection goal's observer gate into an infra riddle)."""
+    """Parse a `collectors.yaml` into collector specs.
+
+    The file binds a `detection` or `evade` goal's `collector` name to a real export (poll mechanics are deployment knowledge the challenge schema deliberately does not carry); pass the result to `challenge_setup(telemetry_collectors=...)`. A malformed declaration refuses with the validation detail: a silently dropped collector would turn a detection goal's observer gate into an infra riddle.
+
+    Args:
+        path: The `collectors.yaml` path (beside the range's `challenges.yaml` by convention).
+
+    Returns:
+        The declared collector specs.
+
+    Raises:
+        OSError: The file cannot be read.
+        yaml.YAMLError: The file is not parseable YAML.
+        pydantic.ValidationError: A declaration does not satisfy the collector schema.
+    """
     import yaml
 
     loaded: object = yaml.safe_load(path.read_text())
