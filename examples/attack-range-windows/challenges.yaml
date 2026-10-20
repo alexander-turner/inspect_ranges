@@ -50,8 +50,8 @@ challenges:
         # exec hangs to its budget or the fetch itself is slow (measured 0.00/
         # valid at the phase exit with the signal shipped on time, twice).
         # 180 s absorbs the worst measured positive case (dump -> bounded 30 s
-        # cleanup -> 45 s settle -> fetch, ~140 s) while staying clear of the
-        # measured negative-side gap (the previous check's event sat 279 s
-        # before the next verdict with the 180 s separation sleeps the
-        # negative checks open with — ~100 s of margin on each side).
+        # cleanup -> 45 s settle -> fetch, ~140 s; ~40 s of margin) while
+        # staying clear of the measured negative-side gap (the previous
+        # check's event sat 279 s before the next verdict with the 180 s
+        # separation sleeps the negative checks open with; ~99 s of margin).
         window_s: 180
