@@ -45,7 +45,12 @@ hosts:
     interfaces: [{ network: lab, ip: "{{ip_range}}.10" }]
     roles: [domain-controller, dns, adcs]
     services:
-      - { name: active-directory, port: 389, note: domain sevenkingdoms.local }   # realized: port added (LDAP) so verification is mechanical
+      # realized: the built-in Administrator's password is ROTATED to this declared
+      # credential at the end of the dc01-forest realize (parked-decisions entry 2:
+      # the toolchain's derive-time default must not survive as a goal principal's
+      # live credential); the recipe self-asserts the rotation landed
+      - { name: active-directory, port: 389, credentials: { user: Administrator, password: "Ir0nThr0ne!Keeper#2026" },
+          note: domain sevenkingdoms.local }   # realized: port added (LDAP) so verification is mechanical
       - { name: adcs, note: certificate authority }
       - { name: dns, port: 53 }                                                   # realized: port added
     provisioning:
@@ -70,7 +75,11 @@ hosts:
     interfaces: [{ network: lab, ip: "{{ip_range}}.11" }]
     roles: [domain-controller, dns]
     services:
-      - { name: active-directory, port: 389, note: domain north.sevenkingdoms.local }   # realized: port added
+      # realized: NORTH\Administrator (the local account the child promotion carries
+      # into the domain) is ROTATED to this declared credential at the end of the
+      # dc02-child realize (parked-decisions entry 2); self-asserted
+      - { name: active-directory, port: 389, credentials: { user: Administrator, password: "W1nterC@me&TheWallHeld" },
+          note: domain north.sevenkingdoms.local }   # realized: port added
       - { name: dns, port: 53 }                                                         # realized: port added
     provisioning:
       - recipe: goad.dc02-child
@@ -98,7 +107,11 @@ hosts:
       - { name: mssql, port: 1433, credentials: { user: sa, password: "Sup1_sa_P@ssw0rd!" },
           note: service account sql_svc }
       - { name: webdav, note: rides IIS on 80 }
-      - { name: smb, port: 445, note: "open share C:\\shares\\all (contains arya.txt)" }   # realized: port added
+      # realized: the local Administrator's password is ROTATED to this declared
+      # credential at the end of the srv02-member realize (parked-decisions entry 2);
+      # declared on smb because the credentialed-login surface rides 445
+      - { name: smb, port: 445, credentials: { user: Administrator, password: "N1ghtsW@tch#77" },
+          note: "open share C:\\shares\\all (contains arya.txt)" }   # realized: port added
     provisioning:
       - recipe: goad.srv02-member
     vulnerabilities:

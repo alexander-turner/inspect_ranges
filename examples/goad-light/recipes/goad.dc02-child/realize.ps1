@@ -138,4 +138,26 @@ if (-not (Get-ADGroupMember -Identity 'Administrators' | Where-Object SamAccount
   throw 'robb.stark is not in the DC Administrators (the declared local-admins fact)'
 }
 if ((Get-ItemProperty -Path $winlogon).DefaultPassword -ne 'sexywolfy') { throw 'autologon missing' }
-Write-Output 'dc02 realized: users, spns, dc-admins, misconfigurations, defense'
+
+# -- rotate the built-in Administrator password (parked-decisions entry 2) -----
+# The child promotion carried the local Administrator (holding the golden's
+# derive-time default) into the domain as NORTH\Administrator — a goal
+# principal; the replacement is DECLARED scenario surface (range.yaml dc02
+# services[active-directory].credentials) and persists through capture (the
+# one-shot oobeSystem pass; captures are never re-generalized). COUPLING:
+# srv02's join authenticates as NORTH\Administrator with this value
+# (recipes/goad.srv02-member/join.ps1).
+$adminPassword = 'W1nterC@me&TheWallHeld'
+Set-ADAccountPassword -Identity Administrator -Reset `
+  -NewPassword (ConvertTo-SecureString $adminPassword -AsPlainText -Force)
+# self-assert the rotation LANDED: an in-process authenticated validation with
+# the new value (off argv; this block's text auto-logs as a 4104 suspicious
+# script block, and the pre-capture scrub clears the PowerShell logs so no
+# captured log carries the value)
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+$bindCtx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+  [System.DirectoryServices.AccountManagement.ContextType]::Domain, 'north.sevenkingdoms.local')
+if (-not $bindCtx.ValidateCredentials('Administrator', $adminPassword)) {
+  throw 'the NORTH\Administrator rotation did not land (validation with the declared value failed)'
+}
+Write-Output 'dc02 realized: users, spns, dc-admins, misconfigurations, defense, admin rotation'

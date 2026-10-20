@@ -68,7 +68,7 @@ def scrub_guest(
 ) -> None:
     """Pre-capture cleanup so the realized image is a clean golden-like artifact (parked-decisions item 2): `cloud-init clean --logs` removes the build boot's instance state (every runtime boot then seeds fresh) and the build seed's rendered netplan goes with it, so neither the build's egress nameserver (a deployment's VPC resolver IP) nor an already-run marker survives into the captured disk.
 
-    A Windows guest has no per-boot network state to clean — its unattend specialize config is PERSISTENT registry state, deliberately kept (the realized image is specialized, and specialize will not re-run at consumer boot). The Windows scrub removes exactly the build-only contamination: staged `guesttool` temp files, and `build_nameserver` stripped from every adapter's resolver list (the build appended it; a consumer boot would otherwise query a dead resolver first on uplinked adapters). Explicitly NOT sysprep: generalizing a domain-joined capture would destroy the membership the build just created.
+    A Windows guest has no per-boot network state to clean — its unattend specialize config is PERSISTENT registry state, deliberately kept (the realized image is specialized, and specialize will not re-run at consumer boot). The Windows scrub removes exactly the build-only contamination: staged `guesttool` temp files, the PowerShell event logs, and `build_nameserver` stripped from every adapter's resolver list (the build appended it; a consumer boot would otherwise query a dead resolver first on uplinked adapters). The PowerShell logs are build logs: Windows PowerShell 5.1 automatically records signature-bearing script blocks (`ConvertTo-SecureString`, `Add-Type`, ...) to `Microsoft-Windows-PowerShell/Operational` as event 4104 even with no logging policy configured (measured live in the arw fixture's exported stream), so a recipe script's text — credential literals included — would otherwise persist in the captured disk (goad rotation review, 2026-10-20: dc02's promote carries dc01's declared credential, srv02's join carries dc02's — a cross-host answer key). Explicitly NOT sysprep: generalizing a domain-joined capture would destroy the membership the build just created.
 
     Raises:
         BuildError: stage `capture`, when the scrub itself fails; a dirty capture must not pass silently.
@@ -89,12 +89,22 @@ def scrub_guest(
         # recipes stage DIRECTORIES under the prefix too (slice-4 review B1 —
         # the goad answer-key JSON and the SQL installer tree must never land
         # in a realized disk)
+        # the PowerShell logs clear LAST: they are the final write-capable step,
+        # and the scrub's own block contains no auto-logging signature, so
+        # nothing lands after the clear. wevtutil is native — assert its rc.
+        clear_ps_logs = (
+            "foreach ($log in @('Microsoft-Windows-PowerShell/Operational', 'Windows PowerShell')) { "
+            "wevtutil cl $log; "
+            "if ($LASTEXITCODE -ne 0) "
+            "{ Write-Error ('clearing ' + $log + ' exited ' + $LASTEXITCODE); exit 1 } }; "
+        )
         script = (
             "$ErrorActionPreference='Stop'; "
             + strip_ns
             + "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue 'C:\\Windows\\Temp\\.ir-*'; "
             + "if (Test-Path 'C:\\Windows\\Temp\\.ir-*') "
             + "{ Write-Error 'staged temp files survived the scrub'; exit 1 }; "
+            + clear_ps_logs
             + "exit 0"
         )
         cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
