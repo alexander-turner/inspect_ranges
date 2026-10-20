@@ -443,7 +443,10 @@ async def _run_one(
 ) -> BehavioralCheckRecord:
     from inspect_ai.util._store import Store
 
-    from .._challenges.setup import run_setup
+    from .._challenges.setup import (
+        _unwind,  # pyright: ignore[reportPrivateUsage]
+        run_setup,
+    )
 
     store = Store()
     planted = await run_setup(oracle, challenge, store)
@@ -456,26 +459,14 @@ async def _run_one(
         # guest content), and samples plant exactly once per boot; this runner
         # reuses ONE boot across checks, so each check's plants are removed
         # here to keep the next `run_setup` fresh; removal failures are logged
-        # and never mask the primary diagnosis (round-1 review)
-        for key in planted:
-            plant = oracle.store.plant(key)
-            if not plant.path.startswith("/"):
-                continue
-            try:
-                removal = await oracle.exec(
-                    plant.guest, ["rm", "-f", "--", plant.path], user="root"
-                )
-                if removal.rc != 0:
-                    logger.warning(
-                        "check plant removal: %s:%s exited %d",
-                        plant.guest,
-                        plant.path,
-                        removal.rc,
-                    )
-            except Exception:
-                logger.warning(
-                    "check plant removal failed: %s:%s", plant.guest, plant.path
-                )
+        # and never mask the primary diagnosis (round-1 review). The shared
+        # unwind is the ONE removal rule: a duplicated POSIX-only loop here
+        # silently skipped Windows plants, so the second check's setup refused
+        # on the first check's leftover token (windows-ad-v1 slice 4, measured)
+        try:
+            await _unwind(oracle, planted)
+        except Exception:
+            logger.warning("check plant unwind failed for %r", name)
 
 
 async def _execute_and_score(

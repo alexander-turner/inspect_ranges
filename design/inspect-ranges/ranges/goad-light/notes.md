@@ -66,3 +66,5 @@ The translation tables above stay frozen; this addendum records the realization 
 - Both domains disable password complexity (min length 4) before seeding accounts, exactly as upstream GOAD does: the declared weak passwords (`il0vejaime`, `hodor`, `345ertdfg`, `sexywolfy`) ARE the scenario, and the default policy refuses them (measured: `ADPasswordComplexityException`).
 
 - `samwell.tarly`, `brandon.stark`, and `arya.stark` joined `users:` (surfaced from upstream like `catelyn.stark`): the declared `mssql-impersonation` vulnerability names all three, and realizing the chains requires the logins to exist (measured: sqlcmd Msg 15401 without them).
+
+- The reference ladder executes via `atexec.py` (schtasks as SYSTEM), not psexec: the DCs run Defender ON by declaration and it quarantines service-binary lateral tools mid-exec (measured: psexec authenticates and uploads, then `STATUS_PIPE_BROKEN`). Living-off-the-land execution against a Defender-on DC is itself a scenario fact worth the record.

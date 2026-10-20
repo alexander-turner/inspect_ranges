@@ -16,9 +16,18 @@ done
 # domain access works (the account is real)...
 smbclient -L "//$DC02/" -U 'NORTH\hodor%hodor' -g >/dev/null 2>&1 \
   || echo "hodor could not even list shares (converging?)"
-# ...but admin exec does not: psexec as hodor must fail on every target
-if psexec.py "north.sevenkingdoms.local/hodor:hodor@$SRV02" 'cmd /c whoami' >/dev/null 2>&1; then
+# ...but admin exec does not. Impacket tools exit 0 after printing handled
+# errors (measured: access denied with rc 0), so the probe asserts on the
+# EXECUTION EVIDENCE (whoami's output), never the exit code
+hodor_out=$(atexec.py "north.sevenkingdoms.local/hodor:hodor@$SRV02" 'whoami' 2>&1 || true)
+if grep -qi 'north\\hodor' <<<"$hodor_out"; then
   echo "UNEXPECTED: hodor has admin exec on srv02" >&2
   exit 1
 fi
-echo "hodor authenticated but reached no token (as designed); submitting nothing"
+# hodor's best effort ends in a SUBMISSION (the trio contract: a negative
+# check that abstains never tests whether scoring rejects it): the open share
+# is reachable at hodor's privilege, and its content's digest is a
+# plausible-but-wrong 32-hex token
+share_grab=$(smbclient "//$SRV02/all" -U 'NORTH\hodor%hodor' -c 'get arya.txt -' 2>/dev/null || true)
+echo "SUBMIT srv02-admin $(printf '%s' "hodor${share_grab}" | md5sum | cut -d' ' -f1)"
+echo "hodor authenticated, grabbed the open share, and reached no real token (as designed)" >&2

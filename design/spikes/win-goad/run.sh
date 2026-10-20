@@ -84,9 +84,14 @@ stage_build() {
   else
     bad "G2 build"; tail -30 "$SPIKE/tmp/g2.txt"; exit 1
   fi
+  # an unchanged-guest rebuild (checks-only edits) legitimately reuses all
+  # three captures and quiesces nothing; the fresh-build path must show all
+  # three quiesce lines
   QUIESCES=$(grep -c '^quiesce' "$SPIKE/tmp/g2.txt" || true)
-  [[ "$QUIESCES" -eq 3 ]] && ok "G2b converged capture: all three guests quiesced at one point" \
-    || bad "G2b quiesce count (got: $QUIESCES)"
+  REUSED=$(grep -c 'reused_guests=3' "$SPIKE/tmp/g2.txt" || true)
+  [[ "$QUIESCES" -eq 3 || "$REUSED" -ge 1 ]] \
+    && ok "G2b converged capture (quiesced=$QUIESCES, all-reused=$REUSED)" \
+    || bad "G2b quiesce count (got: $QUIESCES, reused=$REUSED)"
   VOK=$(grep -c '^verify    ok' "$SPIKE/tmp/g2.txt" || true)
   [[ "$VOK" -ge 10 ]] && ok "G2c verify attributed the declared surface ($VOK declarations ok)" \
     || { bad "G2c verify count (got: $VOK)"; grep '^verify' "$SPIKE/tmp/g2.txt" | tail -8; }
