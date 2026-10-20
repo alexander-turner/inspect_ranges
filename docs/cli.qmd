@@ -1,24 +1,24 @@
 ---
 title: "Running Ranges"
-description: "The operator workflow: derive golden images, render a definition into a bundle, bring the range up, tear it down."
-llms-description: "CLI reference for the realizer workflow: daemon-bundle, images derive/list, render, up, down, doctor, with failure modes."
+description: "The operator workflow: build a range's declared content, render a definition into a bundle, bring the range up, tear it down; derive your own golden images for fleets and air gaps."
+llms-description: "CLI reference for the realizer workflow: build, render, up, down, doctor, plus daemon-bundle and images derive/list for self-derived goldens, with failure modes."
 ---
 
 ## The workflow
 
-A definition becomes a running range in three commands on a prepared host (four when it declares guest content, which must be [built](building.qmd) first):
+A definition becomes a running range in two commands on a prepared host (three when it declares guest content, which must be [built](building.qmd) first):
 
 ```{.bash filename="Terminal"}
-inspect-ranges images derive noble-server-cloudimg-amd64.img \
-  --sha256 <vendor-digest> --daemon-sha256 <bundle-digest>
 inspect-ranges build          # ranges with guest content: realize and verify it
 inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
 
+Images need no preparation: bare `image:` names resolve pin first, then the local cache, then the search path, whose default tail is the published [Image Catalog](catalog.qmd), so the goldens and the attack image arrive digest-verified on first use. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
+
 This page is the narrative tour of the workflow; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
 
-Each stage consumes only the verified output of the one before it: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance. `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
+Each stage consumes only the verified output of the one before it: `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify. Fleets that derive their own goldens instead of consuming the published ones extend the same chain back to the vendor image: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance.
 
 ## daemon-bundle
 
@@ -28,7 +28,7 @@ Failure modes: a missing or wrong-version toolchain refuses with the pin named; 
 
 ## images derive and list
 
-`images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and every stub listener are disabled, and a provenance sidecar records all input digests. Ubuntu noble vendor images are the Linux scope; Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published — see [Example Ranges](examples.qmd).
+Deriving your own goldens is the alternative to pulling the published ones: the fleet and air-gap path, and the only path for vendor images the catalog does not publish. `images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and every stub listener are disabled, and a provenance sidecar records all input digests. Ubuntu noble vendor images are the Linux scope; Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light), [attack-range-windows](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows)) cover the specifics.
 
 Failure modes, each stage-named: vendor digest mismatch (nothing written), missing, tampered, pin-mismatched, or protocol-skewed daemon artifact (each error names the `daemon-bundle` republish command), an unmanaged file squatting on the target name (never clobbered), a corrupt provenance sidecar (unmanaged to both `list` and `derive`), interrupted derives (self-healing on the next run). Re-running with the same inputs is a cache hit that re-verifies the recorded digests, including the in-cache vendor.
 

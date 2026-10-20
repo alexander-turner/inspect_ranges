@@ -3,6 +3,7 @@ project:
   render:
     - "*.qmd"
     - "**/*.qmd"
+    - "examples/*.md"
     - "!CHANGELOG.md"
 
 inspect-docs:
@@ -16,8 +17,6 @@ inspect-docs:
   navigation:
     - text: Home
       href: index.qmd
-    - text: Examples
-      href: examples.qmd
     - text: Building
       contents:
         - text: Overview
@@ -50,6 +49,20 @@ inspect-docs:
           href: topology.qmd
         - text: Range Sandbox
           href: provider.qmd
+    - text: Examples
+      contents:
+        - text: vulhub-zabbix
+          href: examples/vulhub-zabbix.md
+        - text: kypo-demo
+          href: examples/kypo-demo.md
+        - text: cyris-basic
+          href: examples/cyris-basic.md
+        - text: mhbench-equifax-small
+          href: examples/mhbench-equifax-small.md
+        - text: goad-light
+          href: examples/goad-light.md
+        - text: attack-range-windows
+          href: examples/attack-range-windows.md
   sidebar: unified
   navbar:
     right:

@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI framework for cyber range evaluations."
-llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the goal-type table, the vulhub-zabbix real-CVE example, the containment stack, and getting started with doctor and the image catalog."
+llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the containment stack, and getting started with doctor and the image catalog."
 ---
 
 ## Overview
@@ -182,7 +182,19 @@ Any Inspect agent can be the attacker, including coding-agent scaffolds like Cla
 
 ## Examples
 
-The range above ships in the repository as [examples/dmz-pivot](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot), built and proven end to end: its behavioral checks demonstrate at build time that the reference attack chain scores 1.0 while incomplete and forged work scores 0.0. For a range with a real CVE, [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) is a faithful translation of Vulhub's `zabbix/CVE-2016-10134`: a four-host monitoring stack with a real unauthenticated SQL injection escalating to remote command execution. [Examples](examples.qmd) catalogs five more, including a two-domain Active Directory forest and a Splunk-instrumented detection range.
+The range above ships in the repository as the first of seven examples, most translated faithfully from published range definitions, each built and proven end to end: behavioral checks demonstrate at build time that the reference attack chain scores 1.0 while incomplete and forged work scores 0.0. Each example's README covers its topology, chain, challenges, and provenance in depth:
+
+| Example | Upstream | The chain |
+|---|---|---|
+| [dmz-pivot](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot) | original (this page) | wordlist ssh guess, planted db credentials, pivot through the router ACL to postgres |
+| [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution |
+| [kypo-demo](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/kypo-demo) | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation |
+| [cyris-basic](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/cyris-basic) | CyRIS reference (JAIST) | weak-password privesc, firewall recon, forensics triage |
+| [mhbench-equifax-small](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/mhbench-equifax-small) | MHBench (CMU) | CVE-2017-5638 Struts RCE, SSH-key pivot, four-database exfiltration |
+| [goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
+| [attack-range-windows](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection scored from the exported Splunk stream |
+
+The Windows examples build from locally supplied evaluation media (Windows images are never published); their READMEs cover the specifics.
 
 ## Containment
 
@@ -208,8 +220,6 @@ Ranges run on any Linux host with KVM and Docker; `doctor` verifies virtualizati
 ## Learning More
 
 The source code is available in the [inspect_ranges](https://github.com/meridianlabs-ai/inspect_ranges) repository on GitHub. For the overall design (range definitions, the libvirt/KVM runtime, attacker containment, and evidence collection), start with the [Inspect Ranges overview](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/ranges-overview.qmd). The documentation is organized in these sections:
-
-- [Examples](examples.qmd): the in-repo ranges, from the dmz-pivot hello-world to faithful translations of published definitions, built and solved end to end.
 
 - [Building Ranges](building.qmd): authoring a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
 
