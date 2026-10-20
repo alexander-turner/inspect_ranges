@@ -56,7 +56,7 @@ from .schema import (
     validate_challenges,
 )
 from .scorer import challenge_scorer, score_challenge
-from .setup import plant_goals, plant_secret_file
+from .setup import challenge_setup, plant_secret_file
 from .submission import Submission, Submissions, challenge_submit, submissions_from
 from .timings import (
     TIMINGS_STORE_KEY,
@@ -110,12 +110,12 @@ __all__ = [
     "challenge_dataset",
     "challenge_issues",
     "challenge_scorer",
+    "challenge_setup",
     "challenge_submit",
     "goal_type",
     "latch",
     "latched_records",
     "load_challenges",
-    "plant_goals",
     "plant_secret_file",
     "range_oracle",
     "register_exploit",

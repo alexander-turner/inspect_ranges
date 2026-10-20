@@ -103,7 +103,7 @@ class CollectorSpec(EvidenceModel):
 
 
 class CollectorsFile(EvidenceModel):
-    """The range directory's deployment-side collector declarations (`collectors.yaml`, beside `challenges.yaml`): the poll mechanics the challenge schema deliberately does not carry (windows-ad-v1 slice 5). One artifact binds a detection goal's `collector` name to a real export, consumed by BOTH proof paths — the build's behavioral runner and an eval's `plant_goals(telemetry_collectors=...)`."""
+    """The range directory's deployment-side collector declarations (`collectors.yaml`, beside `challenges.yaml`): the poll mechanics the challenge schema deliberately does not carry (windows-ad-v1 slice 5). One artifact binds a detection goal's `collector` name to a real export, consumed by BOTH proof paths — the build's behavioral runner and an eval's `challenge_setup(telemetry_collectors=...)`."""
 
     collectors: list[CollectorSpec]
 

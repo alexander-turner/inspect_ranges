@@ -1,4 +1,4 @@
-"""Per-sample goal setup: `plant_goals()` runs every goal's planting before the agent acts.
+"""Per-sample goal setup: `challenge_setup()` runs every goal's planting before the agent acts.
 
 Setup is symmetric with scoring (`challenges-v1.md`): a prepended solver builds the oracle and plants per-sample proof material from independent entropy, refusing up front when a required observer is unavailable or a plant fails. A refusal raises, which Inspect records as a sample error: infrastructure failure is never read as agent failure, and the sample never starts half-planted (plants already written are unwound).
 
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("inspect_ranges.challenges")
 
-__all__ = ["plant_and_start", "plant_goals", "plant_secret_file", "run_setup"]
+__all__ = ["challenge_setup", "plant_and_start", "plant_secret_file", "run_setup"]
 
 
 async def plant_secret_file(
@@ -178,7 +178,7 @@ async def run_setup(
         oracle: The sample's oracle.
         challenge: The challenge being planted.
         store: The sample store; when given, per-goal setup timings accumulate under `inspect_ranges:timings` (the measure-first surface).
-        extra_observers: Observers the caller supplies beyond the deployment's own (`telemetry-collector` when `plant_goals` was given a matching collector spec).
+        extra_observers: Observers the caller supplies beyond the deployment's own (`telemetry-collector` when `challenge_setup` was given a matching collector spec).
 
     Returns:
         Every planted key, in plant order, so a caller whose LATER step fails (producer start) can unwind the sample to never-half-planted (quality review B15).
@@ -264,7 +264,7 @@ def telemetry_goal_collectors(challenge: Challenge) -> set[str]:
 
 
 @solver
-def plant_goals(
+def challenge_setup(
     telemetry_collectors: "list[CollectorSpec] | None" = None,
 ) -> Solver:
     """Plant every goal's per-sample material before the agent acts, and start the sample's observers.
@@ -292,7 +292,7 @@ def plant_goals(
         if unmatched:
             raise RuntimeError(
                 f"challenge {challenge.id!r} declares telemetry collectors "
-                f"with no telemetry spec supplied to plant_goals(): "
+                f"with no telemetry spec supplied to challenge_setup(): "
                 f"{sorted(unmatched)}"
             )
         extra: frozenset[str] = (

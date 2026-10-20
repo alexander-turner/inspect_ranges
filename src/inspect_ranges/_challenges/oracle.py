@@ -124,7 +124,7 @@ class RangeOracle:
     def available_observers(self) -> frozenset[str]:
         """The trusted observers this sample's deployment can supply right now.
 
-        `evidence-sink` exists when the evidence session is live; `segment-pcap` and `console` when capture was rendered into the range; `active-prober` when the plan carries rendered probe endpoints. `telemetry-collector` is deployment knowledge the oracle cannot see (which collector specs exist), so `plant_goals` supplies it as an extra observer to `run_setup` when a matching spec was passed; a challenge requiring an observer absent from the union refuses at planting.
+        `evidence-sink` exists when the evidence session is live; `segment-pcap` and `console` when capture was rendered into the range; `active-prober` when the plan carries rendered probe endpoints. `telemetry-collector` is deployment knowledge the oracle cannot see (which collector specs exist), so `challenge_setup` supplies it as an extra observer to `run_setup` when a matching spec was passed; a challenge requiring an observer absent from the union refuses at planting.
         """
         available: set[str] = set()
         session = self._handle.evidence
@@ -403,7 +403,7 @@ class RangeOracle:
 def range_oracle() -> RangeOracle:
     """The current sample's oracle, resolved through the default sandbox.
 
-    Call only from setup (`plant_goals`) or scoring code running inside the sample context. The returned capability must never be exposed to the agent's tool loop.
+    Call only from setup (`challenge_setup`) or scoring code running inside the sample context. The returned capability must never be exposed to the agent's tool loop.
 
     Raises:
         TypeError: The sample's sandbox is not a `range` environment.
