@@ -429,6 +429,104 @@ collectors:
     assert checks_digest(tmp_path) != before
 
 
+@pytest.fixture()
+def isolated_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test against a copy of the goal-type registry, like tests/test_challenges_custom_types.py."""
+    import inspect_ranges._challenges.engine as engine_module
+
+    monkeypatch.setattr(
+        engine_module,
+        "_REGISTRY",
+        dict(engine_module._REGISTRY),  # pyright: ignore[reportPrivateUsage]
+    )
+
+
+def _write_challenges(tmp_path: pathlib.Path, text: str) -> pathlib.Path:
+    (tmp_path / "challenges.yaml").write_text(text)
+    return tmp_path
+
+
+def test_build_parse_accepts_registered_custom_type(
+    isolated_registry: None, tmp_path: pathlib.Path
+) -> None:
+    """The build's parse entry point dispatches a registered custom `type:` name exactly like the eval path."""
+    from inspect_ranges import register_goal_type
+    from inspect_ranges._build.behavioral import load_challenges
+
+    from tests.test_challenges_custom_types import MARKER_YAML, MarkerGoal, MarkerType
+
+    register_goal_type(MarkerType())
+    challenges = load_challenges(_write_challenges(tmp_path, MARKER_YAML))
+    assert isinstance(challenges.challenges[0].goals[0], MarkerGoal)
+
+
+def test_build_parse_refuses_unknown_type_with_known_names(
+    isolated_registry: None, tmp_path: pathlib.Path
+) -> None:
+    """An unregistered name still refuses honestly at the build parse: `unknown-goal-type` with the known-name listing, never a misparse."""
+    from inspect_ranges._build.behavioral import load_challenges
+    from pydantic import ValidationError
+
+    from tests.test_challenges_custom_types import MARKER_YAML
+
+    range_dir = _write_challenges(
+        tmp_path, MARKER_YAML.replace("type: marker", "type: zzz")
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        load_challenges(range_dir)
+    assert "known types:" in str(excinfo.value) and "flag" in str(excinfo.value)
+
+
+@dataclass
+class FakeEntryPoint:
+    name: str
+    value: str
+    loader: "Callable[[], None]"
+
+    def load(self) -> None:
+        self.loader()
+
+
+def test_build_parse_loads_entry_point_registrations(
+    isolated_registry: None,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The build loads the `inspect_ai` entry-point group before parsing, so a package registering a custom type works with zero in-process imports; one entry point's load failure is a warning naming it and its cause, never a build failure (inspect's own loader posture)."""
+    import logging
+
+    from inspect_ranges import register_goal_type
+    from inspect_ranges._build.behavioral import load_challenges
+
+    from tests.test_challenges_custom_types import MARKER_YAML, MarkerGoal, MarkerType
+
+    def register_marker() -> None:
+        register_goal_type(MarkerType())
+
+    def explode() -> None:
+        raise ImportError("missing transitive dependency")
+
+    fakes = [
+        FakeEntryPoint("broken", "broken_pkg._registry", explode),
+        FakeEntryPoint("markers", "marker_pkg._registry", register_marker),
+    ]
+
+    def fake_entry_points(*, group: str) -> list[FakeEntryPoint]:
+        return fakes if group == "inspect_ai" else []
+
+    monkeypatch.setattr("importlib.metadata.entry_points", fake_entry_points)
+    with caplog.at_level(logging.WARNING, logger="inspect_ranges._build.behavioral"):
+        challenges = load_challenges(_write_challenges(tmp_path, MARKER_YAML))
+    assert isinstance(challenges.challenges[0].goals[0], MarkerGoal)
+    warning = next(
+        record.getMessage()
+        for record in caplog.records
+        if "entry point" in record.getMessage()
+    )
+    assert "broken" in warning and "missing transitive dependency" in warning
+
+
 def test_detection_only_negatives_pass_without_submissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -197,7 +197,7 @@ Beacons corroborate only when their capture chunk rotates before scoring: tcpdum
 
 The checks run against the **captured** realized images, in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Before the checks, the same boot runs the `conformance` stage, proving the range's defender-to-agent containment ([Security](security.qmd#proving-containment)); a containment finding refuses the manifest exactly like a failed check.
 
-Custom goal types do not parse at build time yet: a custom-typed `challenges.yaml` with declared checks refuses at this stage ([Custom Goals](goals.qmd#registration)).
+Custom goal types parse at build time: the build loads the `inspect_ai` entry-point registrations before parsing `challenges.yaml` ([Custom Goals](goals.qmd#registration)).
 
 Each check gets fresh per-sample proof material, removed afterward; nothing a check planted survives as a valid secret at runtime. A declared checks tree must be complete: a misnamed directory or missing script refuses rather than silently skipping. A failing check saves a REFUSED manifest: consumers refuse it with `range-unproven`, while the next build reuses every guest and re-runs only the proof, so fixing a check script costs a boot-and-prove cycle, not a rebuild. The build reports a `behavioral` stage line per check and records the results in the manifest.
 

@@ -14,8 +14,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import yaml
-
 from .errors import BuildError
 from .manifest import BehavioralCheckRecord
 from .recipes import StageSink
@@ -329,12 +327,33 @@ def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
                 )
 
 
-def load_challenges(range_dir: Path) -> "Challenges":
-    """The range's challenges.yaml, validated."""
-    from .._challenges.schema import Challenges
+def _ensure_goal_type_registrations() -> None:
+    """Load every `inspect_ai` entry point so custom goal types are registered before the build parses `challenges.yaml`.
 
-    raw = yaml.safe_load((range_dir / "challenges.yaml").read_text())
-    return Challenges.model_validate(raw)
+    Eval-time parsing runs under inspect, whose startup loads this group before any parse; the build is a plain process, so it runs the same registrations itself or a custom-typed challenges file dies here with `unknown-goal-type` while the identical eval passes. The error posture mirrors inspect's own loader: each entry point loads independently, and one package's failure is a warning naming the entry point and its cause, never a build failure — the honest refusal stays downstream, where the parse still refuses an unregistered type with the known-name listing.
+    """
+    import importlib.metadata as metadata
+
+    for entry_point in metadata.entry_points(group="inspect_ai"):
+        try:
+            entry_point.load()
+        except Exception as error:
+            logger.warning(
+                "inspect_ai entry point %r (%s) failed to load; goal types it "
+                "registers stay unknown to this build: %s: %s",
+                entry_point.name,
+                entry_point.value,
+                type(error).__name__,
+                error,
+            )
+
+
+def load_challenges(range_dir: Path) -> "Challenges":
+    """The range's `challenges.yaml`, validated, with goal-type registrations loaded first (`_ensure_goal_type_registrations`): the build parses custom-typed challenges exactly like the eval path does."""
+    from .._challenges.schema import load_challenges as load_challenges_file
+
+    _ensure_goal_type_registrations()
+    return load_challenges_file(range_dir / "challenges.yaml")
 
 
 async def run_behavioral_checks(
