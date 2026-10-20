@@ -234,4 +234,24 @@ if (-not $servedOk) {
   [Console]::Error.WriteLine(($served | Out-String))
   throw 'the CA does not serve the ESC1 template'
 }
-Write-Output 'dc01 realized: users, chain, adcs/esc1, rpc, firewall, defense'
+
+# -- rotate the built-in Administrator password (parked-decisions entry 2) -----
+# The golden's derive-time default must not survive as a goal principal's live
+# credential; the replacement is DECLARED scenario surface (range.yaml dc01
+# services[active-directory].credentials). Rotation persists through capture:
+# the seed's AdministratorPassword rides the one-shot oobeSystem pass and
+# captures are never re-generalized (phase review round 2). COUPLING: dc02's
+# child promotion authenticates as SEVENKINGDOMS\Administrator with this value
+# (recipes/goad.dc02-child/promote.ps1).
+$adminPassword = 'Ir0nThr0ne!Keeper#2026'
+Set-ADAccountPassword -Identity Administrator -Reset `
+  -NewPassword (ConvertTo-SecureString $adminPassword -AsPlainText -Force)
+# self-assert the rotation LANDED: an in-process authenticated validation with
+# the new value (no credential on argv or in logs beyond the declared surface)
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+$bindCtx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+  [System.DirectoryServices.AccountManagement.ContextType]::Domain, 'sevenkingdoms.local')
+if (-not $bindCtx.ValidateCredentials('Administrator', $adminPassword)) {
+  throw 'the SEVENKINGDOMS\Administrator rotation did not land (validation with the declared value failed)'
+}
+Write-Output 'dc01 realized: users, chain, adcs/esc1, rpc, firewall, defense, admin rotation'

@@ -86,4 +86,24 @@ $webdavRules = @(Get-WebConfiguration -Filter '/system.webServer/webdav/authorin
 if (-not $webdavRules -or -not ($webdavRules | Where-Object { $_.access -match 'Read' })) {
   throw 'the WebDAV Read authoring rule did not land (authoring enabled but inert)'
 }
-Write-Output 'srv02 realized: iis/webdav, upload weakness, shares, firewall, defender off'
+
+# -- rotate the built-in Administrator password (parked-decisions entry 2) -----
+# The golden's derive-time default must not survive as the goal principal's
+# live credential; the replacement is DECLARED scenario surface (range.yaml
+# srv02 services[smb].credentials) and persists through capture (the one-shot
+# oobeSystem pass; captures are never re-generalized). The value is 14
+# characters BY DESIGN: net.exe prompts interactively for longer passwords
+# (the pre-Windows-2000 compatibility confirm) and would hang this
+# non-interactive exec.
+$adminPassword = 'N1ghtsW@tch#77'
+$null = net user Administrator $adminPassword 2>&1
+if ($LASTEXITCODE -ne 0) { throw "the local Administrator rotation exited $LASTEXITCODE" }
+# self-assert the rotation LANDED: an in-process local-SAM validation with the
+# new value (the net.exe argv above is the declared surface; nothing is logged)
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+$bindCtx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
+  [System.DirectoryServices.AccountManagement.ContextType]::Machine)
+if (-not $bindCtx.ValidateCredentials('Administrator', $adminPassword)) {
+  throw 'the srv02 local Administrator rotation did not land (SAM validation with the declared value failed)'
+}
+Write-Output 'srv02 realized: iis/webdav, upload weakness, shares, firewall, defender off, admin rotation'
