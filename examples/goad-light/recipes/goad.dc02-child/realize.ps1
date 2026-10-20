@@ -151,7 +151,9 @@ $adminPassword = 'W1nterC@me&TheWallHeld'
 Set-ADAccountPassword -Identity Administrator -Reset `
   -NewPassword (ConvertTo-SecureString $adminPassword -AsPlainText -Force)
 # self-assert the rotation LANDED: an in-process authenticated validation with
-# the new value (no credential on argv or in logs beyond the declared surface)
+# the new value (off argv; this block's text auto-logs as a 4104 suspicious
+# script block, and the pre-capture scrub clears the PowerShell logs so no
+# captured log carries the value)
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement
 $bindCtx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
   [System.DirectoryServices.AccountManagement.ContextType]::Domain, 'north.sevenkingdoms.local')

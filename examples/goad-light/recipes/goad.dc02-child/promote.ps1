@@ -5,7 +5,10 @@ $ErrorActionPreference = 'Stop'
 Install-WindowsFeature AD-Domain-Services -IncludeManagementTools | Out-Null
 # the parent credential is the DECLARED rotation value: dc01's realize rotates
 # SEVENKINGDOMS\Administrator before this recipe runs (range.yaml dc01
-# services[active-directory].credentials; parked-decisions entry 2)
+# services[active-directory].credentials; parked-decisions entry 2). This
+# script's text auto-logs as a 4104 suspicious block; the pre-capture scrub
+# clears the PowerShell logs, so dc01's credential never rides dc02's
+# captured disk (a cross-host value here would otherwise skip a ladder rung).
 $parentPass = ConvertTo-SecureString 'Ir0nThr0ne!Keeper#2026' -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential('SEVENKINGDOMS\Administrator', $parentPass)
 # the DSRM safe-mode password is a SET, not an authentication: it stays the

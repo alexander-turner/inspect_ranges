@@ -94,12 +94,16 @@ if (-not $webdavRules -or -not ($webdavRules | Where-Object { $_.access -match '
 # oobeSystem pass; captures are never re-generalized). The value is 14
 # characters BY DESIGN: net.exe prompts interactively for longer passwords
 # (the pre-Windows-2000 compatibility confirm) and would hang this
-# non-interactive exec.
+# non-interactive exec; an in-process rotation (Set-LocalUser) would lift
+# the length constraint.
 $adminPassword = 'N1ghtsW@tch#77'
 $null = net user Administrator $adminPassword 2>&1
 if ($LASTEXITCODE -ne 0) { throw "the local Administrator rotation exited $LASTEXITCODE" }
 # self-assert the rotation LANDED: an in-process local-SAM validation with the
-# new value (the net.exe argv above is the declared surface; nothing is logged)
+# new value. The net.exe argv above is transient build-time surface of a
+# DECLARED value (no 4688 command-line auditing, no sysmon here); this block's
+# text auto-logs as a 4104 suspicious script block, and the pre-capture scrub
+# clears the PowerShell logs so no captured log carries the value.
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement
 $bindCtx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext(
   [System.DirectoryServices.AccountManagement.ContextType]::Machine)
