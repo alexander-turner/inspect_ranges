@@ -18,7 +18,7 @@ Image resolution, movement, and updates follow four rules:
 
 [Distribution](distribution.qmd) holds the mechanics: the location grammar, verification semantics, and the full verb surface.
 
-## The Catalog
+## Catalog
 
 The standard images publish at the project org, each consumable by bare name (hub repos are spelled `inspect-ranges-<name>`; specs keep writing the bare name):
 

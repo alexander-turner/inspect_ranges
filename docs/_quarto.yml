@@ -21,14 +21,14 @@ inspect-docs:
       contents:
         - text: Overview
           href: building.qmd
+        - text: Development
+          href: development.qmd
         - text: Ranges
           href: ranges.qmd
         - text: Guests
           href: guests.qmd
         - text: Networks
           href: networks.qmd
-        - text: Development
-          href: development.qmd
     - text: Evaluation
       contents:
         - text: Challenges
