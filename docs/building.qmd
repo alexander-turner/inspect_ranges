@@ -140,7 +140,7 @@ Failures produce coded refusals (`service-not-verified`, `vulnerability-not-veri
 
 ## Behavioral Checks {#behavioral-checks}
 
-A range that carries challenges ([Challenges](challenges.qmd)) can prove them at build time. Convention: `checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script executed on the attacker guest with `IR_ATTACKER_IP` exported, emitting `SUBMIT <goal-id> <value>` lines. The contract:
+A range that carries challenges ([Challenges](challenges.qmd)) can prove them at build time. The build discovers both pieces beside `range.yaml`: a `challenges.yaml`, and a `checks/<challenge-id>/{reference,insufficient,forged}.sh` directory per challenge. Each script is bash, executed on the attacker guest with `IR_ATTACKER_IP` exported and a 900 s budget per chain (chains legitimately wait for convergence and run full scans). Submissions are `SUBMIT <goal-id> <value>` lines on stdout, one per submission, the value running to the end of the line; a value that contains an `exfiltrate` canary passes, so single-line excerpts of multi-line content work. A failing chain's output lands in the build's stage log under the project state directory. Each check runs against fresh per-sample plants, removed afterward. The shipped [dmz-pivot checks](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot/checks) are the worked example. The contract:
 
 | Chain | Must |
 |---|---|
