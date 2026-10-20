@@ -37,6 +37,8 @@ The standard images publish at the project org, each consumable by bare name (hu
 | `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
 | `inspect-ranges-range` | The hardened range container, published as a conventional Docker image (consumed as a full Docker ref, not a bare `image:` name) by digest pin (below). |
 
+The goldens are minimal Ubuntu cloud images with the control daemon baked in and nothing else enabled: derivation disables ssh and every stub listener, so a recipe installs and enables whatever its scenario needs (`apt` works, and builds run with egress for exactly this).
+
 The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so a rebuilt image gets a new identity instead of silently replacing the old one under the same name. Between publishes the catalog deliberately lags upstream package feeds; the manifest records what shipped.
 
 ## Deployment Shapes
