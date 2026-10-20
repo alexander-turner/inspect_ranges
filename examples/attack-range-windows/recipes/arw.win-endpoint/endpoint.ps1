@@ -9,6 +9,23 @@ $ErrorActionPreference = 'Stop'
 $splunkIp = (Get-Content -Raw 'C:\Windows\Temp\.ir-arw-splunk-ip.txt').Trim()
 if (-not $splunkIp) { throw 'no splunk ip was staged' }
 
+# -- Defender off: the declared posture is tier D2 (telemetry recorded, not
+# acted on), and upstream attack_range disables Defender so simulations run.
+# Leaving real-time protection on made the fixture SIGNATURE-DEPENDENT:
+# measured at the phase exit, post-dump remediation killed the SMB exec
+# surface minutes into the proof boot (NETBIOS timeouts on atexec) on builds
+# that pulled newer definitions, while earlier same-day builds passed. The
+# status poll is the goad lesson: Get-MpComputerStatus lags Set-MpPreference.
+Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true `
+  -MAPSReporting 0 -SubmitSamplesConsent 2
+$mpDeadline = (Get-Date).AddSeconds(60)
+while ((Get-MpComputerStatus).RealTimeProtectionEnabled -and (Get-Date) -lt $mpDeadline) {
+  Start-Sleep -Seconds 5
+}
+if ((Get-MpComputerStatus).RealTimeProtectionEnabled) {
+  throw 'defender real-time protection did not disable'
+}
+
 # -- the declared Administrator credential (users:) ----------------------------
 net user Administrator 'changeme123!' | Out-Null
 

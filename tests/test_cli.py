@@ -120,10 +120,7 @@ def test_plan_refuses_windows_examples(
 ) -> None:
     """Content-carrying Windows examples hit the build-aware gate first (build itself still refuses Windows render; unit-covered in test_plan.py)."""
     monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
-    goad = str(
-        Path(__file__).parent.parent
-        / "design/inspect-ranges/ranges/goad-light/range.yaml"
-    )
+    goad = str(Path(__file__).parent.parent / "examples/goad-light/range.yaml")
     result = CliRunner().invoke(ranges, ["plan", goad])
     assert result.exit_code == 1
     assert "declares guest content but" in result.output

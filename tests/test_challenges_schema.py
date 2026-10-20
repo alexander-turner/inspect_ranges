@@ -49,6 +49,7 @@ EXAMPLES = sorted(
         Path(__file__).parent.parent / "design" / "inspect-ranges" / "ranges",
         Path(__file__).parent.parent / "examples",
     )
+    if root.is_dir()  # the design tier empties once every fixture graduates
     for directory in root.iterdir()
     if (directory / "challenges.yaml").exists()
 )

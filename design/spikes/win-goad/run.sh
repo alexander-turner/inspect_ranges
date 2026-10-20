@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/design/inspect-ranges/ranges/goad-light"
+RANGE="$ROOT/examples/goad-light"
 STAGE="${1:-all}"
 
 WIN_ISO="${WIN_ISO:-$HOME/.cache/inspect-ranges/images/ws2022-eval.iso}"

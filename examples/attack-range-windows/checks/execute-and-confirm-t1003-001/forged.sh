@@ -16,8 +16,8 @@ until nc -z -w3 "$WIN" 445; do
 done
 
 # window separation: the previous check's telemetry must age out of the
-# goal's 120 s trailing scoring window before this check's events begin
-sleep 90
+# goal's 180 s trailing scoring window before this check's events begin
+sleep 180
 
 # Set-Content 'C:\Windows\Temp\fake-telemetry.txt' with the signal line,
 # encoded (PowerShell -EncodedCommand wants UTF-16LE base64). The decoy is

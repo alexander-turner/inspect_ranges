@@ -17,8 +17,8 @@ until nc -z -w3 "$WIN" 445 && nc -z -w3 "$SPLUNK" 9997; do
 done
 
 # window separation: the previous check's telemetry must age out of the
-# goal's 120 s trailing scoring window before this check's events begin
-sleep 90
+# goal's 180 s trailing scoring window before this check's events begin
+sleep 180
 
 # execution evidence, not exit codes (impacket exits 0 on handled errors): the
 # admin activity must PROVABLY run or this check passes vacuously (review

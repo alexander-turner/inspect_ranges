@@ -1,6 +1,6 @@
 """Derive the forest build plan from the example's actual range.yaml.
 
-Loads `design/inspect-ranges/ranges/goad-light/range.yaml` through `inspect_ranges.schema.load_range` (the first time an example fixture drives real VMs) and emits:
+Loads the goad-light fixture's `range.yaml` (now promoted to `examples/goad-light/`) through `inspect_ranges.schema.load_range` (the first time an example fixture drives real VMs) and emits:
 
 - `tmp/plan/plan.env` — shell variables for run.sh and the in-container boot script: guest names, hostnames, FQDNs, IPs, the derived domain structure (forest root and child from the FQDNs), and the DNS chain (attacker -> first authoritative; dc02 -> dc01; srv02 -> dc02, per the range's provider-inventory note).
 - `tmp/plan/{network-config,user-data,meta-data}` — the Linux attacker box's cloud-init seed: static IP on the lab subnet, DNS pointed at the authoritative DC, matching how the compiler would realize `attacker.interfaces`.
@@ -17,7 +17,7 @@ sys.path.insert(0, str(HERE.parent.parent.parent / "src"))
 
 from inspect_ranges.schema import load_range  # noqa: E402
 
-RANGE_YAML = HERE.parent.parent / "inspect-ranges" / "ranges" / "goad-light" / "range.yaml"
+RANGE_YAML = HERE.parent.parent.parent / "examples" / "goad-light" / "range.yaml"
 PLAN = HERE / "tmp" / "plan"
 ATTACKER_HOST_INDEX = 50  # IPAM allocation for the attacker's unpinned interface
 ATTACKER_MAC = "52:54:00:60:00:32"

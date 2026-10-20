@@ -13,5 +13,5 @@ Upstream provenance for this range. Moved verbatim from `range.yaml` (2026-10-03
       - upstream/Vagrantfile                    # VM images and sizing (verbatim)
     upstream_substrate: VMs via Vagrant/Ansible-over-WinRM (VirtualBox/VMware/Proxmox/Ludus/AWS/Azure)
     fetched: 2026-09-30
-    commit: 992307adf944b934a3b76a2f56a637104c54b805   # upstream commit; files in upstream/ match it byte-for-byte (except cochise/: see ../../LICENSES.md)
+    commit: 992307adf944b934a3b76a2f56a637104c54b805   # upstream commit; files in upstream/ match it byte-for-byte (except cochise/: see ../../design/inspect-ranges/LICENSES.md)
 ```

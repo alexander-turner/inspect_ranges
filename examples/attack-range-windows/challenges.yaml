@@ -44,8 +44,14 @@ challenges:
         # the trailing scoring window: without it window_start is 0.0 and every
         # verdict spans the whole run, so one real detection poisons every
         # later negative observation (measured: the build trio's insufficient
-        # check scored 1.0 off reference's own event). 120 s covers the
-        # technique-to-score gap (dump -> 45 s pipeline settle -> score,
-        # measured ~50 s) with margin; the negative checks open with a 90 s
-        # separation sleep so prior telemetry ages out before their window.
-        window_s: 120
+        # check scored 1.0 off reference's own event). The width budgets the
+        # WHOLE technique-to-verdict gap, not just the script's own sleeps:
+        # the scoring fetch lands minutes after the technique when a cleanup
+        # exec hangs to its budget or the fetch itself is slow (measured 0.00/
+        # valid at the phase exit with the signal shipped on time, twice).
+        # 180 s absorbs the worst measured positive case (dump -> bounded 30 s
+        # cleanup -> 45 s settle -> fetch, ~140 s) while staying clear of the
+        # measured negative-side gap (the previous check's event sat 279 s
+        # before the next verdict with the 180 s separation sleeps the
+        # negative checks open with — ~100 s of margin on each side).
+        window_s: 180
