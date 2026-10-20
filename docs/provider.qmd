@@ -21,7 +21,7 @@ def my_task() -> Task:
     )
 ```
 
-Before the first eval on a machine, run `inspect-ranges doctor` (see [Running Ranges](cli.qmd)): it verifies the host end to end and prints fixes for whatever is missing. The images a range references pull automatically from the published catalog at eval init (see [Image Catalog](catalog.qmd)).
+Before the first eval on a machine, run `inspect-ranges doctor` (see [Running Ranges](cli.qmd)): it verifies the host end to end and prints fixes for whatever is missing. The images a range references pull automatically from the published catalog at eval init (see [Images](images.qmd)).
 
 ## Configuration
 

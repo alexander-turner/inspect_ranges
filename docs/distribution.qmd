@@ -1,7 +1,7 @@
 ---
 title: "Distribution"
 description: "Publishing and consuming built ranges: locations in three forms, push and spec-driven pull, the implicit pull at eval init, catalog images, mirroring and the air gap, and cache reclamation."
-llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, the hardened range container image's INSPECT_RANGES_RANGE_IMAGE digest pin with the local build as the default, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows, and the fleet guidance for Docker Hub credentials and rate limits."
+llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, the hardened range container image's INSPECT_RANGES_RANGE_IMAGE digest pin with the local build as the default, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows."
 ---
 
 ## Overview
@@ -116,7 +116,3 @@ A mirrored root carries its transitive closure and its exact-spec reference, so 
 `images prune` reports and reclaims superseded realized images, stranded capture and pull temps, and orphan sidecars; `--chains` extends it to goldens and vendor bases nothing references. Eviction is by whole chain, never a backing out from under a dependent: a golden survives while any realized image, build manifest, or live project names it, and a vendor base survives while any surviving golden's provenance does. Reports by default; `--yes` deletes.
 
 `inspect-ranges doctor` carries the Distribution rows: configured locations parse (directory forms must be valid layouts), and the cache's provenance chains are whole, with broken backing references named.
-
-## Fleet Guidance for Docker Hub
-
-Anonymous hub pulls are rate-limited per address (measured 2026-10-18: 100 pulls per rolling hour), so a fleet cold-pulling the public org should prepend its own registry (connected: bases fall through to the org only once) or mirror the org (disconnected, or to remove the hub availability dependency). One operational note for hosts logged into the hub with a narrowly-scoped access token: the docker CLI sends the stored credential for public pulls too, and the hub rejects an insufficiently-scoped token rather than falling back to anonymous, so public `docker pull`s fail on such a host. The distribution client is unaffected (it authenticates only where it must), but host provisioning that pulls public images should account for it.

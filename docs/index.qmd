@@ -116,7 +116,7 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [Image Catalog](catalog.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
 
 ## Range Tasks
 
@@ -276,4 +276,4 @@ Evidence streams off the instance as it is generated, so an agent that later esc
 
 - **Evaluation**: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
 
-- **Running Ranges**: the [Operator](cli.qmd) workflow, the [Range Sandbox](provider.qmd) that runs Inspect evals against ranges, the [Image Catalog](catalog.qmd) and [Distribution](distribution.qmd) layer that move built ranges between machines, the [Range Host](topology.qmd) topologies, and the [Security](security.qmd) model.
+- **Running Ranges**: the [Operator](cli.qmd) workflow, the [Range Sandbox](provider.qmd) that runs Inspect evals against ranges, the [Images](images.qmd) guide and [Distribution](distribution.qmd) mechanics that move built ranges between machines, the [Range Host](topology.qmd) topologies, and the [Security](security.qmd) model.

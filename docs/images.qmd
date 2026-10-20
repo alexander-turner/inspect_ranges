@@ -1,0 +1,102 @@
+---
+title: "Images"
+description: "The operator's images guide: how names resolve, what the catalog publishes, and a recipe for each deployment shape (connected, mirrored, private registry, air gap, pinned fleet, offline)."
+llms-description: "Operator images guide: the resolution model (pin, then local cache, then the INSPECT_RANGES_REGISTRY search path ending at the public org; locations interchangeable across the hub org, a private OCI registry, and an OCI-layout directory; sticky names with explicit refresh; specs by git and artifacts by registry joined by the spec hash), the published catalog (attack image with its recorded manifest and zero-listener invariant, ubuntu-noble/focal goldens, daemon-bundle, the range container image) with the republish discipline, and per-shape recipes: connected default with hub rate limits, mirroring the catalog, a private registry for your own ranges, the air-gap directory, fleet pins with INSPECT_RANGES_PIN_FILE, INSPECT_RANGES_NEVER_PULL, the INSPECT_RANGES_RANGE_IMAGE digest pin, and self-derived goldens."
+---
+
+## Overview
+
+Four ideas carry everything on this page:
+
+1. **Resolution order.** A bare `image:` name resolves pin first, then the local cache, then the search path: `INSPECT_RANGES_REGISTRY`, an ordered comma-separated list whose default is the public catalog (`docker.io/meridianlabsai/inspect-ranges`). First match wins, and a broken location aborts resolution with the location named rather than silently falling through.
+
+2. **Locations are interchangeable.** A location is the public hub org, a private OCI registry, or a plain directory in OCI image layout. Identity is content: every artifact verifies by digest wherever it lands, and nothing unverified lands under a consumable name.
+
+3. **Sticky, then explicit.** Once a name resolves into the cache, builds keep using the cached artifact even as registries move on. Moving forward is a deliberate act: `images refresh`, regenerating a pin file, or consuming a republish (always a new digest; published bytes never change under a name silently).
+
+4. **Specs travel by git, artifacts by registry.** A built range publishes under its spec's normalized-form hash, and eval init pulls the published build matching the cloned `range.yaml` exactly. That join is what makes clone-and-eval work.
+
+[Distribution](distribution.qmd) is the mechanics reference behind all of this: the location grammar, verification semantics, and the full verb surface.
+
+## The Catalog
+
+The standard images publish at the project org, each consumable by bare name (hub repos are spelled `inspect-ranges-<name>`; specs keep writing the bare name):
+
+| Name | Contents |
+|---|---|
+| `attack` | The standard attack box: a kali-class toolset (nmap, hydra, sqlmap, john, gobuster, impacket, metasploit, and more) built by a pinned recipe over the noble golden. `/etc/attack-image.manifest` records every delivered package and version, and the image refuses to build if anything listens beyond loopback. A dedicated attack box with no `image:` boots it by default. |
+| `ubuntu-noble` / `ubuntu-focal` | Golden chains (image, provenance sidecar, vendor base), each with the guest control daemon baked in. |
+| `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
+| `inspect-ranges-range` | The hardened range container, published as a conventional Docker image and consumed by digest pin (below). |
+
+The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so the realized identity re-keys. Between publish days the catalog deliberately drifts from upstream feeds; the manifest records what shipped.
+
+## Deployment Shapes
+
+### Connected (the Default)
+
+Nothing to configure. At the first eval, init pulls the published build and whatever catalog images are missing, digest-verified, with docker-pull-shaped progress; warm evals cost zero network. One operational caveat: anonymous hub pulls are rate-limited per address (measured 2026-10-18: 100 pulls per rolling hour), so a fleet cold-pulling the public org should mirror it or front it with its own registry (next two recipes).
+
+### Mirror the Catalog
+
+``` {.bash filename="Terminal"}
+inspect-ranges mirror \
+    --from docker.io/meridianlabsai/inspect-ranges \
+    --to registry.example.net/ranges
+
+export INSPECT_RANGES_REGISTRY=registry.example.net/ranges,\
+docker.io/meridianlabsai/inspect-ranges
+```
+
+A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. One hub caveat: the hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (a published catalog list is a recorded follow-up). Mechanics: [Distribution](distribution.qmd).
+
+### Private Registry for Your Own Ranges
+
+``` {.bash filename="Terminal"}
+cd my-range/            # a built range
+inspect-ranges push --to registry.example.net/ranges
+```
+
+`push` uploads the build manifest and its transitive closure (realized images, provenance, recipe bundles) and registers the exact-spec reference that eval init resolves. Consumers prepend the registry as above and run `git clone`, `inspect eval`. Pushing to the public org is the project publisher's job, never a user move.
+
+### Air Gap
+
+``` {.bash filename="Terminal"}
+inspect-ranges mirror \
+    --from docker.io/meridianlabsai/inspect-ranges \
+    --to ./archive
+tar -cf archive.tar archive/   # carry across the gap, untar
+export INSPECT_RANGES_REGISTRY=/mnt/archive
+```
+
+The consuming session is then identical to a connected one, because identity is content, not transport. The daemon bundle travels with whole-location mirrors, so air-gapped fleets can derive their own goldens too.
+
+### Pinned Fleet
+
+``` {.bash filename="Terminal"}
+inspect-ranges images pin \
+    --from docker.io/meridianlabsai/inspect-ranges \
+    --out pins.json
+export INSPECT_RANGES_PIN_FILE=pins.json
+```
+
+A pinned host lands exactly the recorded root digests and refuses `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through). Moving the fleet forward is the explicit act: `images refresh <name>`, or regenerating the pin file.
+
+### Locked-Down Host
+
+`INSPECT_RANGES_NEVER_PULL=1` pins a host against implicit transfers: the provider's auto-pull and the build's registry tier refuse or skip instead of touching the network. Explicit verbs still work, because typing them is the operator's intent; a fully offline host simply configures no reachable locations.
+
+### Range Container Pin
+
+The range container is an ordinary Docker image, so it distributes as one, and consuming the published image is a mandatory digest pin (a mutable tag could swap the hardened jail under a fleet):
+
+``` {.bash filename="Terminal"}
+export INSPECT_RANGES_RANGE_IMAGE=\
+docker.io/meridianlabsai/inspect-ranges-range@sha256:ab12e0...
+```
+
+Unset (the default and the dev loop), `up` builds the image locally from package data. The pull is a plain `docker pull`, so hub credentials and private mirrors work as for any image; one caveat for hosts logged into the hub with a narrowly-scoped org token: docker sends the stored credential for public pulls too and the hub rejects an insufficiently-scoped token rather than falling back to anonymous, so public `docker pull`s fail on such a host (the distribution client is unaffected). Details: [Distribution](distribution.qmd#the-hardened-range-container-image).
+
+### Self-Derived Goldens
+
+Fleets that derive their own goldens instead of consuming the published ones (`images derive`, with the daemon artifact from `daemon-bundle --pull` or a local toolchain build) extend the digest chain back to the vendor image; see [Running Ranges](cli.qmd).

@@ -41,8 +41,8 @@ inspect-docs:
       contents:
         - text: Overview
           href: cli.qmd
-        - text: Image Catalog
-          href: catalog.qmd
+        - text: Images
+          href: images.qmd
         - text: Distribution
           href: distribution.qmd
         - text: Security

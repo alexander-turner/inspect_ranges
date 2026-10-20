@@ -14,7 +14,7 @@ inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
 
-Images need no preparation: bare `image:` names resolve pin first, then the local cache, then the search path, whose default tail is the published [Image Catalog](catalog.qmd), so the goldens and the attack image arrive digest-verified on first use. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
+Images need no preparation: bare `image:` names resolve pin first, then the local cache, then the search path, whose default tail is the published [image catalog](images.qmd), so the goldens and the attack image arrive digest-verified on first use. `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
 
 This page is the narrative tour of the workflow; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
 
@@ -22,7 +22,7 @@ Each stage consumes only the verified output of the one before it: `render` emit
 
 ## `daemon-bundle`
 
-`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does; built artifacts are consumed everywhere else by digest, so one publish serves every host. `--pull` fetches the published bundle from the catalog instead of building, needing no toolchain at all (see [Image Catalog](catalog.qmd)). Publish to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256` so the artifact is pinned out of band, not just sidecar-consistent.
+`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does; built artifacts are consumed everywhere else by digest, so one publish serves every host. `--pull` fetches the published bundle from the catalog instead of building, needing no toolchain at all (see [Images](images.qmd)). Publish to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256` so the artifact is pinned out of band, not just sidecar-consistent.
 
 Failure modes: a missing or wrong-version toolchain refuses with the pin named; builds are reproducible, so rebuilding an unchanged source tree yields the identical bundle digest.
 
@@ -36,7 +36,7 @@ Failure modes, each stage-named: vendor digest mismatch (nothing written), missi
 
 ## `push`, `pull`, and `mirror`
 
-`push` publishes the current range's build to a location, bare `pull` fetches the build matching this `range.yaml` exactly (the provider also pulls implicitly at eval init), and `mirror` moves content between locations, including the air-gap directory form. `publish` promotes built guests, goldens, and the daemon artifact to bare catalog names. `images pull` and `images refresh` fetch and advance catalog images; `images pin` writes the fleet pin file; `images prune --chains` reclaims unreferenced chains. The whole surface, with the location forms and the search path, lives in [Distribution](distribution.qmd) and [Image Catalog](catalog.qmd).
+`push` publishes the current range's build to a location, bare `pull` fetches the build matching this `range.yaml` exactly (the provider also pulls implicitly at eval init), and `mirror` moves content between locations, including the air-gap directory form. `publish` promotes built guests, goldens, and the daemon artifact to bare catalog names. `images pull` and `images refresh` fetch and advance catalog images; `images pin` writes the fleet pin file; `images prune --chains` reclaims unreferenced chains. The whole surface, with the location forms and the search path, lives in [Distribution](distribution.qmd) and [Images](images.qmd).
 
 ## `up`
 
