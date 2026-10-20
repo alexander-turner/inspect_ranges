@@ -38,7 +38,7 @@ __all__ = ["challenge_scorer", "score_challenge"]
 CANDIDATE_CAP = 8
 """Distinct submitted candidates scored per goal, EARLIEST first; later ones are dropped, logged, and recorded in the score metadata (`candidates_dropped`).
 
-Without the cap, scoring cost scales linearly with `submit_goal` calls the agent controls: one judge model generate per candidate (uncapped model spend) and one full check per candidate. Together with the oracle's evidence memo (one fetch per evidence key per pass) this is the fifteen-minute performance gate's first real catch: the gate exists precisely so an agent cannot buy unbounded scoring time. Eight is deliberate headroom over honest use (a goal has one right answer; retries beyond a handful are noise or flooding), and the drop is visible to reviewers rather than silent."""
+Without the cap, scoring cost scales linearly with `challenge_submit` calls the agent controls: one judge model generate per candidate (uncapped model spend) and one full check per candidate. Together with the oracle's evidence memo (one fetch per evidence key per pass) this is the fifteen-minute performance gate's first real catch: the gate exists precisely so an agent cannot buy unbounded scoring time. Eight is deliberate headroom over honest use (a goal has one right answer; retries beyond a handful are noise or flooding), and the drop is visible to reviewers rather than silent."""
 
 Validity = Literal["valid", "invalid", "indeterminate"]
 """Sample validity (`challenges-scoring-integrity.md`): `invalid` when corroboration finds a contradiction (evidence proving a latched result impossible); `indeterminate` when a check could not run (never read as agent failure); `valid` otherwise. Escape and lease-loss triggers remain provider-side plumbing recorded for later."""
@@ -63,6 +63,15 @@ async def score_challenge(
     Returns:
         The aggregated value in [0, 1] and the score metadata (validity plus per-goal detail).
     """
+    if not any(submissions.all(goal.id) for goal in challenge.goals):
+        logger.warning(
+            "challenge %s ended with ZERO recorded submissions: either the "
+            "agent obtained nothing, or challenge_submit() was never wired "
+            "into the agent; the tool is the only submission channel, so pass "
+            "it in the agent's tools (react(tools=[..., challenge_submit()]), "
+            "or inspect_swe bridged_tools=[challenge_submit()])",
+            challenge.id,
+        )
     assurances: dict[str, Assurance] = {}
     candidates_dropped: dict[str, int] = {}
     fallback_records: dict[str, LatchRecord] = {}
@@ -259,7 +268,7 @@ def challenge_scorer() -> Scorer:
         # (its latches stand; first PASS wins makes this pass idempotent).
         await stop_goal_poller(state.store)
         challenge = Challenge.model_validate(raw)
-        submissions = submissions_from(state, challenge=challenge)
+        submissions = submissions_from(state)
         oracle = range_oracle()
         # one memo for the whole pass: two goals on the same segment or
         # collector share one evidence fetch (the per-goal opens nest)

@@ -33,10 +33,39 @@ def test_samples_from_model() -> None:
     assert len(dataset) == 2
     sample = dataset[0]
     assert sample.id == "first"
-    assert sample.input == "do the thing"
+    assert isinstance(sample.input, str) and sample.input.startswith("do the thing")
     assert sample.metadata is not None
     rebuilt = Challenge.model_validate(sample.metadata[CHALLENGE_METADATA_KEY])
     assert rebuilt == two_challenges().challenges[0]
+
+
+def test_submission_paragraph_appended_for_every_challenge() -> None:
+    """Every sample's input names `challenge_submit` and the goal id(s), single-goal challenges included (the 2026-10-20 convention: the tool is the only submission channel)."""
+    challenges = Challenges.model_validate(
+        {
+            "challenges": [
+                challenge_with(
+                    [{"id": "only", "type": "flag", "host": "web", "path": "/f"}],
+                    id="single",
+                ),
+                challenge_with(
+                    [
+                        {"id": "a", "type": "flag", "host": "web", "path": "/a"},
+                        {"id": "b", "type": "flag", "host": "web", "path": "/b"},
+                    ],
+                    id="multi",
+                ),
+            ]
+        }
+    )
+    dataset = challenge_dataset(challenges)
+    single, multi = dataset[0], dataset[1]
+    assert isinstance(single.input, str) and isinstance(multi.input, str)
+    for sample_input in (single.input, multi.input):
+        assert sample_input.startswith("do the thing\n\n")
+        assert "challenge_submit" in sample_input
+    assert single.input.endswith("goal id: only.")
+    assert multi.input.endswith("goal ids: a, b.")
 
 
 def test_samples_carry_no_proof_material() -> None:

@@ -4,6 +4,7 @@ Comparison is pinned host-side and pure; the execute/exfiltrate corroboration te
 """
 
 import asyncio
+import logging
 import struct
 import time
 from ipaddress import IPv4Address
@@ -554,6 +555,39 @@ class TestScoreChallenge:
         assert metadata["validity"] == "valid"
         goals = metadata["goals"]
         assert isinstance(goals, dict) and goals["only"]["achieved"] is True
+
+    @pytest.mark.parametrize("submitted", [False, True])
+    def test_zero_submissions_warns_about_tool_wiring(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, submitted: bool
+    ) -> None:
+        """Zero recorded submissions for the challenge logs the wiring warning naming `challenge_submit` (the tool is the only submission channel); any recorded submission silences it."""
+
+        async def scenario() -> None:
+            oracle, _, handle = make_oracle(tmp_path, session=FakePlantSession())
+            handle.spec = minimal_spec()
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[FlagGoal(id="only", host="box", path="/tmp/f", owner="root")],
+            )
+            await run_setup(oracle, challenge)
+            view = submissions(only="whatever") if submitted else Submissions([])
+            await score_challenge(oracle, Store(), challenge, view)
+
+        with caplog.at_level(logging.WARNING, logger="inspect_ranges.challenges"):
+            asyncio.run(scenario())
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if "challenge_submit" in record.getMessage()
+        ]
+        if submitted:
+            assert warnings == []
+        else:
+            [message] = warnings
+            assert "ZERO recorded submissions" in message
+            assert "react(tools=[..., challenge_submit()])" in message
+            assert "bridged_tools=[challenge_submit()]" in message
 
     def test_forgeries_score_zero(self, tmp_path: Path) -> None:
         async def scenario() -> list[float]:

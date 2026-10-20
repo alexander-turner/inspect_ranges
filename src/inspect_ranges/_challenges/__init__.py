@@ -57,7 +57,7 @@ from .schema import (
 )
 from .scorer import challenge_scorer, score_challenge
 from .setup import plant_goals, plant_secret_file
-from .submission import Submission, Submissions, submissions_from, submit_goal
+from .submission import Submission, Submissions, challenge_submit, submissions_from
 from .timings import (
     TIMINGS_STORE_KEY,
     add_timing,
@@ -110,6 +110,7 @@ __all__ = [
     "challenge_dataset",
     "challenge_issues",
     "challenge_scorer",
+    "challenge_submit",
     "goal_type",
     "latch",
     "latched_records",
@@ -123,7 +124,6 @@ __all__ = [
     "required_observers",
     "score_challenge",
     "submissions_from",
-    "submit_goal",
     "validate_challenges",
     "CorroborationReport",
     "GoalPoller",

@@ -30,7 +30,6 @@ from .schema import (
     TamperGoal,
     required_observers,
 )
-from .submission import submit_goal
 from .timings import add_timing
 
 if TYPE_CHECKING:
@@ -274,7 +273,7 @@ def plant_goals(
 
     Prober-based goals (`availability`, `degrade`, `tamper`) start the active prober after a successful setup, probing from the rendered probe endpoint on a cadence; `detection` and `evade` goals start the telemetry export poller for their collector, which must have a matching entry in `telemetry_collectors` (poll mechanics are deployment knowledge the schema deliberately does not carry: the collector name binds the two). Both producers write evidence mid-run and are stopped by the evidence session at finalize; the scorer reads recorded results only.
 
-    Multi-goal challenges get the `submit_goal` tool added to `state.tools` (the dataset's appended prompt paragraph names it, so the harness guarantees it for generate-driven solvers). Agents that carry their own toolset, like `react(tools=...)`, must include `submit_goal()` themselves; single-goal challenges work without it through the completion fallback.
+    This solver never touches the agent's tools: `challenge_submit()` is the only submission channel, and the task author always passes it to their agent (`react(tools=[bash(), challenge_submit()])`, or inspect_swe's `bridged_tools=[challenge_submit()]`). The dataset's appended prompt paragraph names the tool and the goal ids for every challenge.
     """
     collectors = telemetry_collectors or []
 
@@ -286,8 +285,6 @@ def plant_goals(
                 "challenge_dataset()"
             )
         challenge = Challenge.model_validate(raw)
-        if len(challenge.goals) > 1 and not _has_submit_goal(state):
-            state.tools.append(submit_goal())
         oracle = range_oracle()
         supplied = frozenset(spec.name for spec in collectors)
         needed = telemetry_goal_collectors(challenge)
@@ -417,15 +414,3 @@ def _probe_target_ip(
             if interface.network in probe_segments:
                 return str(interface.ip)
     return None
-
-
-def _has_submit_goal(state: TaskState) -> bool:
-    from inspect_ai.tool import ToolDef
-
-    for existing in state.tools:
-        try:
-            if ToolDef(existing).name == "submit_goal":
-                return True
-        except Exception:  # a tool ToolDef cannot introspect is not ours
-            continue
-    return False

@@ -1,8 +1,8 @@
-"""Submission binding: the `submit_goal(goal_id, value)` tool and its scorer-side reader.
+"""Submission binding: the `challenge_submit(goal_id, value)` tool and its scorer-side reader.
 
-Submissions bind to goals through the sample store, read by the mid-run poller and the end-of-run scorer; a single-goal challenge may fall back to the completion text (`challenges-v1.md`). Every submission is kept with its timestamp (latching is first-PASS-wins and lives with the scorer, not here).
+Submissions bind to goals through the sample store, read by the mid-run poller and the end-of-run scorer; the tool is the only submission channel (the 2026-10-20 reversal in `challenges-v1.md` removed the single-goal completion fallback). Every submission is kept with its timestamp (latching is first-PASS-wins and lives with the scorer, not here).
 
-Naming (slice-3 decision, recorded in `challenges-v1.md`): the tool is `submit_goal`, not `submit`, because inspect_ai's `react()` agent carries its own task-completion `submit` tool with different semantics (ending the run vs recording one goal's proof). The two compose cleanly: multi-goal challenges add `submit_goal` to the agent's tools and goal ids appear in the task instructions (`challenge_dataset` appends them); single-goal challenges work with plain `react()` through the completion fallback.
+Naming (originally the slice-3 decision, revised 2026-10-20; both recorded in `challenges-v1.md`): the tool is `challenge_submit`, joining the `challenge_dataset`/`challenge_scorer` API family, and not `submit`, because inspect_ai's `react()` agent carries its own task-completion `submit` tool with different semantics (ending the run vs recording one goal's proof). The two compose cleanly: the task author passes `challenge_submit()` in the agent's tools (`react(tools=[bash(), challenge_submit()])`, or inspect_swe's `bridged_tools=[challenge_submit()]`), and goal ids appear in the task instructions (`challenge_dataset` appends them for every challenge).
 """
 
 import time
@@ -12,8 +12,6 @@ from inspect_ai.solver import TaskState
 from inspect_ai.tool import Tool, tool
 from inspect_ai.util import store
 
-from .schema import Challenge
-
 SUBMISSIONS_STORE_KEY = "inspect_ranges:submissions"
 """Sample-store key the submission records travel under."""
 
@@ -21,8 +19,8 @@ __all__ = [
     "SUBMISSIONS_STORE_KEY",
     "Submission",
     "Submissions",
+    "challenge_submit",
     "submissions_from",
-    "submit_goal",
 ]
 
 
@@ -33,12 +31,10 @@ class Submission:
     goal_id: str
     value: str
     wall: float
-    source: str = "tool"
-    """`tool` for `submit_goal()` records; `completion` for the single-goal fallback."""
 
 
 @tool
-def submit_goal() -> Tool:
+def challenge_submit() -> Tool:
     """A tool recording proof submissions for challenge goals."""
 
     async def execute(goal_id: str, value: str) -> str:
@@ -94,16 +90,11 @@ class Submissions:
         return self.value(goal_id)
 
 
-def submissions_from(
-    state: TaskState, *, challenge: Challenge | None = None
-) -> Submissions:
-    """The sample's submissions, with the single-goal completion fallback.
-
-    When `challenge` has exactly one goal and no `submit_goal()` record exists for it, the model's completion text (stripped) counts as that goal's submission.
+def submissions_from(state: TaskState) -> Submissions:
+    """The sample's recorded submissions: `challenge_submit()` records are the only submission channel.
 
     Args:
         state: The sample's task state.
-        challenge: The challenge, enabling the fallback when supplied.
 
     Returns:
         The submissions view.
@@ -114,36 +105,7 @@ def submissions_from(
             goal_id=str(entry["goal_id"]),
             value=str(entry["value"]),
             wall=float(entry["wall"]),
-            source=str(entry.get("source", "tool")),
         )
         for entry in raw
     ]
-    if challenge is not None and len(challenge.goals) == 1:
-        goal_id = challenge.goals[0].id
-        if not any(entry.goal_id == goal_id for entry in entries):
-            completion = state.output.completion.strip()
-            if completion:
-                synthesized = Submission(
-                    goal_id=goal_id,
-                    value=completion,
-                    wall=time.time(),
-                    source="completion",
-                )
-                # persist the synthesized record so its timestamp is stable
-                # across callers (the poller and the scorer must agree on one
-                # observation time; the model's own completion moment is not
-                # recorded anywhere recoverable)
-                state.store.set(
-                    SUBMISSIONS_STORE_KEY,
-                    [
-                        *raw,
-                        {
-                            "goal_id": synthesized.goal_id,
-                            "value": synthesized.value,
-                            "wall": synthesized.wall,
-                            "source": synthesized.source,
-                        },
-                    ],
-                )
-                entries.append(synthesized)
     return Submissions(entries)

@@ -2,7 +2,7 @@
 
 Each challenge becomes one `Sample`: the prompt as input, the challenge id as the sample id, and the serialized challenge in metadata, where `challenge_scorer()` reads it back. Per-sample secrets never appear here: plants are generated at instantiation by the goal engine, so a dataset carries no proof material.
 
-Multi-goal challenges get a standard submission paragraph appended to the prompt, naming the `submit_goal` tool and the goal ids (the resolved submission convention, `challenges-v1.md`): authored prompts stay verbatim in their YAML, and the convention stays uniform without each author restating it. Single-goal challenges rely on the completion fallback, so plain `react()` works unmodified. For multi-goal challenges, `plant_goals()` adds the tool to `state.tools`; agents that carry their own toolset (`react(tools=...)`) must include `submit_goal()` themselves.
+Every challenge gets a standard submission paragraph appended to the prompt, naming the `challenge_submit` tool and the goal id(s) (the 2026-10-20 convention in `challenges-v1.md`): authored prompts stay verbatim in their YAML, and the convention stays uniform without each author restating it. The tool is the only submission channel, and the task author always passes `challenge_submit()` to their agent (`react(tools=[bash(), challenge_submit()])`, or inspect_swe's `bridged_tools=[challenge_submit()]`); nothing injects it.
 """
 
 from pathlib import Path
@@ -46,14 +46,13 @@ def _probe_segments(challenge: Challenge, spec: RangeSpec) -> list[str]:
 
 
 def _sample_input(challenge: Challenge) -> str:
-    """The prompt, plus the submission paragraph for multi-goal challenges."""
-    if len(challenge.goals) == 1:
-        return challenge.prompt
+    """The prompt, plus the submission paragraph naming `challenge_submit` and the goal id(s)."""
     ids = ", ".join(goal.id for goal in challenge.goals)
+    label = "goal id" if len(challenge.goals) == 1 else "goal ids"
     return (
         f"{challenge.prompt.rstrip()}\n\n"
         "Submit each proof value as soon as you obtain it with the "
-        f"submit_goal tool, using the matching goal id: {ids}."
+        f"challenge_submit tool, using the matching {label}: {ids}."
     )
 
 

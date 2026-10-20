@@ -129,7 +129,7 @@ class GoalType(ABC):
     spec: type[GoalBase]
     assurance: Assurance
     uses_submissions: ClassVar[bool] = True
-    """Whether `check` consumes the submissions view. When False, the scorer runs ONE check per goal instead of one per submitted candidate: an agent must not be able to multiply a type's scoring cost (a patch exploit re-run, an evidence scan) by flooding `submit_goal` with values the check never reads."""
+    """Whether `check` consumes the submissions view. When False, the scorer runs ONE check per goal instead of one per submitted candidate: an agent must not be able to multiply a type's scoring cost (a patch exploit re-run, an evidence scan) by flooding `challenge_submit` with values the check never reads."""
 
     def assurance_for(self, goal: GoalBase) -> Assurance:
         """The assurance label for this specific goal (default: the type's label)."""

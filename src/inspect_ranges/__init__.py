@@ -12,11 +12,11 @@ from ._challenges import (
     RangeOracle,
     challenge_dataset,
     challenge_scorer,
+    challenge_submit,
     load_challenges,
     plant_goals,
     register_exploit,
     register_goal_type,
-    submit_goal,
     validate_challenges,
 )
 from .schema import (
@@ -35,6 +35,7 @@ __all__ = [
     "__version__",
     "challenge_dataset",
     "challenge_scorer",
+    "challenge_submit",
     "load_challenges",
     "load_range",
     "plant_goals",
@@ -43,7 +44,6 @@ __all__ = [
     "register_goal_type",
     "revalidate_range",
     "semantic_issues",
-    "submit_goal",
     "validate_challenges",
     "validate_range",
 ]
