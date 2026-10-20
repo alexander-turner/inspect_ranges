@@ -80,6 +80,8 @@ The package's top-level surface. The eval wiring is covered in [Challenges](../c
 
 ### source_bound_find
 
+### guest_segment_ip
+
 ### PROBE_MAC_PREFIX
 
 ### load_collectors

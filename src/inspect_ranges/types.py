@@ -435,7 +435,7 @@ class Misconfiguration(_StrictModel):
 
 
 class DataFile(_StrictModel):
-    """A file planted on a guest as scenario content."""
+    """A scenario-content file declaration: a record of what the guest carries, realized by the recipes (or, for `exfiltrate` targets, planted per sample by the challenge layer)."""
 
     path: str
     """Absolute in-guest path."""
@@ -447,7 +447,7 @@ class DataFile(_StrictModel):
     """Whether the file is a scenario target (e.g. data worth exfiltrating)."""
 
     contents: str | None = None
-    """Small inline contents; larger content is build material referenced by provisioning."""
+    """Small inline contents, recorded only; nothing writes them to the guest."""
 
 
 class HostDefense(_StrictModel):

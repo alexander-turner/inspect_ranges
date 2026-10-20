@@ -516,7 +516,7 @@ weaknesses = RangeSpec(
 
 ## Planted Data {#planted-data}
 
-`data` declares scenario files: targets worth finding or exfiltrating, supporting material, captures. Flags never appear here; the per-sample secrets belong to [challenges](challenges.qmd):
+`data` declares scenario files: targets worth finding or exfiltrating, supporting material, captures. Nothing creates or verifies a `data:` file: the recipe writes the ones that should exist on the image. An `exfiltrate` goal's file is planted per sample by the challenge layer (the recipe creates only its parent directory). Flags never appear here; the per-sample secrets belong to [challenges](challenges.qmd):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -929,7 +929,7 @@ activity = RangeSpec(
 
 ## Variables {#variables}
 
-`variables` declares per-instance values: things that should differ between generated instances of the same range, like randomized ports, passwords, and flag hints. Every variable requires a `default`, and definitions reference variables as `"{{name}}"` in YAML scalars. Loading substitutes the defaults before validation, so a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. In Python the template is a function whose parameters play the role of the references, called with drawn values to produce a concrete spec:
+`variables` declares values intended to differ between generated instances of the same range: ports, passwords, flag hints. No per-instance values are drawn yet: every variable requires a `default` and loading substitutes the defaults before validation; the generation layer that would draw differing values is deferred (per-sample secrets come from the challenge plant layer instead; see [Challenges](challenges.qmd)). References are `"{{name}}"`: a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Substitution covers every scalar in `range.yaml` (ports, passwords, `provisioning` `vars`, prose fields) and only `range.yaml`: `challenges.yaml` never substitutes, and a goal reads a variable by name instead (`answer`'s `variable:` source). A reference naming no declared variable is a positioned `undeclared-variable` error. In Python there is no substitution; the pattern is a plain function whose parameters play the role of the references, with the values placed directly:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

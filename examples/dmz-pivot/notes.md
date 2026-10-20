@@ -41,7 +41,7 @@ Scorable material is NEVER baked: `/home/deploy/.proof_token`, `/srv/data/custom
 
 ## What this example exercises in the schema
 
-The docs home page end to end: an ACL'd router between two isolated segments (default-drop with one allow), the attacker-image catalog default, `users`/`services`/`vulnerabilities`/`misconfigurations`/`data` declared honestly and build-verified, and all three introductory goal types (`execute` with a corroborated beacon, `exfiltrate` with segment pcap, `flag`).
+The docs home page end to end: an ACL'd router between two isolated segments (default-drop with one allow), the attacker-image catalog default, `users`/`services`/`vulnerabilities`/`misconfigurations`/`data` declared honestly (`services`/`vulnerabilities` build-verified; the rest covered by recipe self-assertions), and all three introductory goal types (`execute` with a corroborated beacon, `exfiltrate` with segment pcap, `flag`).
 
 ## Realized (2026-10-20)
 

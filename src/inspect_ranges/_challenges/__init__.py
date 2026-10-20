@@ -30,6 +30,7 @@ from .goaltypes import (
     ExfiltrateType,
     FlagType,
 )
+from .netident import guest_segment_ip
 from .observedtypes import (
     AvailabilityType,
     DegradeType,
@@ -147,6 +148,7 @@ __all__ = [
     "challenge_scorer",
     "challenge_setup",
     "goal_type",
+    "guest_segment_ip",
     "latch",
     "latched_records",
     "load_challenges",

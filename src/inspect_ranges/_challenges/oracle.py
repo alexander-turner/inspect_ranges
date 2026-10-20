@@ -138,7 +138,7 @@ class RangeOracle:
         return frozenset(available)
 
     def resolved(self) -> ResolvedPlan:
-        """The sample's resolved plan (variable draws, allocations); how `answer` goals learn instance facts."""
+        """The sample's resolved plan (per-guest address and CID allocations; see `guest_segment_ip`). Variables never ride the plan: `answer` goals read declared defaults from `range_spec()`."""
         if self._handle.plan is None:
             raise OracleSetupError("the sample's resolved plan is unavailable")
         return self._handle.plan

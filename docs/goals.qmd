@@ -58,7 +58,7 @@ A `GoalResult` carries `achieved`, optional `partial` credit in [0, 1] for types
 - `write_file(guest, path, data, mode=, owner=)`: plant placement. With `owner`, the write runs the root owner-flow script: exclusive create (a pre-existing target refuses untouched), never wider than the final mode, chown before chmod, and any failure removes the file so a plant is never left behind under the wrong principal.
 - `read_file(guest, path, user=)`: a raw guest read; `user` routes privileged reads through the exec plane with only the path in argv.
 - `exec(guest, cmd, user=, timeout_s=)`: argv only, with no implicit shell and no plant material in the command line.
-- `resolved()` / `range_spec()`: the sample's resolved plan (variable draws, allocations) and validated spec, for types that verify against instance facts.
+- `resolved()` / `range_spec()`: the sample's resolved plan (per-guest address and vsock CID allocations) and validated spec. Variables never ride the plan: a type that needs one reads the declared default from `range_spec().variables`, as the built-in `answer` does.
 - Evidence accessors, all read-only against the sample's immutable record: `pcap(segment)`, `console(guest)`, `telemetry(collector)`, `telemetry_export(collector)`, and `probe_records(goal_id)` (which also reports stream gaps; treat a gapped stream as indeterminate, since the prober flushes failures first and a lost chunk is disproportionately likely to carry them).
 - `available_observers()`: what this deployment can actually supply, used at planting to refuse challenges whose goals require observers that are not there.
 
@@ -158,7 +158,7 @@ from inspect_ranges import PROBE_MAC_PREFIX, source_bound_find
         return GoalResult(achieved=achieved, corroborated=corroborated)
 ```
 
-Three details carry the soundness. The find is source-bound: a match counts only in a packet whose IPv4 source is the claimed guest, because attacker frames carrying the value sit in honest captures. The probe's reserved MAC prefix is excluded, so probe-sourced flows are dismissed by spec rather than heuristics. And the claimed source comes from the goal's own declaration (`src_ip` here) or from `oracle.resolved()` for instance-allocated addresses, never from the capture itself. A corroborating type declares `segment-pcap` in its `observers()`, which is what refuses the challenge up front on a deployment without capture, and returns `corroborated=None` when the goal declares no segment.
+Three details carry the soundness. The find is source-bound: a match counts only in a packet whose IPv4 source is the claimed guest, because attacker frames carrying the value sit in honest captures. The probe's reserved MAC prefix is excluded, so probe-sourced flows are dismissed by spec rather than heuristics. And the claimed source comes from the goal's own declaration (`src_ip` here) or, for instance-allocated addresses, from the resolved plan via `guest_segment_ip(oracle.resolved(), goal.host, goal.segment)` (a public export the built-in types share), never from the capture itself. A corroborating type declares `segment-pcap` in its `observers()`, which is what refuses the challenge up front on a deployment without capture, and returns `corroborated=None` when the goal declares no segment.
 
 ## Testing
 
@@ -209,5 +209,7 @@ challenges:
 ```
 
 Registration must run before parsing. Under inspect, the entry-point module makes this automatic: it is imported in every process that parses or scores, including the scorer's re-parse of the challenge from sample metadata. Calling `load_challenges` or `validate_challenges` outside inspect requires importing the registering module first; otherwise the custom `type:` name refuses as `unknown-goal-type` with the known-type listing and a hint naming this requirement, an honest refusal rather than a misparse.
+
+Open problem: `inspect-ranges build` runs no registration before parsing, so a custom-typed `challenges.yaml` that declares behavioral checks refuses at the behavioral stage with `unknown-goal-type`. Until the build loads registrations, prove custom-typed challenges with a scored eval.
 
 With a `range_spec`, cross-validation checks a custom goal's observer requirements via `observers()`; its other fields are the type's own semantics (a custom `host` is not assumed to name a range guest), so dangling cross-references surface when the plant or probe fails.

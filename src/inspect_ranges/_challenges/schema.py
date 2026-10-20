@@ -194,7 +194,7 @@ class FlagGoal(GoalBase):
 class AnswerGoal(GoalBase):
     """Submit a fact about the environment, compared against exactly one declared source.
 
-    Sources: `variable` (the instance's drawn value from the resolved range), `value` (a literal fact that is scenario content, visible in the spec by design), or `host` plus `path` (read by the oracle from the live instance). Exactly one source must be declared.
+    Sources: `variable` (the declared default, read from the spec; nothing draws in v1), `value` (a literal fact that is scenario content, visible in the spec by design), or `host` plus `path` (read by the oracle from the live instance). Exactly one source must be declared.
     """
 
     type: Literal["answer"] = "answer"
@@ -333,7 +333,7 @@ class DegradeGoal(GoalBase):
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
     segment: str | None = None
-    """Network the probe reaches the service through; omitted means the host's first declared network (the v1 convention; declare it for multi-homed hosts whose service binds elsewhere)."""
+    """Network the probe reaches the service through; omitted means the host's first interface on a probed segment. A declared segment must carry a probe endpoint in the plan, or setup refuses."""
     window_s: float = Field(gt=0)
     """Observation window the probe verdict is scored over, in seconds."""
     measure: Literal["latency", "error-fraction"] | None = None
@@ -373,7 +373,7 @@ class TamperGoal(GoalBase):
     location: str = Field(min_length=1)
     """The protected location the value must appear in (a database record, a served response), interpreted by the goal engine (v1: `PORT/PATH` observed over HTTP)."""
     segment: str | None = None
-    """Network the probe reaches the location through; omitted means the host's first declared network (the v1 convention)."""
+    """Network the probe reaches the location through; omitted means the host's first interface on a probed segment. A declared segment must carry a probe endpoint in the plan, or setup refuses."""
     observer: Literal["active-prober", "guest-snapshot"] = "active-prober"
     """How the written value is observed from outside."""
 
@@ -410,7 +410,7 @@ class AvailabilityGoal(GoalBase):
     port: int = Field(ge=1, le=65535)
     """Service port the active prober checks."""
     segment: str | None = None
-    """Network the probe reaches the service through; omitted means the host's first declared network (the v1 convention; declare it for multi-homed hosts whose service binds elsewhere)."""
+    """Network the probe reaches the service through; omitted means the host's first interface on a probed segment. A declared segment must carry a probe endpoint in the plan, or setup refuses."""
     window_s: float = Field(gt=0)
     """Observation window, in seconds; DOWN and MUMBLE inside it are penalized."""
 
@@ -616,7 +616,7 @@ class PatchGoal(GoalBase):
     port: int = Field(ge=1, le=65535)
     """Service port of the functional check that must still pass."""
     segment: str | None = None
-    """Probe segment for multi-homed hosts; `None` means the host's single probed segment (the trio's convention)."""
+    """Network the probe reaches the service through; omitted means the host's first interface on a probed segment. A declared segment must carry a probe endpoint in the plan, or setup refuses."""
 
     default_primitive: ClassVar[Primitive | None] = None
 
