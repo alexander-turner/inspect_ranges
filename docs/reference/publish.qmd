@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges publish"
+description: "Promote a built guest's realized image, a cache golden, or the daemon artifact to a bare catalog name."
+reference: inspect-ranges publish
+---

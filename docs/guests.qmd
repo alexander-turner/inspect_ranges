@@ -287,13 +287,13 @@ With `host:`, the attacker declares no machine of its own (the foothold is the m
 
 ## Guest Content {#guest-content}
 
-Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest (what the guest looks like once fully set up), not boot-time actions. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample.
+Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest (what the guest looks like once fully set up), not boot-time actions. Each declaration is realized at build time and the range ships verified; the runtime never applies guest content per sample.
 
-[`inspect-ranges build`](building.qmd) *realizes* every content section below except `scheduled_activity`: it applies the declarations to live guests, verifies them, and captures each guest's disk as a realized image. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
+The ownership rule to know when writing a definition: [`inspect-ranges build`](building.qmd) converges nothing itself. The range's recipes create the accounts, write the files, and seed the weaknesses ([Authoring Recipes](building.qmd#authoring-recipes)); the build then independently verifies every declared `services` and `vulnerabilities` entry against the live guests and captures each guest's disk as a realized image. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and behavioral checks confirm whichever the attack chains depend on. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
 
 ## Users {#users}
 
-`users` declares a guest's local accounts (routers can carry them too). Domain accounts belong in [`active_directory`](#active-directory), not here:
+`users` declares a host's local accounts: the recipe creates them, and the declaration records the surface. Declaring users on a router refuses at planning (`guest-config-not-realized`): router content has no realizer yet. Domain accounts belong in [`active_directory`](#active-directory), not here:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -929,7 +929,7 @@ activity = RangeSpec(
 
 ## Variables {#variables}
 
-`variables` declares per-instance values: things that should differ between generated instances of the same range, like randomized ports, passwords, and flag hints. Every variable requires a `default`, and definitions reference variables as `{{name}}` in YAML scalars. Loading substitutes the defaults before validation, so a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. In Python the template is a function whose parameters play the role of the references, called with drawn values to produce a concrete spec:
+`variables` declares per-instance values: things that should differ between generated instances of the same range, like randomized ports, passwords, and flag hints. Every variable requires a `default`, and definitions reference variables as `"{{name}}"` in YAML scalars. Loading substitutes the defaults before validation, so a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. In Python the template is a function whose parameters play the role of the references, called with drawn values to produce a concrete spec:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

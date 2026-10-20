@@ -6,7 +6,7 @@ title: Reference
 
 | | |
 |---|---|
-| [inspect_ranges](inspect_ranges.qmd) | Loading, validation, and revalidation of range definitions. |
+| [inspect_ranges](inspect_ranges.qmd) | Challenges and goals (dataset, setup, scoring, verification), the goal types, and range definition loading. |
 | [inspect_ranges.types](types.qmd) | Range definition types, usable directly as sandbox configuration. |
 : {.borderless tbl-colwidths=[35,65]}
 
@@ -22,7 +22,11 @@ title: Reference
 | [inspect-ranges down](down.qmd) | Tear down a project (idempotent, works from any process, after any crash). |
 | [inspect-ranges evidence](evidence.qmd) | Work with evidence locations: verify a record's chains and seals. |
 | [inspect-ranges images](images.qmd) | Manage the golden image cache: derive, list, and prune. |
+| [inspect-ranges mirror](mirror.qmd) | Mirror between locations: a whole source, a name, a pin, or a spec-selected build. |
 | [inspect-ranges plan](plan.qmd) | Resolve a range directory or spec file into its immutable plan. |
+| [inspect-ranges publish](publish.qmd) | Promote a built guest's realized image, a cache golden, or the daemon artifact to a bare catalog name. |
+| [inspect-ranges pull](pull.qmd) | Resolve and fetch a published build: by this spec's hash, a spec path, or a name@sha256 pin. |
+| [inspect-ranges push](push.qmd) | Publish the current range's build (its manifest's transitive closure) to a location. |
 | [inspect-ranges reaper](reaper.qmd) | Reclaim expired host leases: teardown first, then CID and lease release. |
 | [inspect-ranges render](render.qmd) | Render a range directory or spec file into its realization bundle. |
 | [inspect-ranges schema](schema.qmd) | Print the JSON Schema for range.yaml to stdout. |

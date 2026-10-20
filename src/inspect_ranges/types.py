@@ -498,7 +498,7 @@ class ScheduledActivity(_StrictModel):
 class Variable(_StrictModel):
     """A named per-instance value: drawn fresh for each generated instance, with a required default.
 
-    Definitions reference variables as `{{name}}` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: v1 semantics ARE defaults-resolution (linux-examples-v1), per-sample secrets are the challenge plant layer's job, and a per-instance generation layer that redraws non-secret values is deferred (see linux-examples-v1-parked-decisions.md). Python authors draw values and construct concretely instead of using references.
+    Definitions reference variables as `"{{name}}"` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: v1 semantics ARE defaults-resolution (linux-examples-v1), per-sample secrets are the challenge plant layer's job, and a per-instance generation layer that redraws non-secret values is deferred (see linux-examples-v1-parked-decisions.md). Python authors draw values and construct concretely instead of using references.
     """
 
     default: str | int | bool
@@ -673,7 +673,7 @@ class Router(_StrictModel):
     """Static routes to segments reached through other routers."""
 
     users: list[User] = []
-    """Local accounts (converged state; applied and verified at build)."""
+    """Local accounts on the router. Not yet realized: declaring any refuses at planning (`guest-config-not-realized`)."""
 
     acl: list[AclRule] = []
     """Inter-segment policy enforced on this router (stateful; endpoints may be routed, not only attached). EMPTY means a plain router (everything forwards, the KYPO/CyRIS pure-router shape); declaring ANY rule flips the router to default-drop, forwarding only the declared allows plus established/related."""
@@ -707,7 +707,7 @@ class Host(_StrictModel):
     """Network attachments (explicit; v0.1 has no implicit attachment)."""
 
     users: list[User] = []
-    """Local accounts (converged state; applied and verified at build)."""
+    """Local accounts (converged by the guest's recipes: the build trusts recipe success rather than probing accounts directly, and behavioral checks confirm the ones the attack chains depend on)."""
 
     services: list[Service] = []
     """The converged listening surface (assertions, verified at build)."""
@@ -931,7 +931,7 @@ class RangeSpec(_StrictModel):
     """Active Directory identity data, for domain ranges."""
 
     variables: dict[str, Variable] = {}
-    """Per-instance randomized values, referenced as `{{name}}` in YAML scalars (defaults substitute at load)."""
+    """Per-instance randomized values, referenced as `"{{name}}"` in YAML scalars (defaults substitute at load)."""
 
     @property
     def foothold_guest(self) -> str:

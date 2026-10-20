@@ -27,7 +27,7 @@ def images() -> None:
     help="Required digest pin for the vendor image (hex or sha256:-prefixed).",
 )
 @click.option(
-    "--name", default=None, help="Golden name (default: <vendor stem>-golden)."
+    "--name", default=None, help="Golden name (default: `<vendor stem>-golden`)."
 )
 @click.option(
     "--image-cache",

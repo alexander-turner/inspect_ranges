@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges mirror"
+description: "Mirror between locations: a whole source, a name, a pin, or a spec-selected build."
+reference: inspect-ranges mirror
+---

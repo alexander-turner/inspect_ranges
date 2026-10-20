@@ -25,13 +25,13 @@ from .._channel.bundle import BundleError, build_daemon_bundle
     "--from",
     "from_location",
     default=None,
-    help="Location override for --pull; default is the configured search path (INSPECT_RANGES_REGISTRY).",
+    help="Location override for `--pull`; default is the configured search path (INSPECT_RANGES_REGISTRY).",
 )
 @click.option(
     "--sha256",
     "expected_sha256",
     default=None,
-    help="Out-of-band pin for --pull: the bundle digest publish day recorded; a served bundle that differs refuses.",
+    help="Out-of-band pin for `--pull`: the bundle digest publish day recorded; a served bundle that differs refuses.",
 )
 def daemon_bundle(
     output: Path, pull: bool, from_location: str | None, expected_sha256: str | None

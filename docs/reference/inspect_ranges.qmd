@@ -1,12 +1,96 @@
 ---
 title: inspect_ranges
-description: Loading, validation, and revalidation of range definitions.
+description: Challenges and goals (dataset, setup, scoring, verification), the goal types, and range definition loading.
 reference: inspect_ranges
 ---
 
-Load a definition with `load_range`, or get complete diagnostics (every error at once, with source positions and hints) from `validate_range`. Typed specs crossing a consumer boundary are re-checked with `revalidate_range`.
+The package's top-level surface. The eval wiring is toured in [Challenges](../challenges.qmd), the custom goal-type contract in [Custom Goals](../goals.qmd), and range definition loading in [Ranges](../ranges.qmd). Range definition types have their own page: [inspect_ranges.types](types.qmd).
 
-## Loading
+## Challenge Tasks
+
+### challenge_dataset
+
+### challenge_setup
+
+### challenge_scorer
+
+### verify_goal
+
+## Challenges
+
+### Challenge
+
+### Challenges
+
+### Goal
+
+### Hint
+
+### Scoring
+
+### Primitive
+
+## Goal Types
+
+### GoalBase
+
+### FlagGoal
+
+### AnswerGoal
+
+### ExfiltrateGoal
+
+### ExecuteGoal
+
+### HijackGoal
+
+### ControlGoal
+
+### DegradeGoal
+
+### TamperGoal
+
+### AvailabilityGoal
+
+### DetectionGoal
+
+### SeverityFilter
+
+### EvadeGoal
+
+### JudgeGoal
+
+### PatchGoal
+
+## Custom Goal Types
+
+### GoalType
+
+### GoalResult
+
+### register_goal_type
+
+### register_exploit
+
+### RangeOracle
+
+### Observations
+
+### ObserverKind
+
+### source_bound_find
+
+### PROBE_MAC_PREFIX
+
+### load_collectors
+
+## Challenge Loading
+
+### load_challenges
+
+### validate_challenges
+
+## Range Loading
 
 ### load_range
 

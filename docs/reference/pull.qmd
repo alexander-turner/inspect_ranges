@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges pull"
+description: "Resolve and fetch a published build: by this spec's hash, a spec path, or a name@sha256 pin."
+reference: inspect-ranges pull
+---

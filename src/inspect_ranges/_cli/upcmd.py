@@ -33,7 +33,7 @@ from .specpath import resolve_spec_path
 @click.option(
     "--project",
     default=None,
-    help="Compose project name (default: ir-<range>-<spec digest>).",
+    help="Compose project name (default: `ir-<range>-<spec digest>`).",
 )
 @click.option(
     "--image-cache",
@@ -46,7 +46,7 @@ from .specpath import resolve_spec_path
     type=click.IntRange(min=3),
     default=3,
     show_default=True,
-    help="First vsock CID when rendering --from-spec (plan-time input).",
+    help="First vsock CID when rendering `--from-spec` (plan-time input).",
 )
 @click.option("--readiness-timeout", type=float, default=300.0, show_default=True)
 @click.option(

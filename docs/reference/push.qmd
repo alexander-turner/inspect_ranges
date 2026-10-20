@@ -1,0 +1,5 @@
+---
+title: "inspect-ranges push"
+description: "Publish the current range's build (its manifest's transitive closure) to a location."
+reference: inspect-ranges push
+---

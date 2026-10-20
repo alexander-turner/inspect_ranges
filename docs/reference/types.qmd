@@ -86,8 +86,12 @@ Models validate fully at construction (structural and cross-reference checks) an
 
 ### AnyIPNetwork
 
+### parse_egress_entry
+
 ## Diagnostics
 
 ### Issue
+
+### IssueError
 
 ### ValidationReport
