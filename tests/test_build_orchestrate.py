@@ -1795,3 +1795,26 @@ def test_converged_build_reuses_all_or_nothing(tmp_path: Path, cache: Path) -> N
     )
     assert {guest for guest, _, _ in second.captures} == {"dc", "db"}
     assert {name for name, _, _ in second.recipe_calls} >= {"acme.web", "acme.db"}
+
+
+def test_stale_bx_state_rotates_aside_before_the_proof_boot(tmp_path: Path) -> None:
+    """A failed build's leftover bx evidence must never collide with the next proof boot's write-once store: the stale project dir rotates aside (kept for autopsy), and a fresh boot starts empty."""
+    from inspect_ranges._build.orchestrate import rotate_stale_bx_state
+    from inspect_ranges._runtime.ownership import project_dir
+
+    state_dir = tmp_path / "state"
+    stale = project_dir(state_dir, "ir-acme-bx")
+    (stale / "evidence" / "chunks").mkdir(parents=True)
+    (stale / "evidence" / "chunks" / "000000.bin").write_bytes(b"old")
+
+    rotate_stale_bx_state(state_dir, "ir-acme-bx")
+
+    assert not stale.exists()
+    rotated = [
+        p for p in stale.parent.iterdir() if p.name.startswith("ir-acme-bx-stale-")
+    ]
+    assert len(rotated) == 1
+    assert (rotated[0] / "evidence" / "chunks" / "000000.bin").read_bytes() == b"old"
+    # a clean state dir is a no-op
+    rotate_stale_bx_state(state_dir, "ir-acme-bx")
+    assert len(list(stale.parent.iterdir())) == 1

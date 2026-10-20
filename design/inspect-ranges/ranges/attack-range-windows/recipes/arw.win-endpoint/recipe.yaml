@@ -1,0 +1,6 @@
+name: arw.win-endpoint
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  splunk_ip: {}

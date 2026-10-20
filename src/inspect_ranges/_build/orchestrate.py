@@ -1321,6 +1321,7 @@ def _run_behavioral_phase(
     # CAP_DAC_OVERRIDE), so container root cannot traverse a 0700 bundle mount
     staging.chmod(0o755)
     bx_project = f"{project}-bx"
+    rotate_stale_bx_state(state_dir, bx_project)
     # beacons must land in a ROTATED capture chunk to corroborate, and the
     # default 10 MB chunk never rotates for check-sized traffic: the bx boot
     # defaults to 1 MB chunks (parked-decisions item 6); explicit env wins
@@ -1466,6 +1467,16 @@ def _prove_realized_boot(
             hybrid_sockets=bx_hybrid,
         )
     )
+
+
+def rotate_stale_bx_state(state_dir: Path, bx_project: str) -> None:
+    """Move a leftover bx project directory aside so the proof boot's evidence record starts empty.
+
+    A failed build's teardown leaves the bx project's evidence store behind (its chunks and manifest parts are write-once), and the next build of the same spec reuses the deterministic `-bx` project name: without rotation every chunk collides as a recorded gap and the telemetry windows can never complete (measured, windows-ad-v1 slice 5). The stale directory is renamed, not deleted, so a failed run's record stays available for autopsy. The known `-bx` interleave limit applies here too: a concurrent same-spec build's live store would rotate with it.
+    """
+    stale = project_dir(state_dir, bx_project)
+    if stale.exists():
+        stale.rename(stale.with_name(f"{stale.name}-stale-{int(time.time() * 1000)}"))
 
 
 def _fetch_image_tier(name: str, image_cache: Path) -> "ImageRef | None":

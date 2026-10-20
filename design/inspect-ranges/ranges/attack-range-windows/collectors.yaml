@@ -1,0 +1,17 @@
+# collectors.yaml — the deployment-side binding between the detection goal's
+# `collector: splunk` and a real export (windows-ad-v1 slice 5). Consumed by
+# BOTH proof paths: the build's behavioral runner and the eval's
+# plant_goals(telemetry_collectors=...). The wrapper is installed by the
+# arw.splunk-server recipe; it reads the admin credential from a root-only
+# file (never argv) and ends every poll with the trailing cursor banner the
+# poller's contract requires.
+collectors:
+  - name: splunk
+    guest: splunk
+    poll_s: 2.0
+    source:
+      kind: command
+      command: ["/opt/range/telemetry-export.sh", "{cursor}"]
+      bootstrap: ["/opt/range/telemetry-export.sh"]
+      cursor_pattern: '-- cursor: (\d+)'
+      user: root
