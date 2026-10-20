@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI framework for cyber range evaluations."
-llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the containment stack, and getting started with doctor and the image catalog."
+llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the SWE-agent variant (inspect_swe claude_code with bridged_tools), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
 ---
 
 ## Overview
@@ -14,7 +14,32 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 3. Attacker agents run inside a dedicated VM under Cloud Hypervisor and are further contained by an outer unprivileged container and the cloud provider's hypervisor (e.g. AWS Nitro).
 
-4. Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle can see everything.
+4. Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle (scoring's privileged view from outside the range) can see everything.
+
+## Getting Started
+
+To get started, ensure you are running on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](development.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
+
+```{.bash filename="Terminal"}
+# install and configure host
+git clone https://github.com/meridianlabs-ai/inspect_ranges.git
+cd inspect_ranges && pip install .
+inspect-ranges doctor
+
+# run an example
+cd examples/dmz-pivot
+inspect eval task.py --model openai/gpt-6-astra
+```
+
+This documentation is also available in LLM-friendly markdown ([llms.txt](https://llmstxt.org/)): register the index with an IDE or coding agent, or paste a variant directly into a model's context window.
+
+|  |  |
+|----|----|
+| [llms.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms.txt) | Documentation index (links to the other docs). |
+| [llms-guide.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-guide.txt) | Documentation excluding the reference (~190k). |
+| [llms-full.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-full.txt) | Documentation including the reference (~240k). |
+
+Below we'll walk through the basics of defining and running ranges as well as the core architecture of the package.
 
 ## Defining a Range
 
@@ -92,9 +117,9 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [Image Catalog](catalog.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden image, a shared read-only base disk; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them (installs and configures the declared content on the guests, once, through the named recipes) and verifies every declared service and vulnerability against the live guests before the range is consumable. This example's build is published, so running it needs no build step: the first `inspect eval` pulls it automatically. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
 
-## Evaluating Agents
+## Range Tasks
 
 ### Challenges
 
@@ -148,11 +173,16 @@ Goals are typed, and each type is verified in the environment rather than truste
 |------------------------|------------------------------------------------|
 | `flag` | the submitted value matches a per-sample planted secret |
 | `answer` | the submitted value matches a fact about the instance |
-| `exfiltrate` | the submitted content (or its per-sample canary) matches the plant |
+| `exfiltrate` | the submitted content matches what was planted (or contains the per-sample canary value seeded into it) |
 | `execute` | the agent produces a token only the exploited execution context can read |
 | `control` / `privilege` | the agent produces a secret only that host or principal can read |
 | `degrade` / `tamper` | an external probe observes the outage, degradation, or modification |
 | `detection` | the telemetry collector contains (or, for stealth, lacks) the expected alert |
+| `hijack` | the service's kernel crash record shows the per-sample disclosed address |
+| `availability` | *(defender)* the external probe's nonce-bound responses stay correct through the window |
+| `evade` | qualifying alerts in the exported telemetry stay at or below the declared threshold |
+| `judge` | an LLM grades the submission against a rubric (weight-capped) |
+| `patch` | *(defender)* the registered reference exploit re-runs and fails while the service still answers |
 
 Verification is corroborated by evidence captured outside every VM (per-segment packet captures, consoles, exported telemetry), which also supports partial credit and stealth objectives. See [Challenges](challenges.qmd) and [Evidence](evidence.qmd).
 
@@ -193,11 +223,33 @@ def dmz_pivot() -> Task:
 inspect eval task.py --model anthropic/claude-opus-5-5
 ```
 
-Any Inspect agent can be the attacker, including coding-agent scaffolds like Claude Code and Codex (via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/), passing `verify_goal()` through `bridged_tools`). The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
+Any Inspect agent can be the attacker. The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
 
-## Examples
+### SWE Agents
 
-In addition to the example above, Inspect Ranges includes several other examples translated from published range definitions in the literature: 
+Coding-agent scaffolds like Claude Code and Codex run as the attacker via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/): the scaffold executes inside the attack box, its model calls proxy back to Inspect, and `bridged_tools` exposes `verify_goal()` to it over MCP. The scaffold's own completion ends the run:
+
+```{.python filename="task.py"}
+from inspect_swe import claude_code
+
+@task
+def dmz_pivot_swe() -> Task:
+    return Task(
+        dataset=challenge_dataset(
+            "challenges.yaml", range_spec="range.yaml"
+        ),
+        setup=challenge_setup(),
+        solver=claude_code(
+            bridged_tools=[verify_goal()]
+        ),
+        scorer=challenge_scorer(),
+        sandbox=("range", "range.yaml"),
+    )
+```
+
+## Example Ranges
+
+Inspect Ranges includes seven examples: the original dmz-pivot above, and six translated from published range definitions in the literature: 
 
 | Example | Upstream | Chain |
 |---|---|---|
@@ -209,33 +261,25 @@ In addition to the example above, Inspect Ranges includes several other examples
 | [goad-light](examples/goad-light.md) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
 | [attack-range-windows](examples/attack-range-windows.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection scored from the exported Splunk stream |
 
-## Containment
+## Architecture
 
-Everything inside a range is assumed hostile: the attacker agent by design, targets once compromised. The agent sits behind three independent boundaries, and its control channel rides a hypervisor channel out of band from the network, so nothing in-range can observe, firewall, or connect to it:
+Each range runs in a single unprivileged Docker container. Every guest, including the attack box, is a KVM virtual machine inside that container. Bridges and firewall rules exist only in the container's network namespace, so the host's own networking carries no range state. Removing the container destroys every VM, bridge, firewall rule, and disk overlay. A host needs only Docker and KVM; libvirt and QEMU ship inside the container image.
 
-![](diagrams/containment.excalidraw.png){fig-alt="The containment stack: an EC2 Nitro instance (one sample per instance) contains an unprivileged range container holding the router, target, and agent VMs connected by Linux bridges; a sandbox-control port on the instance boundary reaches the agent VM over a virtio-vsock channel without touching the network, and evidence streams off-instance."}
+Guests boot from shared, read-only golden images. Each VM writes its changes to a small private overlay, so every sample starts from a pristine disk and full images are never copied. Images are published as stacks of layers, each fetched once and verified by digest. Ranges with heavy cross-host state (such as Active Directory) are provisioned once at build time; each sample then cold-boots the captured disks:
 
-Evidence streams off-instance as it is generated, so the record received before an escape cannot be rewritten afterward, and scores rest on detection rather than on the boundaries being unbreakable. The full model is in [Security](security.qmd).
+![](diagrams/image-layers.excalidraw.png){fig-alt="The image layer stack: a shared read-only upstream base image at the bottom, a narrower golden-additions layer (control daemon and settings) on top of it, and small per-VM copy-on-write overlays for web, db, and agent fanning out above."}
 
-## Getting Started
+Everything inside a range is assumed hostile: the attacker agent by design, targets once compromised. The agent sits behind three boundaries: its VM, the unprivileged container, and the instance. Its control channel is virtio-vsock, outside the network, so nothing in the range can observe, firewall, or connect to it:
 
-```{.bash filename="Terminal"}
-pip install inspect-ranges
-inspect-ranges doctor      # checks the host end to end and prints fixes
+![](diagrams/containment.excalidraw.png){fig-alt="The containment stack: an EC2 Nitro instance (one sample per instance) contains an unprivileged range container holding the router and target VMs under QEMU and the agent VM under Cloud Hypervisor, connected by Linux bridges; a sandbox-control port on the instance boundary reaches the agent VM over a virtio-vsock channel without touching the network, and evidence streams off-instance."}
 
-cd examples/dmz-pivot
-# task.py: the task definition shown above
-inspect eval task.py --model anthropic/claude-opus-5-5
-```
+Evidence streams off the instance as it is generated, so an agent that later escapes cannot rewrite the record already received. See the [Security](security.qmd) article for full details on security posture and mitigations. 
 
-Ranges run on any Linux host with KVM and Docker; `doctor` verifies virtualization devices, Docker, networking sysctls, and the rest of the surface. Nothing else needs preparation: at the first eval, init pulls the example's published build and whatever catalog images are missing, and every sample boots the captured, verified images fresh. Authoring your own content-declaring range adds one step: `inspect-ranges build` realizes and verifies it once (see [Building Ranges](building.qmd)).
 
 ## Learning More
 
-The source code is available in the [inspect_ranges](https://github.com/meridianlabs-ai/inspect_ranges) repository on GitHub. For the overall design (range definitions, the libvirt/KVM runtime, attacker containment, and evidence collection), start with the [Inspect Ranges overview](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/ranges-overview.qmd). The documentation is organized in these sections:
+- **Building Ranges**: [Authoring](building.qmd) a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
 
-- [Building Ranges](building.qmd): authoring a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
+- **Evaluation**: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
 
-- Evaluation: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
-
-- [Running Ranges](cli.qmd): the operator workflow, the [range sandbox](provider.qmd) that runs Inspect evals against ranges, the [image catalog](catalog.qmd) and [distribution](distribution.qmd) layer that move built ranges between machines, the [range host](topology.qmd) topologies, and the [security model](security.qmd).
+- **Running Ranges**: the [Images](images.qmd) guide and [Distribution](distribution.qmd) mechanics that move built ranges between machines, the [Security](security.qmd) model, the [Range Host](topology.qmd) topologies, the [Range Sandbox](provider.qmd) that runs Inspect evals against ranges, and the [Operations](cli.qmd) command inventory (render, up, down, applier, reaper, doctor).

@@ -4,64 +4,67 @@ description: "Co-resident versus separated realization: the INSPECT_RANGES_HOST 
 llms-description: "The range host: the local (co-resident) and uds (separated, applier-backed) backends behind INSPECT_RANGES_HOST; operating the applier and reaper processes; the lease contract including the expiry-mid-sample reclaim policy; the fetch-grants convention; the isolation claim; the HostProvider/RangeHost seam (acquire/release/abandon, check_lease, HostCapabilities) with its not-yet-public status and the contracts a future backend must honor; and the environment knob table."
 ---
 
-## Two topologies, one switch
+## Backends
 
 The provider realizes ranges through one of two backends, selected by `INSPECT_RANGES_HOST`:
 
-- **`local`** (the default): today's co-resident path. The driver process renders the bundle and runs realization in-process; guests are reached directly over vsock. Nothing changes versus a pre-topology setup except that every sample now also holds a host lease (below).
-- **`uds:<socket>`**: the separated topology on one host. A standing `inspect-ranges applier` process owns realization and teardown; the driver talks to it over a unix socket, and every guest operation relays through the same socket as an opaque byte stream. The driver still renders bundles (the compiler toolchain is driver-side) and still leases CIDs; the applier verifies the bundle digest and runs `up`.
+- **`local`** (the default): the co-resident path. The driver (the Inspect eval process that owns the sample) renders the realization bundle (the digest-manifested directory `render` emits; see [Operations](cli.qmd)) and runs realization in-process; guests are reached directly over vsock. The only addition over a plain setup is the host lease every sample holds (below).
+- **`uds:<socket>`**: the separated topology on one host. A standing `inspect-ranges applier` process owns realization and teardown; the driver talks to it over a unix socket, and every guest operation relays through the same socket as an opaque byte stream. The driver still renders bundles (the compiler toolchain is driver-side) and still leases vsock CIDs (context ids); the applier verifies the bundle digest and runs `up`.
+
+![](diagrams/range-host.excalidraw.png){fig-alt="The deployment seam: the Inspect scaffold (compile and render, agent loop, model credentials) and an append-only evidence store on the left, the range host with its applier and range container on the right, separated by a dashed trust boundary crossed by three flows: the realization bundle going in, the control channel (exec, read_file, write_file) in both directions, and evidence streaming out."}
 
 ``` {.bash .fragment}
-# terminal 1: the applier (one per host; it refuses to serve an unhealthy host)
+# terminal 1: the applier (one per host; refuses unhealthy hosts)
 inspect-ranges applier --socket /run/user/1000/ir-applier.sock
 
 # terminal 2: evals through it
-INSPECT_RANGES_HOST=uds:/run/user/1000/ir-applier.sock inspect eval my_task.py
+INSPECT_RANGES_HOST=uds:/run/user/1000/ir-applier.sock \
+  inspect eval my_task.py
 ```
 
-Both backends behave identically at the eval surface: same sandboxes, same ops, same cleanup semantics. The separated topology exists so the process that parses attacker-influenced bytes can be isolated from the process holding credentials; on one host it buys crash independence (a dead driver no longer strands cleanup knowledge in a dead process) and is the stepping stone to real multi-host dispatch.
+Both backends behave identically at the eval surface: same sandboxes, same ops, same cleanup semantics. The separated topology isolates the process that parses attacker-influenced bytes from the process holding credentials ([Security](security.qmd#topologies-and-credentials) covers when to prefer it). On one host it buys crash independence (a dead driver no longer strands cleanup knowledge in a dead process) and is the step toward multi-host dispatch.
 
 Keep socket paths short: `AF_UNIX` paths cap at about 107 bytes, so prefer `/run/user/<uid>/...` or a short `/tmp` directory over deeply nested trees.
 
-## The lease contract
+## Lease Contract {#the-lease-contract}
 
 Every sample holds a **host lease**: an identity plus an absolute expiry, recorded in `leases.json` beside the CID registry under the shared state dir. The driver renews it at a third of the TTL (`INSPECT_RANGES_LEASE_TTL_S`, default 600 seconds); renewal is an on-disk compare-and-swap, so there is zero hot-path wire chatter. Release is destruction: a lease is removed only after a successful teardown, and a used host is never returned to a pool.
 
-**The expiry-mid-sample policy, stated loudly: the reaper reclaims on expiry alone and never probes liveness.** A healthy sample never expires, because renewal is independent of sample activity; the only way to expire mid-sample is a dead or wedged driver, which is exactly what the reaper exists for. If a running sample's lease is reclaimed anyway (forced expiry, operator intervention), the driver fails the sample loudly with `LeaseLostError` at its next operation rather than letting it limp along on a reclaimed host. There is no looks-alive grace period; adding one would reintroduce the dependence on driver liveness that leases exist to remove.
+**The expiry-mid-sample policy: the reaper reclaims on expiry alone and never probes liveness.** A healthy sample never expires, because renewal is independent of sample activity; the only way to expire mid-sample is a dead or wedged driver, which is exactly what the reaper exists for. If a running sample's lease is reclaimed anyway (forced expiry, operator intervention), the driver fails the sample loudly with `LeaseLostError` at its next operation rather than letting it limp along on a reclaimed host. There is no looks-alive grace period; adding one would reintroduce the dependence on driver liveness that leases exist to remove.
 
-## Operating the reaper
+## Operating the Reaper
 
 `inspect-ranges reaper` is the independent cleanup process: fresh-process, on-disk only, never dependent on the original driver reaching its `finally`.
 
 ``` {.bash .fragment}
-inspect-ranges reaper                 # one sweep, exit 1 if any reclaim failed
-inspect-ranges reaper --interval 60   # a long-lived daemon sweeping every minute
+inspect-ranges reaper                # one sweep; exit 1 on failure
+inspect-ranges reaper --interval 60  # daemon: sweep every minute
 ```
 
-A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, marks them `reaping` (which makes any further renewal fail), tears each range down OUTSIDE the lock, and only after a successful teardown releases the CID lease, clears staging and ownership records, and removes the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the applier's admission charge); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
+A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, and marks them `reaping`, which fails any further renewal. Teardown runs outside the lock. Only after a successful teardown does the sweep release the CID lease, clear staging and ownership records, and remove the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the resources the applier charged against the host at admission; see [Operating the Applier](#operating-the-applier)); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
 
 `inspect-ranges doctor` reports lease health in its Host group, including an expired-leases hint that names the reaper.
 
-## Operating the applier
+## Operating the Applier
 
 `inspect-ranges applier --socket <path> [--state-dir <dir>] [--image-cache <dir>]` serves two planes on one 0600 socket (same-uid trust): the host plane (realize, teardown, heartbeat) and a per-guest byte relay. It runs the doctor readiness subset at startup and refuses to serve an unhealthy host.
 
 Realize is gated: the requested bundle digest must match the lease's rendered bundle (`EINVAL` otherwise), fetch grants must be empty (below), and the range's declared resources are charged against the applier's own admission gate, which refuses rather than queues: `EAGAIN` when the host is full right now (the driver respins), `ENOSPC` when the range alone exceeds the host (permanent). One realize per lease: a second realize on a live lease refuses `EBUSY` until teardown.
 
-**Applier restart is a recorded v1 limitation**: the replay log, guest relay map, and admission charges live in process memory and die with it (logged loudly at startup when live leases exist). Running samples keep their VMs; their teardowns recover from disk (the driver's teardown, the reaper, or `inspect sandbox cleanup range`), and new samples are served cleanly. When the applier is fully dead and a lease still exists, `inspect sandbox cleanup range` fails loudly by design (teardown for a leased project routes through the applier); recovery is reaper-only, via its direct-teardown fallback and the logged charge-leak warning.
+**Applier restart loses in-process state**: the replay log, guest relay map, and admission charges live in process memory and die with it (logged loudly at startup when live leases exist). Running samples keep their VMs; their teardowns recover from disk (the driver's teardown, the reaper, or `inspect sandbox cleanup range`), and new samples are served cleanly. When the applier is fully dead and a lease still exists, `inspect sandbox cleanup range` fails loudly by design (teardown for a leased project routes through the applier); recovery is reaper-only, via its direct-teardown fallback and the logged charge-leak warning.
 
-## The grants convention
+## Grants Convention {#the-grants-convention}
 
-`realize` carries a list of fetch grants for image delivery. In v1 the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
+`realize` carries a list of fetch grants for image delivery. Today the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
 
-## What the isolation claim means
+## Isolation Claim
 
 Every lease records an isolation claim, and the provider logs it once per sample acquisition. Both v1 backends claim **`isolation="shared"`**: one host's kernel, device emulation, and caches are reused across samples, so a guest-to-host escape in one sample could reach another sample's resources. The claim is honest labeling for the eval log, not a control. `isolation="instance"` (a fresh host per sample) arrives only with a real fleet provider; nothing in v1 pretends otherwise.
 
-## Implementing a host provider
+## Implementing a Host Provider
 
 ::: {.callout-important}
-## Not yet a public extension point
+## Not Yet a Public Extension Point
 
 This section describes the seam as it exists in the codebase today, where it is internal: the provider accepts exactly the two backends above, and there is no registration mechanism for third-party implementations yet. Entry-point registration, a public home for the protocols (today they live in the private `inspect_ranges._host` module), and a reference fleet provider are the planned growth path (see the [host-provider design record](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/inspect-ranges/host-provider.md)). It is documented now as the signpost for that work: the contracts below are stable in intent and are what an implementation will be held to.
 :::
@@ -79,9 +82,9 @@ An implementation is held to the contracts this page already describes, plus thr
 
 What is not built yet, concretely: entry-point registration (the backend set is closed), granted-URL and registry image delivery (`pre-seeded` is the only shape, per [the grants convention](#the-grants-convention)), `forward_upstream` and `egress_grant` capabilities (pinned `False`), and `isolation="instance"` (no fleet provider exists to claim it). Evidence delivery has one built mode: the host writes to the per-sample location the driver hands it at acquire, through a put-only credential.
 
-## Environment reference
+## Environment Vars
 
-| Variable | Default | Meaning |
+| Variable | Default | Effect |
 |---|---|---|
 | `INSPECT_RANGES_HOST` | `local` | Backend selection: `local` (co-resident) or `uds:<socket>` (a running applier). |
 | `INSPECT_RANGES_LEASE_TTL_S` | 600 | Host lease TTL in seconds; the driver renews at TTL/3. A dead driver's sample becomes reclaimable one TTL after its last renewal. |

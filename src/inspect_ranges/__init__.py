@@ -6,9 +6,12 @@ except ImportError:
     __version__ = "unknown"
 
 from ._challenges import (
+    PROBE_MAC_PREFIX,
+    GoalBase,
     GoalResult,
     GoalType,
     Observations,
+    ObserverKind,
     RangeOracle,
     challenge_dataset,
     challenge_scorer,
@@ -17,6 +20,7 @@ from ._challenges import (
     load_collectors,
     register_exploit,
     register_goal_type,
+    source_bound_find,
     validate_challenges,
     verify_goal,
 )
@@ -29,9 +33,12 @@ from .schema import (
 from .types import semantic_issues
 
 __all__ = [
+    "PROBE_MAC_PREFIX",
+    "GoalBase",
     "GoalResult",
     "GoalType",
     "Observations",
+    "ObserverKind",
     "RangeOracle",
     "__version__",
     "challenge_dataset",
@@ -45,6 +52,7 @@ __all__ = [
     "register_goal_type",
     "revalidate_range",
     "semantic_issues",
+    "source_bound_find",
     "validate_challenges",
     "validate_range",
     "verify_goal",

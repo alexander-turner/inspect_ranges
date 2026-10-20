@@ -21,6 +21,8 @@ inspect-docs:
       contents:
         - text: Overview
           href: building.qmd
+        - text: Development
+          href: development.qmd
         - text: Ranges
           href: ranges.qmd
         - text: Guests
@@ -37,10 +39,8 @@ inspect-docs:
           href: evidence.qmd
     - text: Running
       contents:
-        - text: Overview
-          href: cli.qmd
-        - text: Image Catalog
-          href: catalog.qmd
+        - text: Images
+          href: images.qmd
         - text: Distribution
           href: distribution.qmd
         - text: Security
@@ -49,6 +49,8 @@ inspect-docs:
           href: topology.qmd
         - text: Range Sandbox
           href: provider.qmd
+        - text: Operations
+          href: cli.qmd
     - text: Examples
       contents:
         - text: dmz-pivot

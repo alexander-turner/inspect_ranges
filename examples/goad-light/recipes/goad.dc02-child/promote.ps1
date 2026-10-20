@@ -3,11 +3,19 @@
 # the child is the long pole). The reboot is issued DETACHED.
 $ErrorActionPreference = 'Stop'
 Install-WindowsFeature AD-Domain-Services -IncludeManagementTools | Out-Null
-# COUPLING: this is the golden's derive-time Administrator password (the
-# shared default, winimage/render DEFAULT_WINDOWS_ADMIN_PASSWORD); a golden
-# derived with --admin-password breaks the fixture mid-build (recorded, N3)
+# the parent credential is the DECLARED rotation value: dc01's realize rotates
+# SEVENKINGDOMS\Administrator before this recipe runs (range.yaml dc01
+# services[active-directory].credentials; parked-decisions entry 2). This
+# script's text auto-logs as a 4104 suspicious block; the pre-capture scrub
+# clears the PowerShell logs, so dc01's credential never rides dc02's
+# captured disk (a cross-host value here would otherwise skip a ladder rung).
+$parentPass = ConvertTo-SecureString 'Ir0nThr0ne!Keeper#2026' -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential('SEVENKINGDOMS\Administrator', $parentPass)
+# the DSRM safe-mode password is a SET, not an authentication: it stays the
+# golden's derive-time constant (winimage/render
+# DEFAULT_WINDOWS_ADMIN_PASSWORD). DSRM is recovery-mode only, not a goal
+# principal; it is deliberately outside the entry-2 rotation's scope.
 $pass = ConvertTo-SecureString 'RangeAdm!n2026' -AsPlainText -Force
-$cred = New-Object System.Management.Automation.PSCredential('SEVENKINGDOMS\Administrator', $pass)
 Install-ADDSDomain -NewDomainName 'north' -ParentDomainName 'sevenkingdoms.local' `
   -NewDomainNetbiosName 'NORTH' -DomainType ChildDomain -Credential $cred `
   -SafeModeAdministratorPassword $pass -InstallDns -CreateDnsDelegation `

@@ -42,6 +42,7 @@ from .observedtypes import (
     register_exploit,
 )
 from .oracle import OracleSetupError, RangeOracle, range_oracle
+from .pcapscan import source_bound_find
 from .plants import Plant, PlantStore
 from .poller import GoalPoller, start_goal_poller, stop_goal_poller
 from .prober import Prober, ProbeTarget
@@ -126,6 +127,7 @@ __all__ = [
     "range_oracle",
     "register_exploit",
     "register_goal_type",
+    "source_bound_find",
     "registered_goal_types",
     "required_observers",
     "score_challenge",

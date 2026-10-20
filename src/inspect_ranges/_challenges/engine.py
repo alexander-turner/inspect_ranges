@@ -166,6 +166,8 @@ def register_goal_type(
 ) -> None:
     """Register a goal type under its name(s); duplicate names refuse.
 
+    Registration opens both ends for the type: the engine dispatches scoring to it, and `challenges.yaml` parsing dispatches its YAML `type` name(s) to its `spec` class. Registration must therefore run before any challenges file naming the type parses: under inspect, register from an `inspect_ai` entry-point module (the mechanism `inspect_ranges` uses for its own built-ins, imported in every inspect process); a plain `load_challenges`/`validate_challenges` caller outside inspect must import the registering module first, or the type's name refuses as unknown.
+
     Args:
         goal_type: The stateless type instance.
         names: Registry names; defaults to `(goal_type.name,)`. `control`/`privilege` share one implementation under two names.
