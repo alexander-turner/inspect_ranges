@@ -1,6 +1,7 @@
 """The behavioral runner's own logic (SUBMIT parsing, trio expectations), no VMs (round-1 review: the enforcement of the trio contract had zero unit coverage and two vacuous-pass shapes hid in it)."""
 
 import asyncio
+import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -379,3 +380,50 @@ def test_attacker_guest_resolution_prefers_the_attack_box_then_the_foothold() ->
         "client",
         "192.168.30.5",
     )
+
+
+def test_collectors_file_loads_and_feeds_the_checks_digest(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Windows-ad-v1 slice 5: collectors.yaml parses into CollectorSpecs (command and file sources, name grammar enforced) and participates in checks_digest — an edited export command must re-run the trio."""
+    from inspect_ranges._build.behavioral import checks_digest
+    from inspect_ranges._evidence.telemetry import load_collectors
+
+    collectors_yaml = tmp_path / "collectors.yaml"
+    collectors_yaml.write_text(
+        """
+collectors:
+  - name: splunk
+    guest: splunk
+    poll_s: 2.0
+    source:
+      kind: command
+      command: ["/opt/range/telemetry-export.sh", "{cursor}"]
+      bootstrap: ["/opt/range/telemetry-export.sh"]
+      cursor_pattern: '-- cursor: (\\d+)'
+      user: root
+  - name: endpoint-file
+    guest: win
+    source:
+      kind: file
+      path: C:/telemetry/export.log
+"""
+    )
+    loaded = load_collectors(collectors_yaml)
+    assert [spec.name for spec in loaded] == ["splunk", "endpoint-file"]
+    assert loaded[0].source.kind == "command" and loaded[1].source.kind == "file"
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "collectors: [{name: 'Not Legal', guest: g, source: {kind: file, path: /x}}]"
+    )
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        load_collectors(bad)
+    # digest coverage
+    (tmp_path / "challenges.yaml").write_text("challenges: []\n")
+    checks = tmp_path / "checks"
+    checks.mkdir()
+    before = checks_digest(tmp_path)
+    collectors_yaml.write_text(collectors_yaml.read_text() + "# edited\n")
+    assert checks_digest(tmp_path) != before

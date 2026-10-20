@@ -14,6 +14,7 @@ import hashlib
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Annotated, Callable, Coroutine, Literal
 
 from pydantic import Field, StringConstraints, model_validator
@@ -99,6 +100,20 @@ class CollectorSpec(EvidenceModel):
     max_poll_bytes: int = Field(
         default=DEFAULT_MAX_POLL_BYTES, ge=4096, le=DEFAULT_BULK_CAP
     )
+
+
+class CollectorsFile(EvidenceModel):
+    """The range directory's deployment-side collector declarations (`collectors.yaml`, beside `challenges.yaml`): the poll mechanics the challenge schema deliberately does not carry (windows-ad-v1 slice 5). One artifact binds a detection goal's `collector` name to a real export, consumed by BOTH proof paths — the build's behavioral runner and an eval's `plant_goals(telemetry_collectors=...)`."""
+
+    collectors: list[CollectorSpec]
+
+
+def load_collectors(path: "Path") -> list[CollectorSpec]:
+    """Parse a `collectors.yaml` into collector specs; a malformed declaration refuses with the validation detail (a silently dropped collector would turn a detection goal's observer gate into an infra riddle)."""
+    import yaml
+
+    loaded: object = yaml.safe_load(path.read_text())
+    return CollectorsFile.model_validate(loaded).collectors
 
 
 class _CollectorState:

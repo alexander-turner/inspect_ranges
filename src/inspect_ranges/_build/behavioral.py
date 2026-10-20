@@ -283,6 +283,11 @@ def checks_digest(range_dir: Path) -> str:
     """
     hasher = hashlib.sha256()
     hasher.update((range_dir / "challenges.yaml").read_bytes())
+    collectors_file = range_dir / "collectors.yaml"
+    if collectors_file.is_file():
+        # the collector bindings are proof inputs like the checks themselves
+        # (windows-ad-v1 slice 5): an edited export command must re-run the trio
+        hasher.update(b"collectors.yaml\0" + collectors_file.read_bytes() + b"\0")
     root = range_dir / CHECKS_DIR_NAME
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         exec_bit = b"x" if path.stat().st_mode & 0o111 else b"-"
@@ -359,6 +364,12 @@ async def run_behavioral_checks(
 
     challenges = load_challenges(range_dir)
     _validate_checks(challenges, range_dir)
+    from .._evidence.telemetry import CollectorSpec, load_collectors
+
+    collectors_path = range_dir / "collectors.yaml"
+    collectors: list[CollectorSpec] = (
+        load_collectors(collectors_path) if collectors_path.is_file() else []
+    )
     attacker_name, attacker_ip = _attacker_guest(spec, plan)
     session = EvidenceSession(
         str(evidence_dir), sample_id=f"build-{project}", capture_local=True
@@ -383,6 +394,19 @@ async def run_behavioral_checks(
     )
     records: list[BehavioralCheckRecord] = []
     try:
+        if collectors:
+            # ONE poller for the whole proof boot, stopped at finalize via the
+            # producer registration: streams are per-collector and detection
+            # windows anchor at each check's own goal start, so checks share
+            # the stream without sharing evidence (windows-ad-v1 slice 5)
+            from .._challenges.setup import (
+                _start_producers,  # pyright: ignore[reportPrivateUsage]
+            )
+
+            handle.plants = None
+            await _start_producers(
+                RangeOracle(handle), challenges.challenges[0], collectors
+            )
         for challenge in challenges.challenges:
             check_dir = range_dir / CHECKS_DIR_NAME / challenge.id
             for name in CHECK_NAMES:
@@ -399,6 +423,7 @@ async def run_behavioral_checks(
                     script.read_text(),
                     attacker_name,
                     attacker_ip,
+                    telemetry=bool(collectors),
                 )
                 if stage_log is not None:
                     # stages.jsonl grammar is start|ok|fail; a failing check's
@@ -440,6 +465,8 @@ async def _run_one(
     script: str,
     attacker_name: str,
     attacker_ip: str,
+    *,
+    telemetry: bool = False,
 ) -> BehavioralCheckRecord:
     from inspect_ai.util._store import Store
 
@@ -449,7 +476,14 @@ async def _run_one(
     )
 
     store = Store()
-    planted = await run_setup(oracle, challenge, store)
+    planted = await run_setup(
+        oracle,
+        challenge,
+        store,
+        extra_observers=(
+            frozenset({"telemetry-collector"}) if telemetry else frozenset()
+        ),
+    )
     try:
         return await _execute_and_score(
             oracle, challenge, name, script, attacker_name, attacker_ip, store
