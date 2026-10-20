@@ -137,7 +137,7 @@ The agent loop owns termination; verifying a goal does not end the run. The appe
 
 ## Custom Goal Types
 
-When no built-in type expresses a scenario's proof contract, implement a new one: a stateless `GoalType` with a `Spec` (the schema class its YAML fields dispatch to), `setup` (plant per-sample material through the oracle), `check` (gather raw observations, sending no expected value guest-ward), and `compare` (a pure, host-side verdict against the plant record). [Custom Goals](goals.qmd) covers the full contract: the oracle surface, the proof-design rules, assurance labels, testing, registration, and the one open concern (the v1 `challenges.yaml` type union is closed, so a custom type's YAML `type:` name does not parse yet).
+When no built-in type expresses a scenario's proof contract, implement a new one: a stateless `GoalType` with a `Spec` (the schema class its YAML fields dispatch to), `setup` (plant per-sample material through the oracle), `check` (gather raw observations, sending no expected value guest-ward), and `compare` (a pure, host-side verdict against the plant record). [Custom Goals](goals.qmd) covers the full contract: the oracle surface, the proof-design rules, assurance labels, testing, registration, and authoring the type in `challenges.yaml` (registration opens the parser to the type's name).
 
 ## Patch Exploits
 

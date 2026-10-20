@@ -1,0 +1,46 @@
+---
+title: "Development"
+description: "The range author's loop: a development machine (devbox or your own), then validate, plan, build, boot interactively, and smoke-eval."
+llms-description: "Range development: provisioning a dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM meeting the listed requirements, verified by doctor), then the iteration loop: validate for diagnostics, plan to resolve without booting, build with --keep/--reverify/--cid-base and the recipe log location, interactive boot via up --from-spec with INSPECT_RANGES_REGISTER_ALL_GUESTS, down, and the smoke eval."
+---
+
+## Overview
+
+Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. This page covers the machine the loop runs on and each step's command. The definition language has its own pages ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)), and the build has [Building Ranges](building.qmd); operating ranges in production is [Running Ranges](cli.qmd).
+
+## Development Machine
+
+Ranges build and run on any Linux x86_64 machine with KVM: bare metal with virtualization enabled in firmware, or a VM with nested virtualization. Beyond KVM, the requirements:
+
+- Docker Engine 24+ with the Compose plugin (2.22+) and cgroup v2.
+
+- Kernel modules `tun`, `vhost_net`, and `vhost_vsock`.
+
+- `qemu-utils` and `libguestfs-tools` for building images (libguestfs also requires that the host kernel be readable).
+
+- `br_netfilter` disabled, so host iptables never filters bridged range traffic (and IPv6 enabled, for ranges that use it).
+
+`inspect-ranges doctor` verifies all of this and prints an exact fix for anything missing.
+
+### Devbox
+
+The `devbox` command provisions a remote EC2 instance as a development environment:
+
+``` {.bash filename="Terminal"}
+inspect-ranges devbox up --instance-type m8i.8xlarge
+ssh inspect-ranges-devbox
+```
+
+`up` creates (or starts) a devbox and writes an SSH configuration for it. The default AWS region and profile come from the local AWS configuration; the default instance type is `m8i.8xlarge` (32 vCPUs / 128 GB). To manage costs, an idle devbox stops itself (after 60 idle minutes by default, with a CloudWatch backstop after 6 hours of low CPU), and reconnecting with `ssh` or VS Code starts it again: the SSH configuration's proxy starts the instance and tunnels over AWS SSM, so the devbox has no open inbound ports.
+
+## Iteration Loop
+
+1. **Validate.** `inspect-ranges validate range.yaml` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)).
+
+2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache, allocations, variable draws. A reference that cannot resolve shows up here, not mid-boot.
+
+3. **Build.** `inspect-ranges build` realizes declared guest content ([Building Ranges](building.qmd)). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. Recipe output lands under `~/.local/state/inspect-ranges/projects/<project>/recipes/`.
+
+4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Running Ranges](cli.qmd)). For eval-side poking, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox so solver code can reach targets directly; it removes the foothold wall and is logged loudly, so never set it on scoring runs.
+
+5. **Smoke eval.** Run the real consumption path early: a one-sample task through the provider (the [Range Tasks](index.qmd#range-tasks) wiring) catches registration and readiness issues that direct booting cannot show.

@@ -27,6 +27,8 @@ inspect-docs:
           href: guests.qmd
         - text: Networks
           href: networks.qmd
+        - text: Development
+          href: development.qmd
     - text: Evaluation
       contents:
         - text: Challenges

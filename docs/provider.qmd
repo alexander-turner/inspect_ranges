@@ -63,7 +63,7 @@ attacker:
 
 ## Foothold Sandbox
 
-`sandbox()` is the attacker's foothold host (or the attacker box itself), and by default it is the ONLY registered sandbox: targets are not addressable by name from the agent's tool loop, which is the structural wall challenge scoring relies on (see [Challenges](challenges.qmd)).
+`sandbox()` is the attacker's foothold host (or the attacker box itself), and by default it is the only registered sandbox:
 
 ``` {.python .fragment}
 from inspect_ai.util import sandbox
@@ -71,11 +71,7 @@ from inspect_ai.util import sandbox
 await sandbox().exec(["id", "-un"])  # the attacker box
 ```
 
-One inspect_ai semantic to know: with a single registered environment, `sandbox(name)` returns that environment for ANY name rather than raising, so `sandbox("web")` silently hands back the foothold. Treat any named `sandbox()` call in solver code as a bug under the default registration.
-
-For interactive range development, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox (attacker first). It is logged loudly because it removes the wall; never set it on scoring runs.
-
-Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts.
+The wall this registration creates, the `sandbox(name)` semantic to watch for in solver code, and the `INSPECT_RANGES_REGISTER_ALL_GUESTS` development override are covered in [Challenges](challenges.qmd#scoring-lifecycle).
 
 ## Retry Contract {#the-retry-contract}
 
@@ -91,7 +87,7 @@ Failures that survive the retry budget map to the contract: transport and channe
 
 ## Execution Identity
 
-The daemon runs commands as the `agent` user via an absolute-path `runuser` unless the call names a user. Two consequences worth knowing:
+Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts. The user switch rides an absolute-path `runuser`, with two consequences worth knowing:
 
 - **`runuser` always resets `HOME`, `SHELL`, `USER`, `LOGNAME`, and `PATH`** to the target user's values. Caller env entries for those five keys still work: the provider routes them through an uploaded wrapper script whose exports apply after the user switch.
 - **Oversized or env-carrying commands ride a wrapper script** uploaded to guest `/tmp` with mode `0600`, agent-owned, self-deleting on execution. For an explicit third user (not `agent`, not `root`) one root `chown` transfers ownership before the exec, so only the daemon (root), the agent, and the requested user can ever read the script's env, and owner-only bits are what let the script delete itself under sticky `/tmp`. The env values exist on the guest disk between upload and self-deletion (or the failure-path scrub); that window is the surface's stated exposure.
