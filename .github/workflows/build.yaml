@@ -57,6 +57,8 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
         run: uv sync --group dev
+      - name: Install qemu-utils (the overlay clamp test reads a real qcow2's virtual size)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - name: Install the pinned Go toolchain (the cross-codec drift guard)
         run: |
           curl -fsSL -o /tmp/go.tgz https://go.dev/dl/go1.23.6.linux-amd64.tar.gz

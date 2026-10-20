@@ -53,7 +53,13 @@ def source_names(location: Location) -> list[str]:
         # as the fallback for locations that never published one
         return [name for name in catalog_names(location) if name != CATALOG_REF]
     except DistError as error:
-        if error.code not in ("ref-not-found",):
+        # registry-denied is tolerated alongside ref-not-found because the
+        # hub masks a nonexistent repo as 401 for anonymous callers (an
+        # authenticated probe of the same missing catalog gets 404), so a
+        # denied probe reads as "no published name list here"; a genuine
+        # credential problem resurfaces at the per-name fetches with the
+        # helper-aware denial message.
+        if error.code not in ("ref-not-found", "registry-denied"):
             raise
     if location.directory is not None:
         layout = OciLayout(location.directory).open()
