@@ -172,7 +172,8 @@ dhcp = RangeSpec(
     ),
     networks=[
         Network(
-            name="lab", cidr="10.10.10.0/24", mode="isolated", dhcp=True
+            name="lab", cidr="10.10.10.0/24",
+            mode="isolated", dhcp=True
         )
     ],
     hosts=[
@@ -270,7 +271,9 @@ Networks with `records` hand their guests a derived search domain (`<network>.in
 ``` {.yaml .plan-invalid}
 range:
   name: dns-ad
-  description: An authoritative guest serves DNS, chaining to an upstream forwarder.
+  description: >
+    An authoritative guest serves DNS, chaining to an upstream
+    forwarder.
 
 networks:
   - name: corp
@@ -346,8 +349,10 @@ Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux st
 
 ```         
 ✓ range.yaml  1 warning
-  12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is under '.local', which
-                        Linux stub resolvers reserve for mDNS and never send to unicast DNS
+  12:11  hosts[0].fqdn  warning: host fqdn 'dc01.corp.local' is
+                        under '.local', which Linux stub resolvers
+                        reserve for mDNS and never send to unicast
+                        DNS
 ```
 :::
 
@@ -362,8 +367,9 @@ Routers join segments and carry the inter-segment policy. A router with no `acl`
 range:
   name: dmz-pivot
   description: >
-    An external attacker compromises a web server in the DMZ, then pivots to a
-    database on an internal segment reachable only through the router.
+    An external attacker compromises a web server in the DMZ, then
+    pivots to a database on an internal segment reachable only
+    through the router.
 
 networks:
   - name: dmz
@@ -408,7 +414,9 @@ dmz_pivot = RangeSpec(
     ),
     networks=[
         Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
-        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        Network(
+            name="internal", cidr="10.80.20.0/24", mode="isolated"
+        ),
     ],
     routers=[
         Router(
@@ -455,7 +463,9 @@ Rules evaluate first-match in declaration order, and each rule carries exactly o
 ``` yaml
 range:
   name: policy
-  description: Ordered rules with carve-outs, guest endpoints, and CIDR endpoints.
+  description: >
+    Ordered rules with carve-outs, guest endpoints, and CIDR
+    endpoints.
 
 networks:
   - name: dmz
@@ -472,7 +482,9 @@ routers:
       - { from: dmz, to: db, deny: [tcp/22] } # <1>
       - { from: dmz, to: internal, allow: [tcp/22, tcp/5432, icmp] }
       - { from: web, to: internal, allow: [tcp/80] } # <2>
-      - { from: 10.80.10.0/28, to: internal, allow: [tcp/8080-8090] } # <3>
+      - from: 10.80.10.0/28    # <3>
+        to: internal
+        allow: [tcp/8080-8090]
 
 hosts:
   - name: web
@@ -504,7 +516,9 @@ policy = RangeSpec(
     ),
     networks=[
         Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
-        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        Network(
+            name="internal", cidr="10.80.20.0/24", mode="isolated"
+        ),
     ],
     routers=[
         Router(
@@ -688,7 +702,9 @@ A `nat` network lists what may leave; everything else is dropped. Entries are `C
 ``` yaml
 range:
   name: egress
-  description: A corp segment that may reach one https host and NTP, nothing else.
+  description: >
+    A corp segment that may reach one https host and NTP, nothing
+    else.
 
 networks:
   - name: corp

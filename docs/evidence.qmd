@@ -4,13 +4,15 @@ description: "What the range records outside every VM, where it streams, the tam
 llms-description: "The evidence layer: per-segment pcap, consoles, stage and verification streams, and in-guest telemetry export captured outside every VM; the per-sample location beside the eval log; the hash-chained write-once format with its seal and the sample-store binding; gap and seal semantics; dual-clock records; inspect-ranges evidence verify including --expect-seal; deployment guidance for store-side prevention; the environment knob table."
 ---
 
-## What evidence is
+## Overview
 
 Scoring a cyber range cannot trust what guests report: the agent owns the attack box from the first prompt and owns each target it compromises. Evidence is the record captured **outside every VM**: per-segment packet captures taken on the bridges, serial consoles, the realization stage stream, readiness and verification results, daemon session continuity, and exported in-guest telemetry. It streams off the sample as it is generated, so the record received before a compromise cannot be rewritten afterward.
 
+Scoring consumes the record through the oracle's read-only accessors: [Custom Goals](goals.qmd#the-oracle-surface) covers reading it from a goal type, and [Corroborating Against Evidence](goals.qmd#corroborating-against-evidence) is the worked pattern.
+
 Evidence is on by default inside an eval: when a sample runs under Inspect, the provider derives a location beside the eval log and records automatically. Outside an eval context (CLI experiments, batteries), set `INSPECT_RANGES_EVIDENCE_SINK` to enable it; with neither, evidence is off and one INFO line says so.
 
-## What is captured
+## Captured Streams
 
 | Stream | Contents |
 |---|---|
@@ -22,7 +24,7 @@ Evidence is on by default inside an eval: when a sample runs under Inspect, the 
 | `telemetry/<collector>`, `telemetry-meta/<collector>` | Exported in-guest telemetry deltas and the per-poll watermark records that make coverage decidable (below). |
 | `heartbeat`, `clock` | Capture liveness and watermarks for our own collectors, and wall-clock anomaly records. |
 
-## Where it lives
+## Storage
 
 The per-sample location is derived, never configured per sample:
 
@@ -34,7 +36,7 @@ Local beside a local log in development; in the log's S3 bucket when the log dir
 
 At finalize, the sample's Inspect store receives the binding under `inspect_ranges:evidence`: the evidence pointer, each writer's seal digest, and the per-stream chain heads. The same values are mirrored to an INFO log line, which is all that remains if the sample context is gone by teardown time (deferred teardown, `cleanup=False`).
 
-## The trust story, honestly scoped
+## Tamper Evidence
 
 Collectors in the range container are trusted **while the instance is uncompromised**, and their output is preserved off-instance as it streams. The record itself is tamper-evident by format: write-once chunks, a per-stream hash chain over every record's full metadata, explicit in-chain gap records, and a terminal seal per writer binding chain heads and counts.
 
@@ -45,7 +47,7 @@ Two bounded windows are part of the design and visible in the record rather than
 - **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with a named cause (for example `buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, or `applier-shutdown`; the verifier inventories every gap in the record). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
 - **Manifest batching has a crash window.** Chunks deliver on every flush, but manifest parts are cut on a bounded cadence (15 seconds or 256 records, and always at seal). A crash can leave up to one interval of records whose chunks survive as listed, unreferenced residue rather than chain-committed records; the record never claims the missing window.
 
-## In-guest telemetry export
+## Telemetry Export
 
 Scenario telemetry (journald, application logs, EDR event files) lives inside guests because defenders are supposed to see it. The exporter polls declared collectors through the existing control-channel verbs on a cadence and ships each poll's delta, with a watermark record per poll. The export path is the vsock control plane: nothing in-range can observe or firewall it, and the range's air gap is never punctured.
 
@@ -53,7 +55,7 @@ The assurance claim, stated honestly: **export upgrades the timeline, not the so
 
 Operational note: the guest daemon reaps each command's process group when the command returns, so an in-guest background producer started over the channel must detach with `setsid` to outlive its starting exec.
 
-## Verifying a record
+## Verifying a Record
 
 ```{.bash .fragment}
 # internal consistency: replay every chain, report coverage and gaps
@@ -61,19 +63,20 @@ inspect-ranges evidence verify ./logs/mytask.evidence/sample1_1_1
 
 # the full guarantee: anchor each writer's seal to the digest from the
 # eval log's binding (store key inspect_ranges:evidence)
-inspect-ranges evidence verify s3://bucket/logs/run.evidence/sample1_1_1 \
+inspect-ranges evidence verify \
+  s3://bucket/logs/run.evidence/sample1_1_1 \
   --expect-seal driver=sha256:... --expect-seal host=sha256:...
 ```
 
 Output names the first chain break with its neighborhood, per-stream coverage spans, the gap inventory, and each seal's claimed lease and sample ids; `--json` emits the report for tooling. Exit status is 0 only when every chain replays and every supplied binding matches. Timestamps come from both clocks: capture records carry the range host's wall and monotonic clocks, driver records carry the driver's, and paired records around stage reports bound the offset between them, so cross-clock comparisons carry a tolerance instead of a hidden assumption.
 
-## Deployment guidance: store-side prevention
+## Deployment Guidance {#deployment-guidance-store-side-prevention}
 
 The format detects tampering; preventing it is the store's job, and the writer already helps: on S3 every put is conditional (`If-None-Match: *`), so rewrites of delivered objects are refused by the store itself with a 412. To make the store refuse unconditional rewrites from **any** writer holding the credential, apply a bucket policy denying `s3:PutObject` without the conditional header (the exact policy JSON ships in `design/spikes/evidence-v1-s3/README.md`); Object Lock is the stricter alternative where retention rules demand it. Grant the capture host put-only credentials: the writer never reads back, by design.
 
 Local evidence (a local log dir, no override) is fine for development and does not survive instance compromise: for untrusted-model runs, point the log dir or the sink override at off-instance storage. `inspect-ranges doctor` warns about this in its Evidence group.
 
-## Environment reference
+## Environment Vars
 
 | Variable | Default | Meaning |
 |---|---|---|

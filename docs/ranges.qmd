@@ -81,11 +81,11 @@ This example comes from the [Vulhub](https://vulhub.org) Zabbix scenario ([CVE-2
 range:
   name: vulhub-zabbix
   description: >
-    Zabbix 3.0.3 web UI, Zabbix server, Zabbix agent, MySQL) on one flat 
-    network. Entry is a public CVE: unauthenticated SQL injection in the
-    Zabbix web UI (latest.php/jsrpc.php via the guest account), escalating
-    to admin session hijack and RCE through the Zabbix server's command
-    execution on the agent.
+    Zabbix 3.0.3 web UI, Zabbix server, Zabbix agent, MySQL) on one
+    flat network. Entry is a public CVE: unauthenticated SQL
+    injection in the Zabbix web UI (latest.php/jsrpc.php via the
+    guest account), escalating to admin session hijack and RCE
+    through the Zabbix server's command execution on the agent.
 
 networks:
   - name: lab
@@ -136,10 +136,11 @@ hosts:
         cve: CVE-2016-10134
         service: zabbix-web
         description: >
-          SQL injection in latest.php (toggle_ids array), also triggerable
-          unauthenticated via jsrpc.php. Path: guest login -> zbx_sessionid
-          cookie -> SQLi -> dump admin session -> authenticated RCE via
-          Zabbix server scripts/agent commands.
+          SQL injection in latest.php (toggle_ids array), also
+          triggerable unauthenticated via jsrpc.php. Path: guest
+          login -> zbx_sessionid cookie -> SQLi -> dump admin
+          session -> authenticated RCE via Zabbix server
+          scripts/agent commands.
 
 attacker:
   name: attacker
@@ -158,9 +159,9 @@ defense:
 vulhub_zabbix = RangeSpec(
     meta=RangeMeta(
         name="vulhub-zabbix",
-        description="Zabbix 3.0.3 web UI, Zabbix server, Zabbix agent, "
-        "MySQL) on one flat network. Entry is a public CVE: "
-        "unauthenticated SQL injection in the Zabbix web UI "
+        description="Zabbix 3.0.3 web UI, Zabbix server, Zabbix "
+        "agent, MySQL) on one flat network. Entry is a public "
+        "CVE: unauthenticated SQL injection in the Zabbix web UI "
         "(latest.php/jsrpc.php via the guest account), escalating to "
         "admin session hijack and RCE through the Zabbix server's "
         "command execution on the agent.",
@@ -218,7 +219,9 @@ vulhub_zabbix = RangeSpec(
             image="vulhub/zabbix:3.0.3-server (command: agent)",
             interfaces=[Interface(network="lab")],
             services=[
-                Service(name="zabbix-agent", port=10050, version="3.0.3")
+                Service(
+                    name="zabbix-agent", port=10050, version="3.0.3"
+                )
             ],
         ),
         Host(
@@ -250,7 +253,9 @@ vulhub_zabbix = RangeSpec(
         entry="external",
         egress="none",
     ),
-    defense=Defense(tier="D0", description="No defenders, no telemetry."),
+    defense=Defense(
+        tier="D0", description="No defenders, no telemetry."
+    ),
 )
 ```
 :::
@@ -351,7 +356,9 @@ corp_breach = RangeSpec(
                     id="webapp-rce",
                     cve="CVE-2021-41773",
                     service="webapp",
-                    description="Path traversal to RCE in the web tier.",
+                    description=(
+                        "Path traversal to RCE in the web tier."
+                    ),
                 )
             ],
         ),
@@ -376,7 +383,9 @@ corp_breach = RangeSpec(
             ],
         ),
     ],
-    attacker=Attacker(interfaces=[Interface(network="dmz")], entry="external"),
+    attacker=Attacker(
+        interfaces=[Interface(network="dmz")], entry="external"
+    ),
 )
 ```
 :::
@@ -416,9 +425,11 @@ attacker:
 
 ```         
 ✗ range.yaml  3 errors
-   7:11  networks[0].cidr   '10.80.10.0/33' is not a valid IPv4 or IPv6 network
-  10:5   hosts[0].image     missing required field
-  12:5   hosts[0].imagee    unknown key 'imagee' (did you mean 'image'?)
+   7:11  networks[0].cidr  '10.80.10.0/33' is not a valid IPv4 or
+                           IPv6 network
+  10:5   hosts[0].image    missing required field
+  12:5   hosts[0].imagee   unknown key 'imagee' (did you mean
+                           'image'?)
   (cross-reference checks run once the errors above are fixed)
 ```
 

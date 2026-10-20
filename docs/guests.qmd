@@ -103,9 +103,10 @@ An image reference missing from the cache shows up in the plan output and is an 
 
 ```         
 ✗ range.yaml  1 error
-  12:5  hosts[0].image  image 'acme/db-golden' for guest 'db' is not in the image
-                        cache, so the bundle cannot be self-sufficient (pull or
-                        build the image into the cache)
+  12:5  hosts[0].image  image 'acme/db-golden' for guest 'db' is
+                        not in the image cache, so the bundle
+                        cannot be self-sufficient (pull or build
+                        the image into the cache)
 ```
 
 ## Resources {#resources}
@@ -141,7 +142,8 @@ A router is an ordinary guest with one interface per joined segment, running a g
 ``` yaml
 range:
   name: router-guest
-  description: A router with explicit identity, and one with backend defaults.
+  description: >
+    A router with explicit identity, and one with backend defaults.
 
 networks:
   - name: dmz
@@ -182,7 +184,9 @@ router_guest = RangeSpec(
     ),
     networks=[
         Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
-        Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        Network(
+            name="internal", cidr="10.80.20.0/24", mode="isolated"
+        ),
     ],
     routers=[
         Router(
@@ -307,7 +311,9 @@ hosts:
     interfaces: [{ network: lab }]
     users:
       - { name: alice, password: bacon, note: "weak password" }
-      - { name: backup, groups: [sudo], note: service account with sudo }
+      - name: backup
+        groups: [sudo]
+        note: service account with sudo
 attacker:
   interfaces: [{ network: lab }]
   entry: external
@@ -360,7 +366,8 @@ users = RangeSpec(
 ``` {.yaml .plan-invalid}
 range:
   name: services
-  description: The converged listening surface, asserted and build-verified.
+  description: >
+    The converged listening surface, asserted and build-verified.
 networks:
   - name: lab
     cidr: 10.10.10.0/24
@@ -429,7 +436,9 @@ The seeded attack surface is two distinct lists, because real intrusions lean he
 ``` {.yaml .plan-invalid}
 range:
   name: weaknesses
-  description: A CVE-backed vulnerability and a misconfiguration, as distinct lists.
+  description: >
+    A CVE-backed vulnerability and a misconfiguration, as
+    distinct lists.
 networks:
   - name: lab
     cidr: 10.10.10.0/24
@@ -445,10 +454,13 @@ hosts:
       - id: zabbix-jsrpc-sqli
         cve: CVE-2016-10134
         service: zabbix-web
-        description: SQL injection in jsrpc.php, reachable unauthenticated.
+        description: >
+          SQL injection in jsrpc.php, reachable unauthenticated.
     misconfigurations:
       - id: guest-login-enabled
-        description: The Zabbix guest account is enabled with an empty password.
+        description: >
+          The Zabbix guest account is enabled with an empty
+          password.
 attacker:
   interfaces: [{ network: lab }]
   entry: external
@@ -521,8 +533,11 @@ hosts:
     image: acme/db-golden
     interfaces: [{ network: internal }]
     data:
-      - { path: /srv/data/customers.db, description: the exfiltration target, sensitive: true }
-      - { path: /home/trainee/traffic.pcap, description: packet capture with planted attack traffic }
+      - path: /srv/data/customers.db
+        description: the exfiltration target
+        sensitive: true
+      - path: /home/trainee/traffic.pcap
+        description: packet capture with planted attack traffic
 attacker:
   interfaces: [{ network: internal }]
   entry: assumed-breach
@@ -584,7 +599,9 @@ networks:
     mode: isolated
 defense:
   tier: D2
-  description: Endpoint telemetry is recorded and searchable, no blocking response.
+  description: >
+    Endpoint telemetry is recorded and searchable, no blocking
+    response.
   telemetry:
     - { source: win, collector: Sysmon/WinEventLog, sink: splunk }
 hosts:
@@ -658,7 +675,8 @@ Identity is range-scoped (accounts exist in the domain, not on a host), so `acti
 ``` {.yaml .plan-invalid}
 range:
   name: forest
-  description: A parent and child domain with seeded identity attack surface.
+  description: >
+    A parent and child domain with seeded identity attack surface.
 networks:
   - name: corp
     cidr: 10.20.0.0/24
@@ -670,10 +688,16 @@ active_directory:
       netbios: CORP
       dc: dc01
       users:
-        - { name: c.lannister, password: il0vejaime, groups: [Domain Admins] }
+        - name: c.lannister
+          password: il0vejaime
+          groups: [Domain Admins]
       acls:
-        - { principal: t.lannister, right: ForceChangePassword, target: j.lannister }
-        - { principal: j.lannister, right: GenericWrite, target: j.baratheon }
+        - principal: t.lannister
+          right: ForceChangePassword
+          target: j.lannister
+        - principal: j.lannister
+          right: GenericWrite
+          target: j.baratheon
     - name: north.corp.example
       netbios: NORTH
       dc: dc02
@@ -859,7 +883,9 @@ hosts:
     interfaces: [{ network: corp }]
     scheduled_activity:
       - { script: responder.ps1 }
-      - { script: rdp_scheduler.ps1, user: admin.user, note: creates a stealable session }
+      - script: rdp_scheduler.ps1
+        user: admin.user
+        note: creates a stealable session
 attacker:
   interfaces: [{ network: corp }]
   entry: assumed-breach
@@ -984,7 +1010,8 @@ The compiler emits each guest's desired configuration (addressing, resolvers, ho
 ``` yaml
 range:
   name: windows-host
-  description: A Windows target on a locally installed golden (windows-ad-v1).
+  description: >
+    A Windows target on a locally installed golden (windows-ad-v1).
 networks:
   - name: corp
     cidr: 10.20.0.0/24

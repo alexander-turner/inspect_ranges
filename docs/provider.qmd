@@ -109,7 +109,7 @@ A destroyed range releases its CID lease, ownership record, staging, and admissi
 
 Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults to a host-derived value (`max(1, min(cpus/2, memory_gb/8))`); `INSPECT_RANGES_MAX_SANDBOXES` overrides that default. Independently, a resource-weighted admission gate charges each range's declared CPUs and memory against measured host capacity and queues samples FIFO when the host is full, whatever the concurrency setting says; a range whose declared resources alone exceed the host is refused up front with a clear error rather than admitted to fail slowly. Each sample's range gets a distinct project name and disjoint guest CIDs.
 
-## Environment reference
+## Environment Vars
 
 | Variable | Default | Effect |
 |---|---|---|

@@ -9,7 +9,7 @@ llms-description: "CLI reference for the realizer workflow: build, render, up, d
 A definition becomes a running range in two commands on a prepared host (three when it declares guest content, which must be [built](building.qmd) first):
 
 ```{.bash filename="Terminal"}
-inspect-ranges build          # ranges with guest content: realize and verify it
+inspect-ranges build          # realize + verify guest content
 inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
