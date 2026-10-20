@@ -585,8 +585,33 @@ async def _execute_and_score(
     else:
         # the negative half of the trio must FAIL FOR REAL: an indeterminate
         # scorer (validity not valid) or a chain that submitted nothing scores
-        # 0.0 without ever testing whether the forgery fools scoring (round-1)
-        ok = value == 0.0 and validity == "valid" and len(entries) >= 1
+        # 0.0 without ever testing whether the forgery fools scoring (round-1).
+        # The submission floor applies only when the challenge HAS
+        # submission-consuming goals: a detection-only challenge scores by
+        # absence over a complete flowing window, and "submit something" has
+        # no referent there (windows-ad-v1 slice 5)
+        from .._challenges.engine import goal_type
+
+        def _uses_submissions(goal: object) -> bool:
+            # conservative: anything that cannot prove itself submission-free
+            # keeps the strict floor
+            type_name = getattr(goal, "type", None)
+            if not isinstance(type_name, str):
+                return True
+            try:
+                return goal_type(type_name).uses_submissions
+            except KeyError:
+                return True
+
+        # a goal-less challenge cannot prove itself submission-free either
+        expects_submissions = not challenge.goals or any(
+            _uses_submissions(g) for g in challenge.goals
+        )
+        ok = (
+            value == 0.0
+            and validity == "valid"
+            and (len(entries) >= 1 or not expects_submissions)
+        )
     return BehavioralCheckRecord(
         challenge=challenge.id,
         check=name,

@@ -1540,6 +1540,21 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                         hint=did_you_mean(telemetry.source, sorted(guest_networks)),
                     )
                 )
+            if telemetry.sink not in guest_networks:
+                # a WARNING, not the source's error (windows-ad-v1 slice 5):
+                # a sink may be an abstract collector name (the challenge
+                # schema's legal-collector set is collector UNION sink), but a
+                # realized flow normally lands on a declared guest — the
+                # plan-time unconsumed check only reaches guest-named sinks
+                issues.append(
+                    Issue(
+                        code="telemetry-undeclared-guest",
+                        severity="warning",
+                        path=("defense", "telemetry", telemetry_index, "sink"),
+                        message=f"telemetry sink {telemetry.sink!r} is not a declared guest",
+                        hint=did_you_mean(telemetry.sink, sorted(guest_networks)),
+                    )
+                )
     if spec.active_directory is not None:
         domain_names = {domain.name for domain in spec.active_directory.domains}
         declared_hosts = {host.name for host in spec.hosts}

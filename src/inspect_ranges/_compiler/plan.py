@@ -445,15 +445,41 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                     hint=_GUEST_CONTENT_HINT,
                 )
             )
-    if spec.defense is not None:
+    if spec.defense is not None and (
+        "defense" not in options.realized_sections or not spec.defense.telemetry
+    ):
+        # a bare tier is a classification with no realizable referent (the
+        # kypo precedent); only a TELEMETRY-BEARING posture earns the build
+        # lift — its flows are what recipes realize (windows-ad-v1 slice 5)
         issues.append(
             Issue(
                 code="guest-config-not-realized",
                 path=("defense",),
-                message="the range declares a defensive posture, which the build phase has not yet realized",
+                message="the range declares a defensive posture, which only the build realizes (and only when it carries telemetry flows)",
                 hint=_GUEST_CONTENT_HINT,
             )
         )
+    if (
+        spec.defense is not None
+        and spec.defense.telemetry
+        and "defense" in options.realized_sections
+    ):
+        hosts_for_flows = {host.name: host for host in spec.hosts}
+        for flow_index, flow in enumerate(spec.defense.telemetry):
+            for role, flow_guest in (("source", flow.source), ("sink", flow.sink)):
+                flow_host = hosts_for_flows.get(flow_guest)
+                if flow_host is not None and not flow_host.provisioning:
+                    # flows realize through BOTH ends' recipes (the sensor and
+                    # the receiving collector); a recipe-less end would mint
+                    # the claim unrealized (the slice-4 unconsumed rule)
+                    issues.append(
+                        Issue(
+                            code="realized-section-unconsumed",
+                            path=("defense", "telemetry", flow_index, role),
+                            message=f"telemetry flow {flow_index} names {role} {flow_guest!r}, which carries no provisioning recipe to realize it",
+                            hint="give the guest a recipe that realizes its end of the flow, or drop the flow",
+                        )
+                    )
     if spec.active_directory is not None and "active_directory" in (
         options.realized_sections
     ):

@@ -992,3 +992,68 @@ def test_realized_sections_demand_a_consuming_recipe(cache: Path) -> None:
         if issue.code == "realized-section-unconsumed"
     )
     assert issue.path == ("active_directory", "domains", 0, "dc")
+
+
+def test_spec_defense_lifts_only_with_realized_telemetry(cache: Path) -> None:
+    """Windows-ad-v1 slice 5: a bare `defense: tier` stays gated everywhere (a classification has no realizable referent — the kypo precedent); a telemetry-bearing posture lifts on the build path, and each flow's source and sink must carry a recipe (`realized-section-unconsumed`)."""
+    from inspect_ranges.types import Defense, ProvisioningStep, Telemetry
+
+    def two_hosts() -> RangeSpec:
+        return RangeSpec(
+            meta=RangeMeta(name="teltier", description="telemetry gate"),
+            networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+            hosts=[
+                Host(
+                    name="sensor",
+                    os=Os(type="linux"),
+                    image="ubuntu-noble",
+                    interfaces=[Interface(network="lab", ip="10.0.0.10")],
+                    provisioning=[ProvisioningStep(recipe="acme.web")],
+                ),
+                Host(
+                    name="collector",
+                    os=Os(type="linux"),
+                    image="ubuntu-noble",
+                    interfaces=[Interface(network="lab", ip="10.0.0.11")],
+                    provisioning=[ProvisioningStep(recipe="acme.db")],
+                ),
+            ],
+            attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+        )
+
+    build_options = PlanOptions(
+        image_cache=cache,
+        realized_sections=frozenset({"defense", "provisioning"}),
+    )
+    # a bare tier refuses even on the build path
+    bare = two_hosts()
+    bare.defense = Defense(tier="D2")
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(bare, build_options)
+    assert any(issue.path == ("defense",) for issue in excinfo.value.issues)
+    # a telemetry-bearing posture with recipes on both ends plans
+    flowing = two_hosts()
+    flowing.defense = Defense(
+        tier="D2",
+        telemetry=[Telemetry(source="sensor", collector="sysmon", sink="collector")],
+    )
+    assert resolve_plan(flowing, build_options).totals.guests == 3
+    # the runtime path still refuses it
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(flowing, options(cache))
+    assert any(issue.path == ("defense",) for issue in excinfo.value.issues)
+    # a recipe-less end refuses as unconsumed
+    lame = two_hosts()
+    lame.hosts[1].provisioning = []
+    lame.defense = Defense(
+        tier="D2",
+        telemetry=[Telemetry(source="sensor", collector="sysmon", sink="collector")],
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(lame, build_options)
+    issue = next(
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "realized-section-unconsumed"
+    )
+    assert issue.path == ("defense", "telemetry", 0, "sink")
