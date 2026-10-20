@@ -15,8 +15,8 @@ Each example range vendors verbatim copies of its source's configuration (and, w
 | `examples/vulhub-zabbix/upstream/` | [vulhub](https://github.com/vulhub/vulhub) (`zabbix/CVE-2016-10134/`) | Vulhub contributors | MIT |
 | `../../examples/kypo-demo/upstream/` | [kypo-crp-demo-training](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) | 2020 Masaryk University | MIT |
 | `../../examples/cyris-basic/upstream/` | [CyRIS](https://github.com/crond-jaist/cyris) (`examples/`) | 2016–2021 Japan Advanced Institute of Science and Technology | BSD-3-Clause |
-| `../../examples/mhbench-equifax-small/upstream/` (topology, specs, playbook) | [MHBench](https://github.com/bsinger98/MHBench) | 2025 Brian Singer | MIT |
-| `../../examples/mhbench-equifax-small/upstream/incalmo-prompts/` | [Incalmo](https://github.com/cylabcyberautonomy/Incalmo) | 2025 Brian Singer | MIT |
+| `../../examples/equifax/upstream/` (topology, specs, playbook) | [MHBench](https://github.com/bsinger98/MHBench) | 2025 Brian Singer | MIT |
+| `../../examples/equifax/upstream/incalmo-prompts/` | [Incalmo](https://github.com/cylabcyberautonomy/Incalmo) | 2025 Brian Singer | MIT |
 | `../../examples/goad-light/upstream/` (inventory, config.json, provider files) | [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (`ad/GOAD-Light/`) | Orange Cyberdefense | GPL-3.0 |
 | `../../examples/goad-light/upstream/cochise/` | [cochise](https://github.com/andreashappe/cochise) | 2025 Andreas Happe | MIT |
 | `../../examples/splunk-detection/upstream/` | [attack_range](https://github.com/splunk/attack_range) (`templates/aws/`) | Splunk Inc. | Apache-2.0 |
@@ -44,17 +44,17 @@ Every vendored file was matched to its upstream repository by git blob hash (che
 | | `kypo-demo/upstream/provisioning/roles/server/tasks/main.yml` | `provisioning/roles/server/tasks/main.yml` |
 | `github.com/crond-jaist/cyris` @ `8b65a30581cdd8e126c7b1fa26db2a4b770b7f17` | `cyris-basic/upstream/full.yml` | `examples/full.yml` |
 | | `cyris-basic/upstream/basic-multi_host.yml` | `examples/basic-multi_host.yml` |
-| `github.com/bsinger98/MHBench` @ `3b3db857cb2277da01e121c418966966c2104ee6` | `mhbench-equifax-small/upstream/main.tf` | `src/environments/terraform/topologies/equifax_small/main.tf` |
-| | `mhbench-equifax-small/upstream/security_rules.tf` | `src/environments/terraform/topologies/equifax_small/security_rules.tf` |
-| | `mhbench-equifax-small/upstream/modules/attacker/attacker.tf` | `src/environments/terraform/topologies/modules/attacker/attacker.tf` |
-| | `mhbench-equifax-small/upstream/modules/attacker/security_rules.tf` | `src/environments/terraform/topologies/modules/attacker/security_rules.tf` |
-| | `mhbench-equifax-small/upstream/modules/perry_manager/perry_manager.tf` | `src/environments/terraform/topologies/modules/perry_manager/perry_manager.tf` |
-| | `mhbench-equifax-small/upstream/modules/perry_manager/security_groups.tf` | `src/environments/terraform/topologies/modules/perry_manager/security_groups.tf` |
-| | `mhbench-equifax-small/upstream/equifax_small.py` | `src/environments/terraform/specifications/equifax_small.py` |
-| | `mhbench-equifax-small/upstream/equifax_instance.py` | `src/environments/terraform/specifications/equifax_instance.py` |
-| | `mhbench-equifax-small/upstream/setupStruts.yml` | `ansible/vulnerabilities/apacheStruts/setupStruts.yml` |
-| `github.com/cylabcyberautonomy/Incalmo` @ `932c5fcd1f97c2e75ae3ac7f008d947956995bd9` | `mhbench-equifax-small/upstream/incalmo-prompts/bash-pre_prompt.txt` | `incalmo/core/strategies/llm/interfaces/preprompts/bash/pre_prompt.txt` |
-| | `mhbench-equifax-small/upstream/incalmo-prompts/incalmo-pre_prompt.txt` | `incalmo/core/strategies/llm/interfaces/preprompts/incalmo/pre_prompt.txt` |
+| `github.com/bsinger98/MHBench` @ `3b3db857cb2277da01e121c418966966c2104ee6` | `equifax/upstream/main.tf` | `src/environments/terraform/topologies/equifax_small/main.tf` |
+| | `equifax/upstream/security_rules.tf` | `src/environments/terraform/topologies/equifax_small/security_rules.tf` |
+| | `equifax/upstream/modules/attacker/attacker.tf` | `src/environments/terraform/topologies/modules/attacker/attacker.tf` |
+| | `equifax/upstream/modules/attacker/security_rules.tf` | `src/environments/terraform/topologies/modules/attacker/security_rules.tf` |
+| | `equifax/upstream/modules/perry_manager/perry_manager.tf` | `src/environments/terraform/topologies/modules/perry_manager/perry_manager.tf` |
+| | `equifax/upstream/modules/perry_manager/security_groups.tf` | `src/environments/terraform/topologies/modules/perry_manager/security_groups.tf` |
+| | `equifax/upstream/equifax_small.py` | `src/environments/terraform/specifications/equifax_small.py` |
+| | `equifax/upstream/equifax_instance.py` | `src/environments/terraform/specifications/equifax_instance.py` |
+| | `equifax/upstream/setupStruts.yml` | `ansible/vulnerabilities/apacheStruts/setupStruts.yml` |
+| `github.com/cylabcyberautonomy/Incalmo` @ `932c5fcd1f97c2e75ae3ac7f008d947956995bd9` | `equifax/upstream/incalmo-prompts/bash-pre_prompt.txt` | `incalmo/core/strategies/llm/interfaces/preprompts/bash/pre_prompt.txt` |
+| | `equifax/upstream/incalmo-prompts/incalmo-pre_prompt.txt` | `incalmo/core/strategies/llm/interfaces/preprompts/incalmo/pre_prompt.txt` |
 | `github.com/Orange-Cyberdefense/GOAD` @ `992307adf944b934a3b76a2f56a637104c54b805` | `goad-light/upstream/inventory.ini` | `ad/GOAD-Light/data/inventory` |
 | | `goad-light/upstream/config.json` | `ad/GOAD-Light/data/config.json` |
 | | `goad-light/upstream/provider-vmware-inventory.ini` | `ad/GOAD-Light/providers/vmware/inventory` (identical in `virtualbox/` and `vmware_esxi/`) |

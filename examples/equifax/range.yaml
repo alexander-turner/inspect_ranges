@@ -4,7 +4,7 @@
 # Provenance: ./source.md (upstream) and ./notes.md (per-field detail)
 
 range:
-  name: mhbench-equifax-small
+  name: equifax
   schema_version: "0.3"
   description: >
     Smallest of MHBench's three Equifax-inspired networks (6 target hosts):

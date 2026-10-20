@@ -1,7 +1,7 @@
 # v0.2 DRAFT — not valid under schema v0.1. Acceptance fixture for networking-v0.2.md §1.
 #
 # The MHBench equifax_small ACL re-expressed losslessly from
-# ../../../examples/mhbench-equifax-small/upstream/security_rules.tf (+ modules/attacker/security_rules.tf),
+# ../../../examples/equifax/upstream/security_rules.tf (+ modules/attacker/security_rules.tf),
 # restoring what the v0.1 translation dropped: the 0.0.0.0/0 form and per-group direction.
 #
 # OpenStack secgroup semantics: a new flow src→dst is admitted iff the dst group has a

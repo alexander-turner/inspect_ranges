@@ -47,6 +47,6 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 * [vulhub-zabbix](../../examples/vulhub-zabbix/notes.md) - 4 Linux hosts, flat network, real CVE (Zabbix SQLi→RCE); the minimal/smoke-test case
 * [kypo-demo](../../examples/kypo-demo/notes.md) - 2 hosts + explicit router across 2 routed subnets; static IPs, randomized variables (KYPO CRP)
 * [cyris-basic](../../examples/cyris-basic/notes.md) - firewall-gatewayed office/servers segments with per-guest task provisioning (CyRIS, KVM-native)
-* [mhbench-equifax-small](../../examples/mhbench-equifax-small/notes.md) - breach-derived 3-subnet enterprise with asymmetric ACLs and a planted SSH-key pivot (MHBench, CMU)
+* [equifax](../../examples/equifax/notes.md) - breach-derived 3-subnet enterprise with asymmetric ACLs and a planted SSH-key pivot (MHBench, CMU; formerly mhbench-equifax-small)
 * [goad-light](../../examples/goad-light/notes.md) - 3-VM Windows AD forest (parent+child domains) with seeded AD attack surface and Defender toggles (GOAD)
 * [splunk-detection](../../examples/splunk-detection/notes.md) - Splunk-instrumented Windows endpoint; telemetry as first-class config (Splunk attack_range; formerly attack-range-windows)

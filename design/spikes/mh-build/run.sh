@@ -1,5 +1,5 @@
 #!/bin/bash
-# linux-examples-v1 slice 3 battery: mhbench-equifax-small built and solved —
+# linux-examples-v1 slice 3 battery: equifax (formerly mhbench-equifax-small) built and solved —
 # the phase's scale proof (7 guests incl. the CATALOG-DEFAULT attacker). The
 # attack image builds and publishes to a directory location so the bare name
 # `attack` resolves (the attacker declares NO image); the fixture builds for
@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/examples/mhbench-equifax-small"
+RANGE="$ROOT/examples/equifax"
 ATTACK_RANGE="$ROOT/catalog/attack"
 
 NOBLE="${NOBLE:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"
@@ -62,7 +62,7 @@ $IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --na
 
 echo "=== M2 the fixture builds for real (6 targets + the chain proven) ==="
 (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 1800 >"$SPIKE/tmp/m2.txt" 2>&1) \
-  && grep -q "build OK" "$SPIKE/tmp/m2.txt" && ok "M2 mhbench-equifax-small builds green" \
+  && grep -q "build OK" "$SPIKE/tmp/m2.txt" && ok "M2 equifax builds green" \
   || { bad "M2 build"; tail -15 "$SPIKE/tmp/m2.txt"; exit 1; }
 grep -q "behavioral checks=3" "$SPIKE/tmp/m2.txt" \
   && ok "M2b the trio proved the Equifax chain against the captured artifacts" \

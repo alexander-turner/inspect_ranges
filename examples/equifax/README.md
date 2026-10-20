@@ -1,4 +1,4 @@
-# mhbench-equifax-small
+# equifax
 
 The smallest of [MHBench](https://github.com/bsinger98/MHBench)'s three Equifax-inspired networks (CMU, MIT; companion paper arXiv:2501.16466), modeled on the 2017 Equifax breach: six target hosts across two segmented subnets plus an attacker subnet. It is the scale and catalog reference: the attacker host carries no `image:` line (the schema default is the catalog's standard attack image), and a real CVE entry is asserted live at build.
 
@@ -15,7 +15,7 @@ One challenge, `exfiltrate-critical-data`, whose prompt is verbatim from the ups
 ## Build and run
 
 ```bash
-cd examples/mhbench-equifax-small
+cd examples/equifax
 inspect-ranges build       # realize + verify + prove (build egress required)
 inspect eval task.py --model <model>
 ```
@@ -34,7 +34,7 @@ from inspect_ranges import (
 
 
 @task
-def mhbench_equifax_small() -> Task:
+def equifax() -> Task:
     return Task(
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),

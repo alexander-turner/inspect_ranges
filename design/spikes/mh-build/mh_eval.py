@@ -1,4 +1,4 @@
-"""linux-examples-v1 slice 3: the mhbench-equifax-small reference chain through a real eval.
+"""linux-examples-v1 slice 3: the equifax (formerly mhbench-equifax-small) reference chain through a real eval.
 
 One sample boots the six-target range plus the CATALOG-DEFAULT attacker (no image line in the spec) through the provider; the solver replays the Equifax-shaped reference (struts RCE, the pivot key, four canary exfiltrations beaconed across the critical segment) through the attack-box foothold and feeds its SUBMIT lines to the scorer: expect 1.0 under coverage, validity `valid`.
 
