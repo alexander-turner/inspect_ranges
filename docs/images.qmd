@@ -6,17 +6,17 @@ llms-description: "Operator images guide: the resolution model (pin, then local 
 
 ## Overview
 
-Four ideas carry everything on this page:
+Image resolution, movement, and updates follow four rules:
 
 1. **Resolution order.** A bare `image:` name resolves pin first, then the local cache, then the search path: `INSPECT_RANGES_REGISTRY`, an ordered comma-separated list whose default is the public catalog (`docker.io/meridianlabsai/inspect-ranges`). First match wins, and a broken location aborts resolution with the location named rather than silently falling through.
 
-2. **Locations are interchangeable.** A location is the public hub org, a private OCI registry, or a plain directory in OCI image layout. Identity is content: every artifact verifies by digest wherever it lands, and nothing unverified lands under a consumable name.
+2. **Locations are interchangeable.** A location is the public hub org, a private OCI registry, or a plain directory in OCI image layout. Every artifact verifies by digest wherever it lands, and nothing unverified lands under a consumable name.
 
-3. **Sticky, then explicit.** Once a name resolves into the cache, builds keep using the cached artifact even as registries move on. Moving forward is a deliberate act: `images refresh`, regenerating a pin file, or consuming a republish (always a new digest; published bytes never change under a name silently).
+3. **Sticky, then explicit.** Once a name resolves into the cache, builds keep using the cached artifact even as registries move on. Moving forward is explicit: `images refresh`, regenerating a pin file, or consuming a republish (always a new digest; published bytes never change under a name silently).
 
-4. **Specs travel by git, artifacts by registry.** A built range publishes under its spec's normalized-form hash, and eval init pulls the published build matching the cloned `range.yaml` exactly. That join is what makes clone-and-eval work.
+4. **Specs travel by git, artifacts by registry.** A built range publishes under its spec's normalized-form hash, and eval init pulls the published build matching the cloned `range.yaml` exactly; this join is why `git clone` and `inspect eval` suffice.
 
-[Distribution](distribution.qmd) is the mechanics reference behind all of this: the location grammar, verification semantics, and the full verb surface.
+[Distribution](distribution.qmd) holds the mechanics: the location grammar, verification semantics, and the full verb surface.
 
 ## The Catalog
 
@@ -35,7 +35,7 @@ The republish discipline: every consumer-held artifact is digest-verified, a rep
 
 ### Connected (the Default)
 
-Nothing to configure. At the first eval, init pulls the published build and whatever catalog images are missing, digest-verified, with docker-pull-shaped progress; warm evals cost zero network. One operational caveat: anonymous hub pulls are rate-limited per address (measured 2026-10-18: 100 pulls per rolling hour), so a fleet cold-pulling the public org should mirror it or front it with its own registry (next two recipes).
+Nothing to configure. At the first eval, init pulls the published build and whatever catalog images are missing, digest-verified, with docker-pull-shaped progress; warm evals cost zero network. Anonymous hub pulls are rate-limited per address (measured 2026-10-18: 100 pulls per rolling hour), so a fleet cold-pulling the public org should mirror it or front it with its own registry (next two recipes).
 
 ### Mirror the Catalog
 
@@ -48,7 +48,7 @@ export INSPECT_RANGES_REGISTRY=registry.example.net/ranges,\
 docker.io/meridianlabsai/inspect-ranges
 ```
 
-A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. One hub caveat: the hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (a published catalog list is a recorded follow-up). Mechanics: [Distribution](distribution.qmd).
+A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. The hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (a published catalog list is a recorded follow-up). Mechanics: [Distribution](distribution.qmd).
 
 ### Private Registry for Your Own Ranges
 
@@ -69,7 +69,7 @@ tar -cf archive.tar archive/   # carry across the gap, untar
 export INSPECT_RANGES_REGISTRY=/mnt/archive
 ```
 
-The consuming session is then identical to a connected one, because identity is content, not transport. The daemon bundle travels with whole-location mirrors, so air-gapped fleets can derive their own goldens too.
+The consuming session is then identical to a connected one: digests verify the same from a directory as from a registry. The daemon bundle travels with whole-location mirrors, so air-gapped fleets can derive their own goldens too.
 
 ### Pinned Fleet
 
@@ -80,7 +80,7 @@ inspect-ranges images pin \
 export INSPECT_RANGES_PIN_FILE=pins.json
 ```
 
-A pinned host lands exactly the recorded root digests and refuses `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through). Moving the fleet forward is the explicit act: `images refresh <name>`, or regenerating the pin file.
+A pinned host lands exactly the recorded root digests and refuses `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through). Moving the fleet forward is explicit: `images refresh <name>`, or regenerating the pin file.
 
 ### Locked-Down Host
 
@@ -95,7 +95,7 @@ export INSPECT_RANGES_RANGE_IMAGE=\
 docker.io/meridianlabsai/inspect-ranges-range@sha256:ab12e0...
 ```
 
-Unset (the default and the dev loop), `up` builds the image locally from package data. The pull is a plain `docker pull`, so hub credentials and private mirrors work as for any image; one caveat for hosts logged into the hub with a narrowly-scoped org token: docker sends the stored credential for public pulls too and the hub rejects an insufficiently-scoped token rather than falling back to anonymous, so public `docker pull`s fail on such a host (the distribution client is unaffected). Details: [Distribution](distribution.qmd#the-hardened-range-container-image).
+Unset (the default and the dev loop), `up` builds the image locally from package data. The pull is a plain `docker pull`, so hub credentials and private mirrors work as for any image. Hosts logged into the hub with a narrowly-scoped org token are the exception: docker sends the stored credential for public pulls too, the hub rejects an insufficiently-scoped token rather than falling back to anonymous, and public `docker pull`s fail (the distribution client is unaffected). Details: [Distribution](distribution.qmd#the-hardened-range-container-image).
 
 ### Self-Derived Goldens
 
