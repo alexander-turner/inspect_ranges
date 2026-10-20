@@ -4,7 +4,7 @@ description: Challenges and goals (dataset, setup, scoring, verification), the g
 reference: inspect_ranges
 ---
 
-The package's top-level surface. The eval wiring is toured in [Challenges](../challenges.qmd), the custom goal-type contract in [Custom Goals](../goals.qmd), and range definition loading in [Ranges](../ranges.qmd). Range definition types have their own page: [inspect_ranges.types](types.qmd).
+The package's top-level surface. The eval wiring is covered in [Challenges](../challenges.qmd), the custom goal-type contract in [Custom Goals](../goals.qmd), and range definition loading in [Ranges](../ranges.qmd). Range definition types have their own page: [inspect_ranges.types](types.qmd).
 
 ## Challenge Tasks
 

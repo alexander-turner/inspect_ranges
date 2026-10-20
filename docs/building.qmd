@@ -49,7 +49,7 @@ Build success also garbage-collects the range's superseded realized generations:
 
 ## Reading Build Output
 
-A build prints one line per stage transition: the stage name, then sorted `key=value` fields (only `verify` rows carry a literal `ok`; a failure prints `<stage> FAILED <error>` instead). Abridged, a proven build looks like:
+A build prints one line per stage transition: the stage name, then sorted `key=value` fields (`verify` rows differ: a literal `ok` and the declaration verified; a failure prints `<stage> FAILED <error>` instead), and ends with a two-line summary, the manifest path and a `build OK` line. Abridged, a proven build looks like:
 
 ``` {.default filename="Terminal"}
 resolve   rebuilt_guests=2  recipes=2  reused_guests=0
@@ -71,7 +71,7 @@ manifest  ~/.cache/inspect-ranges/builds/dmz-pivot/manifest.json
 build OK (1243.7 s, 2 recipes) project ir-dmz-pivot-9f1c2a4b
 ```
 
-The `manifest` lines appear after the `behavioral` lines because the save is deferred past the proof: a build is never recorded proven before its checks pass. The final `build OK` line names the compose project, which is also the name of the build's directory under the project state directory (`~/.local/state/inspect-ranges/projects/<project>/`), where `stages.jsonl` keeps this same history as JSONL and the `recipes/` and `verify/` subdirectories hold the per-run logs. A fully cached build prints a single `build` row and `build OK (cached, verified <timestamp>; pass --reverify to re-run)`.
+The `manifest` lines appear after the `behavioral` lines: a build is never recorded proven before its checks pass. The final `build OK` line names the compose project (the `<project>` that `inspect-ranges down` takes), which is also the build's directory name under the project state directory (`~/.local/state/inspect-ranges/projects/<project>/`): `stages.jsonl` there keeps this history as JSONL, and `recipes/` and `verify/` hold the per-run logs. A fully cached build prints a single `build` row and `build OK (cached, verified <timestamp>; pass --reverify to re-run)`.
 
 ## Incremental Rebuilds
 
@@ -108,8 +108,8 @@ The entrypoint runs **on the host**, with the bundle directory as working direct
 |---|---|
 | `IR_EXEC` | Path to the wrapper that runs a command in the target guest |
 | `IR_PUSH` | Path to the wrapper that installs a local file into the target guest |
-| `IR_GUEST` | The target guest's name: the one guest this step provisions, and the only guest the wrappers reach |
-| `IR_GUEST_CIDS` | JSON map of every guest name to its vsock CID (the wrappers' addressing input, not a cross-guest API) |
+| `IR_GUEST` | The target guest's name: the one guest this step provisions |
+| `IR_GUEST_CIDS` | JSON map of every guest name to its vsock CID, the wrappers' addressing input |
 | `IR_GUEST_SOCKETS` | JSON map of Cloud Hypervisor guest names to their hybrid-vsock socket details; QEMU guests are reached by CID |
 | `IR_GUEST_OS` | JSON map of guest name to `linux` or `windows`; absent names are linux |
 | `IR_RECIPE` | The recipe's name |
@@ -125,7 +125,7 @@ The wrappers' whole grammar:
 "$IR_PUSH" LOCAL REMOTE [--mode 644]
 ```
 
-`IR_EXEC` runs as root by default (`--user` switches principal) and passes the in-guest exit status through; 124 is budget expiry, 125 a channel failure, 2 a usage error. `--script` uploads a local file and runs it (as root or the agent user only) and is mutually exclusive with trailing argv. `IR_PUSH` installs root-owned at the given `--mode`, creating parent directories, bounded at 60 s per push; there is no ownership flag, so a recipe needing another owner chowns through `IR_EXEC` afterward (the dmz-pivot and equifax recipes both do).
+`IR_EXEC` runs as root by default (`--user` switches principal) and passes the in-guest exit status through; 124 is budget expiry, 125 a channel failure, 2 a usage error. `--script` uploads a local file and runs it (as root or the agent user only) and is mutually exclusive with trailing argv. `IR_PUSH` installs the file root-owned at the given `--mode`, creating parent directories, bounded at 60 s per push; there is no ownership flag, so a recipe needing another owner chowns through `IR_EXEC` afterward (the [dmz-pivot](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot) and [equifax](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/equifax) recipes both do).
 
 These two wrappers are the entire surface. Nothing fetches a file back from a guest: a recipe that must read guest state reads `IR_EXEC` stdout. Both wrappers reach only `IR_GUEST`, so a recipe cannot provision another guest; state shared across guests is committed material duplicated into each bundle (dmz-pivot writes the same database password into both of its recipes, and equifax commits its pivot keypair's public half into every bundle that authorizes it).
 
@@ -183,7 +183,7 @@ Failures produce coded refusals (`service-not-verified`, `vulnerability-not-veri
 
 ## Behavioral Checks {#behavioral-checks}
 
-A range that carries challenges ([Challenges](challenges.qmd)) can prove them at build time. The build discovers both pieces beside `range.yaml`: a `challenges.yaml`, and a `checks/<challenge-id>/{reference,insufficient,forged}.sh` directory per challenge. Each script runs on the attacker guest as a plain root bash with a 900 s budget per chain (chains legitimately wait for convergence and run full scans). `IR_ATTACKER_IP` is the only contract variable; target addresses come from the range definition. The script text travels as the command itself, never copied onto the attacker's filesystem, so the shebang and executable bit are inert and the working directory is unspecified: use absolute paths. A check owns the attack box, including starting listeners for beacons or exfiltrated content to land on (the conformance sweep runs before the checks, so a check's own listener never trips it). Submissions are `SUBMIT <goal-id> <value>` lines on stdout, one per submission, the value running to the end of the line; a value that contains an `exfiltrate` canary passes, so single-line excerpts of multi-line content work. Chain stdout is capped at 16 MiB and truncation is a hard check failure, since `SUBMIT` lines may be lost. A failing chain's output lands in the build's stage log (`stages.jsonl` under the project state directory; the failing `behavioral` row carries the chain's exit status and last stderr). Each check runs against fresh per-sample plants, removed afterward. The shipped [dmz-pivot checks](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot/checks) are the worked example. The contract:
+A range that carries challenges ([Challenges](challenges.qmd)) can prove them at build time. The build discovers both pieces beside `range.yaml`: a `challenges.yaml`, and a `checks/<challenge-id>/{reference,insufficient,forged}.sh` directory per challenge. Each script runs on the attacker guest as a plain root bash with a 900 s budget per chain (chains legitimately wait for convergence and run full scans). `IR_ATTACKER_IP` is the only contract variable; target addresses come from the range definition. The script text travels as the command itself, never copied onto the attacker's filesystem, so the shebang and executable bit are inert and the working directory is unspecified: use absolute paths. A check owns the attack box, including starting listeners for beacons or exfiltrated content to land on (the `conformance` containment sweep ([Security](security.qmd#proving-containment)) runs before the checks, so a check's own listener never trips it). Submissions are `SUBMIT <goal-id> <value>` lines on stdout, one per submission, the value running to the end of the line; a value that contains an `exfiltrate` canary passes, so single-line excerpts of multi-line content work. Chain stdout is capped at 16 MiB and truncation is a hard check failure, since `SUBMIT` lines may be lost. A failing chain's output lands in the build's stage log (`stages.jsonl` under the project state directory; the failing `behavioral` row carries the chain's exit status and the tail of its stderr). Each check runs against fresh per-sample plants, removed afterward. The shipped [dmz-pivot checks](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot/checks) are the worked example. The contract:
 
 | Chain | Must |
 |---|---|
