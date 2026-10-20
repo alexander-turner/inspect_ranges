@@ -92,7 +92,7 @@ Here is how the built in goal types map to the 6 example ranges included with th
 | cyris-basic | red + blue from one range | `flag` × 2 (desktop, cross-segment, reachability to verify); plus an `answer` forensics triage task over planted artifacts |
 | mhbench-equifax-small | exfil, two elicitation arms | `exfiltrate` from each database host, canary-verified; `coverage` fraction of assets; pcap corroborates the flow (SSH keeps content ciphertext) |
 | goad-light | AD dominance | `control`/`privilege` milestones to Domain Admin on each domain, each proved by a principal-bound secret planted on that domain's DC; defender-on/off variant |
-| attack-range-windows | detection lab | `detection` from the Splunk collector at in-range assurance; defender-direction (the range has no attacker host). Stealth variant asks which expected detections were absent |
+| splunk-detection | detection lab | `detection` from the Splunk collector at in-range assurance; defender-direction (the range has no attacker host). Stealth variant asks which expected detections were absent |
 
 ## Python API {#the-interface-in-code}
 

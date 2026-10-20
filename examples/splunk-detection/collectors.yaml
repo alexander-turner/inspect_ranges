@@ -4,7 +4,11 @@
 # challenge_setup(telemetry_collectors=...). The wrapper is installed by the
 # arw.splunk-server recipe; it reads the admin credential from a root-only
 # file (never argv) and ends every poll with the trailing cursor banner the
-# poller's contract requires.
+# poller's contract requires. Exporter loss fails loud: the wrapper exits
+# nonzero on its 5000-record poll cap AND on any window carrying the endpoint
+# bridge's RANGE-TELEMETRY-GAP overflow marker, so the poller records an
+# in-chain gap and the detection completeness precondition reads the window
+# incomplete — never a silent quiet pass.
 collectors:
   - name: splunk
     guest: splunk

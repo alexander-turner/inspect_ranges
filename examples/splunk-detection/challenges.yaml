@@ -1,4 +1,4 @@
-# challenges.yaml for attack-range-windows (challenges-v1 schema)
+# challenges.yaml for splunk-detection (challenges-v1 schema)
 # attack_range's task model is built in: techniques run on the Windows host and
 # detections are verified as Splunk searches (splunk/attack_data records the
 # resulting datasets). Prompts are ours (tagged default in the legacy seed);
