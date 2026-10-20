@@ -18,12 +18,13 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 ## Getting Started
 
-To get started, ensure you are running on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](development.qmd#devbox)), install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
+To get started, ensure you are running on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](development.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
 
 ```{.bash filename="Terminal"}
 # install and configure host
-pip install git+https://github.com/meridianlabs-ai/inspect_ranges.git
-inspect-ranges doctor     
+git clone https://github.com/meridianlabs-ai/inspect_ranges.git
+cd inspect_ranges && pip install .
+inspect-ranges doctor
 
 # run an example
 cd examples/dmz-pivot
@@ -38,7 +39,7 @@ This documentation is also available in LLM-friendly markdown ([llms.txt](https:
 | [llms-guide.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-guide.txt) | Documentation excluding the reference (~190k). |
 | [llms-full.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-full.txt) | Documentation including the reference (~240k). |
 
-Below we'll walk through the basics of defining and running ranges as well as core architecture of the package.
+Below we'll walk through the basics of defining and running ranges as well as the core architecture of the package.
 
 ## Defining a Range
 
@@ -116,7 +117,7 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. This example's build is published, so running it needs no build step: eval init pulls it automatically. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
 
 ## Range Tasks
 
@@ -177,6 +178,11 @@ Goals are typed, and each type is verified in the environment rather than truste
 | `control` / `privilege` | the agent produces a secret only that host or principal can read |
 | `degrade` / `tamper` | an external probe observes the outage, degradation, or modification |
 | `detection` | the telemetry collector contains (or, for stealth, lacks) the expected alert |
+| `hijack` | the service's kernel crash record shows the per-sample disclosed address |
+| `availability` | *(defender)* the external probe's nonce-bound responses stay correct through the window |
+| `evade` | qualifying alerts in the exported telemetry stay at or below the declared threshold |
+| `judge` | an LLM grades the submission against a rubric (weight-capped) |
+| `patch` | *(defender)* the registered reference exploit re-runs and fails while the service still answers |
 
 Verification is corroborated by evidence captured outside every VM (per-segment packet captures, consoles, exported telemetry), which also supports partial credit and stealth objectives. See [Challenges](challenges.qmd) and [Evidence](evidence.qmd).
 
@@ -243,7 +249,7 @@ def dmz_pivot_swe() -> Task:
 
 ## Example Ranges
 
-In addition to the example above, Inspect Ranges includes several other examples translated from published range definitions in the literature: 
+Inspect Ranges includes seven examples: the original dmz-pivot above, and six translated from published range definitions in the literature: 
 
 | Example | Upstream | Chain |
 |---|---|---|

@@ -62,7 +62,7 @@ A `GoalResult` carries `achieved`, optional `partial` credit in [0, 1] for types
 - Evidence accessors, all read-only against the sample's immutable record: `pcap(segment)`, `console(guest)`, `telemetry(collector)`, `telemetry_export(collector)`, and `probe_records(goal_id)` (which also reports stream gaps; treat a gapped stream as indeterminate, since the prober flushes failures first and a lost chunk is disproportionately likely to carry them).
 - `available_observers()`: what this deployment can actually supply, used at planting to refuse challenges whose goals require observers that are not there.
 
-A goal's observer requirements are declared on its `Spec` by overriding `observers()` (returning `frozenset[ObserverKind]`; both names are public exports): every goal requires `evidence-sink` (the plant record), and a type that corroborates against capture adds `segment-pcap`, a probe-backed type adds `active-prober`, and so on. Declaring them is what makes a missing observer refuse up front instead of scoring indeterminate at the end.
+A goal's observer requirements are declared on its `Spec` by overriding `observers()` (returning `frozenset[ObserverKind]`; `ObserverKind`, like `GoalBase`, is a public export): every goal requires `evidence-sink` (the plant record), and a type that corroborates against capture adds `segment-pcap`, a probe-backed type adds `active-prober`, and so on. Declaring them is what makes a missing observer refuse up front instead of scoring indeterminate at the end.
 
 ## Assurance Labels
 
@@ -168,7 +168,7 @@ The end-to-end proof belongs to the build: a range carrying challenges proves ea
 
 ## Performance
 
-Scoring is measured, not budgeted: every setup and scoring stage records wall-clock per goal into the eval log (store key `inspect_ranges:timings`). The built-ins run their check-plus-compare in milliseconds, and the poller re-runs checks on a 10 s default cadence, so a slow check multiplies. The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
+Scoring is measured, not budgeted ([Challenges](challenges.qmd#performance) has the recorded numbers). The built-ins run their check-plus-compare in milliseconds, and the scorer calls a custom type's `check` once per submitted candidate (at most 8), so a slow check multiplies. The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
 
 ## Registration
 

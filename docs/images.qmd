@@ -6,17 +6,25 @@ llms-description: "Operator images guide: the resolution model (pin, then local 
 
 ## Overview
 
-Image resolution, movement, and updates follow four rules:
+Every guest in a range boots from an image. The standard images (the goldens, the attack box) are published in a public catalog on Docker Hub, and range definitions refer to them by short names like `ubuntu-noble`. When a build or an eval needs an image that is not already on the machine, it downloads it and verifies it against its digest. On a connected machine there is nothing to set up.
 
-1. **Resolution order.** A bare `image:` name resolves pin first, then the local cache, then the search path: `INSPECT_RANGES_REGISTRY`, an ordered comma-separated list whose default is the public catalog (`docker.io/meridianlabsai/inspect-ranges`). First match wins, and a broken location aborts resolution with the location named rather than silently falling through.
+When a name is needed, it resolves in a fixed order:
 
-2. **Locations are interchangeable.** A location is the public hub org, a private OCI registry, or a plain directory in OCI image layout. Every artifact verifies by digest wherever it lands, and nothing unverified lands under a consumable name.
+1. the host's pin file, when one is configured (see [Pinned Fleet](#pinned-fleet));
 
-3. **Sticky, then explicit.** Once a name resolves into the cache, builds keep using the cached artifact even as registries move on. Moving forward is explicit: `images refresh`, regenerating a pin file, or consuming a republish (always a new digest; published bytes never change under a name silently).
+2. the local cache of already-downloaded images;
 
-4. **Specs travel by git, artifacts by registry.** A built range publishes under its spec's normalized-form hash, and eval init pulls the published build matching the cloned `range.yaml` exactly; this join is why `git clone` and `inspect eval` suffice.
+3. the locations listed in `INSPECT_RANGES_REGISTRY`, in order, which defaults to the public catalog (`docker.io/meridianlabsai/inspect-ranges`).
 
-[Distribution](distribution.qmd) holds the mechanics: the location grammar, verification semantics, and the full verb surface.
+A location can be a Docker Hub org, a private registry, or a plain directory, and the same artifacts work from all three because every download verifies against its digest. A location that cannot be reached stops resolution with an error naming it; nothing quietly falls through to the next entry.
+
+Two behaviors to know before the recipes below:
+
+- **Downloads are sticky.** Once an image is in the local cache, builds keep using it even after the registry publishes a newer version. Updating is an explicit action: `images refresh <name>`, or regenerating a pin file.
+
+- **Built ranges are published too.** A built range can be pushed to a registry under a hash of its `range.yaml`; anyone who clones the repository and runs `inspect eval` gets exactly that build pulled automatically. The dmz-pivot example works this way.
+
+[Distribution](distribution.qmd) documents the underlying commands and verification details.
 
 ## Catalog
 
@@ -27,7 +35,7 @@ The standard images publish at the project org, each consumable by bare name (hu
 | `attack` | The standard attack box: a kali-class toolset (nmap, hydra, sqlmap, john, gobuster, impacket, metasploit, and more) built by a pinned recipe over the noble golden. `/etc/attack-image.manifest` records every delivered package and version, and the image refuses to build if anything listens beyond loopback. A dedicated attack box with no `image:` boots it by default. |
 | `ubuntu-noble` / `ubuntu-focal` | Golden chains (image, provenance sidecar, vendor base), each with the guest control daemon baked in. |
 | `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
-| `inspect-ranges-range` | The hardened range container, published as a conventional Docker image and consumed by digest pin (below). |
+| `inspect-ranges-range` | The hardened range container, published as a conventional Docker image (consumed as a full Docker ref, not a bare `image:` name) by digest pin (below). |
 
 The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so the realized identity re-keys. Between publish days the catalog deliberately drifts from upstream feeds; the manifest records what shipped.
 
@@ -57,7 +65,7 @@ cd my-range/            # a built range
 inspect-ranges push --to registry.example.net/ranges
 ```
 
-`push` uploads the build manifest and its transitive closure (realized images, provenance, recipe bundles) and registers the exact-spec reference that eval init resolves. Consumers prepend the registry as above and run `git clone`, `inspect eval`. Pushing to the public org is the project publisher's job, never a user move.
+`push` uploads the build manifest and its transitive closure (realized images, provenance, recipe bundles) and registers the exact-spec reference that eval init resolves. Consumers prepend the registry as above and run `git clone`, `inspect eval`. Pushing to the public org is the project publisher's job.
 
 ### Air Gap
 
@@ -95,14 +103,26 @@ export INSPECT_RANGES_RANGE_IMAGE=\
 docker.io/meridianlabsai/inspect-ranges-range@sha256:ab12e0...
 ```
 
-Unset (the default and the dev loop), `up` builds the image locally from package data. The pull is a plain `docker pull`, so hub credentials and private mirrors work as for any image. Hosts logged into the hub with a narrowly-scoped org token are the exception: docker sends the stored credential for public pulls too, the hub rejects an insufficiently-scoped token rather than falling back to anonymous, and public `docker pull`s fail (the distribution client is unaffected). Details: [Distribution](distribution.qmd#the-hardened-range-container-image).
+Unset (the default and the dev loop), `up` builds the image locally from package data. The pull is a plain `docker pull`, so hub credentials and private mirrors work as for any image. Hosts logged into the hub with a narrowly scoped org token are the exception. Docker sends the stored credential for public pulls too, and the hub rejects an insufficiently scoped token rather than falling back to anonymous, so public `docker pull`s fail (the distribution client is unaffected). Details: [Distribution](distribution.qmd#the-hardened-range-container-image).
 
 ### Self-Derived Goldens
 
 Deriving your own goldens is the alternative to pulling the published ones: the fleet and air-gap path, and the only path for vendor images the catalog does not publish. It extends the digest chain back to the vendor image: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance.
 
-`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does (`--pull` fetches the published bundle instead, needing no toolchain); built artifacts are consumed everywhere else by digest, so one publish serves every host. Publish to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256`. A missing or wrong-version toolchain refuses with the pin named; builds are reproducible, so an unchanged source tree yields the identical bundle digest.
+`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does (`--pull` fetches the published bundle instead, needing no toolchain); built artifacts are consumed everywhere else by digest, so one publish serves every host. Write the bundle to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256`. A missing or wrong-version toolchain refuses with the pin named; builds are reproducible, so an unchanged source tree yields the identical bundle digest.
 
-`images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and every stub listener are disabled, and a provenance sidecar records all input digests. Failure modes, each stage-named: vendor digest mismatch (nothing written); missing, tampered, pin-mismatched, or protocol-skewed daemon artifact (each error names the `daemon-bundle` republish command); an unmanaged file squatting on the target name (never clobbered); a corrupt provenance sidecar; interrupted derives (self-healing on the next run). Re-running with the same inputs is a cache hit that re-verifies the recorded digests. Ubuntu noble vendor images are the Linux scope; Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light), [splunk-detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows)) cover the specifics.
+`images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and every stub listener are disabled, and a provenance sidecar records all input digests. Re-running with the same inputs is a cache hit that re-verifies the recorded digests. Failure modes, each stage-named:
+
+- vendor digest mismatch: nothing is written;
+
+- a missing, tampered, pin-mismatched, or protocol-skewed daemon artifact: each error names the `daemon-bundle` republish command;
+
+- an unmanaged file squatting on the target name: never clobbered;
+
+- a corrupt provenance sidecar;
+
+- an interrupted derive: self-healing on the next run.
+
+Ubuntu noble vendor images are the Linux scope. Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light), [splunk-detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows)) cover the specifics.
 
 `images list` shows managed goldens with provenance, build-captured realized images (flagging superseded generations no manifest references), and everything else: unmanaged files, stale derivation and capture temps, goldens whose recipe version is behind, and legacy double-suffix names. `images prune` reclaims what no manifest references; it reports by default, deletes with `--yes`, and refuses while registered projects exist unless forced (build success already prunes its own range's garbage, keeping one previous generation for rollback).

@@ -17,7 +17,7 @@ The agent sits behind three boundaries, each independent of the last:
 ![](diagrams/containment.excalidraw.png){fig-alt="The containment stack: an EC2 Nitro instance (one sample per instance) contains an unprivileged range container holding the router and target VMs under QEMU and the agent VM under Cloud Hypervisor, connected by Linux bridges; a sandbox-control port on the instance boundary reaches the agent VM over a virtio-vsock channel without touching the network, and evidence streams off-instance."}
 
 1. **The VM boundary.** Every guest, including the attack box, is a hardware virtual machine. The escape surface is kept small and declared: virtual hardware is compiled explicitly per role, and the attack box sees only virtio disk, network, vsock, serial console, and entropy devices.
-2. **The range container.** Nearly all historical VM escapes break out through the device-emulation process and land here: an unprivileged container holding no credentials, with Docker's default capabilities dropped (eight added back: `NET_ADMIN` plus the file-ownership and user-switching set that lets the VMMs run as non-root users), four device nodes (`/dev/kvm`, `/dev/net/tun`, `/dev/vhost-net`, `/dev/vhost-vsock`), and the standard seccomp and AppArmor profiles. The range's bridges and firewall rules exist only inside this container's network namespace, and teardown is the container lifecycle.
+2. **The range container.** Nearly all historical VM escapes break out through the device-emulation process and land here: an unprivileged container holding no credentials, with Docker's default capabilities dropped (eight at the floor: `NET_ADMIN` plus the file-ownership and user-switching set that lets the VMMs run as non-root users; plans serving DHCP or search domains add `NET_BIND_SERVICE`, and DHCP adds `NET_RAW`), four device nodes (`/dev/kvm`, `/dev/net/tun`, `/dev/vhost-net`, `/dev/vhost-vsock`), and the standard seccomp and AppArmor profiles. The range's bridges and firewall rules exist only inside this container's network namespace, and teardown is the container lifecycle.
 3. **The instance.** Reaching the host from the container requires a second, unrelated exploit, and the host is a dedicated machine: even full compromise yields only the sample context, with the cloud hypervisor between it and everything else.
 
 ## Per-Guest Identity
@@ -27,11 +27,11 @@ An escape from one guest's VMM should own nothing else, so no two VMMs share an 
 - **QEMU guests** each run as their own unprivileged uid, derived from the guest's leased vsock CID, with QEMU's syscall sandbox on and the container's AppArmor profile around the whole stack.
 - **The attack box defaults to Cloud Hypervisor**, a smaller rust-vmm device model with no legacy hardware surface, started directly (no management daemon in its path) as its own unprivileged per-guest uid with no capabilities and Cloud Hypervisor's default seccomp filter. The binary and its firmware are sha256-pinned into the range image.
 
-Graded honestly, boundary strength orders rust-vmm above QEMU/KVM, which has a long device-emulation CVE history. The Cloud Hypervisor attack box is a gate, not a tier upgrade: compromising targets is the sanctioned objective, so a successful agent reaches QEMU through any rooted target regardless of what the attack box runs on. What it buys is closing the quiet path, an escape launched from the one guest where the agent has root and full tooling from the first prompt, forcing escape attempts through observable, evidence-producing compromise work first.
+Boundary strength orders rust-vmm above QEMU/KVM, which has a long device-emulation CVE history. The Cloud Hypervisor attack box is a gate, not a tier upgrade: compromising targets is the sanctioned objective, so a successful agent reaches QEMU through any rooted target regardless of what the attack box runs on. It closes the quiet path: an escape launched from the one guest where the agent has root and full tooling from the first prompt. Escape attempts are forced through observable, evidence-producing compromise work first.
 
 ## Virtual Machine Monitors {#virtual-machine-monitors}
 
-Hosts and routers run under QEMU via libvirt by default; the dedicated attack box defaults to Cloud Hypervisor (declare `attacker.vmm: qemu` to keep QEMU), and any host or router may opt in with `vmm: cloud-hypervisor`. Each Cloud Hypervisor VMM runs as its own unprivileged uid derived from the guest's leased vsock CID, so no two VMMs share one, and none shares QEMU's `libvirt-qemu`.
+Hosts and routers run under QEMU via libvirt by default; the dedicated attack box defaults to Cloud Hypervisor (declare `attacker.vmm: qemu` to keep QEMU), and any host or router may opt in with `vmm: cloud-hypervisor`. Each Cloud Hypervisor VMM gets the same per-guest uid treatment as the attack box ([Per-Guest Identity](#per-guest-identity)); none shares QEMU's `libvirt-qemu`.
 
 Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control plane reaches them through the VMM's hybrid-vsock Unix socket, and every dialer checks the socket peer's credentials (`SO_PEERCRED`) against the VMM's uid before sending a byte, refusing anything else without retry. The sockets live in a private per-user host directory that `up` prepares and `down` removes.
 
@@ -43,7 +43,7 @@ Guest control rides virtio-vsock, not a management network. The rules:
 
 - Guests get lab-segment NICs only: no management NIC, no management subnet for in-range software to discover, firewall, or pivot through.
 - The plane is strictly connect-from-host: the in-guest daemon accepts connections only from the host, and no host-side `AF_VSOCK` listeners exist for a compromised guest to dial.
-- Cloud Hypervisor guests are reached over the VMM's hybrid-vsock Unix socket with the peer-credential check described in [Virtual machine monitors](#virtual-machine-monitors).
+- Cloud Hypervisor guests are reached over the VMM's hybrid-vsock Unix socket with the peer-credential check described in [Virtual Machine Monitors](#virtual-machine-monitors).
 - Everything received over the channel comes from guests the agent may have compromised and is treated as untrusted input: strict schema validation, reader-side byte caps, and tamper verdicts for protocol violations an honest endpoint cannot produce (see [the retry contract](provider.qmd#the-retry-contract)).
 
 In the other direction, in-range defenders can detect everything the agent transmits (that is realism, not a leak), but they cannot observe the agent's interior, connect to it (standard images ship zero network listeners), or reach the channel controlling it.
@@ -60,7 +60,7 @@ Scenario networking and operator containment are different authorities, each wit
 
 A range that carries [behavioral checks](building.qmd#behavioral-checks) proves its containment at build time. Before the checks, the proof boot runs the `conformance` stage: a shared-segment target TCP-sweeps the attacker expecting zero open ports, and the attacker verifies that no undeclared management endpoint answers on its segments. Any finding refuses the manifest exactly like a failed check, so an uncontained range is never consumable.
 
-The stage's scope limits, recorded plainly: the sweep is TCP only (ports 1-1024 plus a high-port sample), foothold ranges skip it (the agent lands on a declared host whose services legitimately answer), and a range without behavioral checks has no proof boot, so it gets no conformance stage either.
+The stage's scope limits: the sweep is TCP only (ports 1-1024 plus a high-port sample), foothold ranges skip it (the agent lands on a declared host whose services legitimately answer), and a range without behavioral checks has no proof boot, so it gets no conformance stage either.
 
 ## Score Integrity
 
@@ -70,6 +70,6 @@ Streaming preserves the evidence record but does not by itself detect an escape,
 
 The co-resident topology (the `local` backend) puts the driver, with its model API credentials, on the same host as the range: it is for development and trusted runs, and its credentials must be scoped and revocable (per-run model keys, no long-lived cloud credentials). The separated topology (`uds:`) isolates the process that parses attacker-influenced bytes from the process holding credentials and is the preferred configuration where the agent is genuinely untrusted; see [Range Host](topology.qmd).
 
-Both v1 backends record `isolation="shared"` in the eval log: one host's kernel, device emulation, and caches are reused across samples, so the one-sample-per-instance posture above is a deployment property, not something v1 enforces. The claim is honest labeling; `isolation="instance"` arrives only with a real fleet provider.
+Both v1 backends record `isolation="shared"` in the eval log ([Range Host](topology.qmd#isolation-claim)), so the one-sample-per-instance posture above is a deployment property, not something v1 enforces.
 
 For untrusted-model runs, point the eval log directory or `INSPECT_RANGES_EVIDENCE_SINK` at off-instance storage, since instance-local evidence does not survive instance compromise ([deployment guidance](evidence.qmd#deployment-guidance-store-side-prevention)); `inspect-ranges doctor` warns when evidence resolves to local storage.

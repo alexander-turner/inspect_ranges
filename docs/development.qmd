@@ -18,11 +18,13 @@ Ranges build and run on any Linux x86_64 machine with KVM: bare metal with virtu
 
 - `qemu-utils` and `libguestfs-tools` for building images (libguestfs also requires that the host kernel be readable).
 
-- `br_netfilter` disabled, so host iptables never filters bridged range traffic (and IPv6 enabled, for ranges that use it).
+- `br_netfilter` unloaded, or loaded with `bridge-nf-call-iptables=0`, so host iptables never filters bridged range traffic.
+
+- IPv6 enabled, for ranges that use it (mitm6-style scenarios).
 
 `inspect-ranges doctor` verifies all of this and prints an exact fix for anything missing.
 
-### Devbox
+### `devbox`
 
 The `devbox` command provisions a remote EC2 instance as a development environment:
 
@@ -31,15 +33,15 @@ inspect-ranges devbox up --instance-type m8i.8xlarge
 ssh inspect-ranges-devbox
 ```
 
-`up` creates (or starts) a devbox and writes an SSH configuration for it. The default AWS region and profile come from the local AWS configuration; the default instance type is `m8i.8xlarge` (32 vCPUs / 128 GB). To manage costs, an idle devbox stops itself (after 60 idle minutes by default, with a CloudWatch backstop after 6 hours of low CPU), and reconnecting with `ssh` or VS Code starts it again: the SSH configuration's proxy starts the instance and tunnels over AWS SSM, so the devbox has no open inbound ports.
+`up` creates (or starts) a devbox and writes an SSH configuration for it. The default AWS region and profile come from the local AWS configuration; the default instance type is `m8i.8xlarge` (32 vCPUs / 128 GB). To manage costs, an idle devbox stops itself (after 60 idle minutes by default, with a CloudWatch backstop after 6 hours of low CPU). Reconnecting with `ssh` or VS Code starts it again: the SSH configuration's proxy starts the instance and tunnels over AWS SSM, so the devbox has no open inbound ports.
 
 ## Iteration Loop
 
 1. **Validate.** `inspect-ranges validate range.yaml` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)).
 
-2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache, allocations, variable draws. A reference that cannot resolve shows up here, not mid-boot.
+2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot.
 
-3. **Build.** `inspect-ranges build` realizes declared guest content ([Building Ranges](building.qmd)). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. Recipe output lands under `~/.local/state/inspect-ranges/projects/<project>/recipes/`.
+3. **Build.** `inspect-ranges build` realizes declared guest content ([Building Ranges](building.qmd)). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. Recipe logs and failure diagnosis: [Diagnosing Failures](building.qmd#diagnosing-failures).
 
 4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Operations](cli.qmd)). For eval-side poking, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox so solver code can reach targets directly; it removes the foothold wall and is logged loudly, so never set it on scoring runs.
 

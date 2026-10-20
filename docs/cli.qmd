@@ -13,11 +13,11 @@ inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
 
-A range declaring guest content needs a matching build first: your own ([Building Ranges](building.qmd)), or a published one that eval init or `pull` fetches automatically ([Images](images.qmd)). Images need no preparation either way: bare `image:` names resolve digest-verified on first use ([Images](images.qmd)). `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
-
-This page is the narrative tour of the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
+A range declaring guest content needs a matching build first: your own ([Building Ranges](building.qmd)), or a published one that eval init or `pull` fetches automatically ([Distribution](distribution.qmd)). Images need no preparation either way: bare `image:` names resolve digest-verified on first use ([Images](images.qmd)). `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
 
 Each stage consumes only the verified output of the one before it: `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify.
+
+This page is the narrative tour of the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
 
 ## `push`, `pull`, and `mirror`
 
@@ -45,10 +45,20 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 ## `doctor`
 
-`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus the realizer surface: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet), plus the provider and host groups (entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one), plus the evidence group (knob validity, a writability probe of a configured sink, and a warning when evidence resolves to instance-local storage; see [Evidence](evidence.qmd)), plus the build group (builds/recipe cache writability, recorded manifests and cached recipe bundles still parse, and whether a build nameserver is derivable from this host's resolv.conf; see [Building Ranges](building.qmd)). `--fix-script` emits the shell commands for whatever failed.
+`inspect-ranges doctor` checks the host (virtualization devices, docker versions, networking sysctls, image tooling) plus four surface groups:
+
+- **Realizer**: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet).
+
+- **Provider and host**: entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one.
+
+- **Evidence**: knob validity, a writability probe of a configured sink, and a warning when evidence resolves to instance-local storage (see [Evidence](evidence.qmd)).
+
+- **Build**: builds/recipe cache writability, recorded manifests and cached recipe bundles still parse, and whether a build nameserver is derivable from this host's resolv.conf (see [Building Ranges](building.qmd)).
+
+`--fix-script` emits the shell commands for whatever failed.
 
 ::: {.callout-note}
-## v1 Boundary, Honestly
+## v1 Boundary
 
-`up` realizes cold-boot bundles only: checkpoint instantiation is later build-arc work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections (linux-examples-v1), as do `roles`, `defense`, Active Directory, and telemetry-bearing postures (windows-ad-v1); `scheduled_activity` still validates but refuses at planning until its slice lands, so nothing boots with silently missing content. Windows guests are first-class (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (signed bundles are image-distribution work).
+`up` realizes cold-boot bundles only: checkpoint instantiation is later build-arc work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections, as do `roles`, `defense`, Active Directory, and telemetry-bearing postures; `scheduled_activity` still validates but refuses at planning until its slice lands, so nothing boots with silently missing content. Windows guests are first-class (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (signed bundles are image-distribution work).
 :::

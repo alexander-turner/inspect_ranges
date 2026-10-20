@@ -56,7 +56,7 @@ Images resolve from the published catalog: the hosts boot the `ubuntu-noble` gol
 
 ## Files
 
-- [range.yaml](range.yaml): the definition; [challenges.yaml](challenges.yaml): the three challenges.
+- [range.yaml](range.yaml): the definition; [challenges.yaml](challenges.yaml): the three challenges; [task.py](task.py): the eval task below.
 - [recipes/](recipes/): `dmz.web` (sshd password auth, the `deploy` account, the planted `.pgpass`) and `dmz.db` (postgres 16, DMZ-facing `pg_hba`, the sudoers rule).
 - [checks/](checks/): the per-challenge reference/insufficient/forged trios run at build.
 - [notes.md](notes.md): per-field provenance and the realization record; [source.md](source.md): provenance.

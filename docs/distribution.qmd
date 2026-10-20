@@ -14,7 +14,7 @@ Every artifact is content-addressed: qcow2 images, provenance sidecars, recipe b
 
 Everywhere a registry location appears (`push --to`, `pull --from`, `mirror`, the configured search path) it takes one of three interchangeable forms:
 
-- **The public hub**: `docker.io/meridianlabsai/inspect-ranges`, the out-of-box default carrying the reusable base tier (the hub is two-level, so the third segment is a repo-NAME prefix: name `attack` lives in the repo `meridianlabsai/inspect-ranges-attack`; any `docker.io/<org>/<prefix>` location spells repos the same way) (goldens, the daemon bundle, common recipes).
+- **The public hub**: `docker.io/meridianlabsai/inspect-ranges`, the out-of-box default, carrying the reusable base tier (goldens, the daemon bundle, common recipes) and published range builds (dmz-pivot today). The hub is two-level, so the third segment is a repo-name prefix: name `attack` lives in the repo `meridianlabsai/inspect-ranges-attack`, and any `docker.io/<org>/<prefix>` location spells repos the same way.
 - **A private OCI registry**: `registry.example.net/ranges` (served over https; an explicit `http://host:port/path` form exists for local registries).
 - **A directory** in standard OCI image-layout format: `./archive` or `/mnt/mirror`. This is the registry-less shape: tar it, ship it across an air gap, untar it, and everything still verifies, because identity is content, not transport. Directory locations must look like paths (start with `/`, `./`, `../`, or `~`), so a configured value parses the same way in every working directory.
 
@@ -30,7 +30,7 @@ manifest  vulhub-zabbix (spec 77ab41...) -> registry.example.net/ranges
 push OK   vulhub-zabbix@sha256:ab12e0...
 ```
 
-`push` reads the current directory's build manifest and uploads its transitive closure: every realized image with its provenance sidecar, the goldens and vendor bases they chain onto, the referenced recipe bundles (which must still resolve at the digests the build recorded), and the build manifest itself as the pull root. Blobs the destination already holds are skipped by digest, so pushing a rebuilt range moves only what changed. The printed `name@digest` is the range's publishable identity. Each push also names the root under an exact-spec reference, which is what spec-driven pull resolves.
+`push` reads the current directory's build manifest and uploads its transitive closure: every realized image with its provenance sidecar, the goldens and vendor bases they chain onto, the referenced recipe bundles (which must still resolve at the digests the build recorded), and the build manifest itself as the pull root. Blobs the destination already holds are skipped by digest, so pushing a rebuilt range moves only what changed. The printed `name@digest` is the range's publishable identity. Each push also names the root under an exact-spec reference, which spec-driven pull resolves.
 
 `push` has no default destination: pass `--to` or configure `INSPECT_RANGES_REGISTRY`. Pushing to the public org is the project publisher's job, never a user move, and user ranges must not aim anywhere public by accident.
 
@@ -60,11 +60,11 @@ vulhub-zabbix@sha256:ab12e0... (built 2026-10-17T... from spec
 check out the spec revision matching a published build
 ```
 
-The `name@sha256:` form pulls an exact published root with no spec in hand: `inspect-ranges pull vulhub-zabbix@sha256:ab12e0...`. Either way, what a reference RESOLVED TO is untrusted until the landed manifest's recorded identity matches what was asked for: registry tags are mutable, and a re-pointed reference refuses before anything consumable lands.
+The `name@sha256:` form pulls an exact published root with no spec in hand: `inspect-ranges pull vulhub-zabbix@sha256:ab12e0...`. Either way, what a reference resolved to is untrusted until the landed manifest's recorded identity matches what was asked for: registry tags are mutable, and a re-pointed reference refuses before anything consumable lands.
 
-The warm path costs one spec hash plus artifact-presence checks and touches no network: a local build manifest matching the spec short-circuits, and a pruned artifact heals by re-pull. Byte integrity is enforced where it matters: `up` verifies every image, its backing golden, and (whenever the golden's provenance sidecar is readable) the golden's vendor base against the recorded digests on every boot, so a corrupt or mixed cache refuses with a named cause; a golden whose provenance cannot be read skips the vendor edge, which `images prune --chains` and doctor surface as a frozen chain to fix.
+The warm path costs one spec hash plus artifact-presence checks and touches no network: a local build manifest matching the spec short-circuits, and a pruned artifact heals by re-pull. `up` verifies every image, its backing golden, and (whenever the golden's provenance sidecar is readable) the golden's vendor base against the recorded digests on every boot, so a corrupt or mixed cache refuses with a named cause. A golden whose provenance cannot be read skips the vendor edge; `images prune --chains` and doctor surface it as a frozen chain to fix.
 
-`INSPECT_RANGES_NEVER_PULL=1` pins a host against implicit transfers: the provider's auto-pull and the build's registry tier refuse or skip instead of touching the network. Explicit verbs still work on a pinned host, because typing them is the operator's intent; a fully offline host simply configures no reachable locations.
+`INSPECT_RANGES_NEVER_PULL=1` pins a host against implicit transfers (the provider's auto-pull and the build's registry tier refuse or skip); the locked-down host shape is in [Images](images.qmd#locked-down-host).
 
 ## Catalog Images: `images pull` and `refresh`
 
@@ -79,14 +79,7 @@ A plain `images pull` of a name whose published chain moved refuses rather than 
 
 ## Range Container Image {#the-hardened-range-container-image}
 
-The range container (the hardened jail every guest boots inside) is an ordinary Docker image, not an OCI-artifact qcow2, so it distributes as one: the project publishes it to a conventional Docker repo (`docker.io/meridianlabsai/inspect-ranges-range`), and a consumer opts in by pinning it:
-
-``` {.bash .fragment}
-export INSPECT_RANGES_RANGE_IMAGE=\
-  docker.io/meridianlabsai/inspect-ranges-range@sha256:ab12e0...
-```
-
-With the knob set, `up` pulls the pin once (plain `docker pull`, so hub credentials and private mirrors work exactly as they do for any image) and every range boots inside it; doctor's range-image row reports the pinned source. The pin is mandatory: a mutable tag could swap the hardened jail under a fleet, so an unpinned value refuses before anything boots, as does a pin the registry does not hold.
+The range container (the hardened jail every guest boots inside) is an ordinary Docker image, not an OCI-artifact qcow2, so it distributes as one: the project publishes it to a conventional Docker repo (`docker.io/meridianlabsai/inspect-ranges-range`), and a consumer opts in by pinning it (the recipe is in [Images](images.qmd#range-container-pin)). With `INSPECT_RANGES_RANGE_IMAGE` set to a digest pin, `up` pulls the pin once (plain `docker pull`, so hub credentials and private mirrors work exactly as they do for any image) and every range boots inside it; doctor's range-image row reports the pinned source. The pin is mandatory: a mutable tag could swap the hardened jail under a fleet, so an unpinned value refuses before anything boots, as does a pin the registry does not hold.
 
 Unset (the default and the dev loop), `up` builds the image locally from package data, keyed by a content label over the package version and build context, so an edited Dockerfile rebuilds within one version. The digest pin plays the same role for published images that the content label plays for local ones: the identity that decides whether the image on this host is the one intended.
 
@@ -109,10 +102,20 @@ $ inspect-ranges mirror . --from registry.other-group.net/ranges \
 $ inspect-ranges mirror vulhub-zabbix@sha256:ab12e0... --from X --to Y
 ```
 
-A mirrored root carries its transitive closure and its exact-spec reference, so spec-driven `pull` works from the mirror; manifests move as raw verified bytes, so digests survive the copy even for foreign-produced content. For the air gap, mirror into a directory, `tar` it, carry it across, untar, and set `INSPECT_RANGES_REGISTRY` to the directory: the consuming session is then identical to the connected one. A whole-location mirror carries the source's catalog list verbatim, replacing the destination's: names published only at the destination stay served by ref but drop out of enumeration and pin generation, so merge-style syncs between two publishing locations should republish rather than mirror. Whole-location mirroring enumerates the source's catalog listing; the public hub does not expose org enumeration through the OCI API, so whole-org mirrors from the hub name their artifacts explicitly (the published catalog list is a recorded follow-up of the catalog phase).
+A mirrored root carries its transitive closure and its exact-spec reference, so spec-driven `pull` works from the mirror; manifests move as raw verified bytes, so digests survive the copy even for foreign-produced content. The air-gap recipe (mirror to a directory, carry it across, point `INSPECT_RANGES_REGISTRY` at it) is in [Images](images.qmd#air-gap).
+
+A whole-location mirror carries the source's catalog list verbatim, replacing the destination's: names published only at the destination stay served by ref but drop out of enumeration and pin generation, so merge-style syncs between two publishing locations should republish rather than mirror. Whole-location mirroring enumerates the source's catalog listing; the public hub does not expose org enumeration through the OCI API, so whole-org mirrors from the hub name their artifacts explicitly (the published catalog list is a recorded follow-up of the catalog phase).
 
 ## Reclaiming Space: `images prune --chains`
 
 `images prune` reports and reclaims superseded realized images, stranded capture and pull temps, and orphan sidecars; `--chains` extends it to goldens and vendor bases nothing references. Eviction is by whole chain, never a backing out from under a dependent: a golden survives while any realized image, build manifest, or live project names it, and a vendor base survives while any surviving golden's provenance does. Reports by default; `--yes` deletes.
 
 `inspect-ranges doctor` carries the Distribution rows: configured locations parse (directory forms must be valid layouts), and the cache's provenance chains are whole, with broken backing references named.
+
+## Environment Vars
+
+| Variable | Default | Effect |
+|---|---|---|
+| `INSPECT_RANGES_REGISTRY` | the public org | Ordered, comma-separated search path of locations; first match wins, broken locations abort resolution. |
+| `INSPECT_RANGES_NEVER_PULL` | unset | Any non-empty value refuses implicit transfers (the provider's auto-pull and the build's registry tier); explicit verbs still work. |
+| `INSPECT_RANGES_RANGE_IMAGE` | unset (local build) | Digest-pinned published range container image; `up` pulls it once and boots every range inside it. |

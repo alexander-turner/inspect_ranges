@@ -27,7 +27,7 @@ inspect-ranges build
 
 The range boots on an egress-enabled build plan, recipes converge each guest, every declared service and vulnerability is verified against the live guests, each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning. Declared `users`, `misconfigurations`, and `data` are build-claimed through recipe self-assertion plus the behavioral checks' chain-load-bearing facts; mechanical probes for them are a recorded follow-up.
 
-Until a range has a matching build, every content-consuming verb refuses with `range-not-built`: `plan`, `render`, `up --from-spec`, and the sandbox provider all require a manifest whose spec hash matches the definition and whose realized images verify by digest in the image cache. The refusal names the fix. Nothing boots with silently missing content.
+Until a range has a matching build, every content-consuming verb refuses with `range-not-built`: `plan`, `render`, `up --from-spec`, `push`, and the sandbox provider all require a manifest whose spec hash matches the definition and whose realized images verify by digest in the image cache. The refusal names the fix. Pulling the published build satisfies the gate the same way ([Distribution](distribution.qmd)), so consumers of a published range never run `build`. Nothing boots with silently missing content.
 
 ## Build Stages
 
@@ -82,15 +82,13 @@ The entrypoint runs **on the host**, with the bundle directory as working direct
 |---|---|
 | `IR_GUEST` | The target guest's name |
 | `IR_GUEST_CIDS` | JSON map of every guest name to its vsock CID |
-| `IR_EXEC` | Path to a wrapper that runs a command in the target guest as root (`--budget-ms` bounds it; `--user` switches principal; `--script` uploads and runs a local file, as root or the agent user only, and takes no trailing argv) |
+| `IR_EXEC` | Path to a wrapper that runs a command in the target guest as root (`--budget-ms` bounds it; `--user` switches principal; `--cwd` sets the working directory; `--script` uploads and runs a local file, as root or the agent user only, and takes no trailing argv) |
 | `IR_PUSH` | Path to a wrapper that pushes a local file to a guest path (`--mode` sets permissions) |
 | `IR_EXEC_BUDGET_MS` | The default per-exec budget |
 
 Exit status 0 is demanded and is never sufficient: verification of the declared state happens independently, after all recipes. The whole entrypoint is bounded by `--recipe-budget` (default 1800 s) and killed as a process group on expiry, so stray children cannot hold the build.
 
 ### Entrypoint Conventions
-
-Two conventions, both learned from undiagnosable failures.
 
 **Every step announces itself and surfaces its evidence.** A recipe whose steps are silent (`wget -q`, output redirected into in-guest files) fails as "exited 1" with a log that ends at the previous step. Print a marker before each step, and on failure of a step whose output went to an in-guest file, tail that file to stderr:
 
@@ -126,7 +124,7 @@ rm -f /tmp/host.$$
 
 ### Period Software
 
-Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar actually requires.
+Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar requires.
 
 ## Verification {#verification}
 
@@ -150,9 +148,9 @@ A range that carries challenges can prove them at build time. Convention: `check
 | `insufficient.sh` | Do real but incomplete work and score 0.0 with validity `valid` and at least one submission. |
 | `forged.sh` | Submit plausible fakes and score 0.0 with validity `valid` and at least one submission. A chain that submits nothing, or a scorer that never reached a verdict, would otherwise pass vacuously. |
 
-Beacons corroborate only when their capture chunk rotates before scoring: tcpdump rotates by size, and scoring reads rotated chunks. The build's proof boot defaults to 1 MB chunks, and the reference chain pushes filler traffic after its beacons (the vulhub chain is the worked example). A beacon that never has to land would be theater.
+Beacons corroborate only when their capture chunk rotates before scoring: tcpdump rotates by size, and scoring reads rotated chunks. The build's proof boot defaults to 1 MB chunks, and the reference chain pushes filler traffic after its beacons (the vulhub chain is the worked example).
 
-The checks run against the **captured** realized images, in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Before the checks, the same boot proves the range's defender-to-agent containment: the `conformance` stage has a shared-segment target TCP-sweep the attacker expecting zero open ports, and the attacker check that no undeclared management endpoint answers on its segments. Foothold ranges skip the stage, since the agent lands on a declared host whose services legitimately answer. A containment finding refuses the manifest exactly like a failed check.
+The checks run against the **captured** realized images, in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Before the checks, the same boot runs the `conformance` stage, proving the range's defender-to-agent containment ([Security](security.qmd#proving-containment)); a containment finding refuses the manifest exactly like a failed check.
 
 Each check gets fresh per-sample proof material, removed afterward; nothing a check planted survives as a valid secret at runtime. A declared checks tree must be complete: a misnamed directory or missing script refuses rather than silently skipping. A failing check saves a REFUSED manifest: consumers refuse it with `range-unproven`, while the next build reuses every guest and re-runs only the proof, so fixing a check script costs a boot-and-prove cycle, not a rebuild. The build reports a `behavioral` stage line per check and records the results in the manifest.
 

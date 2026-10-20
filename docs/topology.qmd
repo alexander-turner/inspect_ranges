@@ -4,11 +4,11 @@ description: "Co-resident versus separated realization: the INSPECT_RANGES_HOST 
 llms-description: "The range host: the local (co-resident) and uds (separated, applier-backed) backends behind INSPECT_RANGES_HOST; operating the applier and reaper processes; the lease contract including the expiry-mid-sample reclaim policy; the fetch-grants convention; the isolation claim; the HostProvider/RangeHost seam (acquire/release/abandon, check_lease, HostCapabilities) with its not-yet-public status and the contracts a future backend must honor; and the environment knob table."
 ---
 
-## Two Topologies, One Switch
+## Backends
 
 The provider realizes ranges through one of two backends, selected by `INSPECT_RANGES_HOST`:
 
-- **`local`** (the default): today's co-resident path. The driver process renders the bundle and runs realization in-process; guests are reached directly over vsock. Nothing changes versus a pre-topology setup except that every sample now also holds a host lease (below).
+- **`local`** (the default): the co-resident path. The driver process renders the bundle and runs realization in-process; guests are reached directly over vsock. The only addition over a plain setup is the host lease every sample holds (below).
 - **`uds:<socket>`**: the separated topology on one host. A standing `inspect-ranges applier` process owns realization and teardown; the driver talks to it over a unix socket, and every guest operation relays through the same socket as an opaque byte stream. The driver still renders bundles (the compiler toolchain is driver-side) and still leases CIDs; the applier verifies the bundle digest and runs `up`.
 
 ![](diagrams/range-host.excalidraw.png){fig-alt="The deployment seam: the Inspect scaffold (compile and render, agent loop, model credentials) and an append-only evidence store on the left, the range host with its applier and range container on the right, separated by a dashed trust boundary crossed by three flows: the realization bundle going in, the control channel (exec, read_file, write_file) in both directions, and evidence streaming out."}
@@ -22,7 +22,7 @@ INSPECT_RANGES_HOST=uds:/run/user/1000/ir-applier.sock \
   inspect eval my_task.py
 ```
 
-Both backends behave identically at the eval surface: same sandboxes, same ops, same cleanup semantics. The separated topology exists so the process that parses attacker-influenced bytes can be isolated from the process holding credentials; on one host it buys crash independence (a dead driver no longer strands cleanup knowledge in a dead process) and is the stepping stone to real multi-host dispatch.
+Both backends behave identically at the eval surface: same sandboxes, same ops, same cleanup semantics. The separated topology isolates the process that parses attacker-influenced bytes from the process holding credentials ([Security](security.qmd#topologies-and-credentials) covers when to prefer it). On one host it buys crash independence (a dead driver no longer strands cleanup knowledge in a dead process) and is the step toward multi-host dispatch.
 
 Keep socket paths short: `AF_UNIX` paths cap at about 107 bytes, so prefer `/run/user/<uid>/...` or a short `/tmp` directory over deeply nested trees.
 
@@ -30,7 +30,7 @@ Keep socket paths short: `AF_UNIX` paths cap at about 107 bytes, so prefer `/run
 
 Every sample holds a **host lease**: an identity plus an absolute expiry, recorded in `leases.json` beside the CID registry under the shared state dir. The driver renews it at a third of the TTL (`INSPECT_RANGES_LEASE_TTL_S`, default 600 seconds); renewal is an on-disk compare-and-swap, so there is zero hot-path wire chatter. Release is destruction: a lease is removed only after a successful teardown, and a used host is never returned to a pool.
 
-**The expiry-mid-sample policy, stated loudly: the reaper reclaims on expiry alone and never probes liveness.** A healthy sample never expires, because renewal is independent of sample activity; the only way to expire mid-sample is a dead or wedged driver, which is exactly what the reaper exists for. If a running sample's lease is reclaimed anyway (forced expiry, operator intervention), the driver fails the sample loudly with `LeaseLostError` at its next operation rather than letting it limp along on a reclaimed host. There is no looks-alive grace period; adding one would reintroduce the dependence on driver liveness that leases exist to remove.
+**The expiry-mid-sample policy: the reaper reclaims on expiry alone and never probes liveness.** A healthy sample never expires, because renewal is independent of sample activity; the only way to expire mid-sample is a dead or wedged driver, which is exactly what the reaper exists for. If a running sample's lease is reclaimed anyway (forced expiry, operator intervention), the driver fails the sample loudly with `LeaseLostError` at its next operation rather than letting it limp along on a reclaimed host. There is no looks-alive grace period; adding one would reintroduce the dependence on driver liveness that leases exist to remove.
 
 ## Operating the Reaper
 
@@ -41,7 +41,7 @@ inspect-ranges reaper                # one sweep; exit 1 on failure
 inspect-ranges reaper --interval 60  # daemon: sweep every minute
 ```
 
-A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, marks them `reaping` (which makes any further renewal fail), tears each range down OUTSIDE the lock, and only after a successful teardown releases the CID lease, clears staging and ownership records, and removes the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the applier's admission charge); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
+A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, and marks them `reaping`, which fails any further renewal. Teardown runs outside the lock. Only after a successful teardown does the sweep release the CID lease, clear staging and ownership records, and remove the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the applier's admission charge); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
 
 `inspect-ranges doctor` reports lease health in its Host group, including an expired-leases hint that names the reaper.
 
@@ -84,7 +84,7 @@ What is not built yet, concretely: entry-point registration (the backend set is 
 
 ## Environment Vars
 
-| Variable | Default | Meaning |
+| Variable | Default | Effect |
 |---|---|---|
 | `INSPECT_RANGES_HOST` | `local` | Backend selection: `local` (co-resident) or `uds:<socket>` (a running applier). |
 | `INSPECT_RANGES_LEASE_TTL_S` | 600 | Host lease TTL in seconds; the driver renews at TTL/3. A dead driver's sample becomes reclaimable one TTL after its last renewal. |
