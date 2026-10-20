@@ -343,7 +343,7 @@ dns_ad = RangeSpec(
 The DC's `hostname` and `fqdn` are build-phase content: declaring either refuses at planning (`guest-config-not-realized`) until the build arc realizes them, as described under [Hosts](guests.qmd#hosts).
 
 ::: callout-warning
-## `.local` zones
+## `.local` Zones
 
 Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux stub resolvers never send them to unicast DNS. Definitions using them validate with a warning so you can decide whether to keep them:
 
@@ -359,6 +359,8 @@ Zones under `.local` (common in AD lab material) are reserved for mDNS: Linux st
 ## Segmentation
 
 Routers join segments and carry the inter-segment policy. A router with no `acl` is a plain router: everything forwards (the KYPO/CyRIS pure-router shape). Declaring any rule flips it to default-deny and stateful: anything not allowed is dropped, and return traffic of allowed flows always passes. For example, a DMZ pivot:
+
+![](diagrams/dmz-pivot.excalidraw.png){fig-alt="The dmz-pivot topology: an attacker VM and web server on the DMZ segment, a database on the internal segment, and a router joining the two segments whose ACL allows only tcp/5432 from dmz to internal."}
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -686,7 +688,7 @@ chained = RangeSpec(
 ```
 :::
 
-## Leaving the range {#egress}
+## Leaving the Range {#egress}
 
 Each network declares its egress posture through `mode`:
 

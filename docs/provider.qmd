@@ -61,7 +61,7 @@ attacker:
   egress: none
 ```
 
-## The foothold sandbox
+## The Foothold Sandbox
 
 `sandbox()` is the attacker's foothold host (or the attacker box itself), and by default it is the ONLY registered sandbox: targets are not addressable by name from the agent's tool loop, which is the structural wall challenge scoring relies on (see [Challenges](challenges.qmd)).
 
@@ -77,7 +77,7 @@ For interactive range development, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` regist
 
 Commands run as the unprivileged `agent` user by default (home `/home/agent`, where relative paths resolve); pass `user="root"` or any in-guest user to switch. Sample `files` and the `setup` script land through the same surface before the solver starts.
 
-## The retry contract
+## The Retry Contract {#the-retry-contract}
 
 Infrastructure flakes, and losing an entire sample when a retry would have recovered it is worse than the double-execution risk of retrying, so sandbox operations retry transient infrastructure failures by default. The caveat from `inspect_k8s_sandbox` applies verbatim: "Note that retries cannot guarantee idempotency — if a command partially executed before the error, it may run again on retry." (UKGovernmentBEIS/inspect_k8s_sandbox, docs/docs/design/limitations.md; the em dash inside the quotation is the source's own punctuation, preserved for quote fidelity.)
 
@@ -89,14 +89,14 @@ What bounds that risk, in order:
 
 Failures that survive the retry budget map to the contract: transport and channel-budget failures become `SandboxUnavailableError`; errno-tagged guest failures become the matching `FileNotFoundError`/`PermissionError`/`IsADirectoryError`/`NotADirectoryError`; protocol violations an honest endpoint cannot produce are tamper verdicts and never retried.
 
-## Execution identity
+## Execution Identity
 
 The daemon runs commands as the `agent` user via an absolute-path `runuser` unless the call names a user. Two consequences worth knowing:
 
 - **`runuser` always resets `HOME`, `SHELL`, `USER`, `LOGNAME`, and `PATH`** to the target user's values. Caller env entries for those five keys still work: the provider routes them through an uploaded wrapper script whose exports apply after the user switch.
 - **Oversized or env-carrying commands ride a wrapper script** uploaded to guest `/tmp` with mode `0600`, agent-owned, self-deleting on execution. For an explicit third user (not `agent`, not `root`) one root `chown` transfers ownership before the exec, so only the daemon (root), the agent, and the requested user can ever read the script's env, and owner-only bits are what let the script delete itself under sticky `/tmp`. The env values exist on the guest disk between upload and self-deletion (or the failure-path scrub); that window is the surface's stated exposure.
 
-## Cleanup semantics
+## Cleanup Semantics
 
 - **Normal completion**: each sample's range is destroyed at sample end; the eval's remaining ranges are swept at task end.
 - **Interrupted samples** (Ctrl-C): teardown is deferred to task end, the Docker provider's convention, so cancellation never stalls on a slow teardown. The range stays booted but hypervisor-isolated and egress-controlled until the run finishes: containment does not depend on teardown having happened.
@@ -105,7 +105,7 @@ The daemon runs commands as the `agent` user via an absolute-path `runuser` unle
 
 A destroyed range releases its CID lease, ownership record, staging, and admission charge only after the teardown actually succeeded, so a failed teardown stays visible and recoverable rather than leaking.
 
-## Concurrency and admission
+## Concurrency and Admission
 
 Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults to a host-derived value (`max(1, min(cpus/2, memory_gb/8))`); `INSPECT_RANGES_MAX_SANDBOXES` overrides that default. Independently, a resource-weighted admission gate charges each range's declared CPUs and memory against measured host capacity and queues samples FIFO when the host is full, whatever the concurrency setting says; a range whose declared resources alone exceed the host is refused up front with a clear error rather than admitted to fail slowly. Each sample's range gets a distinct project name and disjoint guest CIDs.
 

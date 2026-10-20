@@ -99,6 +99,8 @@ Python definitions import from `inspect_ranges.types` (shown once above, later P
 
 Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. A golden carries the baked-in control daemon plus whatever the scenario installed at build time. The definition references images by name; planning resolves each reference against the local image cache to a sha256 digest.
 
+![](diagrams/image-layers.excalidraw.png){fig-alt="The image layer stack: a shared read-only upstream base image at the bottom, a narrower golden-additions layer (control daemon and settings) on top of it, and small per-VM copy-on-write overlays for web, db, and agent fanning out above."}
+
 An image reference missing from the cache shows up in the plan output and is an error at render:
 
 ```         
