@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
-description: "Inspect AI extension for ranges."
-llms-description: "What Inspect Ranges is, its development status, where reviewers can find the design overview, and the documentation map: Building Ranges, Evaluation, and Running Ranges."
+description: "Inspect AI extension for cyber ranges."
+llms-description: "What Inspect Ranges is, its development status, where reviewers can find the design overview, and the documentation map: Tutorial, Examples, Building Ranges, Evaluation, and Running Ranges."
 ---
 
 ## Overview
@@ -16,10 +16,10 @@ The source code is available in the [inspect_ranges](https://github.com/meridian
 
 ## Documentation
 
-The [Tutorial](tutorial.qmd) is a hands-on walkthrough, from a first minimal range to building and evaluating the vulhub-zabbix example. The rest of the documentation is organized in three sections, available for review and feedback:
+The [Tutorial](tutorial.qmd) is a hands-on walkthrough, from a first minimal range to building and evaluating the vulhub-zabbix example, and [Examples](examples.qmd) catalogs the in-repo ranges translated from published definitions. The rest of the documentation is organized in three sections, available for review and feedback:
 
 - [Building Ranges](building.qmd): authoring a range, from the definition language ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)) to the build that realizes declared content into captured, verified images.
 
 - Evaluation: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
 
-- [Running Ranges](cli.qmd): the operator workflow, the [sandbox provider](provider.qmd) that runs Inspect evals against ranges, the [host topology](topology.qmd), and the [security model](security.qmd).
+- [Running Ranges](cli.qmd): the operator workflow, the [range sandbox](provider.qmd) that runs Inspect evals against ranges, the [image catalog](catalog.qmd) and [distribution](distribution.qmd) layer that move built ranges between machines, the [range host](topology.qmd) topologies, and the [security model](security.qmd).

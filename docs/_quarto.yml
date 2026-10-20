@@ -1,20 +1,26 @@
 project:
   type: meridianlabs-ai/inspect-docs
+  render:
+    - "*.qmd"
+    - "**/*.qmd"
+    - "!CHANGELOG.md"
 
 inspect-docs:
   title: Inspect Ranges
   description: |
-    Inspect AI extension for ranges.
+    Inspect AI extension for cyber ranges.
   url: https://meridianlabs-ai.github.io/inspect_ranges
   module: inspect_ranges
   repo: meridianlabs-ai/inspect_ranges
   org: Meridian Labs
   navigation:
-    - text: Getting Started
+    - text: Home
       href: index.qmd
     - text: Tutorial
       href: tutorial.qmd
-    - text: Building Ranges
+    - text: Examples
+      href: examples.qmd
+    - text: Building
       contents:
         - text: Overview
           href: building.qmd
@@ -32,25 +38,40 @@ inspect-docs:
           href: goals.qmd
         - text: Evidence
           href: evidence.qmd
-    - text: Running Ranges
+    - text: Running
       contents:
         - text: Overview
           href: cli.qmd
-        - text: Sandbox Provider
-          href: provider.qmd
-        - text: Distribution
-          href: distribution.qmd
         - text: Image Catalog
           href: catalog.qmd
-        - text: Example Ranges
-          href: examples.qmd
-        - text: Host Topology
-          href: topology.qmd
+        - text: Distribution
+          href: distribution.qmd
         - text: Security
           href: security.qmd
+        - text: Range Host
+          href: topology.qmd
+        - text: Range Sandbox
+          href: provider.qmd
   sidebar: unified
+  navbar:
+    right:
+      - icon: github
+        href: https://github.com/meridianlabs-ai/inspect_ranges
   external_refs:
     inspect_ai: https://inspect.aisi.org.uk
 
-comments:
-  hypothesis: true
+format:
+  inspect-docs-html:
+    css: styles.css
+
+website:
+  page-footer:
+    center:
+      - text: Code
+        href: https://github.com/meridianlabs-ai/inspect_ranges
+      - text: License
+        href: https://github.com/meridianlabs-ai/inspect_ranges/blob/main/LICENSE
+      - text: Issues
+        href: https://github.com/meridianlabs-ai/inspect_ranges/issues
+
+

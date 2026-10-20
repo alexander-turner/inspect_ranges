@@ -1,7 +1,7 @@
 ---
-title: "Host Topology"
-description: "Co-resident versus separated realization: the INSPECT_RANGES_HOST switch, the applier and reaper processes, the lease contract, and what the isolation claim means."
-llms-description: "The range-host topology: the local (co-resident) and uds (separated, applier-backed) backends behind INSPECT_RANGES_HOST; operating the applier and reaper processes; the lease contract including the expiry-mid-sample reclaim policy; the fetch-grants convention; the isolation claim; and the environment knob table."
+title: "Range Host"
+description: "Co-resident versus separated realization: the INSPECT_RANGES_HOST switch, the applier and reaper processes, the lease contract, what the isolation claim means, and the host-provider seam a future backend implements."
+llms-description: "The range host: the local (co-resident) and uds (separated, applier-backed) backends behind INSPECT_RANGES_HOST; operating the applier and reaper processes; the lease contract including the expiry-mid-sample reclaim policy; the fetch-grants convention; the isolation claim; the HostProvider/RangeHost seam (acquire/release/abandon, check_lease, HostCapabilities) with its not-yet-public status and the contracts a future backend must honor; and the environment knob table."
 ---
 
 ## Two topologies, one switch
@@ -58,6 +58,27 @@ Realize is gated: the requested bundle digest must match the lease's rendered bu
 
 Every lease records an isolation claim, and the provider logs it once per sample acquisition. Both v1 backends claim **`isolation="shared"`**: one host's kernel, device emulation, and caches are reused across samples, so a guest-to-host escape in one sample could reach another sample's resources. The claim is honest labeling for the eval log, not a control. `isolation="instance"` (a fresh host per sample) arrives only with a real fleet provider; nothing in v1 pretends otherwise.
 
+## Implementing a host provider
+
+::: {.callout-important}
+## Not yet a public extension point
+
+This section describes the seam as it exists in the codebase today, where it is internal: the provider accepts exactly the two backends above, and there is no registration mechanism for third-party implementations yet. Entry-point registration, a public home for the protocols (today they live in the private `inspect_ranges._host` module), and a reference fleet provider are the planned growth path (see the [host-provider design record](https://github.com/meridianlabs-ai/inspect_ranges/blob/main/design/inspect-ranges/host-provider.md)). It is documented now as the signpost for that work: the contracts below are stable in intent and are what an implementation will be held to.
+:::
+
+Both backends implement one seam, two protocols:
+
+- **`HostProvider`** acquires and releases range hosts. `acquire(sample, placement)` takes the sample's identity (`SampleSpec`: sample and task ids, the spec hash, the rendered bundle digest, declared resource totals) and the driver-side placement facts the lease record needs (`LeasePlacement`: project name, bundle path, staging, the evidence location), and returns a leased `RangeHost`. `release` destroys. `abandon` is the deliberate keep-it-running path (`cleanup=False`): renewal stops, the lease stays, and the reaper reclaims after expiry.
+- **`RangeHost`** is one acquired host: the `RangeChannel` to it (the transport-agnostic control plane every guest operation rides; `None` between acquire and boot in the co-resident backend, which builds it from booted guest CIDs), the `isolation` claim, the deployment's declared `capabilities`, and its host-class `facts`. `check_lease()` raises `LeaseLostError` when the lease has been reclaimed, which is how lease loss fails a sample loudly at its next operation.
+
+An implementation is held to the contracts this page already describes, plus three from the design record:
+
+1. **Lease semantics.** `acquire` returns identity plus expiry; crashes, interrupted acquisition, partial boots, and network partitions are normal cases, not exceptions. Cleanup must be recoverable from recorded ownership by an independent process, never dependent on the original driver reaching its `finally`.
+2. **Release is destruction.** A used host never returns to a pool, and under `isolation="instance"` release means the instance is destroyed or handed to independently controlled reprovisioning. The claim must be honest: it is logged per sample, and `"instance"` may be claimed only when the deployment actually provides a fresh host per sample.
+3. **Capabilities refuse at planning.** `HostCapabilities` declares what the deployment can do (image delivery, upstream forwarding, egress grants, evidence delivery); a range whose requirements exceed the declaration refuses before anything boots, never degrades silently.
+
+What is not built yet, concretely: entry-point registration (the backend set is closed), granted-URL and registry image delivery (`pre-seeded` is the only shape, per [the grants convention](#the-grants-convention)), `forward_upstream` and `egress_grant` capabilities (pinned `False`), and `isolation="instance"` (no fleet provider exists to claim it). Evidence delivery has one built mode: the host writes to the per-sample location the driver hands it at acquire, through a put-only credential.
+
 ## Environment reference
 
 | Variable | Default | Meaning |
@@ -66,4 +87,4 @@ Every lease records an isolation claim, and the provider logs it once per sample
 | `INSPECT_RANGES_LEASE_TTL_S` | 600 | Host lease TTL in seconds; the driver renews at TTL/3. A dead driver's sample becomes reclaimable one TTL after its last renewal. |
 | `INSPECT_RANGES_HOST_CLASS` | `unspecified` | The host-class name recorded in lease host facts (declarations, never per-instance probes). |
 
-The provider's own knobs (concurrency, retries, image cache) are on the [Sandbox Provider](provider.qmd) page and apply unchanged under either backend.
+The provider's own knobs (concurrency, retries, image cache) are on the [Range Sandbox](provider.qmd) page and apply unchanged under either backend.

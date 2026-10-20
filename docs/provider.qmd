@@ -1,5 +1,5 @@
 ---
-title: "Sandbox Provider"
+title: "Range Sandbox"
 description: "Running Inspect evals against ranges: the range sandbox provider, its configuration forms, retry contract, cleanup semantics, and environment knobs."
 llms-description: "The range Inspect sandbox provider: configuration (range.yaml path or typed RangeSpec), foothold-only sandbox registration (the agent/target wall), the retry contract and its idempotency caveat, cleanup semantics including interrupted samples and recovery commands, and the environment variable reference."
 ---
@@ -21,7 +21,7 @@ def my_task() -> Task:
     )
 ```
 
-Before the first eval on a machine, derive a golden image and check the host (see [Running Ranges](cli.qmd)): `inspect-ranges doctor` verifies the host end to end, and `inspect-ranges images derive` bakes the guest control daemon into a golden the range definition references.
+Before the first eval on a machine, run `inspect-ranges doctor` (see [Running Ranges](cli.qmd)): it verifies the host end to end and prints fixes for whatever is missing. The images a range references pull automatically from the published catalog at eval init (see [Image Catalog](catalog.qmd)).
 
 ## Configuration
 
@@ -60,14 +60,6 @@ attacker:
   entry: external
   egress: none
 ```
-
-## Virtual machine monitors
-
-Hosts and routers run under QEMU via libvirt by default; the dedicated attack box defaults to Cloud Hypervisor (declare `attacker.vmm: qemu` to keep QEMU), and any host or router may opt in with `vmm: cloud-hypervisor`. Cloud Hypervisor is a smaller, rust-vmm userspace device model, started directly by the boot script as its own unprivileged per-guest uid (derived from the leased vsock CID, so no two VMMs share one, and none shares QEMU's `libvirt-qemu`) with no capabilities and Cloud Hypervisor's default seccomp filter. The binary and its firmware are sha256-pinned into the range image. The security rationale lives in the agent-containment record: the attack box is where the VM-escape surface matters most.
-
-Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control plane reaches them through the VMM's hybrid-vsock Unix socket, and every dialer checks the socket peer's credentials (`SO_PEERCRED`) against the VMM's uid before sending a byte, refusing anything else without retry. The sockets live in a private per-user host directory that `up` prepares and `down` removes.
-
-Two planning refusals bound the opt-in: a Cloud Hypervisor guest cannot carry guest content yet (`cloud-hypervisor-content-unsupported`: the build captures provisioned guests through libvirt, which cannot see CH guests), and a pinned `cpu_model` refuses (`cloud-hypervisor-cpu-model`: CH guests always see the host CPU).
 
 ## The foothold sandbox
 
