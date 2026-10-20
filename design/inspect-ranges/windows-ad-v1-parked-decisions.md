@@ -25,4 +25,4 @@
 
 **Recommendation.** Republish v3 on the user's own publish flow (the same deliberate act as publish day); docs/examples.qmd carries an interim caveat pointing local consumers at `catalog/attack`.
 
-**Interim behavior in force.** The catalog serves the pre-v3 image; both Windows batteries build the v3 image locally (`T1b`/`G1b`), so nothing in-repo depends on the republish.
+**RESOLVED (user, 2026-10-20).** v3 published to the public org: `attack@sha256:43a10d17e39383949916b6b3b71a4f3388f7cfc93563c8fbd455f050eb3e142c` (catalog-releases.md, 2026-10-20 entry); the docs caveat is removed.

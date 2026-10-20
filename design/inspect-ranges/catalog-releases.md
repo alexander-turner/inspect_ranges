@@ -39,3 +39,13 @@ Fleet pin file (`images pin --from docker.io/meridianlabsai/inspect-ranges`):
 ```
 
 Operational note, recorded for the runbook: `docker push` fails from a host logged in with an org access token because docker requests a cross-repo mount scope on the base image's repo (`library/ubuntu`), which org tokens can never grant; `skopeo copy docker-archive:<saved tar> docker://…` pushes cleanly with the same credential.
+
+## 2026-10-20 — attack v3 (windows-ad-v1)
+
+Published from commit `2085b54` by the project publisher, per the user's in-session authorization, to `docker.io/meridianlabsai/inspect-ranges`.
+
+| Name | Root digest |
+|---|---|
+| `attack` | `sha256:43a10d17e39383949916b6b3b71a4f3388f7cfc93563c8fbd455f050eb3e142c` |
+
+The v3 recipe adds pip impacket 0.12.0 with presence assertions for the Windows ladder's tools (`atexec.py`, `psexec.py`, `wmiexec.py`, `secretsdump.py`, `GetUserSPNs.py`, `raiseChild.py`, `lookupsid.py`, `smbexec.py`, `mssqlclient.py`) and records the pip install in `/etc/attack-image.manifest` (windows-ad-v1 slice 4; both Windows example batteries assert against this build). Goldens unchanged (`ubuntu-noble`/`ubuntu-focal` keep their 2026-10-19 digests). Build `attack-box-22995e7cb56d` over the published `ubuntu-noble`; hub pin list verified post-push (`images pin --from`).

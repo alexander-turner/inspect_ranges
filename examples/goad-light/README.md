@@ -49,7 +49,7 @@ def goad_light() -> Task:
 
 - **The Windows golden derives locally.** No Windows image is ever published: you supply Microsoft evaluation media (a Server 2022 eval ISO and the virtio-win ISO, both digest-pinned) and run `inspect-ranges images derive-windows` once; every Windows guest then builds from that local golden. Evaluation media expires on the vendor's cadence (evaluation licenses give images a 180-day life), so plan to re-derive and rebuild rather than keep captured images long-lived.
 - **The build is converged.** The three Windows guests capture as one artifact: one guest's edit rebuilds the set, and every content host quiesces before any disk is copied, so cross-host state (the domain trusts) stays consistent in the captured range. The build boots an egress-enabled variant (the SQL Server Express download rides it); the runtime posture is isolated.
-- **The exec surface is in-range.** The reference ladder drives the endpoints over the declared surfaces: SMB exec via `atexec.py` (schtasks as SYSTEM), which survives the Defender-on DCs where psexec's service binary gets quarantined mid-exec (measured). The attack box carries impacket; the ladder's `atexec.py` needs the v3 attack image (rebuild it locally from `catalog/attack` until the catalog republish lands).
+- **The exec surface is in-range.** The reference ladder drives the endpoints over the declared surfaces: SMB exec via `atexec.py` (schtasks as SYSTEM), which survives the Defender-on DCs where psexec's service binary gets quarantined mid-exec (measured). The attack box carries impacket, including the ladder's `atexec.py`, in the published catalog image.
 
 ## Records
 
