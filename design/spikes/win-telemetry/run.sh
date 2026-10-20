@@ -1,13 +1,15 @@
 #!/bin/bash
 # windows-ad-v1 slice 5 battery: the defense-telemetry tier. The
-# attack-range-windows pair (Splunk Enterprise on noble + the instrumented
+# splunk-detection pair (Splunk Enterprise on noble + the instrumented
 # Server 2022 endpoint) builds on the production pipeline — the FIRST
 # detection-bearing build: the trio plants through the Windows oracle, the
 # behavioral runner drives the collectors.yaml export, reference fires
 # T1003.001 and scores 1.0 from the stream, insufficient flows without the
 # signal (0.0 over a complete window), forged proves the collector binding
-# (base64-shielded signal text in an uncollected file) — then a real eval
-# boots the captured pair through the provider with the same collectors file.
+# (base64-shielded signal text in an uncollected file) — then two real eval
+# legs boot the captured pair through the provider with the same collectors
+# file: the detection leg scores 1.0/valid, and the gap-marker leg forces a
+# read-bound exporter overflow and proves it surfaces as an incomplete window.
 # Mixed-OS converged capture (one Linux + one Windows content host,
 # quiesced=2). Usage: ./run.sh [prep|build|prove|down|all]; staged under the
 # 2 h background bound, tmp/ wiped by prep only. CID band 4210 (attack factory
@@ -16,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/examples/attack-range-windows"
+RANGE="$ROOT/examples/splunk-detection"
 STAGE="${1:-all}"
 
 WIN_ISO="${WIN_ISO:-$HOME/.cache/inspect-ranges/images/ws2022-eval.iso}"
@@ -82,7 +84,7 @@ stage_prep() {
 stage_build() {
   echo "=== T2 the pair builds: splunk, endpoint, verify, mixed-OS converged capture, detection trio ==="
   if (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 2700 >"$SPIKE/tmp/t2.txt" 2>&1); then
-    grep -q "build OK" "$SPIKE/tmp/t2.txt" && ok "T2 attack-range-windows builds green" \
+    grep -q "build OK" "$SPIKE/tmp/t2.txt" && ok "T2 splunk-detection builds green" \
       || { bad "T2 output"; tail -15 "$SPIKE/tmp/t2.txt"; }
   else
     bad "T2 build"; tail -30 "$SPIKE/tmp/t2.txt"; exit 1
@@ -110,18 +112,18 @@ stage_build() {
 }
 
 stage_prove() {
-  echo "=== T4 the detection scores through a real eval (collectors.yaml shared with the build) ==="
+  echo "=== T4 the eval legs: detection scores 1.0; a forced exporter overflow reads incomplete ==="
   export INSPECT_RANGES_IMAGE_CACHE="$CACHE"
   export INSPECT_RANGES_BUILD_CACHE="$BUILDS"
   if (cd "$ROOT" && uv run python "$SPIKE/arw_eval.py" "$RANGE" >"$SPIKE/tmp/t4.txt" 2>&1); then
     grep -E "^(PASS|FAIL)" "$SPIKE/tmp/t4.txt" || true
-    ok "T4 the eval leg ran green (1.0, valid, wall held)"
+    ok "T4 the eval legs ran green (detection 1.0/valid, wall held; gap marker -> window incomplete)"
   else
     grep -E "^(PASS|FAIL)" "$SPIKE/tmp/t4.txt" || true
     bad "T4 eval"; tail -30 "$SPIKE/tmp/t4.txt"
   fi
   $IR down --all >/dev/null 2>&1 || true
-  docker ps --format '{{.Names}}' | grep -q '^ir-attack-range-windows-' && bad "T5 teardown left containers" || ok "T5 teardown clean"
+  docker ps --format '{{.Names}}' | grep -q '^ir-splunk-detection-' && bad "T5 teardown left containers" || ok "T5 teardown clean"
 }
 
 case "$STAGE" in

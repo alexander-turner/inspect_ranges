@@ -122,11 +122,15 @@ if ($startName -ne 'LocalSystem') { throw "forwarder service account is $startNa
 # is PROVEN as SYSTEM. A SYSTEM task exports new events (RecordId watermark)
 # to a log the UF monitors — its most battle-tested input — so the declared
 # sysmon -> forwarder -> splunk flow stays real end to end.
-# BOUND CAVEAT (slice-5 review finding 5b): each 8 s cycle reads the newest
-# 4000 events per channel; a burst past that skips the middle with no gap
-# record. Fine for presence-scored detection (the signal event is the burst's
-# cause, not its middle); a stealth/evade goal must NOT ride this bridge
-# without first replacing the bound with an honest gap record.
+# READ BOUND (slice-5 review finding 5b, overflow now recorded): each 8 s
+# cycle reads the newest 4000 events per channel. A burst past the bound still
+# skips the middle, but never silently: RecordIds are contiguous per channel,
+# so a read whose oldest new record does not adjoin the watermark proves the
+# skip, and the bridge writes an explicit gap marker line into the bridged
+# log. The splunk-side export wrapper fails LOUD on any poll window carrying
+# the marker (same contract as its 5000-record cap): poll-failed, the poller
+# records an in-chain gap, and the detection completeness precondition reads
+# the window incomplete — never a quiet pass over exporter loss.
 $bridgeDir = 'C:\ProgramData\range-telemetry'
 New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
 Set-Content -Path "$bridgeDir\export-events.ps1" -Value @'
@@ -140,8 +144,39 @@ while ($true) {
   }
   foreach ($channel in $channels) {
     $last = if ($marks.ContainsKey($channel)) { $marks[$channel] } else { 0 }
-    $events = Get-WinEvent -LogName $channel -MaxEvents 4000 -ErrorAction SilentlyContinue |
-      Where-Object { $_.RecordId -gt $last } | Sort-Object RecordId
+    $all = @(Get-WinEvent -LogName $channel -MaxEvents 4000 -ErrorAction SilentlyContinue |
+      Sort-Object RecordId)
+    # watermark regression: when a captured image boots, the channels start a
+    # NEW RecordId generation, and the captured state.json still carries the
+    # realize-era watermark — every new record below it was silently dropped
+    # with the window still reading complete (measured: an eval boot's whole
+    # technique chain, EventID 10 included, vanished under the stale
+    # watermark). A newest record BELOW the watermark proves the restart;
+    # re-bootstrap from the new generation (lossless while the generation
+    # fits the read bound; a generation that already lost its head gets the
+    # adjacency marker below). Undetected only if the new generation outruns
+    # the old watermark before the first cycle, implausible on the 8 s
+    # cadence from boot against realize-scale watermarks.
+    $regressed = $false
+    if ($last -gt 0 -and $all.Count -gt 0 -and $all[$all.Count - 1].RecordId -lt $last) {
+      $last = 0
+      $regressed = $true
+    }
+    $events = @($all | Where-Object { $_.RecordId -gt $last })
+    # overflow: RecordIds are contiguous per channel, so an oldest new record
+    # that does not adjoin the watermark proves the read bound skipped the
+    # middle of a burst (or a restarted generation lost its head); the skip
+    # is recorded as an explicit marker the splunk-side wrapper fails loud
+    # on. A true bootstrap (no prior state) stays markerless by design,
+    # mirroring the wrapper's bootstrap-at-now. The token is assembled from
+    # fragments: this script's own 4104 script-block record travels a
+    # collected channel, and the assembled token must only ever ship as a
+    # real marker.
+    if (($last -gt 0 -or $regressed) -and $events.Count -gt 0 -and $events[0].RecordId -gt ($last + 1)) {
+      $marker = 'RANGE-TELEMETRY-' + 'GAP'
+      $dropped = $events[0].RecordId - $last - 1
+      Add-Content -Path $out -Value ("$((Get-Date).ToUniversalTime().ToString('o')) channel=$channel $marker exporter-overflow dropped=$dropped first_skipped=$($last + 1) last_skipped=$($events[0].RecordId - 1)")
+    }
     foreach ($event in $events) {
       $message = ($event.Message -replace "\r?\n", ' ')
       Add-Content -Path $out -Value ("$($event.TimeCreated.ToUniversalTime().ToString('o')) channel=$channel EventID=$($event.Id) RecordID=$($event.RecordId) $message")

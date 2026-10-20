@@ -98,6 +98,15 @@ if [ "$(printf "%s" "$out" | grep -c .)" -ge 5000 ]; then
   echo "telemetry export overflowed the poll cap" >&2
   exit 1
 fi
+# the endpoint bridge records read-bound overflow (RecordId discontinuity)
+# as an explicit marker in the bridged log; a window carrying one fails LOUD
+# exactly like the cap — poll-failed, the poller records an in-chain gap, and
+# the completeness precondition reads the window incomplete. Honest by
+# construction: past proven exporter loss, no quiet window is trustworthy.
+if printf "%s" "$out" | grep -q "RANGE-TELEMETRY-GAP"; then
+  echo "telemetry export window carries an exporter gap marker" >&2
+  exit 1
+fi
 printf "%s" "$out"
 # the leading newline guards a missing trailing newline in the csv body: the
 # banner must be its own final line or the poller mis-takes an event line

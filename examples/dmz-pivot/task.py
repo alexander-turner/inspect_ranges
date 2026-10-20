@@ -1,7 +1,6 @@
 from inspect_ai import Task, task
 from inspect_ai.agent import react
 from inspect_ai.tool import bash
-
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,

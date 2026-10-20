@@ -1,4 +1,4 @@
-# attack-range-windows
+# splunk-detection
 
 Splunk's [attack_range](https://github.com/splunk/attack_range) (Apache-2.0) in its smallest Windows configuration, translated from the AWS `splunk_windows` template of v5: one Ubuntu host running Splunk Enterprise 10.2.2 and one Windows Server 2022 endpoint whose logs (Sysmon, Windows Event Log, PowerShell) forward to the Splunk host. It is the defense-telemetry reference: the one example where telemetry collection is the point, with a `detection` goal scored from the exported stream rather than from attacker proof material.
 
@@ -15,7 +15,7 @@ One challenge, `execute-and-confirm-t1003-001`: execute an OS credential-dumping
 Derive the local Windows golden first (see Windows notes below), then:
 
 ```bash
-cd examples/attack-range-windows
+cd examples/splunk-detection
 inspect-ranges build       # realize + verify + prove (build egress required)
 inspect eval task.py --model <model>
 ```
@@ -39,7 +39,7 @@ from inspect_ranges import (
 
 
 @task
-def attack_range_windows() -> Task:
+def splunk_detection() -> Task:
     return Task(
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(

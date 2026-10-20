@@ -5,7 +5,7 @@
 # notes.md Realized). Provenance detail: ./notes.md
 
 range:
-  name: attack-range-windows
+  name: splunk-detection
   schema_version: "0.3"
   description: >
     Splunk's attack_range in its smallest Windows configuration: one Ubuntu

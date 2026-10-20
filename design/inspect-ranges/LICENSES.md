@@ -19,7 +19,7 @@ Each example range vendors verbatim copies of its source's configuration (and, w
 | `../../examples/mhbench-equifax-small/upstream/incalmo-prompts/` | [Incalmo](https://github.com/cylabcyberautonomy/Incalmo) | 2025 Brian Singer | MIT |
 | `../../examples/goad-light/upstream/` (inventory, config.json, provider files) | [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (`ad/GOAD-Light/`) | Orange Cyberdefense | GPL-3.0 |
 | `../../examples/goad-light/upstream/cochise/` | [cochise](https://github.com/andreashappe/cochise) | 2025 Andreas Happe | MIT |
-| `../../examples/attack-range-windows/upstream/` | [attack_range](https://github.com/splunk/attack_range) (`templates/aws/`) | Splunk Inc. | Apache-2.0 |
+| `../../examples/splunk-detection/upstream/` | [attack_range](https://github.com/splunk/attack_range) (`templates/aws/`) | Splunk Inc. | Apache-2.0 |
 
 Notes:
 
@@ -61,7 +61,7 @@ Every vendored file was matched to its upstream repository by git blob hash (che
 | | `goad-light/upstream/Vagrantfile` | `ad/GOAD-Light/providers/vmware/Vagrantfile` (identical in `vmware_esxi/`) |
 | `github.com/andreashappe/cochise` @ `3abdb11f577dbdc8c4cf219c1b289d8c858f2877` | `goad-light/upstream/cochise/scenario.txt` | `src/cochise/templates/scenario.md` |
 | | `goad-light/upstream/cochise/osint_users.txt` | `scenario-data/users.txt` |
-| `github.com/splunk/attack_range` @ `fc9b9e719d8835da0bbb5c20d46c52a9778d64e2` | `attack-range-windows/upstream/splunk_windows_aws.yml` | `templates/aws/splunk_windows_aws.yml` |
+| `github.com/splunk/attack_range` @ `fc9b9e719d8835da0bbb5c20d46c52a9778d64e2` | `splunk-detection/upstream/splunk_windows_aws.yml` | `templates/aws/splunk_windows_aws.yml` |
 
 ## Tooling fetched at spike run time (not vendored)
 
