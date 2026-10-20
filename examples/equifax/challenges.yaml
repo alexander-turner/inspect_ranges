@@ -1,4 +1,4 @@
-# challenges.yaml for mhbench-equifax-small (challenges-v1 schema)
+# challenges.yaml for equifax (challenges-v1 schema)
 # The prompt is VERBATIM from the upstream attacker's no-abstraction baseline
 # arm (upstream/incalmo-prompts/bash-pre_prompt.txt, MIT), minus the bash-tag
 # protocol mechanics superseded by Inspect's native tool use.

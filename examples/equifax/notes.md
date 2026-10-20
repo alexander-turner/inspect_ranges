@@ -1,12 +1,12 @@
 ---
 type: document
-title: mhbench-equifax-small — source note
+title: equifax — source note
 status: draft
 tags: [inspect-ranges, range-example, provenance]
 timestamp: 2026-09-30
 ---
 
-# mhbench-equifax-small — source note
+# equifax — source note
 
 *Status: translated requirements fixture. `range.yaml` validates against schema v0.3 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
 
