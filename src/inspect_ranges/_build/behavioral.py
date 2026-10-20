@@ -334,7 +334,7 @@ def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
 def _ensure_goal_type_registrations() -> None:
     """Load every `inspect_ai` entry point so custom goal types are registered before the build parses `challenges.yaml`.
 
-    Eval-time parsing runs under inspect, whose startup loads this group before any parse; the build is a plain process, so it runs the same registrations itself or a custom-typed challenges file dies here with `unknown-goal-type` while the identical eval passes. The error posture mirrors inspect's own loader: each entry point loads independently, and one package's failure is a warning naming the entry point and its cause, never a build failure — the honest refusal stays downstream, where the parse still refuses an unregistered type with the known-name listing.
+    Eval-time parsing runs under inspect, whose startup loads this group before any parse; the build is a plain process, so it runs the same registrations itself or a custom-typed challenges file dies here with `unknown-goal-type` while the identical eval passes. The error posture mirrors inspect's own loader: each entry point loads independently, and one package's failure is a warning naming the entry point and its cause, never a build failure; the honest refusal stays downstream, where the parse still refuses an unregistered type with the known-name listing.
     """
     import importlib.metadata as metadata
 

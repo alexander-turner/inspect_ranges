@@ -480,7 +480,7 @@ class RootBashEndpoint(RecordingEndpoint):
 def test_prober_backed_trio_reads_valid(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """The per-check prober makes a prober-backed goal scoreable in the trio (the fix for the proof boot starting no prober): each check starts a prober over ITS challenge's derived targets, stops and flushes it before scoring, and scores only its own records. Running the three checks sequentially against the shared evidence stream is the contamination regression: without the per-check floor, the reference chain's genuine outage records would score the insufficient and forged chains' degrade goal as achieved too (degrade scans every fully-observed window), failing them — measured: dropping the floor fails `insufficient` at value=1.00."""
+    """The per-check prober makes a prober-backed goal scoreable in the trio (the fix for the proof boot starting no prober): each check starts a prober over ITS challenge's derived targets, stops and flushes it before scoring, and scores only its own records. Running the three checks sequentially against the shared evidence stream is the contamination regression: without the per-check floor, the reference chain's genuine outage records would score the insufficient and forged chains' degrade goal as achieved too (degrade scans every fully-observed window), failing them (measured: dropping the floor fails `insufficient` at value=1.00)."""
     import inspect_ranges._challenges.prober as prober_module
     from inspect_ranges._build.behavioral import _run_one, _scoped_oracle_class
     from inspect_ranges._challenges.oracle import RangeOracle
