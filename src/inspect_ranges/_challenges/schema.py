@@ -1,8 +1,8 @@
 """Typed `challenges.yaml`: challenges, goals, and the per-type goal shapes.
 
-The design of record is the challenges-and-goals reviewer document (`design/challenges-overview.qmd`) and `design/inspect-ranges/challenges-scoring-integrity.md`; field shapes here follow their proof contracts. This module is shape-only: it defines what a challenge file says, validates it strictly (unknown keys are errors, like the range schema), and cross-references it against a `RangeSpec`. The engine executing goals (setup, check, compare) arrives with the goal-type registry in a later slice; `GOAL_TYPES` is the seam it consumes.
+The design of record is the challenges-and-goals reviewer document (`design/challenges-overview.qmd`) and `design/inspect-ranges/challenges-scoring-integrity.md`; field shapes here follow their proof contracts. This module is shape-only: it defines what a challenge file says, validates it strictly (unknown keys are errors, like the range schema), and cross-references it against a `RangeSpec`. The engine executing goals (setup, check, compare) lives in `engine.py`; `GOAL_TYPES` names the built-in seam it consumes.
 
-A goal in YAML is flat: `{id, type, weight, ...per-type fields}`. Goals parse as a discriminated union on `type`, so each type's fields validate against its own strict model and positions in errors point at the authored keys.
+A goal in YAML is flat: `{id, type, weight, ...per-type fields}`. Built-in goals parse as a discriminated union on `type`, so each type's fields validate against its own strict model and positions in errors point at the authored keys. The union is open: a `type` name outside `GOAL_TYPES` dispatches to the goal-type registry (`register_goal_type`), validating against the registered type's `spec` class with the same strictness; a name known to neither refuses with the full known-name listing. Registration must precede parsing, so the refusal is also the honest failure mode when a registering module was never imported (see `load_challenges`).
 """
 
 import re
@@ -14,7 +14,10 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializeAsAny,
     ValidationError,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
     model_validator,
 )
 
@@ -115,7 +118,14 @@ class _StrictModel(BaseModel):
 
 
 class GoalBase(_StrictModel):
-    """Fields shared by every goal, independent of its proof contract."""
+    """Base class for goal `Spec` models: the fields every goal shares, independent of its proof contract.
+
+    A goal type's `spec` (see `GoalType`) subclasses this to declare the fields its goals carry in `challenges.yaml`. A subclass must declare a `type` field whose `Literal` value(s) match the name(s) the type registers under (`register_goal_type`), e.g. `type: Literal["marker"] = "marker"`; the parser dispatches a goal mapping to the spec through that name. Validation is strict exactly like the built-ins: unknown keys are errors, the shared fields below apply, and the goal id must satisfy the evidence stream-name grammar (lowercase key-safe, since ids name `probe/<goal id>` streams).
+
+    Override `observers()` to declare the trusted observers goals of the type require; declaring them is what makes a deployment that cannot supply one refuse the challenge at planning time instead of scoring indeterminate at the end.
+
+    A custom spec parses from YAML only in processes where the type's registration has already run: under inspect the `inspect_ai` entry-point mechanism imports registering modules before any parsing, while a plain `load_challenges`/`validate_challenges` caller must import the registering module first, or the goal's `type` name refuses as unknown.
+    """
 
     id: str = Field(min_length=1)
     """Goal name, unique within its challenge; `verify_goal(goal_id, value)` binds to it."""
@@ -614,6 +624,38 @@ class PatchGoal(GoalBase):
         return super().observers() | _observers("active-prober")
 
 
+def _registered_goal_specs() -> dict[str, type[GoalBase]]:
+    """Spec classes of registered goal types, by registry name.
+
+    The import is lazy because `engine` imports this module; by dispatch time the engine (and with it the built-in registrations) has always loaded.
+    """
+    from .engine import registered_goal_types
+
+    return {name: gt.spec for name, gt in registered_goal_types().items()}
+
+
+def _dispatch_goal(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    """Dispatch one goal: built-in `type` names through the discriminated union, registered custom names against their type's `spec` class.
+
+    An already constructed `GoalBase` instance passes through unchanged (its own validation ran at construction). A mapping whose `type` names a registered non-built-in type validates against that type's `spec` with built-in strictness; a nested validation failure re-raises as `IssueError` so the report path positions each finding under the authored goal. Everything else falls through to the union; names unknown to both the union and the registry never reach it, because `Challenge._known_goal_types` refuses them first with the full known-name listing.
+    """
+    if isinstance(value, GoalBase):
+        return value
+    if isinstance(value, dict):
+        mapping = cast("dict[str, Any]", value)
+        name = mapping.get("type")
+        if isinstance(name, str) and name not in GOAL_TYPES:
+            spec = _registered_goal_specs().get(name)
+            if spec is not None:
+                try:
+                    return spec.model_validate(mapping)
+                except ValidationError as error:
+                    raise IssueError(
+                        issues_from_validation_error(error, spec, None)[0]
+                    ) from error
+    return handler(value)
+
+
 Goal = Annotated[
     FlagGoal
     | AnswerGoal
@@ -629,8 +671,9 @@ Goal = Annotated[
     | JudgeGoal
     | PatchGoal,
     Field(discriminator="type"),
+    WrapValidator(_dispatch_goal),
 ]
-"""One typed goal; the YAML shape is flat and dispatches on `type`."""
+"""One typed goal; the YAML shape is flat and dispatches on `type` (built-ins through the union, registered custom types through `_dispatch_goal`)."""
 
 GOAL_TYPES: dict[str, type[GoalBase]] = {
     "flag": FlagGoal,
@@ -694,8 +737,8 @@ class Challenge(_StrictModel):
     prompt: str = Field(min_length=1)
     """The agent-facing task statement."""
 
-    goals: list[Goal] = Field(min_length=1)
-    """Typed goals; each drives per-sample setup and supplies the scorer's verification."""
+    goals: list[SerializeAsAny[Goal]] = Field(min_length=1)
+    """Typed goals; each drives per-sample setup and supplies the scorer's verification. `SerializeAsAny` serializes each goal by its runtime class, so a registry-dispatched custom goal round-trips through sample metadata with all its fields."""
 
     scoring: Scoring = Scoring()
     """Aggregation of goal results (weights by default)."""
@@ -713,17 +756,32 @@ class Challenge(_StrictModel):
         if not isinstance(goals, list):
             return mapping
         issues: list[Issue] = []
+        known: list[str] | None = None
         for index, raw in enumerate(cast(list[Any], goals)):
             if not isinstance(raw, dict):
                 continue
             goal = cast(dict[str, Any], raw)
-            if "type" in goal and goal.get("type") not in GOAL_TYPES:
+            if "type" not in goal:
+                continue
+            name = goal.get("type")
+            if known is None:
+                known = sorted(set(GOAL_TYPES) | set(_registered_goal_specs()))
+            if name not in known:
                 issues.append(
                     Issue(
                         code="unknown-goal-type",
                         path=("goals", index, "type"),
-                        message=f"unknown goal type {goal.get('type')!r}",
-                        hint=did_you_mean(str(goal.get("type")), sorted(GOAL_TYPES)),
+                        message=(
+                            f"unknown goal type {name!r}; known types: "
+                            f"{', '.join(known)}"
+                        ),
+                        hint=did_you_mean(str(name), known)
+                        or (
+                            "a custom type's registration must run before "
+                            "parsing: import its registering module first "
+                            "(under inspect, the inspect_ai entry point does "
+                            "this)"
+                        ),
                     )
                 )
         if issues:
@@ -798,6 +856,8 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
 
     Checks: goal hosts name declared hosts or routers, segment references name declared networks, `answer` variables are declared range variables, `detection` and `evade` collectors appear in the range's declared telemetry flows, and observers that are designed but not built refuse.
 
+    Registry-dispatched custom goals get only the observer check (via `observers()`, which every goal declares): their field semantics belong to their type, so a custom `host` or `segment` is never assumed to name a range construct, and any dangling cross-reference surfaces when its plant or probe fails against the live range.
+
     Args:
         challenges: A structurally valid challenges file.
         spec: The range the challenges run against.
@@ -830,11 +890,16 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
             hint=did_you_mean(name, sorted(candidates)),
         )
 
+    builtin_specs = frozenset(GOAL_TYPES.values())
     for ci, challenge in enumerate(challenges.challenges):
         for gi, goal in enumerate(challenge.goals):
             at = ("challenges", ci, "goals", gi)
             host = getattr(goal, "host", None)
-            if host is not None and host not in guests:
+            # custom specs own their field semantics: a registry-dispatched
+            # goal's `host`/`segment` is never assumed to name a range
+            # construct (only the observer check below applies to every goal)
+            builtin = type(goal) in builtin_specs
+            if builtin and host is not None and host not in guests:
                 issues.append(
                     unknown(
                         "unknown-goal-host",
@@ -844,18 +909,19 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
                         guests,
                     )
                 )
-            for field in ("segment", "beacon_segment"):
-                segment = getattr(goal, field, None)
-                if segment is not None and segment not in networks:
-                    issues.append(
-                        unknown(
-                            "unknown-goal-segment",
-                            (*at, field),
-                            segment,
-                            f"goal segment '{segment}' is not a declared network",
-                            networks,
+            if builtin:
+                for field in ("segment", "beacon_segment"):
+                    segment = getattr(goal, field, None)
+                    if segment is not None and segment not in networks:
+                        issues.append(
+                            unknown(
+                                "unknown-goal-segment",
+                                (*at, field),
+                                segment,
+                                f"goal segment '{segment}' is not a declared network",
+                                networks,
+                            )
                         )
-                    )
             if isinstance(goal, AnswerGoal) and goal.variable is not None:
                 if goal.variable not in spec.variables:
                     issues.append(
@@ -916,6 +982,8 @@ def challenge_issues(challenges: Challenges, spec: RangeSpec) -> list[Issue]:
 def load_challenges(path: Path) -> Challenges:
     """Load and validate a `challenges.yaml` file.
 
+    Custom goal types parse only when their `register_goal_type` registration has already run in this process. Under inspect the `inspect_ai` entry-point mechanism imports registering modules before any parsing; a plain call outside inspect must import the registering module first, or the custom `type` name refuses as unknown (an `unknown-goal-type` error listing the known names, never a misparse).
+
     Args:
         path: Path to the YAML file.
 
@@ -939,6 +1007,8 @@ def validate_challenges(
     """Validate a `challenges.yaml` file, reporting every detectable issue at once.
 
     Like `validate_range`, this never raises on invalid content: unreadable files (a directory, permissions, non-UTF-8 content), YAML syntax errors, structural schema violations, and (when a range is supplied) cross-reference problems all become `Issue` entries with stable codes and source positions.
+
+    Custom goal types validate only when their `register_goal_type` registration has already run in this process (see `load_challenges`); an unregistered custom `type` name reports `unknown-goal-type` with the known-name listing, never a misparse.
 
     Args:
         path: Path to the challenges YAML file.

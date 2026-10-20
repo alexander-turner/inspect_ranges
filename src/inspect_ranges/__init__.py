@@ -6,9 +6,11 @@ except ImportError:
     __version__ = "unknown"
 
 from ._challenges import (
+    GoalBase,
     GoalResult,
     GoalType,
     Observations,
+    ObserverKind,
     RangeOracle,
     challenge_dataset,
     challenge_scorer,
@@ -29,9 +31,11 @@ from .schema import (
 from .types import semantic_issues
 
 __all__ = [
+    "GoalBase",
     "GoalResult",
     "GoalType",
     "Observations",
+    "ObserverKind",
     "RangeOracle",
     "__version__",
     "challenge_dataset",

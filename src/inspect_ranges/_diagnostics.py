@@ -355,7 +355,10 @@ def issues_from_validation_error(
                 semantic_checked = False
             for issue in carried:
                 full_path = loc + issue.path
-                position = locate(node, full_path)
+                # unknown-key issues point at the key itself, matching the
+                # direct extra_forbidden path (registry-dispatched goal specs
+                # carry their strict-field refusals through IssueError)
+                position = locate(node, full_path, key=issue.code == "unknown-key")
                 issues.append(
                     issue.model_copy(
                         update={
