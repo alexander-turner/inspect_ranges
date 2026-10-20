@@ -1,6 +1,6 @@
 """windows-ad-v1 slice 5: the attack-range-windows detection challenge through a real eval.
 
-One sample boots the built pair through the provider; the solver pins the foothold wall (`sandbox("win")` must land on the attack box), replays the reference chain (T1003.001 on the endpoint over the declared exec surface, then the telemetry settle) through `sandbox().exec`, and the detection goal scores from the exported stream — `plant_goals` receives the fixture's `collectors.yaml`, the same artifact the build trio consumed. Expect 1.0, validity `valid`.
+One sample boots the built pair through the provider; the solver pins the foothold wall (`sandbox("win")` must land on the attack box), replays the reference chain (T1003.001 on the endpoint over the declared exec surface, then the telemetry settle) through `sandbox().exec`, and the detection goal scores from the exported stream — `challenge_setup` receives the fixture's `collectors.yaml`, the same artifact the build trio consumed. Expect 1.0, validity `valid`.
 
 Run (caches/env exported by run.sh): `uv run python arw_eval.py <range-dir>`.
 """
@@ -17,7 +17,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.scorer import challenge_scorer
-from inspect_ranges._challenges.setup import plant_goals
+from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._evidence.telemetry import load_collectors
 
 RANGE_DIR = Path(sys.argv[1]).resolve()
@@ -57,7 +57,7 @@ def main() -> int:
         dataset=challenge_dataset(
             str(RANGE_DIR / "challenges.yaml"), str(RANGE_DIR / "range.yaml")
         ),
-        solver=[plant_goals(telemetry_collectors=collectors), technique_solver()],
+        solver=[challenge_setup(telemetry_collectors=collectors), technique_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(RANGE_DIR / "range.yaml")),
     )

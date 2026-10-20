@@ -16,7 +16,7 @@ from .manifest import (
     realized_file_name,
     save_manifest,
     spec_projection,
-    windows_network_projection,
+    windows_key_facts,
 )
 from .orchestrate import (
     DEFAULT_UPLINK_NETWORK,
@@ -99,7 +99,7 @@ __all__ = [
     "save_manifest",
     "shutdown_guest",
     "spec_projection",
-    "windows_network_projection",
+    "windows_key_facts",
     "validate_vars",
     "verify_range",
     "wait_shutoff",

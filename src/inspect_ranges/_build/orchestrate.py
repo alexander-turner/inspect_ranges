@@ -86,7 +86,7 @@ from .manifest import (
     save_refused_manifest,
     validate_range_name,
     vars_hash,
-    windows_network_projection,
+    windows_key_facts,
 )
 from .recipes import (
     DEFAULT_RECIPE_BUDGET_S,
@@ -636,7 +636,7 @@ def build_range(
             range_name=spec.meta.name,
             active_directory_hash=active_directory_hash(spec),
             network_state=(
-                windows_network_projection(spec, host)
+                windows_key_facts(spec, host.name, image_cache=image_cache)
                 if host.os.type == "windows"
                 else None
             ),

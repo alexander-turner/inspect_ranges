@@ -1106,3 +1106,21 @@ def test_empty_rendered_hostname_refuses_at_planning(cache: Path) -> None:
         issue for issue in excinfo.value.issues if issue.code == "hostname-empty"
     )
     assert "WEB" in issue.message
+    # the Windows branch: 15+ leading invalid chars empty ONLY after the
+    # NetBIOS truncate + rstrip, so the per-OS form must be what the gate tests
+    win = spec.model_copy(
+        update={
+            "hosts": [
+                Host(
+                    name="dc",
+                    hostname="_" * 15 + "x",
+                    os=Os(type="windows"),
+                    image="win-golden",
+                    interfaces=[Interface(network="lab", ip="10.0.0.5")],
+                )
+            ]
+        }
+    )
+    with pytest.raises(IssueError) as excinfo2:
+        resolve_plan(win, options(cache))
+    assert any(issue.code == "hostname-empty" for issue in excinfo2.value.issues)

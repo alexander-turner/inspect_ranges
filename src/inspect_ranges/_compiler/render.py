@@ -399,14 +399,18 @@ def render_bundle(
             # implicit answer-file search matches that name on removable media
             # (autounattend.xml is the installation-media name; measured:
             # specialize ignored it and booted with defaults)
+            # the seed carries the admin password (escaped but plaintext); the
+            # provider's bundles sit under a 0700 state root, but a CLI
+            # `render --out` path is user-chosen — 0600 BEFORE the bytes land,
+            # no transient wide window (phase review rounds 1-2)
+            seed_path = out / f"guests/{guest.name}/seed/unattend.xml"
+            seed_path.parent.mkdir(parents=True, exist_ok=True)
+            seed_path.touch(mode=0o600)
+            seed_path.chmod(0o600)  # touch mode is umask-masked; pin it
             write(
                 f"guests/{guest.name}/seed/unattend.xml",
                 _windows_unattend(plan, guest, options),
             )
-            # the seed carries the admin password (escaped but plaintext); the
-            # provider's bundles sit under a 0700 state root, but a CLI
-            # `render --out` path is user-chosen (phase review round 1)
-            (out / f"guests/{guest.name}/seed/unattend.xml").chmod(0o600)
         else:
             write(
                 f"guests/{guest.name}/seed/meta-data",
@@ -726,21 +730,20 @@ def windows_hostname(name: str) -> str:
     return guest_hostname(name)[:15].rstrip("-")
 
 
-def _windows_unattend(
-    plan: ResolvedPlan, guest: PlannedGuest, options: "PlanOptions | None"
-) -> str:
-    """The per-boot specialize answer file for a Windows guest: hostname, MAC-keyed static addressing, resolvers, and the OOBE answers. The Administrator password comes from the golden's recorded metadata (scenario content, local-only), falling back to the documented default."""
+def windows_seed_facts(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, object]:
+    """Every PLAN-RESOLVED fact the specialize seed bakes into a Windows disk, as a canonical JSON-able dict.
+
+    This is both the renderer's input (`_windows_unattend` assembles its XML from exactly this) and the Windows build key's `network_state` (phase review round 2): keying on spec declarations missed resolution — resolver ADDRESSES come from `dns.authoritative` guests' allocated IPs, gateways from router election and hypervisor-address allocation, sibling routes from NON-attached networks — so an edit there re-rendered against a stale disk with no rebuild. One function feeding both consumers makes renderer/key drift impossible. The admin password is deliberately absent: it rides the golden digest in the key already, and key material must never carry it.
+    """
     networks = {network.name: network for network in plan.networks}
     gatewayed = [
         networks[other.network]
         for other in guest.interfaces
         if networks[other.network].gateway is not None
     ]
-    tcpip: list[str] = []
-    dns: list[str] = []
+    interfaces: list[dict[str, object]] = []
     for index, interface in enumerate(guest.interfaces):
         network = networks[interface.network]
-        mac = interface.mac.upper().replace(":", "-")
         route_specs: list[tuple[str, str, int | None]] = []
         if network.gateway is not None:
             # Windows treats 169.254/16 as on-link (APIPA) and ARPs for it
@@ -770,6 +773,29 @@ def _windows_unattend(
                         for sibling in plan.networks
                         if sibling.name not in attached and sibling.mode != "nat"
                     )
+        interfaces.append(
+            {
+                "mac": interface.mac,
+                "ip": str(interface.ip),
+                "prefixlen": network.cidr.prefixlen,
+                "routes": [list(route) for route in route_specs],
+                "resolvers": [str(address) for address in network.resolvers],
+                "search": network.search,
+            }
+        )
+    return {"hostname": guest.hostname, "interfaces": interfaces}
+
+
+def _windows_unattend(
+    plan: ResolvedPlan, guest: PlannedGuest, options: "PlanOptions | None"
+) -> str:
+    """The per-boot specialize answer file for a Windows guest: hostname, MAC-keyed static addressing, resolvers, and the OOBE answers, assembled from `windows_seed_facts`. The Administrator password comes from the golden's recorded metadata (scenario content, local-only), falling back to the documented default."""
+    facts = windows_seed_facts(plan, guest)
+    tcpip: list[str] = []
+    dns: list[str] = []
+    for interface_facts in cast("list[dict[str, Any]]", facts["interfaces"]):
+        mac = cast(str, interface_facts["mac"]).upper().replace(":", "-")
+        route_specs = cast("list[list[Any]]", interface_facts["routes"])
         routes = ""
         if route_specs:
             rendered = "".join(
@@ -789,26 +815,27 @@ def _windows_unattend(
         tcpip.append(
             _TCPIP_INTERFACE.format(
                 mac=mac,
-                ip=interface.ip,
-                prefix=network.cidr.prefixlen,
+                ip=interface_facts["ip"],
+                prefix=interface_facts["prefixlen"],
                 routes=routes,
             )
         )
-        if network.resolvers:
+        resolvers = cast("list[str]", interface_facts["resolvers"])
+        if resolvers:
             servers = "".join(
                 f'            <IpAddress wcm:action="add" wcm:keyValue="{server_index + 1}">{address}</IpAddress>\n'
-                for server_index, address in enumerate(network.resolvers)
+                for server_index, address in enumerate(resolvers)
             )
             # the connection-specific DNS suffix (AD short-name resolution
             # needs it; the Linux analogue is netplan's nameservers.search)
             domain = (
-                f"          <DNSDomain>{network.search}</DNSDomain>\n"
-                if network.search is not None
+                f"          <DNSDomain>{interface_facts['search']}</DNSDomain>\n"
+                if interface_facts["search"] is not None
                 else ""
             )
             dns.append(_DNS_INTERFACE.format(mac=mac, domain=domain, servers=servers))
     return _WINDOWS_UNATTEND_TEMPLATE.format(
-        hostname=guest.hostname,
+        hostname=facts["hostname"],
         tcpip_interfaces="".join(tcpip),
         dns_interfaces="".join(dns),
         # the password is the one spec-side value a template cannot constrain:

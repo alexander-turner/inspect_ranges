@@ -55,6 +55,7 @@ foreach ($admin in @('eddard.stark', 'catelyn.stark', 'robb.stark')) {
 foreach ($must in @(
     @{ user = 'eddard.stark'; group = 'Domain Admins' },
     @{ user = 'eddard.stark'; group = 'Administrators' },
+    @{ user = 'catelyn.stark'; group = 'Administrators' },
     @{ user = 'robb.stark'; group = 'Administrators' }
   )) {
   $members = Get-ADGroupMember -Identity $must.group | Select-Object -ExpandProperty SamAccountName

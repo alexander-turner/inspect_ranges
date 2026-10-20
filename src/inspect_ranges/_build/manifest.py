@@ -11,8 +11,9 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -178,33 +179,37 @@ def vars_hash(step_vars: dict[str, VarValue]) -> str:
     ).hexdigest()
 
 
-def windows_network_projection(spec: "RangeSpec", host: Host) -> dict[str, object]:
-    """The unattend-relevant network state the specialize pass bakes into a Windows disk.
+@lru_cache(maxsize=8)
+def _resolved_plan_for_keys(spec_json: str, image_cache: str) -> "Any":
+    """One plan resolution per (spec, cache) for build-key fact extraction; planning is pure, so the cache is sound within a process."""
+    from .._compiler.plan import PlanOptions, resolve_plan
+    from ..schema import RangeSpec as _RangeSpec
 
-    The seed renders, per attached network: the gateway (declared or elected from the routers attached to it, with mode-driven NAT metrics), the cidr prefix, the dns nameservers and search domain, and — for multi-gateway hosts — static routes to every sibling network. All of it persists in the captured disk (specialize is one-shot), so all of it must move the build key: the attached networks project whole, plus each router's interfaces on them (router topology decides the election even when `gateway:` is unset). Phase review round 1 finding B1: the slice-2 `windows_identity` decision closed the host-level half of this class only.
+    spec = _RangeSpec.model_validate_json(spec_json)
+    # the build realizes the recipe-realizable sections, so this pure key-time
+    # resolution lifts the same gates the build render lifts (the runtime
+    # path keeps its gates; this plan never boots anything)
+    return resolve_plan(
+        spec,
+        PlanOptions(
+            image_cache=Path(image_cache),
+            realized_sections=frozenset(BUILD_REALIZED_SECTIONS),
+        ),
+    )
+
+
+def windows_key_facts(
+    spec: "RangeSpec", guest_name: str, *, image_cache: Path
+) -> dict[str, object]:
+    """The plan-RESOLVED facts the specialize seed bakes for one Windows guest: `render.windows_seed_facts` over a freshly resolved plan.
+
+    The build key must see what the DISK holds, and the disk holds resolution, not declarations (phase review round 2): resolver addresses come from `dns.authoritative` guests' allocated IPs, gateways from router election and hypervisor-address allocation, sibling routes from non-attached networks. The same function feeds the renderer, so the key and the seed can never drift.
     """
-    attached = [interface.network for interface in host.interfaces]
-    attached_set = set(attached)
-    by_name = {network.name: network for network in spec.networks}
-    return {
-        "networks": [
-            by_name[name].model_dump(mode="json")
-            for name in attached
-            if name in by_name
-        ],
-        "routers": [
-            {
-                "name": router.name,
-                "interfaces": [
-                    ri.model_dump(mode="json")
-                    for ri in router.interfaces
-                    if ri.network in attached_set
-                ],
-            }
-            for router in spec.routers
-            if any(ri.network in attached_set for ri in router.interfaces)
-        ],
-    }
+    from .._compiler.render import windows_seed_facts
+
+    plan = _resolved_plan_for_keys(spec.model_dump_json(), str(image_cache))
+    guest = next(g for g in plan.guests if g.name == guest_name)
+    return windows_seed_facts(plan, guest)
 
 
 def spec_projection(

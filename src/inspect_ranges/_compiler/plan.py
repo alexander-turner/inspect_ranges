@@ -2,7 +2,7 @@
 
 `resolve_plan` turns a validated `RangeSpec` into everything downstream stages consume: per-guest allocations (addresses, MACs, CIDs), per-network realization facts (bridge, gateway, resolvers, search domain), image references with cache-resolved digests, host requirements, and resource totals. Unsupported combinations fail here, at planning, as `IssueError`s with stable codes — never mid-boot. The plan is pure data with no timestamps, so the same spec and options always produce byte-identical `plan.json` (see `plan_json`).
 
-Render scope: Linux guests inject configuration via cloud-init; Windows HOSTS inject via a per-boot unattend seed with daemon-only readiness (windows-ad-v1 slice 1). Windows routers and attackers still refuse at planning (`windows-render-not-supported`).
+Render scope: Linux guests inject configuration via cloud-init; Windows HOSTS inject via a per-boot unattend seed with daemon-only readiness (windows-ad-v1 slice 1). Windows routers refuse at planning (`windows-render-not-supported`); Windows attackers cannot exist (dedicated boxes are schema-level Linux, and a Windows foothold refuses `windows-foothold-not-supported`).
 """
 
 import hashlib

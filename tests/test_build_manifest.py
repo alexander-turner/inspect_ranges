@@ -87,88 +87,76 @@ def test_windows_projection_keys_on_name_and_addressing() -> None:
     assert win_projection(renamed) != same
 
 
-def test_windows_projection_keys_on_baked_network_state() -> None:
-    """Phase-review B1: the specialize pass bakes gateway election, cidr, dns, and sibling routes into the disk, so an attached network or router edit must move the key; a Windows host with no network state refuses (fail closed); Linux hosts ignore it."""
+def test_windows_projection_keys_on_baked_network_state(tmp_path: Path) -> None:
+    """Phase-review B1 (round 2 shape): the key sees the PLAN-RESOLVED facts the seed bakes — an authoritative resolver guest's ip edit moves OTHER Windows guests' facts, an unrelated isolated network does not; a Windows host with no network state refuses (fail closed); Linux hosts ignore it."""
     import pytest as _pytest
-    from inspect_ranges._build.manifest import windows_network_projection
-    from inspect_ranges.types import Attacker, Network, RangeMeta, RangeSpec, Router
+    from inspect_ranges._build.manifest import windows_key_facts
+    from inspect_ranges.types import Attacker, DnsConfig, Network, RangeMeta, RangeSpec
 
     host = make_host(os=Os(type="windows"))
-    base = win_projection(host)
-    gateway_edit: dict[str, object] = {
-        "networks": [
-            {
-                "name": "lab",
-                "cidr": "10.0.0.0/24",
-                "mode": "isolated",
-                "gateway": "10.0.0.1",
-            }
-        ],
-        "routers": [],
-    }
-    assert win_projection(host, gateway_edit) != base
-    dns_edit: dict[str, object] = {
-        "networks": [
-            {
-                "name": "lab",
-                "cidr": "10.0.0.0/24",
-                "mode": "isolated",
-                "dns": ["1.1.1.1"],
-            }
-        ],
-        "routers": [],
-    }
-    assert win_projection(host, dns_edit) != base
     with _pytest.raises(ValueError, match="network state"):
         spec_projection(host)
     # linux hosts never consume it: byte-stable with or without
     linux = make_host()
-    assert spec_projection(linux) == spec_projection(linux, network_state=LAB_STATE)
-    # the projection helper itself: only ATTACHED networks and the routers on
-    # them participate, so an unrelated network edit does not move the key
-    spec = RangeSpec(
-        meta=RangeMeta(name="r", description="d"),
-        networks=[
-            Network(name="lab", cidr="10.0.0.0/24", mode="isolated"),
-            Network(name="dmz", cidr="10.0.1.0/24", mode="isolated"),
-        ],
-        routers=[
-            Router(
-                name="rtr",
-                interfaces=[Interface(network="lab"), Interface(network="dmz")],
-            )
-        ],
-        hosts=[host],
-        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    assert spec_projection(linux) == spec_projection(
+        linux, network_state={"hostname": "x", "interfaces": []}
     )
-    state = windows_network_projection(spec, host)
-    assert [n["name"] for n in state["networks"]] == ["lab"]  # type: ignore[index, union-attr]
-    assert state["routers"] and state["routers"][0]["name"] == "rtr"  # type: ignore[index]
-    assert len(state["routers"][0]["interfaces"]) == 1  # type: ignore[index]
-    unrelated = spec.model_copy(
+
+    def forest_spec(dc_ip: str) -> RangeSpec:
+        return RangeSpec(
+            meta=RangeMeta(name="r", description="d"),
+            networks=[
+                Network(
+                    name="lab",
+                    cidr="10.0.0.0/24",
+                    mode="isolated",
+                    dns=DnsConfig(authoritative=["dc"]),
+                ),
+            ],
+            hosts=[
+                Host.model_validate(
+                    {
+                        "name": "dc",
+                        "os": Os(type="windows"),
+                        "image": "win-golden",
+                        "interfaces": [Interface(network="lab", ip=dc_ip)],
+                    }
+                ),
+                Host.model_validate(
+                    {
+                        "name": "member",
+                        "os": Os(type="windows"),
+                        "image": "win-golden",
+                        "interfaces": [Interface(network="lab", ip="10.0.0.20")],
+                    }
+                ),
+            ],
+            attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+        )
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    base = windows_key_facts(forest_spec("10.0.0.10"), "member", image_cache=cache)
+    from typing import Any, cast
+
+    base_interfaces = cast("list[dict[str, Any]]", base["interfaces"])
+    assert any("10.0.0.10" in str(i["resolvers"]) for i in base_interfaces), (
+        "the authoritative DC's ip must appear in the member's baked resolvers"
+    )
+    # the resolver guest's ip edit moves the OTHER guest's facts (the round-2
+    # escape class: spec-level projection could not see this)
+    moved = windows_key_facts(forest_spec("10.0.0.11"), "member", image_cache=cache)
+    assert moved != base
+    # an unrelated isolated network leaves a single-homed guest's facts alone
+    extra = forest_spec("10.0.0.10").model_copy(
         update={
             "networks": [
-                spec.networks[0],
-                spec.networks[1].model_copy(update={"cidr": "10.0.2.0/24"}),
+                forest_spec("10.0.0.10").networks[0],
+                Network(name="aside", cidr="10.9.0.0/24", mode="isolated"),
             ]
         }
     )
-    assert windows_network_projection(unrelated, host) == state
-    router_edit = spec.model_copy(
-        update={
-            "routers": [
-                spec.routers[0].model_copy(
-                    update={
-                        "interfaces": [
-                            Interface(network="lab", ip="10.0.0.254"),
-                            Interface(network="dmz"),
-                        ]
-                    }
-                )
-            ]
-        }
-    )
-    assert windows_network_projection(router_edit, host) != state
+    assert windows_key_facts(extra, "member", image_cache=cache) == base
 
 
 Steps = list[tuple[ResolvedRecipe, dict[str, str | int | bool]]]
