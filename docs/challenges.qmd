@@ -1,7 +1,7 @@
 ---
 title: "Challenges"
 description: "Defining what an agent is asked to do on a range and how success is verified: challenges.yaml, the goal types and their proof contracts, submissions, scoring, and the trust boundaries stated plainly."
-llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes, hints), the fourteen built-in goal types with proof contracts and assurance labels, the submit_goal tool, the plant/poll/latch/corroborate scoring lifecycle and validity states, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
+llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes, hints), the fourteen built-in goal types with proof contracts and assurance labels, the challenge_submit tool, the plant/poll/latch/corroborate scoring lifecycle and validity states, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
 ---
 
 ## Overview
@@ -11,11 +11,13 @@ A challenge is what an agent is asked to do on a range; a goal is how success is
 ``` {.python .fragment}
 from inspect_ai import Task, task
 from inspect_ai.agent import react
+from inspect_ai.tool import bash
 
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
-    plant_goals,
+    challenge_setup,
+    challenge_submit,
 )
 
 @task
@@ -24,13 +26,14 @@ def zabbix() -> Task:
         dataset=challenge_dataset(
             "challenges.yaml", range_spec="range.yaml"
         ),
-        solver=[plant_goals(), react()],
+        setup=challenge_setup(),
+        solver=react(tools=[bash(), challenge_submit()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
 ```
 
-`challenge_dataset()` turns each challenge into a sample and validates the file against the range (goal hosts exist, segments are declared, required observers are deliverable; problems refuse with positioned errors before anything boots). `plant_goals()` runs every goal's setup before the agent acts and starts the sample's observers; a plant failure or a missing observer refuses up front, and plants already written are unwound, so the agent never starts against a half-planted range. `challenge_scorer()` verifies each goal and aggregates.
+`challenge_dataset()` turns each challenge into a sample and validates the file against the range (goal hosts exist, segments are declared, required observers are deliverable; problems refuse with positioned errors before anything boots). `challenge_setup()` runs every goal's setup before the agent acts and starts the sample's observers; a plant failure or a missing observer refuses up front, and plants already written are unwound, so the agent never starts against a half-planted range. `challenge_scorer()` verifies each goal and aggregates.
 
 ## Authoring challenges.yaml
 
@@ -84,13 +87,13 @@ The active probe behind `degrade`, `tamper`, `availability`, and `patch` runs fr
 
 ## Submitting proofs
 
-Multi-goal challenges get the `submit_goal` tool automatically (the dataset appends a paragraph to the prompt naming the tool and the goal ids). Agents that carry their own toolset, like `react(tools=...)`, must include `submit_goal()` themselves. Single-goal challenges work without it: the completion text is the fallback submission.
+Proofs travel through one channel: the `challenge_submit(goal_id, value)` tool, which the task author passes to the agent. For react-style agents that is `react(tools=[..., challenge_submit()])`; for coding-agent scaffolds run via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/) it is `bridged_tools=[challenge_submit()]`. The dataset appends a paragraph to every challenge prompt naming the tool and the goal id(s), so the agent always knows how to submit. There is no fallback: a sample that ends with no recorded submissions logs a loud warning naming both wiring idioms, since that is either an empty-handed agent or a task that forgot to wire the tool.
 
 Submissions are recorded, not judged, at submission time: the scorer verifies at most 8 distinct values per goal, earliest first, and records any overflow in the score metadata (a flooding agent is visible to reviewers, and scoring cost cannot be amplified by submission volume). Types whose verification never reads submissions (the prober types, `detection`, `evade`, `hijack`, `patch`) run exactly one check however many values arrive.
 
 ## How scoring works
 
-**Setup.** `plant_goals()` generates each proof value from independent entropy and plants it with no world-readable window, owned by the declared account; values never appear in process arguments, environment, logs, or the durable evidence record (the plants evidence stream carries digests and metadata only).
+**Setup.** `challenge_setup()` generates each proof value from independent entropy and plants it with no world-readable window, owned by the declared account; values never appear in process arguments, environment, logs, or the durable evidence record (the plants evidence stream carries digests and metadata only).
 
 **The wall.** Only the foothold is registered as the sample's sandbox, so the agent's tool loop cannot reach targets by name: targets are reachable solely through the range network (tradecraft) and the scoring oracle (a privileged surface never handed to solvers). Note the inspect_ai semantic: with a single registered environment `sandbox(name)` returns the foothold for any name rather than raising; treat named `sandbox()` calls in solver code as bugs. `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` restores all-guest registration for interactive range development and is logged loudly because it removes the wall.
 

@@ -16,8 +16,6 @@ inspect-docs:
   navigation:
     - text: Home
       href: index.qmd
-    - text: Tutorial
-      href: tutorial.qmd
     - text: Examples
       href: examples.qmd
     - text: Building
