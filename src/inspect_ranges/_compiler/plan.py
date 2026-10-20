@@ -393,6 +393,21 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                         hint=_GUEST_CONTENT_HINT,
                     )
                 )
+        if (
+            (host.roles and "roles" in options.realized_sections)
+            or (host.defense is not None and "defense" in options.realized_sections)
+        ) and not host.provisioning:
+            # the build claims these sections REALIZED, and only recipes
+            # realize them: a recipe-less host would mint the claim unrealized
+            # and unverified (slice-4 review)
+            issues.append(
+                Issue(
+                    code="realized-section-unconsumed",
+                    path=("hosts", index, "provisioning"),
+                    message=f"host {host.name!r} declares roles/defense but no provisioning recipe realizes them",
+                    hint="give the host a recipe that realizes its declared roles/defense, or drop the declarations",
+                )
+            )
         if host.defense is not None and "defense" not in options.realized_sections:
             # realized by build recipes as of windows-ad-v1 slice 4 (Defender
             # and update toggles are chain-load-bearing and verifiable); the
@@ -439,6 +454,24 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 hint=_GUEST_CONTENT_HINT,
             )
         )
+    if spec.active_directory is not None and "active_directory" in (
+        options.realized_sections
+    ):
+        hosts_by_name = {host.name: host for host in spec.hosts}
+        for domain_index, domain in enumerate(spec.active_directory.domains):
+            dc_host = hosts_by_name.get(domain.dc)
+            if dc_host is not None and not dc_host.provisioning:
+                # the identity data realizes through the DC's recipes
+                # (IR_ACTIVE_DIRECTORY); a recipe-less DC would mint the
+                # claim unrealized (slice-4 review)
+                issues.append(
+                    Issue(
+                        code="realized-section-unconsumed",
+                        path=("active_directory", "domains", domain_index, "dc"),
+                        message=f"domain {domain.name!r} names dc {domain.dc!r}, which carries no provisioning recipe to realize the identity data",
+                        hint="give the DC a promotion/realize recipe, or drop the active_directory declaration",
+                    )
+                )
     if (
         spec.active_directory is not None
         and "active_directory" not in options.realized_sections

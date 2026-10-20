@@ -485,3 +485,73 @@ def test_provider_resolve_config_applies_the_gate(
     # the batch cache serves the same resolution without re-running the gate
     again = runtime.resolve_config("provgate.yaml", lambda: spec)
     assert again[0] is swapped
+
+
+def test_realized_section_edits_move_the_windows_projection() -> None:
+    """Slice-4 exit properties: roles/defense/fqdn edits rebuild (they are realized into the disk), and a host declaring none of them keeps its projection byte-identical (existing manifests stay valid)."""
+    plain = make_host(os=Os(type="windows"))
+    base = spec_projection(plain)
+    assert spec_projection(make_host(os=Os(type="windows"))) == base
+    assert spec_projection(make_host(os=Os(type="windows"), roles=["iis"])) != base
+    from inspect_ranges.types import HostDefense
+
+    assert (
+        spec_projection(
+            make_host(os=Os(type="windows"), defense=HostDefense(defender=False))
+        )
+        != base
+    )
+    assert (
+        spec_projection(make_host(os=Os(type="windows"), fqdn="web.corp.local")) != base
+    )
+
+
+def test_active_directory_hash_moves_every_content_guest_key() -> None:
+    """The AD data is range-scoped: a user edit changes guest_build_key for any host passed with the hash; None (no AD declared) reproduces the pre-slice-4 key exactly."""
+    from inspect_ranges._build.manifest import active_directory_hash
+    from inspect_ranges.types import ActiveDirectory, AdDomain, AdUser, RangeSpec
+
+    host = make_host()
+    without = guest_build_key("sha256:d", host, [], range_name="r")
+    assert (
+        guest_build_key(
+            "sha256:d", host, [], range_name="r", active_directory_hash=None
+        )
+        == without
+    )
+
+    def spec_with(password: str) -> RangeSpec:
+        from inspect_ranges.types import Attacker, Interface, Network, Os, RangeMeta
+
+        return RangeSpec(
+            meta=RangeMeta(name="adr", description="d"),
+            networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+            hosts=[make_host(os=Os(type="windows"))],
+            attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+            active_directory=ActiveDirectory(
+                forest="corp.local",
+                domains=[
+                    AdDomain(
+                        name="corp.local",
+                        netbios="CORP",
+                        dc="web",
+                        users=[AdUser(name="alice", password=password)],
+                    )
+                ],
+            ),
+        )
+
+    first = active_directory_hash(spec_with("one"))
+    second = active_directory_hash(spec_with("two"))
+    assert first is not None and second is not None and first != second
+    assert guest_build_key(
+        "sha256:d", host, [], range_name="r", active_directory_hash=first
+    ) != guest_build_key(
+        "sha256:d", host, [], range_name="r", active_directory_hash=second
+    )
+    assert (
+        guest_build_key(
+            "sha256:d", host, [], range_name="r", active_directory_hash=first
+        )
+        != without
+    )

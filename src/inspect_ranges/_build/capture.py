@@ -85,11 +85,14 @@ def scrub_guest(
                 f"else {{ Set-DnsClientServerAddress -InterfaceIndex $ifc.InterfaceIndex -ServerAddresses $servers }} }} }}; "
             )
         # a locked temp file surviving the sweep would ride into the capture:
-        # fail loudly, the same rule as the Linux scrub's hard rc
+        # fail loudly, the same rule as the Linux scrub's hard rc. -Recurse:
+        # recipes stage DIRECTORIES under the prefix too (slice-4 review B1 —
+        # the goad answer-key JSON and the SQL installer tree must never land
+        # in a realized disk)
         script = (
             "$ErrorActionPreference='Stop'; "
             + strip_ns
-            + "Remove-Item -Force -ErrorAction SilentlyContinue 'C:\\Windows\\Temp\\.ir-*'; "
+            + "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue 'C:\\Windows\\Temp\\.ir-*'; "
             + "if (Test-Path 'C:\\Windows\\Temp\\.ir-*') "
             + "{ Write-Error 'staged temp files survived the scrub'; exit 1 }; "
             + "exit 0"

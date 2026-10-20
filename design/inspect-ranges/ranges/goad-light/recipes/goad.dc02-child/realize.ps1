@@ -6,7 +6,7 @@
 $ErrorActionPreference = 'Stop'
 Import-Module ActiveDirectory
 
-$ad = Get-Content -Raw 'C:\Windows\Temp\goad-ad.json' | ConvertFrom-Json
+$ad = Get-Content -Raw 'C:\Windows\Temp\.ir-goad-ad.json' | ConvertFrom-Json
 $domain = $ad.domains | Where-Object { $_.name -eq 'north.sevenkingdoms.local' }
 if (-not $domain) { throw 'north.sevenkingdoms.local is not in the AD declaration' }
 
@@ -18,14 +18,15 @@ Set-ADDefaultDomainPasswordPolicy -Identity 'north.sevenkingdoms.local' `
 function Default-Password([string]$name) { "Goad2026!$name" }
 
 function Ensure-Group([string]$name) {
-  if (-not (Get-ADGroup -Filter "SamAccountName -eq '$name'" -ErrorAction SilentlyContinue)) {
+  if (-not (Get-ADGroup -Filter 'SamAccountName -eq $name' -ErrorAction SilentlyContinue)) {
     New-ADGroup -Name $name -SamAccountName $name -GroupScope Global | Out-Null
   }
 }
 
 foreach ($user in $domain.users) {
   $password = if ($user.password) { $user.password } else { Default-Password $user.name }
-  if (-not (Get-ADUser -Filter "SamAccountName -eq '$($user.name)'" -ErrorAction SilentlyContinue)) {
+  $userName = $user.name
+  if (-not (Get-ADUser -Filter 'SamAccountName -eq $userName' -ErrorAction SilentlyContinue)) {
     $secure = ConvertTo-SecureString $password -AsPlainText -Force
     New-ADUser -Name $user.name -SamAccountName $user.name -AccountPassword $secure `
       -Enabled $true -PasswordNeverExpires $true | Out-Null
@@ -44,7 +45,7 @@ foreach ($user in $domain.users) {
 # local SAM, so BUILTIN\Administrators of the domain carries it) — the
 # declared local-admins misconfiguration the reference chain rides
 foreach ($admin in @('eddard.stark', 'catelyn.stark', 'robb.stark')) {
-  if (Get-ADUser -Filter "SamAccountName -eq '$admin'" -ErrorAction SilentlyContinue) {
+  if (Get-ADUser -Filter 'SamAccountName -eq $admin' -ErrorAction SilentlyContinue) {
     Add-ADGroupMember -Identity 'Administrators' -Members $admin -ErrorAction SilentlyContinue
   }
 }
@@ -67,16 +68,30 @@ Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value 'NORTH'
 Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value 'robb.stark'
 Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value 'sexywolfy'
 
-# -- TERMSRV saved credential (cmdkey store for robb.stark) ---------------------
-cmdkey /add:TERMSRV/castelblack /user:north\robb.stark /pass:sexywolfy | Out-Null
+# -- TERMSRV saved credential, in robb.stark's OWN vault (slice-4 review S8:
+# cmdkey under the daemon's SYSTEM lands in SYSTEM's store, inverting the
+# chain — the credential is loot FROM compromising robb) -----------------------
+$termsrvAction = New-ScheduledTaskAction -Execute 'cmd.exe' `
+  -Argument '/c cmdkey /add:TERMSRV/castelblack /user:north\robb.stark /pass:sexywolfy'
+Register-ScheduledTask -TaskName 'ir-seed-termsrv' -Action $termsrvAction `
+  -User 'NORTH\robb.stark' -Password 'sexywolfy' -RunLevel Limited | Out-Null
+Start-ScheduledTask -TaskName 'ir-seed-termsrv'
+Start-Sleep -Seconds 8
+$termsrvResult = (Get-ScheduledTaskInfo -TaskName 'ir-seed-termsrv').LastTaskResult
+Unregister-ScheduledTask -TaskName 'ir-seed-termsrv' -Confirm:$false
+if ($termsrvResult -ne 0) { throw "the TERMSRV credential seed task exited $termsrvResult" }
 
 # -- SYSVOL secret --------------------------------------------------------------
 $scripts = 'C:\Windows\SYSVOL\sysvol\north.sevenkingdoms.local\scripts'
 if (-not (Test-Path $scripts)) { New-Item -ItemType Directory -Force -Path $scripts | Out-Null }
+# the secret is jeor.mormont's REAL declared credential (slice-4 review B2:
+# a convention-shaped password here would disclose the derivation formula to
+# any authenticated reader; upstream seeds a live chain, so do we — jeor is
+# srv02's local admin)
 Set-Content -Path (Join-Path $scripts 'secret.ps1') -Value @'
 # legacy deployment script (do not remove)
 $cred = New-Object System.Management.Automation.PSCredential('NORTH\jeor.mormont',
-  (ConvertTo-SecureString 'Goad2026!jeor.mormont' -AsPlainText -Force))
+  (ConvertTo-SecureString '_L0ngCl@w_' -AsPlainText -Force))
 '@
 
 # -- shares (the open-shares misconfiguration) ----------------------------------
@@ -89,7 +104,7 @@ if (-not (Get-SmbShare -Name public -ErrorAction SilentlyContinue)) {
 Set-NetFirewallProfile -All -Enabled False
 
 # -- defense toggles --------------------------------------------------------------
-$defense = Get-Content -Raw 'C:\Windows\Temp\goad-defense.json' | ConvertFrom-Json
+$defense = Get-Content -Raw 'C:\Windows\Temp\.ir-goad-defense.json' | ConvertFrom-Json
 if ($defense -and $defense.defender -eq $true) {
   if (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) {
     throw 'defender: on is declared but RealTimeProtection is disabled'

@@ -14,10 +14,16 @@ boot_stamp() {
 }
 
 # the spec's identity data and this host's defense toggles, into the guest
-printf '%s' "$IR_ACTIVE_DIRECTORY" > ad.json
-printf '%s' "${IR_HOST_DEFENSE:-null}" > defense.json
-"$IR_PUSH" ad.json 'C:\Windows\Temp\goad-ad.json'
-"$IR_PUSH" defense.json 'C:\Windows\Temp\goad-defense.json'
+# staged OUTSIDE the bundle dir (a bundle write would vendor build residue
+# into the repo and churn the recipe digest, slice-4 review S1) and pushed
+# under the .ir-goad- prefix so the capture scrub's sweep ENFORCES removal
+# (slice-4 review B1: a surviving staged file is an answer key in the image)
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+printf '%s' "$IR_ACTIVE_DIRECTORY" > "$STAGING/ad.json"
+printf '%s' "${IR_HOST_DEFENSE:-null}" > "$STAGING/defense.json"
+"$IR_PUSH" "$STAGING/ad.json" 'C:\Windows\Temp\.ir-goad-ad.json'
+"$IR_PUSH" "$STAGING/defense.json" 'C:\Windows\Temp\.ir-goad-defense.json'
 
 BEFORE=$(boot_stamp)
 [ -n "$BEFORE" ] || { echo "dc01-forest: no boot stamp"; exit 1; }

@@ -90,8 +90,14 @@ async def _unwind(oracle: RangeOracle, keys: list[str]) -> None:
     """
     for key in reversed(keys):
         plant = oracle.store.plant(key)
-        windows_path = bool(re.match(r"^[A-Za-z]:\\", plant.path))
-        if not plant.path.startswith("/") and not windows_path:
+        # removal dispatches on the GUEST'S OS, with the path shape only
+        # deciding file-vs-record-only; both slash forms count as a Windows
+        # file (slice-4 review: a C:/-form path planted fine but unwound as
+        # record-only, leaving residue the next check's setup refused on)
+        windows_guest = oracle.is_windows(plant.guest)
+        windows_path = windows_guest and bool(re.match(r"^[A-Za-z]:[\\/]", plant.path))
+        posix_path = not windows_guest and plant.path.startswith("/")
+        if not windows_path and not posix_path:
             logger.debug(
                 "setup unwind: %s is a record-only plant (placement %r, no guest file)",
                 key,

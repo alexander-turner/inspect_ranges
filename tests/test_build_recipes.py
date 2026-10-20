@@ -419,3 +419,33 @@ def test_contract_env_exports_guest_os(tmp_path: Path) -> None:
         log_dir=tmp_path / "logs",
     )
     assert (recipe.bundle_dir / "os.txt").read_text().strip() == '{"web": "windows"}'
+
+
+def test_contract_env_exports_ad_and_defense(tmp_path: Path) -> None:
+    """The executor serializes IR_ACTIVE_DIRECTORY and the target host's IR_HOST_DEFENSE only when declared (windows-ad-v1 slice 4): the spec is the single source the domain recipes realize from."""
+    write_recipe(
+        tmp_path,
+        body='#!/bin/sh\nprintf "%s|%s" "${IR_ACTIVE_DIRECTORY:-absent}" "${IR_HOST_DEFENSE:-absent}" > "$PWD/contract.txt"\n',
+    )
+    recipe = resolve_recipe("acme.web", range_dir=tmp_path, cache=tmp_path / "cache")
+    run_recipe(
+        recipe,
+        step_vars={},
+        target=RecipeTarget(
+            guest="web",
+            cids={"web": 3100},
+            active_directory='{"forest": "corp.local"}',
+            host_defense='{"defender": false}',
+        ),
+        log_dir=tmp_path / "logs",
+    )
+    assert (recipe.bundle_dir / "contract.txt").read_text() == (
+        '{"forest": "corp.local"}|{"defender": false}'
+    )
+    run_recipe(
+        recipe,
+        step_vars={},
+        target=RecipeTarget(guest="web", cids={"web": 3100}),
+        log_dir=tmp_path / "logs",
+    )
+    assert (recipe.bundle_dir / "contract.txt").read_text() == "absent|absent"

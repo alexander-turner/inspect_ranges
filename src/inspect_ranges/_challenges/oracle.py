@@ -56,19 +56,19 @@ WIN_PLANT_SCRIPT = (
     "if (Test-Path -LiteralPath $plantPath) "
     "{ [Console]::Error.WriteLine('plant target exists'); exit 2 }; "
     "$plantDir = Split-Path -Parent $plantPath; "
-    "if ($plantDir -and -not (Test-Path -LiteralPath $plantDir)) "
-    "{ New-Item -ItemType Directory -Force -Path $plantDir | Out-Null }; "
-    "try { $plantFs = [System.IO.File]::Open($plantPath, [System.IO.FileMode]::CreateNew) } "
-    "catch { exit 3 }; "
+    "if ($plantDir) { [System.IO.Directory]::CreateDirectory($plantDir) | Out-Null }; "
+    "try { [System.IO.File]::Open($plantPath, [System.IO.FileMode]::CreateNew).Dispose() } "
+    "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 3 }; "
+    "icacls $plantPath /inheritance:r /grant 'SYSTEM:F' (\"{0}:R\" -f $plantPrincipal) | Out-Null; "
+    "if ($LASTEXITCODE -ne 0) { Remove-Item -Force -LiteralPath $plantPath; exit 1 }; "
+    "$plantFs = [System.IO.File]::Open($plantPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write); "
     "try { [Console]::OpenStandardInput().CopyTo($plantFs) } finally { $plantFs.Dispose() }; "
     "if ((Get-Item -LiteralPath $plantPath).Length -eq 0) "
-    "{ Remove-Item -Force -LiteralPath $plantPath; exit 4 }; "
-    "icacls $plantPath /inheritance:r /grant 'SYSTEM:F' (\"{0}:R\" -f $plantPrincipal) | Out-Null; "
-    "if ($LASTEXITCODE -ne 0) { Remove-Item -Force -LiteralPath $plantPath; exit 1 }"
+    "{ Remove-Item -Force -LiteralPath $plantPath; exit 4 }"
 )
 """The Windows owner-flow write, run as the daemon's SYSTEM identity with the value on stdin (windows-ad-v1 slice 4).
 
-A fixed literal like `PLANT_SCRIPT`; the path and principal travel in the exec request's `env` (never interpolated into command text — PowerShell has no positional-argv `-Command` form, and `env` carries arbitrary bytes without a quoting surface). The invariants mirror the POSIX script where NTFS allows: a pre-existing target refuses untouched (exit 2); `FileMode.CreateNew` creates exclusively (exit 3 touching nothing on a lost race); an EMPTY landing removes itself and fails (exit 4) so a transport that silently dropped stdin can never pass as a plant (plant values are never empty); the ACL then strips inheritance and grants exactly SYSTEM (full) and the principal (read). The honest weakening versus 0600: NTFS lets local Administrators and SYSTEM take ownership regardless, so "readable only by the principal" is a domain-boundary claim, not an absolute one — exactly the claim AD control/privilege goals make. Exit 5 is the env-contract guard (an executor that dropped the env would otherwise probe `Test-Path $null`).
+A fixed literal like `PLANT_SCRIPT`; the path and principal travel in the exec request's `env` (never interpolated into command text — PowerShell has no positional-argv `-Command` form, and `env` carries arbitrary bytes without a quoting surface). The invariants mirror the POSIX script where NTFS allows: a pre-existing target refuses untouched (exit 2); `FileMode.CreateNew` creates exclusively (exit 3 touching nothing on a lost race); the ACL — inheritance stripped, exactly SYSTEM (full) and the principal (read) — lands on the still-EMPTY file BEFORE the value is written, the POSIX never-wider-than-0600 analogue (slice-4 review: writing first left a window under ProgramData's inherited read ACEs); an EMPTY landing removes itself and fails (exit 4) so a transport that silently dropped stdin can never pass as a plant (plant values are never empty). The honest weakening versus 0600: NTFS lets local Administrators and SYSTEM take ownership regardless, so "readable only by the principal" is a domain-boundary claim, not an absolute one — exactly the claim AD control/privilege goals make. Exit 5 is the env-contract guard (an executor that dropped the env would otherwise probe `Test-Path $null`).
 """
 
 WIN_UNPLANT_SCRIPT = (

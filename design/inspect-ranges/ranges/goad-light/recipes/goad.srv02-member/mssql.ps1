@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 $sa = 'Sup1_sa_P@ssw0rd!'
 if (-not (Get-Service MSSQLSERVER -ErrorAction SilentlyContinue)) {
-  $bootstrap = 'C:\Windows\Temp\sqlexpr'
+  $bootstrap = 'C:\Windows\Temp\.ir-goad-sqlexpr'
   New-Item -ItemType Directory -Force -Path $bootstrap | Out-Null
   $exe = Join-Path $bootstrap 'SQLEXPR_x64_ENU.exe'
   $pinned = 'BEA033E778048748EB1C87BF57597F7F5449B6A15BAC55DDC08263C57F7A1CA8'
@@ -64,8 +64,8 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'NORTH\arya.st
   CREATE USER [NORTH\arya.stark] FOR LOGIN [NORTH\arya.stark];
 GRANT IMPERSONATE ON USER::dbo TO [NORTH\arya.stark];
 "@
-Set-Content -Path 'C:\Windows\Temp\goad-mssql.sql' -Value $tsql
-& $sqlcmd -S localhost -U sa -P $sa -b -i 'C:\Windows\Temp\goad-mssql.sql'
+Set-Content -Path 'C:\Windows\Temp\.ir-goad-mssql.sql' -Value $tsql
+& $sqlcmd -S localhost -U sa -P $sa -b -i 'C:\Windows\Temp\.ir-goad-mssql.sql'
 if ($LASTEXITCODE -ne 0) { throw "mssql impersonation config failed ($LASTEXITCODE)" }
 
 # self-assertion: the listener and the sa credential, mechanically

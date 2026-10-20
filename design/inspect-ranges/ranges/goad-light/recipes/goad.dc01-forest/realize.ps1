@@ -1,4 +1,4 @@
-# Realize dc01's declared content from the spec (C:\Windows\Temp\goad-ad.json,
+# Realize dc01's declared content from the spec (C:\Windows\Temp\.ir-goad-ad.json,
 # pushed by the entrypoint from IR_ACTIVE_DIRECTORY): sevenkingdoms users and
 # groups, the eleven-edge ACL-abuse chain, ADCS + the ESC1 template, anonymous
 # RPC, firewall off, and the defender-on assertion. Self-asserting throughout:
@@ -10,7 +10,7 @@
 $ErrorActionPreference = 'Stop'
 Import-Module ActiveDirectory
 
-$ad = Get-Content -Raw 'C:\Windows\Temp\goad-ad.json' | ConvertFrom-Json
+$ad = Get-Content -Raw 'C:\Windows\Temp\.ir-goad-ad.json' | ConvertFrom-Json
 $domain = $ad.domains | Where-Object { $_.name -eq 'sevenkingdoms.local' }
 if (-not $domain) { throw 'sevenkingdoms.local is not in the AD declaration' }
 $domainDn = (Get-ADDomain).DistinguishedName
@@ -24,7 +24,7 @@ Set-ADDefaultDomainPasswordPolicy -Identity 'sevenkingdoms.local' `
 function Default-Password([string]$name) { "Goad2026!$name" }
 
 function Ensure-User([string]$name, [string]$password) {
-  if (-not (Get-ADUser -Filter "SamAccountName -eq '$name'" -ErrorAction SilentlyContinue)) {
+  if (-not (Get-ADUser -Filter 'SamAccountName -eq $name' -ErrorAction SilentlyContinue)) {
     $secure = ConvertTo-SecureString $password -AsPlainText -Force
     New-ADUser -Name $name -SamAccountName $name -AccountPassword $secure `
       -Enabled $true -PasswordNeverExpires $true | Out-Null
@@ -32,7 +32,7 @@ function Ensure-User([string]$name, [string]$password) {
 }
 
 function Ensure-Group([string]$name) {
-  if (-not (Get-ADGroup -Filter "SamAccountName -eq '$name'" -ErrorAction SilentlyContinue)) {
+  if (-not (Get-ADGroup -Filter 'SamAccountName -eq $name' -ErrorAction SilentlyContinue)) {
     New-ADGroup -Name $name -SamAccountName $name -GroupScope Global | Out-Null
   }
 }
@@ -67,15 +67,15 @@ function Resolve-Endpoint([string]$name) {
   }
   if ($name -like 'OU=*') {
     $ou = $name.Substring(3)
-    $existing = Get-ADOrganizationalUnit -Filter "Name -eq '$ou'" -ErrorAction SilentlyContinue
+    $existing = Get-ADOrganizationalUnit -Filter 'Name -eq $ou' -ErrorAction SilentlyContinue
     if (-not $existing) {
       $existing = New-ADOrganizationalUnit -Name $ou -ProtectedFromAccidentalDeletion $false -PassThru
     }
     return @{ Dn = $existing.DistinguishedName; Sid = $null }
   }
-  $user = Get-ADUser -Filter "SamAccountName -eq '$name'" -ErrorAction SilentlyContinue
+  $user = Get-ADUser -Filter 'SamAccountName -eq $name' -ErrorAction SilentlyContinue
   if ($user) { return @{ Dn = $user.DistinguishedName; Sid = $user.SID } }
-  $group = Get-ADGroup -Filter "SamAccountName -eq '$name'" -ErrorAction SilentlyContinue
+  $group = Get-ADGroup -Filter 'SamAccountName -eq $name' -ErrorAction SilentlyContinue
   if ($group) { return @{ Dn = $group.DistinguishedName; Sid = $group.SID } }
   if ($name -match '^[a-z]+\.[a-z]+$') {
     Ensure-User $name (Default-Password $name)
@@ -147,7 +147,7 @@ $configNc = (Get-ADRootDSE).configurationNamingContext
 $templateContainer = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNc"
 $esc1Name = 'ESC1'
 $esc1Dn = "CN=$esc1Name,$templateContainer"
-if (-not (Get-ADObject -Filter "Name -eq '$esc1Name'" -SearchBase $templateContainer -ErrorAction SilentlyContinue)) {
+if (-not (Get-ADObject -Filter 'Name -eq $esc1Name' -SearchBase $templateContainer -ErrorAction SilentlyContinue)) {
   # a client-auth template whose subject the ENROLLEE supplies, enrollable by
   # any domain user: the ESC1 shape
   $attributes = @{
@@ -165,6 +165,12 @@ if (-not (Get-ADObject -Filter "Name -eq '$esc1Name'" -SearchBase $templateConta
     'pKIDefaultKeySpec'                    = 1
     'revision'                             = 100
     'msPKI-Cert-Template-OID'              = '1.3.6.1.4.1.311.21.8.4213371.1.1'
+    # issuance-required attributes (slice-4 review S6: a validity-period-less
+    # schema-v2 template plausibly fails at the CA while existing green)
+    'pKIExpirationPeriod'                  = [byte[]](0x00, 0x40, 0x39, 0x87, 0x2E, 0xE1, 0xFE, 0xFF)  # 1 year
+    'pKIOverlapPeriod'                     = [byte[]](0x00, 0x80, 0xA6, 0x0A, 0xFF, 0xDE, 0xFF, 0xFF)  # 6 weeks
+    'pKIKeyUsage'                          = [byte[]](0xA0, 0x00)  # digitalSignature + keyEncipherment
+    'pKIDefaultCSPs'                       = @('1,Microsoft Enhanced Cryptographic Provider v1.0')
   }
   New-ADObject -Name $esc1Name -Type pKICertificateTemplate -Path $templateContainer `
     -OtherAttributes $attributes | Out-Null
@@ -176,13 +182,21 @@ if (-not (Get-ADObject -Filter "Name -eq '$esc1Name'" -SearchBase $templateConta
   $templateAcl.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
         $domainUsers, 'GenericRead', 'Allow')))
   Set-Acl -Path ("AD:\" + $esc1Dn) -AclObject $templateAcl
-  # publish on the CA
-  $caDn = "CN=sevenkingdoms-CA,CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNc"
-  Set-ADObject -Identity $caDn -Add @{certificateTemplates = $esc1Name }
+  # publish on the CA through certutil (the canonical path: it edits the
+  # enrollment-services attribute AND refreshes certsvc's template cache —
+  # measured: a raw AD-attribute add leaves the CA not serving the template)
+  Restart-Service certsvc
+  $published = $false
+  foreach ($attempt in 1..12) {
+    certutil -SetCATemplates "+$esc1Name" *> $null
+    if ($LASTEXITCODE -eq 0) { $published = $true; break }
+    Start-Sleep -Seconds 5
+  }
+  if (-not $published) { throw 'certutil -SetCATemplates never accepted ESC1' }
 }
 
 # -- defense toggles (declared; verified, not trusted) ------------------------
-$defense = Get-Content -Raw 'C:\Windows\Temp\goad-defense.json' | ConvertFrom-Json
+$defense = Get-Content -Raw 'C:\Windows\Temp\.ir-goad-defense.json' | ConvertFrom-Json
 if ($defense -and $defense.defender -eq $true) {
   if (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) {
     throw 'defender: on is declared but RealTimeProtection is disabled'
@@ -204,7 +218,20 @@ $varysEdge = $daAcl.Access | Where-Object {
   $_.IdentityReference -match 'lord.varys' -and $_.ActiveDirectoryRights -match 'GenericAll'
 }
 if (-not $varysEdge) { throw 'the lord.varys GenericAll edge on Domain Admins is missing' }
-if (-not (Get-ADObject -Filter "Name -eq '$esc1Name'" -SearchBase $templateContainer)) {
+if (-not (Get-ADObject -Filter 'Name -eq $esc1Name' -SearchBase $templateContainer)) {
   throw 'the ESC1 template is missing'
+}
+# the CA must SERVE the template (publication + validity accepted), not
+# merely store the AD object (slice-4 review S6); full issuance remains the
+# agent-discoverable surface
+$servedOk = $false
+foreach ($attempt in 1..12) {
+  $served = certutil -CATemplates 2>&1
+  if ($served -match 'ESC1') { $servedOk = $true; break }
+  Start-Sleep -Seconds 5
+}
+if (-not $servedOk) {
+  [Console]::Error.WriteLine(($served | Out-String))
+  throw 'the CA does not serve the ESC1 template'
 }
 Write-Output 'dc01 realized: users, chain, adcs/esc1, rpc, firewall, defense'

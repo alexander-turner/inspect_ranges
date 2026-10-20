@@ -11,8 +11,11 @@ boot_stamp() {
     2>/dev/null | tr -d '\r' || true
 }
 
-printf '%s' "${IR_HOST_DEFENSE:-null}" > defense.json
-"$IR_PUSH" defense.json 'C:\Windows\Temp\goad-defense.json'
+# staged outside the bundle dir, pushed under .ir-goad- (slice-4 review S1/B1)
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+printf '%s' "${IR_HOST_DEFENSE:-null}" > "$STAGING/defense.json"
+"$IR_PUSH" "$STAGING/defense.json" 'C:\Windows\Temp\.ir-goad-defense.json'
 
 READY=0
 for _ in $(seq 1 180); do

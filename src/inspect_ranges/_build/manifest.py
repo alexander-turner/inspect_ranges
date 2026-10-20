@@ -200,6 +200,7 @@ def spec_projection(host: Host) -> str:
         projected["windows_identity"] = {
             "name": host.name,
             "hostname": host.hostname,
+            "fqdn": host.fqdn,
             "interfaces": [
                 interface.model_dump(mode="json") for interface in host.interfaces
             ],

@@ -106,6 +106,7 @@ hosts:
     misconfigurations:
       - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
       - { id: open-shares, description: "C:\\shares\\all world-readable" }
+      - { id: local-admins, description: "north\\jeor.mormont in local Administrators (upstream local_groups; the SYSVOL secret's credential is live)" }   # realized: surfaced from upstream (slice-4 review B2)
     defense: { defender: off, windows_update: on }
 
 attacker:
@@ -122,9 +123,18 @@ active_directory:
       netbios: SEVENKINGDOMS
       dc: dc01
       users:
+        # realized: every named account carries its UPSTREAM password (slice-4
+        # review B2: derivable convention passwords on privileged or
+        # chain-member accounts collapse milestones to a formula)
         - { name: cersei.lannister, groups: [Domain Admins], password: il0vejaime }
-        - { name: robert.baratheon, groups: [Domain Admins, Protected Users] }
-        - { name: renly.baratheon, note: marked account_is_sensitive on dc01 }
+        - { name: robert.baratheon, groups: [Domain Admins, Protected Users], password: iamthekingoftheworld }
+        - { name: renly.baratheon, password: lorastyrell, note: marked account_is_sensitive on dc01 }
+        - { name: tywin.lannister, password: powerkingftw135, note: ACL-chain entry }
+        - { name: jaime.lannister, password: cersei, note: ACL chain }
+        - { name: joffrey.baratheon, password: 1killerlion, note: ACL chain }
+        - { name: tyron.lannister, password: "Alc00L&S3x", note: ACL chain }
+        - { name: stannis.baratheon, password: Drag0nst0ne, note: ACL chain }
+        - { name: lord.varys, password: "_W1sper_$", note: GenericAll on Domain Admins + AdminSDHolder }
       acls:                      # the seeded ACL-abuse chain (config.json "acls")
         - { principal: tywin.lannister, right: ForceChangePassword, target: jaime.lannister }
         - { principal: jaime.lannister, right: GenericWrite, target: joffrey.baratheon }
@@ -142,14 +152,15 @@ active_directory:
       dc: dc02
       parent: sevenkingdoms.local
       users:
-        - { name: eddard.stark, groups: [Stark, Domain Admins] }
-        - { name: catelyn.stark, groups: [Stark] }                      # realized: surfaced from upstream (dc02 local admin)
+        - { name: eddard.stark, groups: [Stark, Domain Admins], password: "FightP3aceAndHonor!" }
+        - { name: catelyn.stark, groups: [Stark], password: robbsansabradonaryarickon }   # realized: surfaced from upstream (dc02 local admin)
         - { name: sql_svc, password: YouWillNotKerboroast1ngMeeeeee,
             spns: [MSSQLSvc/castelblack.north.sevenkingdoms.local:1433], note: kerberoastable }
         - { name: sansa.stark, password: 345ertdfg, spns: [HTTP/eyrie.north.sevenkingdoms.local] }
-        - { name: jon.snow, spns: [HTTP/thewall.north.sevenkingdoms.local], note: MSSQL sysadmin }
+        - { name: jon.snow, password: iknownothing, spns: [HTTP/thewall.north.sevenkingdoms.local], note: MSSQL sysadmin }
+        - { name: jeor.mormont, password: "_L0ngCl@w_", note: srv02 local Administrators (upstream local_groups); his credential is the SYSVOL secret }   # realized: surfaced from upstream (slice-4 review B2)
         - { name: hodor, password: hodor, note: trivially weak }
         - { name: robb.stark, password: sexywolfy, note: autologon + saved TERMSRV credential on dc02 }
-        - { name: samwell.tarly, note: mssql executeaslogin -> sa }        # realized: named by the mssql-impersonation vulnerability; surfaced from upstream
-        - { name: brandon.stark, note: mssql executeaslogin -> jon.snow }  # realized: see samwell.tarly
-        - { name: arya.stark, note: mssql executeasuser -> dbo }           # realized: see samwell.tarly
+        - { name: samwell.tarly, password: Heartsbane, note: mssql executeaslogin -> sa }        # realized: named by the mssql-impersonation vulnerability; surfaced from upstream
+        - { name: brandon.stark, password: iseedeadpeople, note: mssql executeaslogin -> jon.snow }  # realized: see samwell.tarly
+        - { name: arya.stark, password: Needle, note: mssql executeasuser -> dbo }                   # realized: see samwell.tarly

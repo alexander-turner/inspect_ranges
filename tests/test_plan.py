@@ -931,3 +931,64 @@ attacker:
     render_bundle(load_range(spec_path), out, options(cache))
     unattend = (out / "guests" / "dc" / "seed" / "unattend.xml").read_text()
     assert recorded in unattend
+
+
+def test_realized_sections_demand_a_consuming_recipe(cache: Path) -> None:
+    """The build claims roles/defense/active_directory REALIZED, and only recipes realize them: a recipe-less host declaring them (or a recipe-less DC under a declared active_directory) refuses `realized-section-unconsumed` on the build path (slice-4 review)."""
+    from inspect_ranges.types import (
+        ActiveDirectory,
+        AdDomain,
+        HostDefense,
+        ProvisioningStep,
+    )
+
+    build_options = PlanOptions(
+        image_cache=cache,
+        realized_sections=frozenset(
+            {"roles", "defense", "active_directory", "provisioning"}
+        ),
+    )
+    spec = RangeSpec(
+        meta=RangeMeta(name="unconsumed", description="gate test"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="ubuntu-noble",
+                interfaces=[Interface(network="lab", ip="10.0.0.10")],
+                defense=HostDefense(defender=False),
+            )
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, build_options)
+    assert any(
+        issue.code == "realized-section-unconsumed" for issue in excinfo.value.issues
+    )
+    # a recipe lifts it
+    spec.hosts[0].provisioning = [ProvisioningStep(recipe="acme.web")]
+    assert resolve_plan(spec, build_options).guests[0].name == "web"
+    # a declared AD whose DC carries no recipe refuses too
+    spec.active_directory = ActiveDirectory(
+        forest="corp.local",
+        domains=[AdDomain(name="corp.local", netbios="CORP", dc="bare")],
+    )
+    spec.hosts.append(
+        Host(
+            name="bare",
+            os=Os(type="windows"),
+            image="windows-2022",
+            interfaces=[Interface(network="lab", ip="10.0.0.11")],
+        )
+    )
+    (cache / "windows-2022.qcow2").write_bytes(b"fake windows golden")
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, build_options)
+    issue = next(
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "realized-section-unconsumed"
+    )
+    assert issue.path == ("active_directory", "domains", 0, "dc")
