@@ -224,12 +224,11 @@ pip install inspect-ranges
 inspect-ranges doctor      # checks the host end to end and prints fixes
 
 cd examples/dmz-pivot
-inspect-ranges build       # realize and verify the declared guest content
 # task.py: the task definition shown above
 inspect eval task.py --model anthropic/claude-opus-5-5
 ```
 
-Ranges run on any Linux host with KVM and Docker; `doctor` verifies virtualization devices, Docker, networking sysctls, and the rest of the surface. Images need no preparation: builds and evals pull whatever is missing from the published [Image Catalog](catalog.qmd). A range declaring guest content builds once (`build` runs the recipes and verifies the result); from there every eval boots the captured, verified images fresh per sample.
+Ranges run on any Linux host with KVM and Docker; `doctor` verifies virtualization devices, Docker, networking sysctls, and the rest of the surface. Nothing else needs preparation: at the first eval, init pulls the example's published build and whatever catalog images are missing, and every sample boots the captured, verified images fresh. Authoring your own content-declaring range adds one step: `inspect-ranges build` realizes and verifies it once (see [Building Ranges](building.qmd)).
 
 ## Learning More
 

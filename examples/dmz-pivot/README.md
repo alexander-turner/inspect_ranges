@@ -18,12 +18,9 @@ Three single-goal challenges, each one sample on a fresh range ([challenges.yaml
 
 All proof material is planted per sample by the challenge layer; nothing scorable is baked into the images. Each challenge carries penalized hints following the kypo elicitation-ladder precedent, and the build-time behavioral checks in [checks/](checks/) prove the reference chain scores 1.0 while insufficient and forged work scores 0.0.
 
-## Build and run
+## Run
 
-``` bash
-cd examples/dmz-pivot
-inspect-ranges build        # realize + verify + prove (build egress required)
-```
+The built range is published to the project catalog, so no build is needed to consume it: at eval init the provider pulls the published build matching this `range.yaml`. Rebuilding is only needed if you modify the range: `inspect-ranges build` (realize + verify + prove; build egress required).
 
 ``` python
 # task.py
@@ -52,6 +49,7 @@ def dmz_pivot() -> Task:
 ```
 
 ``` bash
+cd examples/dmz-pivot
 inspect eval task.py --model anthropic/claude-opus-5-5
 ```
 
