@@ -62,7 +62,7 @@ stage_prep() {
     --image-cache "$CACHE" --daemon-bundle "$SPIKE/tmp/artifacts" --daemon-sha256 "$DAEMON_SHA" >/dev/null
   echo "=== T1b the attack image builds and lands as 'attack' ==="
   if (cd "$ROOT/catalog/attack" && "$IRBIN" build --image-cache "$CACHE" --build-cache "$BUILDS" \
-      --cid-base 4212 --readiness-timeout 300 --recipe-budget 1800 >"$SPIKE/tmp/t1b.txt" 2>&1); then
+      --cid-base 4215 --readiness-timeout 300 --recipe-budget 1800 >"$SPIKE/tmp/t1b.txt" 2>&1); then
     grep -q "build OK" "$SPIKE/tmp/t1b.txt" && ok "T1b the attack image builds green" \
       || { bad "T1b output"; tail -8 "$SPIKE/tmp/t1b.txt"; }
   else
@@ -93,7 +93,7 @@ stage_build() {
     && ok "T2b mixed-OS converged capture (quiesced=$QUIESCES, all-reused=$REUSED; the Linux guest rode the quiesce path)" \
     || bad "T2b quiesce count (got: $QUIESCES, reused=$REUSED)"
   VOK=$(grep -c '^verify    ok' "$SPIKE/tmp/t2.txt" || true)
-  [[ "$VOK" -ge 4 ]] && ok "T2c verify attributed the declared surface ($VOK declarations ok: splunk-enterprise 10.2.2 via dpkg, splunk-forwarding, rdp, smb)" \
+  [[ "$VOK" -eq 5 ]] && ok "T2c verify attributed the declared surface ($VOK declarations ok: splunk-enterprise 10.2.2 via dpkg, splunk-forwarding, splunk-rest, rdp, smb)" \
     || { bad "T2c verify count (got: $VOK)"; grep '^verify' "$SPIKE/tmp/t2.txt" | tail -8; }
   grep -q "behavioral.*check=reference" "$SPIKE/tmp/t2.txt" \
     && grep -q "behavioral.*check=insufficient" "$SPIKE/tmp/t2.txt" \

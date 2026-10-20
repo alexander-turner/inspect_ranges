@@ -1,7 +1,8 @@
 #!/bin/bash
 # Insufficient attempt: hodor (the declared trivially weak account) CAN
 # authenticate to the domain — shares list, LDAP binds — but holds no admin
-# anywhere, so no token is reachable and nothing is submitted. Must score 0.0.
+# anywhere, so no real token is reachable; it SUBMITS a decoy digest (the
+# open share listing) so the negative proof is non-vacuous. Must score 0.0.
 set -euo pipefail
 
 DC02=192.168.56.11

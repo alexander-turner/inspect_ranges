@@ -93,7 +93,7 @@ stage_build() {
     && ok "G2b converged capture (quiesced=$QUIESCES, all-reused=$REUSED)" \
     || bad "G2b quiesce count (got: $QUIESCES, reused=$REUSED)"
   VOK=$(grep -c '^verify    ok' "$SPIKE/tmp/g2.txt" || true)
-  [[ "$VOK" -ge 10 ]] && ok "G2c verify attributed the declared surface ($VOK declarations ok)" \
+  [[ "$VOK" -eq 12 ]] && ok "G2c verify attributed the declared surface ($VOK declarations ok, the full declared set)" \
     || { bad "G2c verify count (got: $VOK)"; grep '^verify' "$SPIKE/tmp/g2.txt" | tail -8; }
   grep -q "behavioral.*check=reference" "$SPIKE/tmp/g2.txt" \
     && grep -q "behavioral.*check=insufficient" "$SPIKE/tmp/g2.txt" \

@@ -49,6 +49,19 @@ foreach ($admin in @('eddard.stark', 'catelyn.stark', 'robb.stark')) {
     Add-ADGroupMember -Identity 'Administrators' -Members $admin -ErrorAction SilentlyContinue
   }
 }
+# self-assert the DECLARED memberships the quiet adds above were meant to land
+# (phase review: eddard's Domain Admins rode SilentlyContinue unasserted; dc01
+# asserts its analogous cersei fact)
+foreach ($must in @(
+    @{ user = 'eddard.stark'; group = 'Domain Admins' },
+    @{ user = 'eddard.stark'; group = 'Administrators' },
+    @{ user = 'robb.stark'; group = 'Administrators' }
+  )) {
+  $members = Get-ADGroupMember -Identity $must.group | Select-Object -ExpandProperty SamAccountName
+  if ($members -notcontains $must.user) {
+    throw "declared membership missing: $($must.user) in $($must.group)"
+  }
+}
 
 # -- LLMNR + NBT-NS enabled (the Windows default, pinned explicitly) ----------
 Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' `

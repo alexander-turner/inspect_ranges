@@ -14,7 +14,7 @@ The `examples/` directory holds ranges translated faithfully from published defi
 | `kypo-demo` | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation | the client host (assumed breach) |
 | `cyris-basic` | CyRIS reference (JAIST) | weak-root-password privesc; firewall-policy recon; forensics triage of planted captures | the desktop host (assumed breach) |
 | `mhbench-equifax-small` | MHBench (CMU) | CVE-2017-5638 Struts RCE, planted SSH-key pivot, four-database exfiltration | the standard attack box (catalog default) |
-| `goad-light` | GOAD (Orange Cyberdefense) | autologon credential to SYSTEM via `atexec`, DCSync, pass-the-hash, `raiseChild` child-to-forest escalation — Defender ON throughout | dedicated attack box |
+| `goad-light` | GOAD (Orange Cyberdefense) | autologon credential to SYSTEM via `atexec`, DCSync, pass-the-hash, `raiseChild` child-to-forest escalation — Defender ON on both DCs | dedicated attack box |
 | `attack-range-windows` | Splunk attack_range | T1003.001 (comsvcs MiniDump on LSASS) on the instrumented endpoint, then confirm the detection in Splunk | dedicated attack box |
 
 ## What the examples demonstrate
@@ -23,7 +23,7 @@ The `examples/` directory holds ranges translated faithfully from published defi
 - **cyris-basic** is the firewall-ACL reference: a plain-router guest carrying the upstream 25/53 forwarding rules, deterministic synthesized evidence artifacts (pcaps, log noise, a resident dummy process), and a weights-scored forensics challenge.
 - **mhbench-equifax-small** is the scale and catalog reference: six targets, the attacker as the schema default (no `image:` line, the catalog's `attack`), a real CVE entry asserted live at build, and coverage-scored exfiltration with source-bound pcap corroboration.
 - **vulhub-zabbix** is the era-exact CVE reference: version-exact services compiled from canonical archives, with the patch dual (a defender removing the weakness) in its challenge set.
-- **goad-light** is the Windows Active Directory reference: a two-domain forest (parent and child) with GOAD's seeded attack surface realized by recipes, whole-range converged capture (every content host quiesces before any disk copies), and a reference ladder that works with Defender on.
+- **goad-light** is the Windows Active Directory reference: a two-domain forest (parent and child) with GOAD's seeded attack surface realized by recipes, whole-range converged capture (every content host quiesces before any disk copies), and a reference ladder that works with Defender on at the DCs (the member server declares `defender: off`, upstream-faithful).
 - **attack-range-windows** is the defense-telemetry reference: a declared telemetry flow (sysmon source, forwarder, Splunk sink) bound to a real export by `collectors.yaml`, with a `detection` goal scored from the exported stream — the same collector binding drives the build's proof trio and the eval.
 
 Each example's `checks/<challenge-id>/{reference,insufficient,forged}.sh` trio runs at build against the captured artifacts; a build whose proof fails records a refused manifest, and no consumer can boot an unproven range.
@@ -44,4 +44,4 @@ The two Windows examples (`goad-light`, `attack-range-windows`) differ operation
 
 - **The Windows golden derives locally.** No Windows image is ever published: you supply Microsoft evaluation media (a Server 2022 eval ISO and the virtio-win ISO) and run `inspect-ranges images derive-windows` once; every Windows guest then builds from that local golden. Evaluation media expires on the vendor's cadence, so plan to re-derive and rebuild rather than keep captured images long-lived (each fixture's `notes.md` records its specific cadence facts, like the rolling Sysmon download URL).
 - **Builds are converged.** A multi-guest build with Windows content captures its content hosts as one artifact: one guest's edit rebuilds the set, and every content host quiesces before any disk is copied, so cross-host state (domain trusts, forwarder checkpoints) stays consistent in the captured range.
-- **The exec surface is in-range.** Reference chains drive the endpoints over the declared surfaces (SMB exec via `atexec`, as SYSTEM); the agent foothold is the standard attack box, which carries the needed tooling (impacket).
+- **The exec surface is in-range.** Reference chains drive the endpoints over the declared surfaces (SMB exec via `atexec`, as SYSTEM); the agent foothold is the standard attack box, which carries the needed tooling (impacket; the ladder's `atexec.py` needs the v3 attack image — rebuild it locally from `catalog/attack` until the catalog republish lands).

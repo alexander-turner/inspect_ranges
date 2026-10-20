@@ -118,7 +118,7 @@ def test_render_writes_verifiable_bundle(tmp_path: Path) -> None:
 def test_plan_refuses_windows_examples(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Content-carrying Windows examples hit the build-aware gate first (build itself still refuses Windows render; unit-covered in test_plan.py)."""
+    """Content-carrying Windows examples hit the build-aware gate first (the Windows-specific refusals — vmm, foothold, ip-required — are unit-covered in test_plan.py)."""
     monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
     goad = str(Path(__file__).parent.parent / "examples/goad-light/range.yaml")
     result = CliRunner().invoke(ranges, ["plan", goad])

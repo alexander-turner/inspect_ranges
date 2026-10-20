@@ -71,4 +71,13 @@ if (-not (Get-Website -Name 'Default Web Site')) { throw 'IIS default site missi
 if (-not (Test-Path 'C:\shares\all\arya.txt')) { throw 'the open share content is missing' }
 $uploadAcl = icacls $upload
 if (-not ($uploadAcl -match 'IIS_IUSRS:\(OI\)\(CI\)\(F\)')) { throw 'the upload ACL is missing' }
+# the quiet weakness-enabling writes above must have LANDED or the declared
+# vulnerability is inert (phase review: accessPolicy and WebDAV authoring
+# rode SilentlyContinue unasserted)
+$policy = (Get-WebConfigurationProperty -Filter '/system.webServer/handlers' `
+    -PSPath 'IIS:\Sites\Default Web Site\upload' -Name accessPolicy).ToString()
+if ($policy -notmatch 'Script') { throw "upload accessPolicy did not land (got '$policy')" }
+$webdav = Get-WebConfigurationProperty -Filter '/system.webServer/webdav/authoring' `
+  -PSPath 'MACHINE/WEBROOT/APPHOST' -Location 'Default Web Site' -Name enabled
+if (-not $webdav.Value) { throw 'WebDAV authoring did not enable' }
 Write-Output 'srv02 realized: iis/webdav, upload weakness, shares, firewall, defender off'

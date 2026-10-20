@@ -1057,3 +1057,52 @@ def test_spec_defense_lifts_only_with_realized_telemetry(cache: Path) -> None:
         if issue.code == "realized-section-unconsumed"
     )
     assert issue.path == ("defense", "telemetry", 0, "sink")
+
+
+def test_windows_foothold_attacker_refuses_at_planning(cache: Path) -> None:
+    """The attacker surface is POSIX by construction (behavioral chains exec bash on the foothold), so attacker.host naming a Windows guest refuses at planning instead of breaking every chain (phase review round 1 finding A4)."""
+    spec = RangeSpec(
+        meta=RangeMeta(name="winfoot", description="windows foothold"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="dc",
+                os=Os(type="windows"),
+                image="win-golden",
+                interfaces=[Interface(network="lab", ip="10.0.0.5")],
+            )
+        ],
+        attacker=Attacker(host="dc", entry="external"),
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, options(cache))
+    issue = next(
+        issue
+        for issue in excinfo.value.issues
+        if issue.code == "windows-foothold-not-supported"
+    )
+    assert issue.path == ("attacker", "host")
+
+
+def test_empty_rendered_hostname_refuses_at_planning(cache: Path) -> None:
+    """A declared hostname that sanitizes to nothing (the sanitizer is lowercase-alphabet, so e.g. all-uppercase renders empty) breaks Windows specialize mid-boot and degrades cloud-init; planning refuses per the fail-at-planning contract (phase review round 1 finding A2)."""
+    spec = RangeSpec(
+        meta=RangeMeta(name="emptyhost", description="empty hostname"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[
+            Host(
+                name="web",
+                hostname="WEB",
+                os=Os(type="linux"),
+                image="focal",
+                interfaces=[Interface(network="lab")],
+            )
+        ],
+        attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec, options(cache))
+    issue = next(
+        issue for issue in excinfo.value.issues if issue.code == "hostname-empty"
+    )
+    assert "WEB" in issue.message

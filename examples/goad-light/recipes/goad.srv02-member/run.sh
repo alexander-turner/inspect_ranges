@@ -40,13 +40,18 @@ for _ in $(seq 1 120); do
 done
 [ "$NOW" != "$BEFORE" ] || { echo "srv02-member: the join reboot never happened"; exit 1; }
 
+CHANNEL_OK=0
 for _ in $(seq 1 60); do
   if "$IR_EXEC" -- powershell -NoProfile -NonInteractive -Command \
       "if (Test-ComputerSecureChannel) { exit 0 } else { exit 1 }" >/dev/null 2>&1; then
+    CHANNEL_OK=1
     break
   fi
   sleep 5
 done
+# loud like every other convergence loop here: a dead channel otherwise
+# surfaced indirectly at the first domain-credential assertion (phase review)
+[ "$CHANNEL_OK" = 1 ] || { echo "srv02-member: the secure channel never converged"; exit 1; }
 
 # IIS/WebDAV/shares first (fast, in-box), then the SQL Express install (the
 # long download rides the build egress)

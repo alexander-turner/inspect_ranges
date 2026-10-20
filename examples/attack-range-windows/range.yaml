@@ -39,6 +39,8 @@ hosts:
           note: web UI; admin credential is the template's shared password }
       - { name: splunk-forwarding, port: 9997,   # realized: the receiving surface the flow lands on
           note: splunktcp input the endpoint forwarder ships to }
+      - { name: splunk-rest, port: 8089,   # realized: the management/REST surface the prompt points the agent at
+          note: splunkd REST API (the collector export rides it too) }
     provisioning:
       - recipe: arw.splunk-server
 

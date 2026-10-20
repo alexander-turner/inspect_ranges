@@ -85,7 +85,7 @@ attacker:
   entry: external
 SPEC
 $IR render "$SPIKE/tmp/range" -o "$SPIKE/tmp/bundle" --image-cache "$CACHE" --cid-base 4150 >/dev/null 2>&1 \
-  && ok "W2 render emits the unattend seed and scsi-cdrom domain" || { bad "W2 render"; exit 1; }
+  && ok "W2 render succeeds for the windows guest (seed/domain shape pinned by test_plan units)" || { bad "W2 render"; exit 1; }
 if $IR up "$SPIKE/tmp/bundle" --image-cache "$CACHE" --readiness-timeout 600 >"$SPIKE/tmp/w2.txt" 2>&1; then
   ok "W2b up: the clone specialized and the daemon answered (daemon readiness)"
 else

@@ -61,21 +61,25 @@ WIN_PLANT_SCRIPT = (
     "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 3 }; "
     "icacls $plantPath /inheritance:r /grant 'SYSTEM:F' (\"{0}:R\" -f $plantPrincipal) | Out-Null; "
     "if ($LASTEXITCODE -ne 0) { Remove-Item -Force -LiteralPath $plantPath; exit 1 }; "
+    "try { "
     "$plantFs = [System.IO.File]::Open($plantPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write); "
-    "try { [Console]::OpenStandardInput().CopyTo($plantFs) } finally { $plantFs.Dispose() }; "
+    "try { [Console]::OpenStandardInput().CopyTo($plantFs) } finally { $plantFs.Dispose() } "
+    "} catch { Remove-Item -Force -LiteralPath $plantPath; "
+    "[Console]::Error.WriteLine($_.Exception.Message); exit 6 }; "
     "if ((Get-Item -LiteralPath $plantPath).Length -eq 0) "
     "{ Remove-Item -Force -LiteralPath $plantPath; exit 4 }"
 )
 """The Windows owner-flow write, run as the daemon's SYSTEM identity with the value on stdin (windows-ad-v1 slice 4).
 
-A fixed literal like `PLANT_SCRIPT`; the path and principal travel in the exec request's `env` (never interpolated into command text — PowerShell has no positional-argv `-Command` form, and `env` carries arbitrary bytes without a quoting surface). The invariants mirror the POSIX script where NTFS allows: a pre-existing target refuses untouched (exit 2); `FileMode.CreateNew` creates exclusively (exit 3 touching nothing on a lost race); the ACL — inheritance stripped, exactly SYSTEM (full) and the principal (read) — lands on the still-EMPTY file BEFORE the value is written, the POSIX never-wider-than-0600 analogue (slice-4 review: writing first left a window under ProgramData's inherited read ACEs); an EMPTY landing removes itself and fails (exit 4) so a transport that silently dropped stdin can never pass as a plant (plant values are never empty). The honest weakening versus 0600: NTFS lets local Administrators and SYSTEM take ownership regardless, so "readable only by the principal" is a domain-boundary claim, not an absolute one — exactly the claim AD control/privilege goals make. Exit 5 is the env-contract guard (an executor that dropped the env would otherwise probe `Test-Path $null`).
+A fixed literal like `PLANT_SCRIPT`; the path and principal travel in the exec request's `env` (never interpolated into command text — PowerShell has no positional-argv `-Command` form, and `env` carries arbitrary bytes without a quoting surface). The invariants mirror the POSIX script where NTFS allows: a pre-existing target refuses untouched (exit 2); `FileMode.CreateNew` creates exclusively (exit 3 touching nothing on a lost race); the ACL — inheritance stripped, exactly SYSTEM (full) and the principal (read) — lands on the still-EMPTY file BEFORE the value is written, the POSIX never-wider-than-0600 analogue (slice-4 review: writing first left a window under ProgramData's inherited read ACEs); an EMPTY landing removes itself and fails (exit 4) so a transport that silently dropped stdin can never pass as a plant (plant values are never empty). The honest weakening versus 0600: NTFS lets local Administrators and SYSTEM take ownership regardless, so "readable only by the principal" is a domain-boundary claim, not an absolute one — exactly the claim AD control/privilege goals make. Exit 5 is the env-contract guard (an executor that dropped the env would otherwise probe `Test-Path $null`). Exit 6 is the stdin-copy failure branch (phase review round 1: a mid-copy exception previously disposed the handle but left the PARTIAL file under the applied ACL, contradicting the removal invariant the driver's error reports).
 """
 
 WIN_UNPLANT_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
     "if ($env:IR_PLANT_PATH -and (Test-Path -LiteralPath $env:IR_PLANT_PATH)) "
     "{ Remove-Item -Force -LiteralPath $env:IR_PLANT_PATH }"
 )
-"""The Windows unwind: removal by `env`-carried path, the same no-quoting-surface rule as the plant."""
+"""The Windows unwind: removal by `env`-carried path, the same no-quoting-surface rule as the plant. `$ErrorActionPreference = 'Stop'` makes a locked-file removal exit NONZERO so the unwind's warning breadcrumb fires (phase review round 1: the default non-terminating error exited 0 and the next check's plant refused with no trail)."""
 
 
 class RangeOracle:

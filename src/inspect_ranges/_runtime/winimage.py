@@ -290,8 +290,12 @@ def install_windows_golden(
             )
             # sidecar lands first (derive_golden's crash ordering): metadata
             # pointing at a missing golden repairs on the next install; a
-            # provenance-less golden would refuse as unmanaged forever
+            # provenance-less golden would refuse as unmanaged forever.
+            # 0600: the sidecar carries the admin password PLAINTEXT (the one
+            # place it rests outside the image), and the cache dir is
+            # user-relocatable (phase review round 1, password journey)
             metadata_temp.write_text(metadata.model_dump_json(indent=2) + "\n")
+            metadata_temp.chmod(0o600)
             metadata_temp.replace(metadata_path)
             temp_golden.replace(golden_path)
             return metadata, False

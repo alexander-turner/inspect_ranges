@@ -403,6 +403,10 @@ def render_bundle(
                 f"guests/{guest.name}/seed/unattend.xml",
                 _windows_unattend(plan, guest, options),
             )
+            # the seed carries the admin password (escaped but plaintext); the
+            # provider's bundles sit under a 0700 state root, but a CLI
+            # `render --out` path is user-chosen (phase review round 1)
+            (out / f"guests/{guest.name}/seed/unattend.xml").chmod(0o600)
         else:
             write(
                 f"guests/{guest.name}/seed/meta-data",

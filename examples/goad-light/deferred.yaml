@@ -2,7 +2,7 @@
 # by anything. Guest configuration (active_directory with the typed ACL chain,
 # per-host services/vulnerabilities/misconfigurations/defense toggles, the
 # range-level defense posture) migrated into range.yaml under schema v0.3
-# (2026-10-07, see ../../guest-config-v0.3.md); variables, roles, and
+# (2026-10-07, see ../../design/inspect-ranges/guest-config-v0.3.md); variables, roles, and
 # scheduled_activity migrated as well (2026-10-07). What remains here is
 # deferred per that record's table.
 

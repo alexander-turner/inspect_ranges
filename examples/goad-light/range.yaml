@@ -55,7 +55,10 @@ hosts:
     misconfigurations:
       - { id: firewall-disabled, description: Windows firewall disabled (vuln role disable_firewall) }
       - { id: acl-chain, description: seeded ACL-abuse chain (see active_directory.domains) }
-      - { id: anonymous-rpc, description: anonymous RPC read enabled on the domain }
+      # DEVIATION (phase review): upstream seeds its anonymous_rpc ACEs on the
+      # CHILD domain (north/dc02); this fixture declares and realizes it on the
+      # forest root instead, via Pre-Win2K membership + RestrictAnonymous
+      - { id: anonymous-rpc, description: anonymous RPC read enabled on the domain (realized on the root; upstream seeds the child) }
     defense: { defender: on, windows_update: off }
 
   - name: dc02

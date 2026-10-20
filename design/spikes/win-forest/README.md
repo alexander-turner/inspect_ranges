@@ -12,4 +12,4 @@ What it proves, in order:
 - **F4** a consumer boots the captured forest: the member still joined to the child domain, its machine secure channel re-validated (convergence-gated: netlogon re-establishes lazily on a cold boot), the child DC's TRUST channel to the parent verified (`nltest /sc_verify:corp.local`), and cross-domain DC discovery from the member through the delegated DNS chain (`nltest /dsgetdc:corp.local` finds `\\dc01`).
 - **F5** teardown leaves nothing.
 
-Media pins ride the environment (`WIN_ISO`, `VIRTIO_ISO`, `NOBLE`). The battery wipes `tmp/` each run: a full run re-installs the golden (~25 min), builds the forest (~20-25 min: root ~4 min, child ~8 min serialized behind it, join, three captures), and boots the consumer.
+Media pins ride the environment (`WIN_ISO`, `VIRTIO_ISO`, `NOBLE`). The battery wipes `tmp/` each run: a full run re-installs the golden (~25 min), builds the forest (~20-25 min: root promote ~5.7 min (341 s measured), child ~8 min serialized behind it, join, three captures), and boots the consumer.

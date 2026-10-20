@@ -8,7 +8,7 @@ timestamp: 2026-09-30
 
 # goad-light — source note
 
-*Status: translated requirements fixture, now partially exercised: the [goad-forest spike](../../design/spikes/goad-forest/README.md) (2026-10-04) derived its build plan from this `range.yaml` (hosts, addressing, FQDN-derived forest shape, DNS chain) and built the two-domain forest end to end, verified by cross-domain auth and in-zone Linux resolution. Full promotion to a runnable range still requires the build pipeline (image resolution, GOAD's seeded attack-surface provisioning) and behavioral verification.*
+*Status: translated requirements fixture, now partially exercised: the [goad-forest spike](../../design/spikes/goad-forest/README.md) (2026-10-04) derived its build plan from this `range.yaml` (hosts, addressing, FQDN-derived forest shape, DNS chain) and built the two-domain forest end to end, verified by cross-domain auth and in-zone Linux resolution. Superseded (windows-ad-v1 slice 4): the fixture now BUILDS, VERIFIES, and SOLVES on the production pipeline — see the Realized addendum below.*
 
 Translation of GOAD-Light from `github.com/Orange-Cyberdefense/GOAD` (`ad/GOAD-Light/`, GPL-3.0, cloned 2026-09-30). This is the testbed behind the cochise autonomous-AD-pentest evaluation (arXiv:2502.04227, ACM TOSEM — that paper used full GOADv3; Light is the 3-VM variant). It is the example that forces AD realities into the format: static DC addressing, AD-integrated DNS chains, identity data (users/groups/ACLs/SPNs) as first-class configuration, and per-host defender toggles.
 

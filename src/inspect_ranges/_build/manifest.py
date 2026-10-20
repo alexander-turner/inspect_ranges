@@ -178,12 +178,43 @@ def vars_hash(step_vars: dict[str, VarValue]) -> str:
     ).hexdigest()
 
 
-def spec_projection(host: Host) -> str:
+def windows_network_projection(spec: "RangeSpec", host: Host) -> dict[str, object]:
+    """The unattend-relevant network state the specialize pass bakes into a Windows disk.
+
+    The seed renders, per attached network: the gateway (declared or elected from the routers attached to it, with mode-driven NAT metrics), the cidr prefix, the dns nameservers and search domain, and — for multi-gateway hosts — static routes to every sibling network. All of it persists in the captured disk (specialize is one-shot), so all of it must move the build key: the attached networks project whole, plus each router's interfaces on them (router topology decides the election even when `gateway:` is unset). Phase review round 1 finding B1: the slice-2 `windows_identity` decision closed the host-level half of this class only.
+    """
+    attached = [interface.network for interface in host.interfaces]
+    attached_set = set(attached)
+    by_name = {network.name: network for network in spec.networks}
+    return {
+        "networks": [
+            by_name[name].model_dump(mode="json")
+            for name in attached
+            if name in by_name
+        ],
+        "routers": [
+            {
+                "name": router.name,
+                "interfaces": [
+                    ri.model_dump(mode="json")
+                    for ri in router.interfaces
+                    if ri.network in attached_set
+                ],
+            }
+            for router in spec.routers
+            if any(ri.network in attached_set for ri in router.interfaces)
+        ],
+    }
+
+
+def spec_projection(
+    host: Host, *, network_state: dict[str, object] | None = None
+) -> str:
     """Canonical hash of the host's realized-relevant declarations.
 
     Only the sections the build realizes participate (provisioning, services, vulnerabilities), so edits elsewhere (addresses, resources, notes on other hosts) re-render without rebuilding this guest; the projection principle from the spine's checkpoint decision, applied per guest.
 
-    A WINDOWS host's projection also carries its name and interface addressing (windows-ad-v1 slice 2): the unattend specialize pass runs once on the generalized golden, so the captured realized disk holds the hostname and static addresses PERSISTENTLY — a consumer boot cannot re-apply them the way cloud-init re-seeds a Linux guest. Excluding addressing would let an IP edit re-render against a disk that still holds the old address, with no rebuild and no refusal; including it makes the edit an honest rebuild.
+    A WINDOWS host's projection also carries its name, interface addressing, and `network_state` (`windows_network_projection`; windows-ad-v1 slice 2, completed by the phase review): the unattend specialize pass runs once on the generalized golden, so the captured realized disk holds the hostname, static addresses, routes, and resolvers PERSISTENTLY — a consumer boot cannot re-apply them the way cloud-init re-seeds a Linux guest. Excluding any of it would let an edit re-render against a disk that still holds the old state, with no rebuild and no refusal; including it makes the edit an honest rebuild. A Windows host with no `network_state` refuses here, fail closed.
     """
     projected: dict[str, object] = {
         "provisioning": [step.model_dump(mode="json") for step in host.provisioning],
@@ -197,6 +228,11 @@ def spec_projection(host: Host) -> str:
     if host.defense is not None:
         projected["defense"] = host.defense.model_dump(mode="json")
     if host.os.type == "windows":
+        if network_state is None:
+            raise ValueError(
+                f"guest {host.name!r}: a Windows projection needs the network state "
+                "the specialize pass bakes into the disk (windows_network_projection)"
+            )
         projected["windows_identity"] = {
             "name": host.name,
             "hostname": host.hostname,
@@ -204,6 +240,7 @@ def spec_projection(host: Host) -> str:
             "interfaces": [
                 interface.model_dump(mode="json") for interface in host.interfaces
             ],
+            "network_state": network_state,
         }
     return hashlib.sha256(
         json.dumps(projected, sort_keys=True, separators=(",", ":")).encode()
@@ -217,6 +254,7 @@ def guest_build_key(
     *,
     range_name: str,
     active_directory_hash: str | None = None,
+    network_state: dict[str, object] | None = None,
 ) -> str:
     """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars, and the range's Active Directory hash when one is declared.
 
@@ -225,7 +263,7 @@ def guest_build_key(
     parts = [
         f"identity:{range_name}/{host.name}",
         f"golden:{golden_digest}",
-        f"spec:{spec_projection(host)}",
+        f"spec:{spec_projection(host, network_state=network_state)}",
     ]
     if active_directory_hash is not None:
         parts.append(f"ad:{active_directory_hash}")

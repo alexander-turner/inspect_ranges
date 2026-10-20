@@ -2,7 +2,7 @@
 # by anything. Guest configuration (users, services, the Ansible role as a
 # provisioning reference, the D2 defense posture with its telemetry flow)
 # migrated into range.yaml under schema v0.3 (2026-10-07, see
-# ../../guest-config-v0.3.md); what remains here is deferred per that record's
+# ../../design/inspect-ranges/guest-config-v0.3.md); what remains here is deferred per that record's
 # table.
 
 # attack_range_password migrated to range.yaml variables (2026-10-07);

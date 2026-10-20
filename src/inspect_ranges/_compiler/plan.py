@@ -299,6 +299,24 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             for path, name, vmm in pinned_cpu_guests
             if vmm == "cloud-hypervisor"
         )
+    if spec.attacker.host is not None:
+        foothold = next(
+            (host for host in spec.hosts if host.name == spec.attacker.host), None
+        )
+        if foothold is not None and foothold.os.type == "windows":
+            # the attacker surface is POSIX by construction: behavioral chains
+            # and eval tooling exec bash on the foothold, and the dedicated
+            # attack box is schema-level Linux — a Windows foothold would plan
+            # fine and then break every chain (phase review round 1 finding
+            # A4; "no windows attacker nodes", user 2026-10-20)
+            issues.append(
+                Issue(
+                    code="windows-foothold-not-supported",
+                    path=("attacker", "host"),
+                    message=f"the attacker foothold {spec.attacker.host!r} is a Windows guest; the attacker surface is POSIX",
+                    hint="point attacker.host at a Linux guest, or declare a dedicated attack box",
+                )
+            )
     for index, router in enumerate(spec.routers):
         if router.os is not None and router.os.type == "windows":
             issues.append(
@@ -358,6 +376,22 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         sanitized = (
             windows_hostname(declared) if is_windows else guest_hostname(declared)
         )
+        if not sanitized:
+            # a declared hostname of hostname-invalid characters only (e.g.
+            # uppercase: the sanitizer is lowercase-alphabet) renders EMPTY —
+            # an empty ComputerName breaks Windows specialize mid-boot and an
+            # empty local-hostname degrades cloud-init; fail at planning per
+            # the gate contract (phase review round 1 finding A2: slice 4
+            # removed the old not-realized gate without adding this)
+            issues.append(
+                Issue(
+                    code="hostname-empty",
+                    path=("hosts",),
+                    message=f"guest {guest_name!r}: the declared hostname {declared!r} renders empty after sanitizing",
+                    hint="hostnames sanitize to lowercase letters, digits, and hyphens; declare a hostname that keeps at least one such character",
+                )
+            )
+            continue
         if sanitized in hostnames and hostnames[sanitized] != guest_name:
             issues.append(
                 Issue(

@@ -458,6 +458,10 @@ async def _collect_facts(
     pid_packages: dict[int, str] = {}
     if pids:
         if windows:
+            # the one data interpolation into PowerShell command text in the
+            # Windows surface that skips ps_quote: every pid came through
+            # int() in the listener parser, so the joined list is digits and
+            # commas by construction — keep it that way or quote each value
             pid_list = ",".join(str(pid) for pid in pids)
             script = (
                 "$ErrorActionPreference='SilentlyContinue'; "
