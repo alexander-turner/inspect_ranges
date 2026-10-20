@@ -191,7 +191,7 @@ A range that carries challenges ([Challenges](challenges.qmd)) can prove them at
 | `insufficient.sh` | Do real but incomplete work and score 0.0 with validity `valid` and at least one submission. |
 | `forged.sh` | Submit plausible fakes and score 0.0 with validity `valid` and at least one submission. A chain that submits nothing, or a scorer that never reached a verdict, would otherwise pass vacuously. |
 
-The one-submission floor applies only when the challenge has submission-consuming goals: a challenge scored purely by observation (`detection`) has nothing to submit, so its insufficient and forged chains need only exit 0 and score 0.0 with validity `valid` (the splunk-detection checks are the worked example). Prober-backed goals cannot pass the trio today ([Challenges](challenges.qmd#goal-types)).
+The one-submission floor applies only when the challenge has submission-consuming goals: a challenge scored purely by observation (`detection`) has nothing to submit, so its insufficient and forged chains need only exit 0 and score 0.0 with validity `valid` (the splunk-detection checks are the worked example). Prober-backed goals score in the trio too: each check runs its own prober, and the chain must keep running until the goal's `window_s` is covered ([Challenges](challenges.qmd#goal-types)).
 
 Beacons corroborate only when their capture chunk rotates before scoring: tcpdump rotates by size, and scoring reads rotated chunks. The build's proof boot (the post-capture boot that runs the checks) defaults to 1 MB capture chunks, and the reference chain pushes filler traffic after its beacons (the vulhub chain is the worked example).
 

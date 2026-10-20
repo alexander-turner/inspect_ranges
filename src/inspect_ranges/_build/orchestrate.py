@@ -51,7 +51,13 @@ from ..types import (
     RangeSpec,
     has_guest_content,
 )
-from .behavioral import CHECKS_DIR_NAME, checks_declared, checks_digest
+from .behavioral import (
+    CHECKS_DIR_NAME,
+    checks_declared,
+    checks_digest,
+    load_challenges,
+    probe_segments_for_checks,
+)
 from .capture import (
     SHUTOFF_TIMEOUT_S,
     SHUTOFF_TIMEOUT_WINDOWS_S,
@@ -1345,6 +1351,15 @@ def _run_behavioral_phase(
                 realized_sections=sections,
                 realized_backings=realized_backings(manifest),
                 evidence_capture=True,
+                # prober-backed goals probe from rendered endpoints: the proof
+                # boot's bundle carries the same probe segments the provider
+                # derives per sample, or the per-check prober has no vantage
+                # and run_setup refuses active-prober
+                probe_segments=(
+                    probe_segments_for_checks(load_challenges(range_dir), spec)
+                    if checks_declared(range_dir)
+                    else ()
+                ),
             ),
         )
         result = up_fn(

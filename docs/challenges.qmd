@@ -125,7 +125,7 @@ The probe is an HTTP GET of `/probe?nonce=<hex>` every 2 s (`tamper` takes its p
 
 `degrade` scores over sliding windows, one anchored at every probe with a full `window_s` of observation after it: an outage counts even when the service is restored before run end, provided probing continues for at least `window_s` after the outage begins. `availability` anchors its window to the last record, and an observed span shorter than `window_s` is indeterminate. An omitted `segment` means the probe reaches the host through its first interface on a segment carrying a probe endpoint; a declared `segment` must carry one in the plan, or setup refuses.
 
-Open problem: the build's proof boot starts no prober, so a challenge carrying a prober-backed goal cannot pass its behavioral trio today (the goal reads indeterminate in every chain, and the trio requires `valid`). Until the proof boot gains a prober, prove prober goals with a scored eval.
+The build's proof boot runs the same prober: each behavioral check starts one over its challenge's derived targets, stops and flushes it before scoring, and scores only its own probe records. A check chain must keep running (sleeping is fine) until its prober goals' `window_s` is covered, or the goal reads indeterminate.
 
 ## Verifying Goals
 
