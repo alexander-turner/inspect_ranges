@@ -35,12 +35,11 @@ from inspect_ranges import (
     verify_goal,
 )
 
+
 @task
 def dmz_pivot() -> Task:
     return Task(
-        dataset=challenge_dataset(
-            "challenges.yaml", range_spec="range.yaml"
-        ),
+        dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
         solver=react(tools=[bash(), verify_goal()]),
         scorer=challenge_scorer(),
