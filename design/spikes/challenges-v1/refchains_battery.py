@@ -25,7 +25,7 @@ from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.observedtypes import register_exploit
 from inspect_ranges._challenges.oracle import range_oracle
 from inspect_ranges._challenges.scorer import challenge_scorer
-from inspect_ranges._challenges.setup import plant_goals
+from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._challenges.submission import SUBMISSIONS_STORE_KEY
 
 SPIKE = Path(__file__).parent
@@ -309,7 +309,7 @@ def main() -> int:
     challenges = SPIKE / "ref-challenges.yaml"
     task = Task(
         dataset=challenge_dataset(str(challenges), str(spec)),
-        solver=[arming_solver(), plant_goals(), battery_solver()],
+        solver=[arming_solver(), challenge_setup(), battery_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(spec)),
     )

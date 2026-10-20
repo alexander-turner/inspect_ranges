@@ -5,12 +5,12 @@ This module is named by the `inspect_ai` entry point in `pyproject.toml`, so ins
 
 from ._challenges.scorer import challenge_scorer
 from ._challenges.setup import challenge_setup
-from ._challenges.submission import challenge_submit
+from ._challenges.verify import verify_goal
 from ._provider.provider import RangeSandboxEnvironment
 
 __all__ = [
     "RangeSandboxEnvironment",
     "challenge_scorer",
     "challenge_setup",
-    "challenge_submit",
+    "verify_goal",
 ]

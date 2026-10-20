@@ -18,7 +18,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox, store
 from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.scorer import challenge_scorer
-from inspect_ranges._challenges.setup import plant_goals
+from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._challenges.submission import SUBMISSIONS_STORE_KEY
 
 RANGE_DIR = Path(sys.argv[1]).resolve()
@@ -71,7 +71,7 @@ def main() -> int:
         dataset=challenge_dataset(
             str(RANGE_DIR / "challenges.yaml"), str(RANGE_DIR / "range.yaml")
         ),
-        solver=[plant_goals(), ladder_solver()],
+        solver=[challenge_setup(), ladder_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(RANGE_DIR / "range.yaml")),
     )

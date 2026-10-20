@@ -56,6 +56,29 @@ function Link(el)
   end
 end
 
+-- Insert a "Source: examples/<name>" line pointing at the repository
+-- directory, directly under the page title (after the first h1 when it is
+-- still present; the title promotion may have already lifted it out).
+function Pandoc(doc)
+  local para = pandoc.Para({
+    pandoc.Str("Source:"),
+    pandoc.Space(),
+    pandoc.Link(
+      { pandoc.Code("examples/" .. name) },
+      REPO .. "/tree/main/examples/" .. name
+    ),
+  })
+  local pos = 1
+  for i, block in ipairs(doc.blocks) do
+    if block.t == "Header" and block.level == 1 then
+      pos = i + 1
+      break
+    end
+  end
+  table.insert(doc.blocks, pos, para)
+  return doc
+end
+
 function Image(el)
   if is_relative(el.src) then
     el.src = rewrite(el.src, true)

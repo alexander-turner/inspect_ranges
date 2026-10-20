@@ -31,6 +31,7 @@ from .schema import (
     required_observers,
 )
 from .timings import add_timing
+from .verify import register_verify_context
 
 if TYPE_CHECKING:
     from inspect_ai.util import Store
@@ -273,7 +274,7 @@ def challenge_setup(
 
     Prober-based goals (`availability`, `degrade`, `tamper`) start the active prober after a successful setup, probing from the rendered probe endpoint on a cadence; `detection` and `evade` goals start the telemetry export poller for their collector, which must have a matching entry in `telemetry_collectors` (poll mechanics are deployment knowledge the schema deliberately does not carry: the collector name binds the two). Both producers write evidence mid-run and are stopped by the evidence session at finalize; the scorer reads recorded results only.
 
-    This solver never touches the agent's tools: `challenge_submit()` is the only submission channel, and the task author always passes it to their agent (`react(tools=[bash(), challenge_submit()])`, or inspect_swe's `bridged_tools=[challenge_submit()]`). The dataset's appended prompt paragraph names the tool and the goal ids for every challenge.
+    This solver never touches the agent's tools: `verify_goal()` is the only submission channel, and the task author always passes it to their agent (`react(tools=[bash(), verify_goal()])`, or inspect_swe's `bridged_tools=[verify_goal()]`). The dataset's appended prompt paragraph names the tool and the goal ids for every challenge; this solver registers the sample's verification context so the tool can verify cheap-tier goals at call time.
     """
     collectors = telemetry_collectors or []
 
@@ -305,6 +306,9 @@ def challenge_setup(
             [spec for spec in collectors if spec.name in needed],
             extra_observers=extra,
         )
+        # verify_goal's call-time verification needs the oracle (in-memory
+        # plants) and the challenge; the scorer discards the context.
+        register_verify_context(oracle, challenge, state.store)
         # The cheap-tier poller (slice 5): latches mid-run passes with their
         # timestamps; the scorer stops it. Failure to start is logged by the
         # poller itself and never blocks the sample.

@@ -13,11 +13,12 @@ from ._challenges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
-    challenge_submit,
     load_challenges,
+    load_collectors,
     register_exploit,
     register_goal_type,
     validate_challenges,
+    verify_goal,
 )
 from .schema import (
     load_range,
@@ -36,8 +37,8 @@ __all__ = [
     "challenge_dataset",
     "challenge_scorer",
     "challenge_setup",
-    "challenge_submit",
     "load_challenges",
+    "load_collectors",
     "load_range",
     "range_json_schema",
     "register_exploit",
@@ -46,4 +47,5 @@ __all__ = [
     "semantic_issues",
     "validate_challenges",
     "validate_range",
+    "verify_goal",
 ]

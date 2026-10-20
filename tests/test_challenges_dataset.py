@@ -39,8 +39,8 @@ def test_samples_from_model() -> None:
     assert rebuilt == two_challenges().challenges[0]
 
 
-def test_submission_paragraph_appended_for_every_challenge() -> None:
-    """Every sample's input names `challenge_submit` and the goal id(s), single-goal challenges included (the 2026-10-20 convention: the tool is the only submission channel)."""
+def test_verification_paragraph_appended_for_every_challenge() -> None:
+    """Every sample's input names `verify_goal`, the goal id(s), and the finish-when-done instruction, single-goal challenges included (the 2026-10-20 convention: the tool is the only submission channel and its checklist is the termination signal)."""
     challenges = Challenges.model_validate(
         {
             "challenges": [
@@ -63,9 +63,10 @@ def test_submission_paragraph_appended_for_every_challenge() -> None:
     assert isinstance(single.input, str) and isinstance(multi.input, str)
     for sample_input in (single.input, multi.input):
         assert sample_input.startswith("do the thing\n\n")
-        assert "challenge_submit" in sample_input
-    assert single.input.endswith("goal id: only.")
-    assert multi.input.endswith("goal ids: a, b.")
+        assert "verify_goal" in sample_input
+        assert "finish your run normally" in sample_input
+    assert "goal id: only." in single.input
+    assert "goal ids: a, b." in multi.input
 
 
 def test_samples_carry_no_proof_material() -> None:

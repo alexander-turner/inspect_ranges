@@ -25,7 +25,7 @@ from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.oracle import range_oracle
 from inspect_ranges._challenges.schema import Challenge
 from inspect_ranges._challenges.scorer import challenge_scorer, score_challenge
-from inspect_ranges._challenges.setup import plant_goals
+from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._challenges.submission import (
     SUBMISSIONS_STORE_KEY,
     submissions_from,
@@ -165,7 +165,7 @@ def main() -> int:
     challenges = SPIKE / "gate-challenges.yaml"
     task = Task(
         dataset=challenge_dataset(str(challenges), str(spec)),
-        solver=[plant_goals(), battery_solver()],
+        solver=[challenge_setup(), battery_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(spec)),
     )

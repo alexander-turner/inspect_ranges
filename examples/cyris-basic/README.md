@@ -33,15 +33,16 @@ from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
-    challenge_submit,
+    verify_goal,
 )
+
 
 @task
 def cyris_basic() -> Task:
     return Task(
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
-        solver=react(tools=[bash(), challenge_submit()]),
+        solver=react(tools=[bash(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )

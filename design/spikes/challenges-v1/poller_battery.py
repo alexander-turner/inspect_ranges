@@ -38,7 +38,7 @@ from inspect_ranges._challenges.scorer import (  # noqa: E402
     challenge_scorer,
     score_challenge,
 )
-from inspect_ranges._challenges.setup import plant_goals, run_setup  # noqa: E402
+from inspect_ranges._challenges.setup import challenge_setup, run_setup  # noqa: E402
 from inspect_ranges._challenges.submission import (  # noqa: E402
     SUBMISSIONS_STORE_KEY,
     Submissions,
@@ -112,7 +112,7 @@ def part_a() -> None:
     spec = SPIKE / "spec.yaml"
     task = Task(
         dataset=challenge_dataset(str(SPIKE / "poller-challenges.yaml"), str(spec)),
-        solver=[plant_goals(), battery_solver()],
+        solver=[challenge_setup(), battery_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(spec)),
     )
