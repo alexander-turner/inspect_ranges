@@ -1,5 +1,5 @@
 #!/bin/sh
-# Splunk Enterprise 10.2.2 from the vendored, digest-pinned .deb (dpkg
+# Splunk Enterprise 10.2.2 from the URL+sha256-pinned .deb (dpkg
 # attributes the declared service version), listening for the endpoint
 # forwarder on 9997, with the range telemetry-export wrapper installed for the
 # declared collector (collectors.yaml). The admin credential is the template's
@@ -72,23 +72,36 @@ cat > /opt/range/telemetry-export.sh <<"WRAP"
 # A failing search must exit NONZERO: the poller then records poll-failed
 # (an incomplete window scores indeterminate, never a silent quiet pass) —
 # measured: a swallowed SPL error read as endless quiet polls
-now="$(date +%s)"
+# the upper bound of each window is the LAST FULLY ELAPSED second: events
+# indexed later in the current second would land behind an already-advanced
+# cursor and vanish silently (slice-5 review finding 5a)
+upper="$(($(date +%s) - 1))"
 if [ $# -eq 0 ]; then
   # bootstrap (and re-bootstrap): the stream begins NOW — history indexed
   # before the first poll is baked build noise, not range activity, and an
   # unbounded backlog export blows the poller 1 MiB cap into an endless
   # truncate/re-bootstrap loop (measured)
-  echo "-- cursor: $now"
+  printf -- "-- cursor: %s\n" "$upper"
   exit 0
 fi
 cursor="$1"
-if ! curl -sk --fail -K /opt/range/.splunk-auth "https://localhost:8089/services/search/v2/jobs/export" \
-    --data-urlencode "search=search index=* _indextime>$cursor _indextime<=$now | sort 0 _indextime | head 5000 | table _raw" \
-    -d output_mode=csv -d earliest_time=0; then
+if ! out="$(curl -sk --fail -K /opt/range/.splunk-auth "https://localhost:8089/services/search/v2/jobs/export" \
+    --data-urlencode "search=search index=* _indextime>$cursor _indextime<=$upper | sort 0 _indextime | head 5000 | table _raw" \
+    -d output_mode=csv -d earliest_time=0)"; then
   echo "telemetry export search failed" >&2
   exit 1
 fi
-echo "-- cursor: $now"
+# the cap must fail LOUD: head would drop the newest records while the cursor
+# still advanced — a silent-loss primitive (review finding 5a); a failed poll
+# records poll-failed and the window scores indeterminate, never a quiet pass
+if [ "$(printf "%s" "$out" | grep -c .)" -ge 5000 ]; then
+  echo "telemetry export overflowed the poll cap" >&2
+  exit 1
+fi
+printf "%s" "$out"
+# the leading newline guards a missing trailing newline in the csv body: the
+# banner must be its own final line or the poller mis-takes an event line
+printf "\n-- cursor: %s\n" "$upper"
 WRAP
 chmod 755 /opt/range/telemetry-export.sh'
 

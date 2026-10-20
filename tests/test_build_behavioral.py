@@ -427,3 +427,31 @@ collectors:
     before = checks_digest(tmp_path)
     collectors_yaml.write_text(collectors_yaml.read_text() + "# edited\n")
     assert checks_digest(tmp_path) != before
+
+
+def test_detection_only_negatives_pass_without_submissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice-5 rule: detection goals score by observation, so a negative check over detection-only goals passes at 0.0/valid with zero submissions; any submission-consuming or unknown goal in the mix keeps the strict floor."""
+    detection = SimpleNamespace(id="d", type="detection")
+    flag = SimpleNamespace(id="f", type="flag")
+    unknown = SimpleNamespace(id="u", type="not-a-goal-type")
+    quiet = FakeOutcome(stdout=b"no submissions, by design\n")
+    assert (
+        run_check(
+            monkeypatch, name="insufficient", outcome=quiet, goals=[detection]
+        ).status
+        == "pass"
+    )
+    assert (
+        run_check(
+            monkeypatch, name="forged", outcome=quiet, goals=[detection, flag]
+        ).status
+        == "fail"
+    )
+    assert (
+        run_check(
+            monkeypatch, name="insufficient", outcome=quiet, goals=[unknown]
+        ).status
+        == "fail"
+    )

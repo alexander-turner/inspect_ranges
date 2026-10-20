@@ -396,17 +396,21 @@ async def run_behavioral_checks(
     try:
         if collectors:
             # ONE poller for the whole proof boot, stopped at finalize via the
-            # producer registration: streams are per-collector and detection
-            # windows anchor at each check's own goal start, so checks share
-            # the stream without sharing evidence (windows-ad-v1 slice 5)
-            from .._challenges.setup import (
-                _start_producers,  # pyright: ignore[reportPrivateUsage]
-            )
+            # producer registration: streams are per-collector and every
+            # check's detection verdict is a trailing window over the shared
+            # stream (the checks' separation sleeps hold isolation), so checks
+            # share the stream without sharing evidence (windows-ad-v1
+            # slice 5). Started DIRECTLY, not through a challenge's producer
+            # setup: that path also derives prober targets from the borrowed
+            # challenge's goals (slice-5 review finding 1)
+            from .._evidence.telemetry import TelemetryPoller
 
-            handle.plants = None
-            await _start_producers(
-                RangeOracle(handle), challenges.challenges[0], collectors
-            )
+            writer = session.driver_writer
+            if writer is None:
+                raise RuntimeError("telemetry export needs the driver evidence writer")
+            poller = TelemetryPoller(channel, writer, collectors)
+            await poller.start()
+            session.register_producer(poller.stop)
         for challenge in challenges.challenges:
             check_dir = range_dir / CHECKS_DIR_NAME / challenge.id
             for name in CHECK_NAMES:

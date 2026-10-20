@@ -872,6 +872,22 @@ def test_semantic_codes(
     # invalid-allow-entry test)
 
 
+def test_undeclared_telemetry_sink_warns_but_stays_valid(tmp_path: Path) -> None:
+    """A sink may be an abstract collector name (windows-ad-v1 slice 5), so an undeclared sink is a WARNING on the sink path and the spec stays valid."""
+    report = report_with(
+        """
+        defense:
+          tier: D2
+          telemetry: [{ source: web, collector: sysmon, sink: ghost }]
+        """,
+        tmp_path,
+    )
+    assert report.valid
+    issue = next(i for i in report.issues if i.code == "telemetry-undeclared-guest")
+    assert issue.severity == "warning"
+    assert issue.path_str == "defense.telemetry[0].sink"
+
+
 def test_semantic_report_is_complete(tmp_path: Path) -> None:
     report = report_with(
         """

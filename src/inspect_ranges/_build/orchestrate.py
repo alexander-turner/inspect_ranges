@@ -1472,10 +1472,12 @@ def _prove_realized_boot(
 def rotate_stale_bx_state(state_dir: Path, bx_project: str) -> None:
     """Move a leftover bx project directory aside so the proof boot's evidence record starts empty.
 
-    A failed build's teardown leaves the bx project's evidence store behind (its chunks and manifest parts are write-once), and the next build of the same spec reuses the deterministic `-bx` project name: without rotation every chunk collides as a recorded gap and the telemetry windows can never complete (measured, windows-ad-v1 slice 5). The stale directory is renamed, not deleted, so a failed run's record stays available for autopsy. The known `-bx` interleave limit applies here too: a concurrent same-spec build's live store would rotate with it.
+    Every bx teardown keeps its project state (`keep_state=True`: the evidence record is the proof's audit trail), and the next build of the same spec reuses the deterministic `-bx` project name — the store's chunks and manifest parts are write-once, so without rotation every chunk collides as a recorded gap and the telemetry windows can never complete (measured, windows-ad-v1 slice 5). The previous run's directory is renamed, not deleted, so the latest prior record stays available for autopsy; OLDER rotated copies are pruned so repeated rebuilds hold exactly one stale sibling instead of accumulating evidence stores without bound (slice-5 review finding 3). The known `-bx` interleave limit applies here too: a concurrent same-spec build's live store would rotate with it.
     """
     stale = project_dir(state_dir, bx_project)
     if stale.exists():
+        for old in stale.parent.glob(f"{stale.name}-stale-*"):
+            shutil.rmtree(old, ignore_errors=True)
         stale.rename(stale.with_name(f"{stale.name}-stale-{int(time.time() * 1000)}"))
 
 

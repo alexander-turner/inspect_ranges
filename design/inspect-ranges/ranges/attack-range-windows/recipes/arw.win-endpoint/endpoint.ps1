@@ -105,6 +105,11 @@ if ($startName -ne 'LocalSystem') { throw "forwarder service account is $startNa
 # is PROVEN as SYSTEM. A SYSTEM task exports new events (RecordId watermark)
 # to a log the UF monitors — its most battle-tested input — so the declared
 # sysmon -> forwarder -> splunk flow stays real end to end.
+# BOUND CAVEAT (slice-5 review finding 5b): each 8 s cycle reads the newest
+# 4000 events per channel; a burst past that skips the middle with no gap
+# record. Fine for presence-scored detection (the signal event is the burst's
+# cause, not its middle); a stealth/evade goal must NOT ride this bridge
+# without first replacing the bound with an honest gap record.
 $bridgeDir = 'C:\ProgramData\range-telemetry'
 New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
 Set-Content -Path "$bridgeDir\export-events.ps1" -Value @'
@@ -118,7 +123,7 @@ while ($true) {
   }
   foreach ($channel in $channels) {
     $last = if ($marks.ContainsKey($channel)) { $marks[$channel] } else { 0 }
-    $events = Get-WinEvent -LogName $channel -MaxEvents 500 -ErrorAction SilentlyContinue |
+    $events = Get-WinEvent -LogName $channel -MaxEvents 4000 -ErrorAction SilentlyContinue |
       Where-Object { $_.RecordId -gt $last } | Sort-Object RecordId
     foreach ($event in $events) {
       $message = ($event.Message -replace "\r?\n", ' ')

@@ -17,7 +17,7 @@ done
 
 # window separation: the previous check's telemetry must age out of the
 # goal's 120 s trailing scoring window before this check's events begin
-sleep 60
+sleep 90
 
 # Set-Content 'C:\Windows\Temp\fake-telemetry.txt' with the signal line,
 # encoded (PowerShell -EncodedCommand wants UTF-16LE base64). The decoy is
@@ -35,5 +35,13 @@ PY
 )
 timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
   "powershell -NoProfile -EncodedCommand $payload" >/dev/null 2>&1 || true
+# execution evidence, not exit codes (impacket exits 0 on handled errors): the
+# decoy must PROVABLY exist or this proof of the collector binding is vacuous
+# (review finding 4). Reading it back puts the signal text only on atexec's
+# stdout path, never in a collected channel (the command line names the file).
+read_out=$(timeout 180 atexec.py 'Administrator:changeme123!@'"$WIN" \
+  'cmd /c type C:\Windows\Temp\fake-telemetry.txt' 2>&1 || true)
+grep -q '0x1FFFFF' <<<"$read_out" \
+  || { echo "the forgery never landed on disk" >&2; tail -5 <<<"$read_out" >&2; exit 1; }
 sleep 45
 echo "the signal text sits in an uncollected file; the stream must not match" >&2
