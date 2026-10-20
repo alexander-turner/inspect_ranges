@@ -1,6 +1,6 @@
 """Journey A's closing step: a real `inspect eval` solving the BUILT vulhub-zabbix range.
 
-The provider's build-aware gate consumes the manifest (the eval boots the captured realized images), `plant_goals` plants the per-sample proof tokens, and a deterministic solver executes the range's own reference chain (`checks/zabbix-rce/reference.sh`) through the FOOTHOLD sandbox alone, exactly as an agent would act. The challenge scorer must return 1.0 with validity `valid` (pcap-corroborated beacons from both exploited hosts).
+The provider's build-aware gate consumes the manifest (the eval boots the captured realized images), `challenge_setup` plants the per-sample proof tokens, and a deterministic solver executes the range's own reference chain (`checks/zabbix-rce/reference.sh`) through the FOOTHOLD sandbox alone, exactly as an agent would act. The challenge scorer must return 1.0 with validity `valid` (pcap-corroborated beacons from both exploited hosts).
 
 Run (caches/state exported by run.sh): `uv run python journey_eval.py <range-dir>`.
 """
@@ -19,7 +19,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox, store
 from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.scorer import challenge_scorer
-from inspect_ranges._challenges.setup import plant_goals
+from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._challenges.submission import SUBMISSIONS_STORE_KEY
 
 RANGE_DIR = Path(sys.argv[1]).resolve()
@@ -73,7 +73,7 @@ def main() -> int:
         dataset=challenge_dataset(
             str(RANGE_DIR / "challenges.yaml"), str(RANGE_DIR / "range.yaml")
         ),
-        solver=[plant_goals(), reference_chain_solver()],
+        solver=[challenge_setup(), reference_chain_solver()],
         scorer=challenge_scorer(),
         sandbox=("range", str(RANGE_DIR / "range.yaml")),
     )
