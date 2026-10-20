@@ -276,4 +276,4 @@ Evidence streams off the instance as it is generated, so an agent that later esc
 
 - **Evaluation**: [Challenges](challenges.qmd) covers defining what an agent is asked to do and how success is verified; [Custom Goals](goals.qmd) covers creating new goal types; [Evidence](evidence.qmd) covers the tamper-evident record scoring relies on.
 
-- **Running Ranges**: the [Operator](cli.qmd) workflow, the [Range Sandbox](provider.qmd) that runs Inspect evals against ranges, the [Images](images.qmd) guide and [Distribution](distribution.qmd) mechanics that move built ranges between machines, the [Range Host](topology.qmd) topologies, and the [Security](security.qmd) model.
+- **Running Ranges**: the [Images](images.qmd) guide and [Distribution](distribution.qmd) mechanics that move built ranges between machines, the [Operations](cli.qmd) lifecycle (render, up, down, applier, reaper, doctor), the [Range Sandbox](provider.qmd) that runs Inspect evals against ranges, the [Range Host](topology.qmd) topologies, and the [Security](security.qmd) model.

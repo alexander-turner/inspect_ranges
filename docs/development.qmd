@@ -6,7 +6,7 @@ llms-description: "Range development: provisioning a dev machine (inspect-ranges
 
 ## Overview
 
-Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. This page covers the machine the loop runs on and each step's command. The definition language has its own pages ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)), and the build has [Building Ranges](building.qmd); operating ranges in production is [Running Ranges](cli.qmd).
+Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. This page covers the machine the loop runs on and each step's command. The definition language has its own pages ([Ranges](ranges.qmd), [Guests](guests.qmd), [Networks](networks.qmd)), and the build has [Building Ranges](building.qmd); operating ranges in production is [Operations](cli.qmd).
 
 ## Development Machine
 
@@ -41,6 +41,6 @@ ssh inspect-ranges-devbox
 
 3. **Build.** `inspect-ranges build` realizes declared guest content ([Building Ranges](building.qmd)). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. Recipe output lands under `~/.local/state/inspect-ranges/projects/<project>/recipes/`.
 
-4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Running Ranges](cli.qmd)). For eval-side poking, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox so solver code can reach targets directly; it removes the foothold wall and is logged loudly, so never set it on scoring runs.
+4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Operations](cli.qmd)). For eval-side poking, `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` registers every guest as a named sandbox so solver code can reach targets directly; it removes the foothold wall and is logged loudly, so never set it on scoring runs.
 
 5. **Smoke eval.** Run the real consumption path early: a one-sample task through the provider (the [Range Tasks](index.qmd#range-tasks) wiring) catches registration and readiness issues that direct booting cannot show.

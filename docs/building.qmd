@@ -14,7 +14,7 @@ A definition (`range.yaml`, or a typed `RangeSpec` in Python) declares the netwo
 
 - [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
 
-This page covers the build: how declared guest content becomes captured, verified images. For what happens after a build (rendering, booting, running evals), see [Running Ranges](cli.qmd).
+This page covers the build: how declared guest content becomes captured, verified images. For what happens after a build (rendering, booting, running evals), see [Operations](cli.qmd).
 
 ## Range Build
 
