@@ -33,7 +33,7 @@ Boundary strength orders rust-vmm above QEMU/KVM, which has a long device-emulat
 
 Hosts and routers run under QEMU via libvirt by default; the dedicated attack box defaults to Cloud Hypervisor (declare `attacker.vmm: qemu` to keep QEMU), and any host or router may opt in with `vmm: cloud-hypervisor`. Each Cloud Hypervisor VMM gets the same per-guest uid treatment as the attack box ([Per-Guest Identity](#per-guest-identity)); none shares QEMU's `libvirt-qemu`.
 
-Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control plane reaches them through the VMM's hybrid-vsock Unix socket, and every dialer checks the socket peer's credentials (`SO_PEERCRED`) against the VMM's uid before sending a byte, refusing anything else without retry. The sockets live in a private per-user host directory that `up` prepares and `down` removes.
+Cloud Hypervisor guests have no `AF_VSOCK` listener on the host: the control plane reaches them through the VMM's hybrid-vsock Unix socket (Cloud Hypervisor's vsock transport: a host-side Unix socket the VMM bridges to the guest's vsock device), and every dialer checks the socket peer's credentials (`SO_PEERCRED`) against the VMM's uid before sending a byte, refusing anything else without retry. The sockets live in a private per-user host directory that `up` prepares and `down` removes.
 
 Two planning refusals bound the opt-in: a Cloud Hypervisor guest cannot carry guest content yet (`cloud-hypervisor-content-unsupported`: the build captures provisioned guests through libvirt, which cannot see CH guests), and a pinned `cpu_model` refuses (`cloud-hypervisor-cpu-model`: CH guests always see the host CPU).
 
@@ -58,13 +58,13 @@ Scenario networking and operator containment are different authorities, each wit
 
 ## Proving Containment
 
-A range that carries [behavioral checks](building.qmd#behavioral-checks) proves its containment at build time. Before the checks, the proof boot runs the `conformance` stage: a shared-segment target TCP-sweeps the attacker expecting zero open ports, and the attacker verifies that no undeclared management endpoint answers on its segments. Any finding refuses the manifest exactly like a failed check, so an uncontained range is never consumable.
+A range that carries [behavioral checks](building.qmd#behavioral-checks) proves its containment at build time. Before the checks, the proof boot (the build's second boot of the captured images, where the checks run; see [Behavioral Checks](building.qmd#behavioral-checks)) runs the `conformance` stage: a shared-segment target TCP-sweeps the attacker expecting zero open ports, and the attacker verifies that no undeclared management endpoint answers on its segments. Any finding refuses the manifest exactly like a failed check, so an uncontained range is never consumable.
 
 The stage's scope limits: the sweep is TCP only (ports 1-1024 plus a high-port sample), foothold ranges skip it (the agent lands on a declared host whose services legitimately answer), and a range without behavioral checks has no proof boot, so it gets no conformance stage either.
 
 ## Score Integrity
 
-Streaming preserves the evidence record but does not by itself detect an escape, so each goal type is scored against proof the agent cannot fabricate, and detection-type goals consume coverage watermarks rather than trusting exported content (see [Challenges](challenges.qmd) and [Evidence](evidence.qmd)). An escaped agent can invalidate its sample; it cannot silently falsify it. Score integrity rests on that detection, not on the boundaries being unbreakable.
+Streaming preserves the evidence record but does not by itself detect an escape, so each goal type is scored against proof the agent cannot fabricate, and detection-type goals consume coverage watermarks (the per-poll records that make telemetry coverage decidable; see [Evidence](evidence.qmd#telemetry-export)) rather than trusting exported content (see [Challenges](challenges.qmd) and [Evidence](evidence.qmd)). An escaped agent can invalidate its sample; it cannot silently falsify it. Score integrity rests on that detection, not on the boundaries being unbreakable.
 
 ## Topologies and Credentials
 

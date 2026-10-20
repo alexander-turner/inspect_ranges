@@ -6,7 +6,7 @@ llms-description: "Overview of range authoring (pointers to the Ranges, Guests, 
 
 ## Overview
 
-A definition (`range.yaml`, or a typed `RangeSpec` in Python) declares the networks, the guests, and the guest content; `inspect-ranges build` realizes that content into captured, verified images; every downstream consumer boots those images. The definition language has its own pages:
+A definition (`range.yaml`, or a typed `RangeSpec` in Python) declares the networks, the guests, and the guest content; `inspect-ranges build` realizes that content: it boots the range once, runs the recipes that produce the declared state, verifies it, and captures each guest's disk as an image; every downstream consumer boots those captured images. The definition language has its own pages:
 
 - [Ranges](ranges.qmd): what a range definition is, end-to-end examples in YAML and Python, and the validation workflow.
 
@@ -25,23 +25,23 @@ cd my-range/        # range.yaml plus ./recipes/
 inspect-ranges build
 ```
 
-The range boots on an egress-enabled build plan, recipes converge each guest, every declared service and vulnerability is verified against the live guests, each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning. Declared `users`, `misconfigurations`, and `data` are build-claimed through recipe self-assertion plus the behavioral checks' chain-load-bearing facts; mechanical probes for them are a recorded follow-up.
+The range boots on an egress-enabled build plan, recipes converge each guest, every declared service and vulnerability is verified against the live guests, each provisioned guest's disk is captured as a realized image, and a build manifest records the whole thing. Samples then boot the captured images, byte-identical, with no per-sample provisioning. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and the behavioral checks confirm whichever of them the attack chains actually depend on. Direct probes for these fields are planned.
 
-Until a range has a matching build, every content-consuming verb refuses with `range-not-built`: `plan`, `render`, `up --from-spec`, `push`, and the sandbox provider all require a manifest whose spec hash matches the definition and whose realized images verify by digest in the image cache. The refusal names the fix. Pulling the published build satisfies the gate the same way ([Distribution](distribution.qmd)), so consumers of a published range never run `build`. Nothing boots with silently missing content.
+Until a range has a matching build, every command that consumes built content refuses with `range-not-built`: `plan`, `render`, `up --from-spec`, `push`, and the sandbox provider all require a manifest whose spec hash (a digest of the definition) matches the definition and whose realized images verify by digest in the image cache. The refusal names the fix. Pulling the published build satisfies the gate the same way ([Distribution](distribution.qmd)), so consumers of a published range never run `build`. Nothing boots with silently missing content.
 
 ## Build Stages
 
-1. **The egress build plan.** For the build only, routerless isolated networks become NAT networks with full egress and a host-derived nameserver (`--build-nameserver` overrides it; deployments that force DNS through a VPC resolver are the norm). A provisioned host whose every attachment is router-attached gets a dedicated `build-uplink` NAT segment appended instead, so routed topologies build too. A provisioned foothold host has the attacker's egress containment lifted for the build only; no agent runs during a build. The runtime spec is untouched: samples boot with the isolation the definition declares, and realized images keep no reference to build networking, since network config is per-boot cloud-init. A per-guest settle gate holds each guest's first recipe until in-guest name resolution works.
+1. **The egress build plan.** For the build only, routerless isolated networks become NAT networks with full egress and a host-derived nameserver (`--build-nameserver` overrides it; cloud deployments that force DNS through a VPC resolver typically need the override). A provisioned host attached only to networks behind routers gets a dedicated `build-uplink` NAT segment appended instead, so routed topologies build too. A provisioned foothold host (the host the attacker starts on under assumed breach; see [Networks](networks.qmd#attacker)) has the attacker's egress containment lifted for the build only; no agent runs during a build. The runtime spec is untouched: samples boot with the isolation the definition declares, and realized images keep no reference to build networking, since network config is per-boot cloud-init. A per-guest settle gate holds each guest's first recipe until in-guest name resolution works.
 
 2. **Recipes** run in declaration order per guest (see [Authoring Recipes](#authoring-recipes)).
 
 3. **Verification** checks every declared `services` and `vulnerabilities` entry against the live guests, independent of what the recipes claimed (see [Verification](#verification)).
 
-4. **Capture.** Each provisioned guest is cleanly shut down and its overlay captured into the image cache as a realized image: a qcow2 rebased onto its golden, digest-recorded, with a provenance sidecar.
+4. **Capture.** Each provisioned guest is cleanly shut down and its overlay captured into the image cache as a realized image: a qcow2 rebased onto its golden image ([Guests](guests.qmd#images)), its digest recorded, with a provenance sidecar (a companion file recording the digests of everything it was built from).
 
 5. **The manifest.** The builds cache (`~/.cache/inspect-ranges/builds/<range>/manifest.json`, or `INSPECT_RANGES_BUILD_CACHE`) records the spec and its hash, every guest's build key and realized digest, recipe versions and digests, base-image digests, and the verification results. Consumers and the provider resolve the cache the same way; a non-default location is set through the environment variable (there is no per-verb flag).
 
-6. **Behavioral checks**, when the range declares them: the captured images boot once more and each challenge's chains run against the thing that ships (see [Behavioral Checks](#behavioral-checks)). The manifest lands on disk proven (every check passed) or REFUSED (the failure recorded; consumers reject it with `range-unproven`, and guest reuse survives it). A build interrupted before this phase leaves no manifest at all.
+6. **Behavioral checks**, when the range declares them: the captured images boot once more and each challenge's chains run against the thing that ships (see [Behavioral Checks](#behavioral-checks)). The manifest lands on disk proven (every check passed) or REFUSED (the failure recorded; consumers reject it with `range-unproven`; the next build reuses every guest and re-runs only the checks). A build interrupted before this phase leaves no manifest at all.
 
 Build success also garbage-collects the range's superseded realized generations: the new generation and the immediately-previous one stay, so reverting an edit rebuilds instantly; anything a running project references is excluded; the deletion is stage-logged with bytes reclaimed. `inspect-ranges images prune` reclaims the rest (generations stranded by refused manifests or crashes, capture temps, orphan sidecars); `images list` and `doctor` report reclaimable bytes.
 
@@ -124,7 +124,7 @@ rm -f /tmp/host.$$
 
 ### Period Software
 
-Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) uses whatever the era bar requires.
+Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/vulhub-zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) only needs to be plausible for the CVE's era.
 
 ## Verification {#verification}
 
@@ -140,15 +140,15 @@ Failures produce coded refusals (`service-not-verified`, `vulnerability-not-veri
 
 ## Behavioral Checks {#behavioral-checks}
 
-A range that carries challenges can prove them at build time. Convention: `checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script executed on the attacker guest with `IR_ATTACKER_IP` exported, emitting `SUBMIT <goal-id> <value>` lines. The contract:
+A range that carries challenges ([Challenges](challenges.qmd)) can prove them at build time. Convention: `checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script executed on the attacker guest with `IR_ATTACKER_IP` exported, emitting `SUBMIT <goal-id> <value>` lines. The contract:
 
 | Chain | Must |
 |---|---|
-| `reference.sh` | Exercise the real attack chain and score 1.0 with validity `valid`; every goal that declares a `beacon_segment` must come back pcap-corroborated. |
+| `reference.sh` | Exercise the real attack chain and score 1.0 with validity `valid`; every goal that declares a `beacon_segment` must have its beacon found in that segment's packet capture ([Goal Types](challenges.qmd#goal-types)). |
 | `insufficient.sh` | Do real but incomplete work and score 0.0 with validity `valid` and at least one submission. |
 | `forged.sh` | Submit plausible fakes and score 0.0 with validity `valid` and at least one submission. A chain that submits nothing, or a scorer that never reached a verdict, would otherwise pass vacuously. |
 
-Beacons corroborate only when their capture chunk rotates before scoring: tcpdump rotates by size, and scoring reads rotated chunks. The build's proof boot defaults to 1 MB chunks, and the reference chain pushes filler traffic after its beacons (the vulhub chain is the worked example).
+Beacons corroborate only when their capture chunk rotates before scoring: tcpdump rotates by size, and scoring reads rotated chunks. The build's proof boot (the post-capture boot that runs the checks) defaults to 1 MB capture chunks, and the reference chain pushes filler traffic after its beacons (the vulhub chain is the worked example).
 
 The checks run against the **captured** realized images, in a second boot after capture, through the same consumption path samples use, so they prove the artifact that ships. Before the checks, the same boot runs the `conformance` stage, proving the range's defender-to-agent containment ([Security](security.qmd#proving-containment)); a containment finding refuses the manifest exactly like a failed check.
 

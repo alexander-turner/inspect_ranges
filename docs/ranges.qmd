@@ -72,7 +72,7 @@ Evaluation goals live in a separate `challenges.yaml` consumed by the task, beca
 
 ## Example: Zabbix
 
-This example comes from the [Vulhub](https://vulhub.org) Zabbix scenario ([CVE-2016-10134](https://www.cve.org/CVERecord?id=CVE-2016-10134)) and ships as the built [vulhub-zabbix](examples/vulhub-zabbix.md) example: a four-host monitoring stack on one flat network with an unauthenticated SQL injection. This range defines a dedicated `attacker` VM. It is defined like any other VM and can start inside or outside the network; the designation only marks which VM `sandbox("default")` resolves to.
+This example comes from the [Vulhub](https://vulhub.org) Zabbix scenario ([CVE-2016-10134](https://www.cve.org/CVERecord?id=CVE-2016-10134)) and ships as the [vulhub-zabbix](examples/vulhub-zabbix.md) example, already built and runnable: a four-host monitoring stack on one flat network with an unauthenticated SQL injection. This range defines a dedicated `attacker` VM. It is defined like any other VM and can start outside the network (`entry: external`) or from a foothold inside it; the designation only marks which VM `sandbox("default")` resolves to (see [Guests](guests.qmd#the-attacker-guest)).
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -468,7 +468,7 @@ Task(..., sandbox=("range", corp_breach))   # python config
 Task(..., sandbox=("range", "range.yaml"))  # file config
 ```
 
-Python configuration objects validate fully at construction and stay mutable for programmatic building. Validity is re-established at every consumer boundary (the sandbox revalidates a typed configuration on receipt), so mutating a spec between construction and handoff is safe.
+Python configuration objects validate fully at construction and stay mutable for programmatic building. The sandbox revalidates a typed configuration when it receives it, so mutating a spec between construction and handoff is safe.
 
 ## Validation and Diagnostics
 
@@ -502,7 +502,7 @@ attacker:
   (cross-reference checks run once the errors above are fixed)
 ```
 
-Once a definition validates, `inspect-ranges plan` shows the fully resolved result (every address, MAC, and control-channel id, plus host requirements and resource totals), and `inspect-ranges render` emits the digest-manifested bundle the runtime realizes:
+Once a definition validates, `inspect-ranges plan` shows the fully resolved result (every address, MAC, and control-channel id, plus host requirements and resource totals), and `inspect-ranges render` emits the bundle `up` boots: the compiled boot artifacts plus a manifest pinning every file and image by sha256 digest:
 
 ``` {.bash filename="Terminal"}
 inspect-ranges validate range.yaml

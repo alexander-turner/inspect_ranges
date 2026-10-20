@@ -33,11 +33,11 @@ The standard images publish at the project org, each consumable by bare name (hu
 | Name | Contents |
 |---|---|
 | `attack` | The standard attack box: a kali-class toolset (nmap, hydra, sqlmap, john, gobuster, impacket, metasploit, and more) built by a pinned recipe over the noble golden. `/etc/attack-image.manifest` records every delivered package and version, and the image refuses to build if anything listens beyond loopback. A dedicated attack box with no `image:` boots it by default. |
-| `ubuntu-noble` / `ubuntu-focal` | Golden chains (image, provenance sidecar, vendor base), each with the guest control daemon baked in. |
+| `ubuntu-noble` / `ubuntu-focal` | Golden images, published as chains (the image, its provenance sidecar, and the vendor base it derives from), each with the guest control daemon baked in. |
 | `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
 | `inspect-ranges-range` | The hardened range container, published as a conventional Docker image (consumed as a full Docker ref, not a bare `image:` name) by digest pin (below). |
 
-The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so the realized identity re-keys. Between publish days the catalog deliberately drifts from upstream feeds; the manifest records what shipped.
+The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so a rebuilt image gets a new identity instead of silently replacing the old one under the same name. Between publishes the catalog deliberately lags upstream package feeds; the manifest records what shipped.
 
 ## Deployment Shapes
 
@@ -56,7 +56,7 @@ export INSPECT_RANGES_REGISTRY=registry.example.net/ranges,\
 docker.io/meridianlabsai/inspect-ranges
 ```
 
-A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. The hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (a published catalog list is a recorded follow-up). Mechanics: [Distribution](distribution.qmd).
+A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. The hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (the catalog does not yet publish a machine-readable list of its artifacts). Mechanics: [Distribution](distribution.qmd).
 
 ### Private Registry for Your Own Ranges
 
@@ -65,7 +65,7 @@ cd my-range/            # a built range
 inspect-ranges push --to registry.example.net/ranges
 ```
 
-`push` uploads the build manifest and its transitive closure (realized images, provenance, recipe bundles) and registers the exact-spec reference that eval init resolves. Consumers prepend the registry as above and run `git clone`, `inspect eval`. Pushing to the public org is the project publisher's job.
+`push` uploads the build manifest and its transitive closure (realized images, provenance, recipe bundles) and registers the build under the hash of its `range.yaml`, which a consumer's first `inspect eval` resolves automatically. Consumers prepend the registry as above and run `git clone`, `inspect eval`. Pushing to the public org is the project publisher's job.
 
 ### Air Gap
 
@@ -123,6 +123,6 @@ Deriving your own goldens is the alternative to pulling the published ones: the 
 
 - an interrupted derive: self-healing on the next run.
 
-Ubuntu noble vendor images are the Linux scope. Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light), [splunk-detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows)) cover the specifics.
+On Linux, Ubuntu noble is the supported vendor image for derivation. Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/goad-light), [splunk-detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/attack-range-windows)) cover the specifics.
 
 `images list` shows managed goldens with provenance, build-captured realized images (flagging superseded generations no manifest references), and everything else: unmanaged files, stale derivation and capture temps, goldens whose recipe version is behind, and legacy double-suffix names. `images prune` reclaims what no manifest references; it reports by default, deletes with `--yes`, and refuses while registered projects exist unless forced (build success already prunes its own range's garbage, keeping one previous generation for rollback).

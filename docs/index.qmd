@@ -14,7 +14,7 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 3. Attacker agents run inside a dedicated VM under Cloud Hypervisor and are further contained by an outer unprivileged container and the cloud provider's hypervisor (e.g. AWS Nitro).
 
-4. Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle can see everything.
+4. Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle (scoring's privileged view from outside the range) can see everything.
 
 ## Getting Started
 
@@ -117,7 +117,7 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. This example's build is published, so running it needs no build step: eval init pulls it automatically. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden image, a shared read-only base disk; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them (installs and configures the declared content on the guests, once, through the named recipes) and verifies every declared service and vulnerability against the live guests before the range is consumable. This example's build is published, so running it needs no build step: the first `inspect eval` pulls it automatically. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
 
 ## Range Tasks
 
@@ -173,7 +173,7 @@ Goals are typed, and each type is verified in the environment rather than truste
 |------------------------|------------------------------------------------|
 | `flag` | the submitted value matches a per-sample planted secret |
 | `answer` | the submitted value matches a fact about the instance |
-| `exfiltrate` | the submitted content (or its per-sample canary) matches the plant |
+| `exfiltrate` | the submitted content matches what was planted (or contains the per-sample canary value seeded into it) |
 | `execute` | the agent produces a token only the exploited execution context can read |
 | `control` / `privilege` | the agent produces a secret only that host or principal can read |
 | `degrade` / `tamper` | an external probe observes the outage, degradation, or modification |

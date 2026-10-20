@@ -89,13 +89,13 @@ Python definitions import from `inspect_ranges.types` (shown once above, later P
 
 `name` is how everything else refers to the guest: `sandbox("dc01")` in evaluations, ACL endpoints, DNS `authoritative` lists. `hostname` is only needed when the in-guest name should differ, and `fqdn` matters for domain-joined ranges. `os` records the platform (`type: linux | windows`, with `distro` or `version` detail); `interfaces` are covered in [Networks](networks.qmd).
 
-The in-guest hostname is the declared `hostname:` when one is present, else a hostname-safe form of `name`: invalid characters such as underscores and dots become hyphens, and Windows names truncate to the 15-character NetBIOS limit. Two guests whose rendered hostnames collide refuse at planning. `fqdn` is realized by the build's Active Directory recipes (promotion and domain join set the primary DNS suffix), so declaring it refuses on the runtime path until a build manifest carries the `active_directory` claim.
+The in-guest hostname is the declared `hostname:` when one is present, else a hostname-safe form of `name`: invalid characters such as underscores and dots become hyphens, and Windows names truncate to the 15-character NetBIOS limit. Two guests whose rendered hostnames collide refuse at planning (`inspect-ranges plan` reports the collision as an error). `fqdn` is set at build time by the Active Directory recipes (promotion and domain join set the primary DNS suffix), so a range declaring it refuses to run until a build has produced that content and recorded it in the build manifest, the build's record of what it ran and produced (see [Building Ranges](building.qmd)).
 
-`roles` tags a host's function, such as `roles: [domain-controller, dns]` or `[member-server]`. The tags tell the build what a host is for and give scoring a way to refer to hosts by function rather than by name. Roles realize through the host's provisioning recipes at build time; a roles-declaring host with no recipe refuses at planning (`realized-section-unconsumed`).
+`roles` tags a host's function, such as `roles: [domain-controller, dns]` or `[member-server]`. The tags tell the build what a host is for and give scoring a way to refer to hosts by function rather than by name. Roles take effect through the host's provisioning recipes at build time; a host declaring roles but no recipe refuses at planning (`realized-section-unconsumed`).
 
 ## Images {#images}
 
-Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. A golden carries the baked-in control daemon plus whatever the scenario installed at build time. The definition references images by name; planning resolves each reference against the local image cache to a sha256 digest. How bare names resolve beyond the cache (pins, registries, the public catalog) is covered in [Images](images.qmd).
+Every host names the `image` it boots from. Images are golden qcow2 disks: shared and read-only, with each guest booting a private copy-on-write overlay, so every sample starts from a pristine disk. A golden carries the baked-in control daemon (the in-guest service that runs commands, moves files, and answers readiness) plus whatever the scenario installed at build time. The definition references images by name; planning resolves each reference against the local image cache to a sha256 digest. How bare names resolve beyond the cache (pins, registries, the public catalog) is covered in [Images](images.qmd).
 
 ![](diagrams/image-layers.excalidraw.png){fig-alt="The image layer stack: a shared read-only upstream base image at the bottom, a narrower golden-additions layer (control daemon and settings) on top of it, and small per-VM copy-on-write overlays for web, db, and agent fanning out above."}
 
@@ -281,15 +281,15 @@ attack_box = RangeSpec(
 ```
 :::
 
-A dedicated attack box runs under Cloud Hypervisor by default, so the most adversarial guest gets the smaller VMM (unprivileged per-guest uid, seccomp, credential-checked hybrid vsock; see [Security](security.qmd#virtual-machine-monitors)). Declare `vmm: qemu` to keep QEMU; with `host:` set, the foothold host's own `vmm` applies. Hosts and routers default to QEMU and opt in per guest with `vmm: cloud-hypervisor`; a Cloud Hypervisor guest cannot carry buildable guest content yet, which planning refuses.
+A dedicated attack box runs under Cloud Hypervisor by default, so the most adversarial guest gets the smaller VMM (unprivileged per-guest uid, seccomp, credential-checked hybrid vsock; see [Security](security.qmd#virtual-machine-monitors)). Declare `vmm: qemu` to keep QEMU; with `host:` set, the foothold host's own `vmm` applies. Hosts and routers default to QEMU and opt in per guest with `vmm: cloud-hypervisor`; a Cloud Hypervisor guest cannot yet carry [guest content](#guest-content) that requires a build; planning refuses the combination.
 
 With `host:`, the attacker declares no machine of its own (the foothold is the machine), and `entry: assumed-breach` records the premise. The attacker's `egress` posture is covered in [Networks](networks.qmd#egress).
 
 ## Guest Content {#guest-content}
 
-Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest, not boot-time actions. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample.
+Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest (what the guest looks like once fully set up), not boot-time actions. The build applies each declaration by whatever means the image demands (a provisioning recipe, content baked into a derived image, or a captured checkpoint) and verifies it before the range ships; the runtime never applies guest content per sample.
 
-[`inspect-ranges build`](building.qmd) realizes every content section below except `scheduled_activity`: a range declaring content refuses planning (`range-not-built`) until a matching build exists, then boots its captured realized images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
+[`inspect-ranges build`](building.qmd) *realizes* every content section below except `scheduled_activity`: it applies the declarations to live guests, verifies them, and captures each guest's disk as a realized image. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
 
 ## Users {#users}
 
@@ -586,7 +586,7 @@ planted_data = RangeSpec(
 
 ## Defense {#defense}
 
-The range-level `defense` section records the defensive posture on the D0 (no defenders) to D5 (adaptive defender) spectrum, with telemetry flows where signals are recorded or forwarded. A posture realizes through its telemetry flows, so a bare tier with no `telemetry` refuses at planning; omitting `defense` already means D0. Per-host toggles turn individual protections on or off:
+The range-level `defense` section records the defensive posture on the D0 (no defenders) to D5 (adaptive defender) spectrum, with telemetry flows where signals are recorded or forwarded. A posture realizes through its telemetry flows, so a tier declared without `telemetry` entries refuses at planning; omitting `defense` already means D0. Per-host toggles turn individual protections on or off:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -669,7 +669,7 @@ defended = RangeSpec(
 
 ## Active Directory {#active-directory}
 
-Identity is range-scoped (accounts exist in the domain, not on a host), so `active_directory` is a top-level section: the forest, its domains, each domain's controller (a declared host), accounts of note with groups and SPNs, and the seeded ACL-abuse chain as typed edges:
+Identity is range-scoped (accounts exist in the domain, not on a host), so `active_directory` is a top-level section: the forest, its domains, each domain's controller (a declared host), accounts of note with groups and SPNs, and the seeded ACL-abuse chain as typed edges (each edge names a principal, a right, and a target):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -1004,7 +1004,7 @@ spec = randomized()
 
 ## Guest Configuration {#how-configuration-reaches-a-guest}
 
-The compiler emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. Linux guests inject over cloud-init (a seed presented as a read-only virtio disk). Windows hosts inject over a per-boot unattend seed: a read-only cdrom whose answer file drives the sysprep'd golden's specialize pass (hostname, MAC-keyed static addressing, resolvers), with readiness announced by the in-guest control daemon. Windows routers are not yet realized and refuse at planning. An attack box is Linux by construction (the `attacker:` block declares no `os` field). A Windows host declaring `vmm: cloud-hypervisor` refuses at planning, since the seed rides removable media that Cloud Hypervisor cannot present. Other injectors remain designed: configuration baked at build time for images without an agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints.
+The range compiler (the plan and render steps) emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. Linux guests inject over cloud-init (a seed presented as a read-only virtio disk). Windows hosts inject over a per-boot unattend seed: a read-only cdrom whose answer file drives the sysprep'd golden's specialize pass (hostname, MAC-keyed static addressing, resolvers), with readiness announced by the in-guest control daemon. Windows routers are not yet realized and refuse at planning. An attack box is Linux by construction (the `attacker:` block declares no `os` field). A Windows host declaring `vmm: cloud-hypervisor` refuses at planning, since the seed rides removable media that Cloud Hypervisor cannot present. Other injectors are designed but not yet implemented: configuration baked at build time for images without an agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints.
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

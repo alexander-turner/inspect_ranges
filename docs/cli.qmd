@@ -13,7 +13,7 @@ inspect-ranges render range.yaml -o bundle/
 inspect-ranges up bundle/
 ```
 
-A range declaring guest content needs a matching build first: your own ([Building Ranges](building.qmd)), or a published one that eval init or `pull` fetches automatically ([Distribution](distribution.qmd)). Images need no preparation either way: bare `image:` names resolve digest-verified on first use ([Images](images.qmd)). `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
+A range declaring guest content needs a matching build first: your own ([Building Ranges](building.qmd)), or a published one that the first `inspect eval` (or an explicit `pull`) fetches automatically ([Distribution](distribution.qmd)). Images need no preparation either way: bare `image:` names resolve digest-verified on first use ([Images](images.qmd)). `inspect-ranges doctor` checks the host first and prints fixes for whatever is missing.
 
 Each stage consumes only the verified output of the one before it: `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify.
 
@@ -37,7 +37,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 ## `applier`
 
-`inspect-ranges applier --socket <path>` serves the separated topology's host plane and guest relay on a unix socket (see [Range Host](topology.qmd)). It runs the doctor readiness subset at startup and refuses to serve an unhealthy host; drivers reach it via `INSPECT_RANGES_HOST=uds:<path>`.
+`inspect-ranges applier --socket <path>` serves the host side of a separated topology (driver on one machine, range host on another) on a unix socket, relaying guest control traffic; see [Range Host](topology.qmd). It runs the doctor readiness subset at startup and refuses to serve an unhealthy host; drivers reach it via `INSPECT_RANGES_HOST=uds:<path>`.
 
 ## `reaper`
 
@@ -58,7 +58,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 `--fix-script` emits the shell commands for whatever failed.
 
 ::: {.callout-note}
-## v1 Boundary
+## Current Boundaries
 
-`up` realizes cold-boot bundles only: checkpoint instantiation is later build-arc work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections, as do `roles`, `defense`, Active Directory, and telemetry-bearing postures; `scheduled_activity` still validates but refuses at planning until its slice lands, so nothing boots with silently missing content. Windows guests are first-class (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (signed bundles are image-distribution work).
+`up` realizes cold-boot bundles only: checkpoint instantiation is planned later work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections, as do `roles`, `defense`, Active Directory, and telemetry-bearing postures; `scheduled_activity` still validates but refuses at planning until its support lands, so nothing boots with silently missing content. Windows guests are first-class (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (bundle signing is planned as part of image-distribution work).
 :::

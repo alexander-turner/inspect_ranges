@@ -8,8 +8,8 @@ llms-description: "The range host: the local (co-resident) and uds (separated, a
 
 The provider realizes ranges through one of two backends, selected by `INSPECT_RANGES_HOST`:
 
-- **`local`** (the default): the co-resident path. The driver process renders the bundle and runs realization in-process; guests are reached directly over vsock. The only addition over a plain setup is the host lease every sample holds (below).
-- **`uds:<socket>`**: the separated topology on one host. A standing `inspect-ranges applier` process owns realization and teardown; the driver talks to it over a unix socket, and every guest operation relays through the same socket as an opaque byte stream. The driver still renders bundles (the compiler toolchain is driver-side) and still leases CIDs; the applier verifies the bundle digest and runs `up`.
+- **`local`** (the default): the co-resident path. The driver (the Inspect eval process that owns the sample) renders the realization bundle (the digest-manifested directory `render` emits; see [Operations](cli.qmd)) and runs realization in-process; guests are reached directly over vsock. The only addition over a plain setup is the host lease every sample holds (below).
+- **`uds:<socket>`**: the separated topology on one host. A standing `inspect-ranges applier` process owns realization and teardown; the driver talks to it over a unix socket, and every guest operation relays through the same socket as an opaque byte stream. The driver still renders bundles (the compiler toolchain is driver-side) and still leases vsock CIDs (context ids); the applier verifies the bundle digest and runs `up`.
 
 ![](diagrams/range-host.excalidraw.png){fig-alt="The deployment seam: the Inspect scaffold (compile and render, agent loop, model credentials) and an append-only evidence store on the left, the range host with its applier and range container on the right, separated by a dashed trust boundary crossed by three flows: the realization bundle going in, the control channel (exec, read_file, write_file) in both directions, and evidence streaming out."}
 
@@ -41,7 +41,7 @@ inspect-ranges reaper                # one sweep; exit 1 on failure
 inspect-ranges reaper --interval 60  # daemon: sweep every minute
 ```
 
-A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, and marks them `reaping`, which fails any further renewal. Teardown runs outside the lock. Only after a successful teardown does the sweep release the CID lease, clear staging and ownership records, and remove the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the applier's admission charge); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
+A sweep selects expired (and crashed-mid-reap) leases under the registry lock, re-checking expiry so a renewal that just landed spares its lease, and marks them `reaping`, which fails any further renewal. Teardown runs outside the lock. Only after a successful teardown does the sweep release the CID lease, clear staging and ownership records, and remove the host lease last. A failed teardown frees nothing: the lease stays findable and the next sweep retries. For `uds:` leases the reaper tears down through the applier socket (which also releases the resources the applier charged against the host at admission; see [Operating the Applier](#operating-the-applier)); if the applier is unreachable it falls back to direct teardown with a logged warning that a live applier's charge leaks until restart.
 
 `inspect-ranges doctor` reports lease health in its Host group, including an expired-leases hint that names the reaper.
 
@@ -51,11 +51,11 @@ A sweep selects expired (and crashed-mid-reap) leases under the registry lock, r
 
 Realize is gated: the requested bundle digest must match the lease's rendered bundle (`EINVAL` otherwise), fetch grants must be empty (below), and the range's declared resources are charged against the applier's own admission gate, which refuses rather than queues: `EAGAIN` when the host is full right now (the driver respins), `ENOSPC` when the range alone exceeds the host (permanent). One realize per lease: a second realize on a live lease refuses `EBUSY` until teardown.
 
-**Applier restart is a recorded v1 limitation**: the replay log, guest relay map, and admission charges live in process memory and die with it (logged loudly at startup when live leases exist). Running samples keep their VMs; their teardowns recover from disk (the driver's teardown, the reaper, or `inspect sandbox cleanup range`), and new samples are served cleanly. When the applier is fully dead and a lease still exists, `inspect sandbox cleanup range` fails loudly by design (teardown for a leased project routes through the applier); recovery is reaper-only, via its direct-teardown fallback and the logged charge-leak warning.
+**Applier restart loses in-process state**: the replay log, guest relay map, and admission charges live in process memory and die with it (logged loudly at startup when live leases exist). Running samples keep their VMs; their teardowns recover from disk (the driver's teardown, the reaper, or `inspect sandbox cleanup range`), and new samples are served cleanly. When the applier is fully dead and a lease still exists, `inspect sandbox cleanup range` fails loudly by design (teardown for a leased project routes through the applier); recovery is reaper-only, via its direct-teardown fallback and the logged charge-leak warning.
 
 ## Grants Convention {#the-grants-convention}
 
-`realize` carries a list of fetch grants for image delivery. In v1 the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
+`realize` carries a list of fetch grants for image delivery. Today the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
 
 ## Isolation Claim
 

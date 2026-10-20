@@ -341,7 +341,7 @@ dns_ad = RangeSpec(
 ```
 :::
 
-The DC's `fqdn` is build-phase content: declaring it refuses at planning (`guest-config-not-realized`) until a build's Active Directory recipes realize it; `hostname` renders directly, as described under [Hosts](guests.qmd#hosts), as described under [Hosts](guests.qmd#hosts).
+The DC's `fqdn` is build-phase content: declaring it refuses at planning (`guest-config-not-realized`) until a build's Active Directory recipes realize it (produce it on the actual guest at build time; see [Building Ranges](building.qmd)); `hostname` renders directly, as described under [Hosts](guests.qmd#hosts).
 
 ::: callout-warning
 ## `.local` Zones
@@ -766,14 +766,14 @@ egress = RangeSpec(
 ```
 :::
 
-The attacker's own `egress` composes ahead of network policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
+The attacker's own `egress` is enforced before the network's policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
 
-Egress-by-name is part of the vocabulary but not yet realized, so it is rejected with `egress-fqdn-not-realized`:
+Egress-by-name (FQDN entries) is accepted by the schema but not yet implemented, so a definition using it is rejected with `egress-fqdn-not-realized`:
 
 ``` {.yaml .invalid-example}
 range:
   name: egress-fqdn
-  description: FQDN entries are in the vocabulary but gated.
+  description: FQDN egress entries parse but are not yet implemented.
 networks:
   - name: corp
     cidr: 10.90.10.0/24
