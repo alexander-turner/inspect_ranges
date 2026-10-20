@@ -64,3 +64,5 @@ The translation tables above stay frozen; this addendum records the realization 
 - MSSQL realizes as SQL Server Express 2019 (downloaded in-build from Microsoft, pinned URL), `SECURITYMODE=SQL` with the declared sa credential, `NORTH\sql_svc` as the service account (the kerberoastable SPN lives on the account, declared in `active_directory`), TCP fixed to 1433, and the declared impersonation chains applied via sqlcmd.
 
 - Both domains disable password complexity (min length 4) before seeding accounts, exactly as upstream GOAD does: the declared weak passwords (`il0vejaime`, `hodor`, `345ertdfg`, `sexywolfy`) ARE the scenario, and the default policy refuses them (measured: `ADPasswordComplexityException`).
+
+- `samwell.tarly`, `brandon.stark`, and `arya.stark` joined `users:` (surfaced from upstream like `catelyn.stark`): the declared `mssql-impersonation` vulnerability names all three, and realizing the chains requires the logins to exist (measured: sqlcmd Msg 15401 without them).

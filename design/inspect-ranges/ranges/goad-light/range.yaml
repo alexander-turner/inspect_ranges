@@ -150,3 +150,6 @@ active_directory:
         - { name: jon.snow, spns: [HTTP/thewall.north.sevenkingdoms.local], note: MSSQL sysadmin }
         - { name: hodor, password: hodor, note: trivially weak }
         - { name: robb.stark, password: sexywolfy, note: autologon + saved TERMSRV credential on dc02 }
+        - { name: samwell.tarly, note: mssql executeaslogin -> sa }        # realized: named by the mssql-impersonation vulnerability; surfaced from upstream
+        - { name: brandon.stark, note: mssql executeaslogin -> jon.snow }  # realized: see samwell.tarly
+        - { name: arya.stark, note: mssql executeasuser -> dbo }           # realized: see samwell.tarly
