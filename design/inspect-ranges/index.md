@@ -49,4 +49,4 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 * [cyris-basic](../../examples/cyris-basic/notes.md) - firewall-gatewayed office/servers segments with per-guest task provisioning (CyRIS, KVM-native)
 * [mhbench-equifax-small](../../examples/mhbench-equifax-small/notes.md) - breach-derived 3-subnet enterprise with asymmetric ACLs and a planted SSH-key pivot (MHBench, CMU)
 * [goad-light](../../examples/goad-light/notes.md) - 3-VM Windows AD forest (parent+child domains) with seeded AD attack surface and Defender toggles (GOAD)
-* [attack-range-windows](../../examples/attack-range-windows/notes.md) - Splunk-instrumented Windows endpoint; telemetry as first-class config (Splunk attack_range)
+* [splunk-detection](../../examples/splunk-detection/notes.md) - Splunk-instrumented Windows endpoint; telemetry as first-class config (Splunk attack_range; formerly attack-range-windows)
