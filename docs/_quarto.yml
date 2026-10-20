@@ -41,8 +41,6 @@ inspect-docs:
       contents:
         - text: Images
           href: images.qmd
-        - text: Operations
-          href: cli.qmd
         - text: Distribution
           href: distribution.qmd
         - text: Security
@@ -51,6 +49,8 @@ inspect-docs:
           href: topology.qmd
         - text: Range Sandbox
           href: provider.qmd
+        - text: Operations
+          href: cli.qmd
     - text: Examples
       contents:
         - text: dmz-pivot
