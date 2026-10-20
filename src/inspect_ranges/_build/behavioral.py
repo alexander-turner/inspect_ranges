@@ -2,10 +2,11 @@
 
 The ratified verification structure puts exploitability proof in exactly one place: the challenge's behavioral checks (the reference solution passes, an insufficient attempt fails, a forged submission fails). The build runs them against the range's CAPTURED artifacts: after capture and the build range's teardown, the realized images boot once more through the gate's own `swap_realized_spec` consumption step, the checks run, and only then does the manifest land on disk with the results in its `behavioral_checks` slot. The save is deferred past this phase deliberately (slice 6 review), and a failed proof lands as a REFUSED manifest (parked-decisions item 4): the failure's records are saved, the gate refuses `range-unproven`, and the next build reuses every guest and re-runs only the proof; under exits that record nothing (a teardown error before the phase, Ctrl-C, a crash) no manifest exists at all. Either way no consumer can boot a range whose challenge is unproven. Running against the captured artifacts rather than the build range proves the thing that ships, and exploit debris dirties only ephemeral per-boot overlays. A declared checks tree must be complete (`_validate_checks`): proof that silently does not run is indistinguishable from proof, so a misnamed directory or a missing trio script refuses instead of skipping. Check scripts and `challenges.yaml` participate in the build's cached fast path through `checks_digest`, never in guest build keys.
 
-Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script run ON THE ATTACKER GUEST via the oracle (outside an eval there is no `sandbox()`; the foothold-only property is held by construction here and enforced by the eval path), with `IR_ATTACKER_IP` exported. Scripts emit `SUBMIT <goal-id> <value>` lines (the refchains contract); `reference` must score 1.0 with validity `valid`, `insufficient` and `forged` must score 0.0. Per-check plants are fresh: `run_setup` runs per check with a fresh `PlantStore`, and each check's planted files are removed afterward (the plant script refuses an existing target, and this runner reuses one boot across checks where a sample plants once per boot). Runtime samples re-plant, so nothing a check planted survives as a valid secret.
+Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script run ON THE ATTACKER GUEST via the oracle (outside an eval there is no `sandbox()`; the foothold-only property is held by construction here and enforced by the eval path), with `IR_ATTACKER_IP` exported. Scripts emit `SUBMIT <goal-id> <value>` lines (the refchains contract); `reference` must score 1.0 with validity `valid`, `insufficient` and `forged` must score 0.0. A challenge with prober-backed goals gets a per-check `Prober` over its own derived targets (`probe_segments_for_checks` puts the probe endpoints into the proof boot's bundle), running across the chain and stopped-and-flushed before scoring, and each check's oracle scores only its own probe records (`_scoped_oracle_class`); prober windows are the chain's own responsibility, so a chain must keep running (sleeping is fine) until its goals' `window_s` is covered. Per-check plants are fresh: `run_setup` runs per check with a fresh `PlantStore`, and each check's planted files are removed afterward (the plant script refuses an existing target, and this runner reuses one boot across checks where a sample plants once per boot). Runtime samples re-plant, so nothing a check planted survives as a valid secret.
 """
 
 import asyncio
+import functools
 import hashlib
 import logging
 import re
@@ -14,8 +15,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import yaml
-
 from .errors import BuildError
 from .manifest import BehavioralCheckRecord
 from .recipes import StageSink
@@ -23,10 +22,13 @@ from .recipes import StageSink
 if TYPE_CHECKING:
     from inspect_ai.util._store import Store
 
+    from .._challenges.evidenceread import SpannedRecord
     from .._challenges.oracle import RangeOracle
+    from .._challenges.prober import Prober
     from .._challenges.schema import Challenge, Challenges
     from .._channel.vsock import HybridEndpoint
     from .._compiler.plan import ResolvedPlan
+    from .._provider.state import SampleHandle
     from ..types import RangeSpec
 
 logger = logging.getLogger(__name__)
@@ -329,12 +331,73 @@ def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
                 )
 
 
-def load_challenges(range_dir: Path) -> "Challenges":
-    """The range's challenges.yaml, validated."""
-    from .._challenges.schema import Challenges
+def _ensure_goal_type_registrations() -> None:
+    """Load every `inspect_ai` entry point so custom goal types are registered before the build parses `challenges.yaml`.
 
-    raw = yaml.safe_load((range_dir / "challenges.yaml").read_text())
-    return Challenges.model_validate(raw)
+    Eval-time parsing runs under inspect, whose startup loads this group before any parse; the build is a plain process, so it runs the same registrations itself or a custom-typed challenges file dies here with `unknown-goal-type` while the identical eval passes. The error posture mirrors inspect's own loader: each entry point loads independently, and one package's failure is a warning naming the entry point and its cause, never a build failure; the honest refusal stays downstream, where the parse still refuses an unregistered type with the known-name listing.
+    """
+    import importlib.metadata as metadata
+
+    for entry_point in metadata.entry_points(group="inspect_ai"):
+        try:
+            entry_point.load()
+        except Exception as error:
+            logger.warning(
+                "inspect_ai entry point %r (%s) failed to load; goal types it "
+                "registers stay unknown to this build: %s: %s",
+                entry_point.name,
+                entry_point.value,
+                type(error).__name__,
+                error,
+            )
+
+
+def load_challenges(range_dir: Path) -> "Challenges":
+    """The range's `challenges.yaml`, validated, with goal-type registrations loaded first (`_ensure_goal_type_registrations`): the build parses custom-typed challenges exactly like the eval path does."""
+    from .._challenges.schema import load_challenges as load_challenges_file
+
+    _ensure_goal_type_registrations()
+    return load_challenges_file(range_dir / "challenges.yaml")
+
+
+def probe_segments_for_checks(
+    challenges: "Challenges", spec: "RangeSpec"
+) -> tuple[str, ...]:
+    """Every probe segment the challenges' prober-backed goals need, derived exactly as `challenge_dataset` derives them per sample.
+
+    The proof boot's bundle must render these (the probe endpoints and the zero-capability probe sidecar), or the per-check prober has nothing to probe from and `run_setup`'s observer gate refuses `active-prober`.
+    """
+    from .._challenges.dataset import (
+        _probe_segments,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    segments: set[str] = set()
+    for challenge in challenges.challenges:
+        segments.update(_probe_segments(challenge, spec))
+    return tuple(sorted(segments))
+
+
+@functools.cache
+def _scoped_oracle_class() -> "type[RangeOracle]":
+    """The oracle class check runs score through, built lazily (`RangeOracle` imports the provider, which imports `_build`).
+
+    The proof boot shares ONE evidence store across the whole trio and probe streams are per-goal and append-only, so without a floor an earlier check's records would decide a later check's verdict: `degrade` scans every fully-observed window and `tamper` latches any found record, so the reference chain's genuine outage would score 1.0 again under the insufficient chain. Each check constructs a fresh oracle, so records at or after construction are exactly the check's own; telemetry streams stay unfiltered (detection verdicts are trailing windows and the checks' separation sleeps hold their isolation, the windows-ad-v1 slice-5 shape).
+    """
+    from .._challenges.oracle import RangeOracle
+
+    class CheckScopedOracle(RangeOracle):
+        def __init__(self, handle: "SampleHandle") -> None:
+            super().__init__(handle)
+            self._probe_wall_floor = time.time()
+
+        async def probe_records(
+            self, goal_id: str
+        ) -> "tuple[list[SpannedRecord], bool]":
+            records, gapped = await super().probe_records(goal_id)
+            scoped = [r for r in records if r.wall() >= self._probe_wall_floor]
+            return scoped, gapped
+
+    return CheckScopedOracle
 
 
 async def run_behavioral_checks(
@@ -356,7 +419,6 @@ async def run_behavioral_checks(
     """
     # imported here, not at module top: _provider imports _build (the gate),
     # so the behavioral runner's provider/challenge imports must stay lazy
-    from .._challenges.oracle import RangeOracle
     from .._channel.channel import MessageChannel
     from .._channel.vsock import VsockTransport
     from .._provider.evidence import EvidenceSession
@@ -417,9 +479,11 @@ async def run_behavioral_checks(
                 script = check_dir / f"{name}.sh"
                 # plant keys are write-once per store and the pcap/evidence
                 # memo must not leak across checks: fresh store and oracle
-                # per check (fresh plants are the per-check contract)
+                # per check (fresh plants are the per-check contract); the
+                # scoped oracle additionally floors probe reads at its own
+                # construction, so a check scores only its own prober's records
                 handle.plants = None
-                oracle = RangeOracle(handle)
+                oracle = _scoped_oracle_class()(handle)
                 record = await _run_one(
                     oracle,
                     challenge,
@@ -474,7 +538,9 @@ async def _run_one(
 ) -> BehavioralCheckRecord:
     from inspect_ai.util._store import Store
 
+    from .._challenges.prober import Prober
     from .._challenges.setup import (
+        _probe_targets,  # pyright: ignore[reportPrivateUsage]
         _unwind,  # pyright: ignore[reportPrivateUsage]
         run_setup,
     )
@@ -488,11 +554,38 @@ async def _run_one(
             frozenset({"telemetry-collector"}) if telemetry else frozenset()
         ),
     )
+    prober: "Prober | None" = None
     try:
+        # a per-check prober over THIS challenge's derived targets, never a
+        # borrowed challenge's (slice-5 review finding 1: the proof boot's one
+        # shared producer start derived targets from challenges[0]); derivation
+        # runs after run_setup because a tamper target carries its fresh
+        # needle, and shares `challenge_setup`'s own code
+        targets = _probe_targets(oracle, challenge)
+        if targets:
+            session = oracle.evidence_session()
+            if session is None or not session.enabled:
+                # run_setup's observer gate normally refuses first; this is
+                # the honest backstop for a handle without a live session
+                raise RuntimeError("prober-backed checks need a live evidence session")
+            prober = Prober(session, oracle.project, targets)
+            prober.start()
         return await _execute_and_score(
-            oracle, challenge, name, script, attacker_name, attacker_ip, store
+            oracle,
+            challenge,
+            name,
+            script,
+            attacker_name,
+            attacker_ip,
+            store,
+            prober=prober,
         )
     finally:
+        if prober is not None:
+            # stop() is idempotent: the scoring path already stopped and
+            # flushed it before reading probe records; this arm covers the
+            # failure paths (a failed chain exec, a raising scorer)
+            await prober.stop()
         # the plant script refuses an existing target (it never truncates real
         # guest content), and samples plant exactly once per boot; this runner
         # reuses ONE boot across checks, so each check's plants are removed
@@ -515,6 +608,8 @@ async def _execute_and_score(
     attacker_name: str,
     attacker_ip: str,
     store: "Store",
+    *,
+    prober: "Prober | None" = None,
 ) -> BehavioralCheckRecord:
     wrapped = f"export IR_ATTACKER_IP={attacker_ip}\n{script}"
     outcome = await oracle.exec(
@@ -570,6 +665,11 @@ async def _execute_and_score(
             for e in entries
         ]
     )
+    if prober is not None:
+        # probe records batch on a 15 s cadence (`down` flushes immediately);
+        # stop() force-flushes the rest, which is what makes this check's
+        # records readable before score_challenge reads the probe streams
+        await prober.stop()
     value, metadata = await score_challenge(oracle, store, challenge, submissions)
     validity = str(metadata.get("validity", ""))
     goals_meta = cast("dict[str, dict[str, Any]]", metadata.get("goals", {}))
