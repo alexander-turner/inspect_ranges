@@ -59,3 +59,13 @@ Pushed from commit `c6838e6` by the user from the main session (the public-surfa
 | `dmz-pivot` | `sha256:c36fb23b96ea8dca4cfcb818623b7011d08a56818b857c231847a0e5c84ef117` |
 
 The first published range build: spec `sha256:8e2c07eed07c7ab671872c8a42f7c7755a3b03890178dcca5ccfa4f18a46a7fd` (`examples/dmz-pivot/range.yaml` as merged in `724e846`), realized images for `web` and `db` over the published `ubuntu-noble`, recipes `dmz.web`/`dmz.db`. Spec-driven pull now serves the docs home page's clone-and-eval journey. Catalog image names and the fleet pin list are unchanged (a range build is not a catalog image; `images pin --from` re-verified post-push: `attack`/`ubuntu-noble`/`ubuntu-focal` digests exactly as recorded above).
+
+## 2026-10-20 — equifax build
+
+Pushed from commit `e4b1d2f` to `docker.io/meridianlabsai/inspect-ranges`; the push ran in-session at the user's explicit request (preparation, build, and verification in-session as before).
+
+| Name | Root digest |
+|---|---|
+| `equifax` | `sha256:52d43f1f57b41bc5c03228eee430ae59e047f03581a4864a0491b72cd4ee5ed0` |
+
+The second published range build, under the example's new name (renamed from `mhbench-equifax-small`, merged in `64db161`): spec `sha256:9c60f909a1421397b31cde2175ea68923ae7189702859151842db4927d427377` (`examples/equifax/range.yaml` as merged), realized images for `webserver_0`/`webserver_1` and `database_0`–`database_3` over the published `ubuntu-focal` (router on `ubuntu-noble`), recipes `mh.webserver`/`mh.database`. Built fresh on main after the rename merge (`build OK (418.2 s, 6 recipes)`, all three behavioral check trios proven), distinct from the rename slice's battery build, whose spike cache died with its worktree. Catalog image names and the fleet pin list are unchanged (a range build is not a catalog image; `images pin --from` re-verified post-push: `attack`/`ubuntu-noble`/`ubuntu-focal` digests exactly as recorded above).
