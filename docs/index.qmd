@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI framework for cyber range evaluations."
-llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
+llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the SWE-agent variant (inspect_swe claude_code with bridged_tools), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
 ---
 
 ## Overview
@@ -118,7 +118,7 @@ attacker:
 
 At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [Image Catalog](catalog.qmd) (`ubuntu-noble` is a published golden; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them once through the named recipes, verifying every declared service and vulnerability against the live guests before the range is consumable. Definitions can go much further: Active Directory identity data, defenders and telemetry, and per-instance randomization (see [Building Ranges](building.qmd)).
 
-## Evaluating Agents
+## Range Tasks
 
 ### Challenges
 
@@ -217,7 +217,29 @@ def dmz_pivot() -> Task:
 inspect eval task.py --model anthropic/claude-opus-5-5
 ```
 
-Any Inspect agent can be the attacker, including coding-agent scaffolds like Claude Code and Codex (via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/), passing `verify_goal()` through `bridged_tools`). The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
+Any Inspect agent can be the attacker. The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
+
+### SWE Agents
+
+Coding-agent scaffolds like Claude Code and Codex run as the attacker via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/): the scaffold executes inside the attack box, its model calls proxy back to Inspect, and `bridged_tools` exposes `verify_goal()` to it over MCP. The scaffold's own completion ends the run:
+
+```{.python filename="task.py"}
+from inspect_swe import claude_code
+
+@task
+def dmz_pivot_swe() -> Task:
+    return Task(
+        dataset=challenge_dataset(
+            "challenges.yaml", range_spec="range.yaml"
+        ),
+        setup=challenge_setup(),
+        solver=claude_code(
+            bridged_tools=[verify_goal()]
+        ),
+        scorer=challenge_scorer(),
+        sandbox=("range", "range.yaml"),
+    )
+```
 
 ## Example Ranges
 

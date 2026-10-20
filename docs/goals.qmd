@@ -178,6 +178,16 @@ Registration itself is one call per type instance. `register_goal_type` refuses 
 my_package = "my_package._registry"
 ```
 
-where `my_package/_registry.py` imports your types and calls `register_goal_type`.
+The module itself does nothing but import and register:
+
+``` {.python filename="my_package/_registry.py"}
+"""Entry point: loaded by inspect_ai, registers our goal types."""
+
+from inspect_ranges import register_goal_type
+
+from .marker import MarkerType
+
+register_goal_type(MarkerType())
+```
 
 **The open concern, recorded here as the reminder.** The v1 `challenges.yaml` goal-type union is closed: goals parse against a fixed discriminated union of the built-in `Spec` classes, so a custom type's YAML `type:` name does not parse, and the `Spec` base class (`GoalBase`) is not yet public API. The engine side documented on this page (registration, setup/check/compare, latching, aggregation) already treats custom types identically to built-ins; what is missing is the authoring path that gets a goal of your type into a validated challenge, which today requires extending the union in a fork. Opening the union, dispatching unknown `type:` names against the registry's registered `spec` classes, and exporting the `Spec` base are the recorded follow-up (`design/inspect-ranges/challenges-v1.md`). This page's contract is the stable part; expect the authoring gap, not the engine, to change.

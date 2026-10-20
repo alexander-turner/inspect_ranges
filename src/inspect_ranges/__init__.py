@@ -7,9 +7,11 @@ except ImportError:
 
 from ._challenges import (
     PROBE_MAC_PREFIX,
+    GoalBase,
     GoalResult,
     GoalType,
     Observations,
+    ObserverKind,
     RangeOracle,
     challenge_dataset,
     challenge_scorer,
@@ -32,9 +34,11 @@ from .types import semantic_issues
 
 __all__ = [
     "PROBE_MAC_PREFIX",
+    "GoalBase",
     "GoalResult",
     "GoalType",
     "Observations",
+    "ObserverKind",
     "RangeOracle",
     "__version__",
     "challenge_dataset",
