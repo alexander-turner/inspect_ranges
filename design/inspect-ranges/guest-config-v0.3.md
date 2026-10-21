@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Guest configuration (schema v0.3): converged-state declarations, parsed now, realized at build"
-status: proposed
+status: accepted
 tags: [inspect-ranges, range-yaml, schema, guest-config, decision]
 timestamp: 2026-10-07
 ---
@@ -60,3 +60,7 @@ Guest content realizes in the build phase ([range-build](range-build.md)): recip
 - `schema_version: "0.3"`; fully additive over v0.2.
 - The six examples carry their guest content in `range.yaml` again; their `deferred.yaml` files shrink to the genuinely deferred remainder.
 - The review package shows one uniform language; the only remaining "tell us what you need" surfaces are the deferred table above and the vocabulary edges (AD rights set, defense toggle set), both marked as extension points.
+
+## Addendum
+
+**`DataFile.contents` removed (2026-10-21):** the field was removed from the schema. It was recorded-only from the start (nothing ever wrote declared contents to a guest; the recipes realize `data:` files, and `exfiltrate` targets are planted per sample by the challenge layer), and the schema is pre-stabilization, so unsupported surface is removed rather than warned around. `data:` itself and its other fields (`path`, `description`, `sensitive`) stay. Inline contents return as a schema addition if a realizer for them is designed.

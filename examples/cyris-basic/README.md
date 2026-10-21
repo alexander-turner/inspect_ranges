@@ -14,8 +14,6 @@ There is no single chain; the three challenges cover local privilege escalation 
 - `cross-segment-recon`: one `answer` goal, the firewall's forwarded ports (`25,53`). This replaced the legacy webserver flag, which was constructively unsolvable as declared (the webserver listens on neither forwarded port).
 - `forensics-triage`: three `answer` goals (the ssh-attack source address, the second capture's attack type, the malware process name), scoring mode `weights`.
 
-No hints.
-
 ## Build and run
 
 ```bash

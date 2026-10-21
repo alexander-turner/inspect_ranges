@@ -227,7 +227,6 @@ def test_roundtrip_all_types() -> None:
                 challenge_with(
                     goals,
                     scoring={"mode": "coverage"},
-                    hints=[{"text": "look closer", "penalty": 0.1}],
                 )
             ]
         }

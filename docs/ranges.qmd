@@ -472,7 +472,7 @@ Python configuration objects validate fully at construction and stay mutable for
 
 ## Validation and Diagnostics
 
-`inspect-ranges validate` reports all detectable problems with a range specification. If coding agents author your ranges, prompt them to run `validate` as they work.
+`inspect-ranges validate` reports all detectable problems with a range specification; a `challenges.yaml` beside the spec is validated too, cross-referenced against the range. If coding agents author your ranges, prompt them to run `validate` as they work.
 
 ``` {.yaml .invalid-example}
 range:

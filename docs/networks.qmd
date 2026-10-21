@@ -72,7 +72,7 @@ Every guest attaches to networks explicitly through `interfaces`. The attacker i
 
 ## Addressing
 
-Addresses are optional. When omitted, they are allocated deterministically: the same definition always produces the same addresses (routers take the first usable addresses, the attacker follows, hosts allocate from `.10` upward). Explicit addresses are validated against the subnet and for conflicts:
+Addresses are optional. When omitted, they are allocated deterministically: the same definition always produces the same addresses (routers take the first usable addresses, the attacker follows, hosts allocate from `.10` upward). Addressing is IPv4 today: the types accept IPv6 structurally so the surface never migrates, but every IPv6 construct (a network `cidr`, an interface `ip`, DNS values, routes) refuses validation with `ipv6-not-realized` until its realization lands. Explicit addresses are validated against the subnet and for conflicts:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -766,7 +766,7 @@ egress = RangeSpec(
 ```
 :::
 
-The attacker's own `egress` is enforced before the network's policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it.
+The attacker's own `egress` is enforced before the network's policy: `none` (the default) drops the attacker's flows even on a network with an allowlist, `open` permits them, and the same `{allow: [...]}` form scopes them. Egress is enforced in the hypervisor's network namespace, outside every VM: an attacker that compromises every guest, including the router, cannot widen it. Scoped egress is realized as hypervisor NAT on routerless networks only: a network that declares an egress allowlist and attaches a router refuses validation with `egress-with-router-not-realized`.
 
 Egress-by-name (FQDN entries) is accepted by the schema but not yet implemented, so a definition using it is rejected with `egress-fqdn-not-realized`:
 

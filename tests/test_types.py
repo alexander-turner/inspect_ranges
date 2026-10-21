@@ -116,7 +116,7 @@ def test_unresolved_reference_to_declared_variable_is_rejected() -> None:
 
     spec.hosts[0].users = [User(name="admin", password="hunter2")]
     spec.hosts[0].data = [
-        DataFile(path="/srv/app/payload.txt", contents="{{secret_key}} and {{7*7}}")
+        DataFile(path="/srv/app/payload.txt", description="{{secret_key}} and {{7*7}}")
     ]
     revalidate_range(spec)
 

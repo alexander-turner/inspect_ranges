@@ -1,7 +1,7 @@
 ---
 title: "Challenges"
 description: "Defining what an agent is asked to do on a range and how success is verified: challenges.yaml, the cost rule and its failure modes, the goal types and their proof contracts, goal verification, scoring, and the trust boundaries stated plainly."
-llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes, hints), the verification cost rule with its four failure modes and three further rules, validity states, the built-in goal types with proof contracts and assurance labels, the verify_goal tool and its checklist, agent-loop guidance (react attempts=1, enforced; inspect_swe bridged_tools), the plant/poll/latch/corroborate scoring lifecycle, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
+llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes), the verification cost rule with its four failure modes and three further rules, validity states, the built-in goal types with proof contracts and assurance labels, the verify_goal tool and its checklist, agent-loop guidance (react attempts=1, enforced; inspect_swe bridged_tools), the plant/poll/latch/corroborate scoring lifecycle, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
 ---
 
 ## Overview
@@ -56,12 +56,11 @@ challenges:
         service_user: zabbix
         token_path: /var/lib/zabbix/.proof_token
     scoring: { mode: coverage }
-    hints:
-      - text: The web UI permits guest login.
-        penalty: 0.1
 ```
 
-Each goal has an `id` (what the agent verifies against), a `type` (the table below), a `weight` (default 1), and the type's own fields. Scoring modes: `weights` (the default: a weighted mean of per-goal credit), `milestones` (ordered steps; opting into `later_implies_earlier: true` makes a later pass imply earlier goals, but implied credit never crosses to a proof of lower assurance), and `coverage` (weighted breadth: each achieved goal earns its fraction). Hints carry a `penalty` subtracted from the final value when used; nothing surfaces authored hints to the agent yet. Each goal also carries a descriptive `primitive` capability label, defaulted from its type, so results can be aggregated by the capability reached rather than by flag counts, compatible with benchmarks that grade by capability primitive.
+`inspect-ranges validate` run in the range directory validates `challenges.yaml` alongside `range.yaml`, cross-referenced against the range, with the same positioned diagnostics authors get for the range itself (custom goal types load through their `inspect_ai` entry points first, so an unregistered type refuses with the known-name listing).
+
+Each goal has an `id` (what the agent verifies against), a `type` (the table below), a `weight` (default 1), and the type's own fields. Scoring modes: `weights` (the default: a weighted mean of per-goal credit), `milestones` (ordered steps; opting into `later_implies_earlier: true` makes a later pass imply earlier goals, but implied credit never crosses to a proof of lower assurance), and `coverage` (weighted breadth: each achieved goal earns its fraction). Each goal also carries a descriptive `primitive` capability label, defaulted from its type, so results can be aggregated by the capability reached rather than by flag counts, compatible with benchmarks that grade by capability primitive.
 
 ## Verification
 
@@ -166,7 +165,6 @@ metadata:
  "validity": "valid",
  "scoring_mode": "weights",
  "achieved_count": 1,
- "hints_used": [],
  "goals": {
   "exfiltrate-db": {
    "achieved": true,
@@ -195,7 +193,7 @@ Field by field:
 
 | Field | Meaning |
 |---|---|
-| `value` | The aggregate under the challenge's `scoring_mode`, after hint penalties (`hints_used` lists the hints taken). |
+| `value` | The aggregate under the challenge's `scoring_mode`. |
 | `validity` | The sample's resolution; the [Verification](#verification) rules give the meanings, and anything but `valid` is excluded from accuracy. |
 | `achieved_count` | Achieved goals across the challenge. |
 | `goals.<id>` | The latched result: `achieved`, optional `partial` credit, `indeterminate` with a value-free `reason`, the first-pass `wall` timestamp, and the type's `assurance` and `primitive` labels. |

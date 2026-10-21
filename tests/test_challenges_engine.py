@@ -33,7 +33,6 @@ from inspect_ranges._challenges.schema import (
     ExecuteGoal,
     ExfiltrateGoal,
     FlagGoal,
-    Hint,
     Scoring,
 )
 from inspect_ranges._challenges.scorer import score_challenge
@@ -441,22 +440,6 @@ class TestAggregate:
         )
         assert value == pytest.approx((0.5 + 2.0) / 3.0)
 
-    def test_hint_penalties_subtract_and_floor(self) -> None:
-        challenge = two_flag_challenge("weights")
-        challenge = challenge.model_copy(
-            update={
-                "hints": [Hint(text="h1", penalty=0.1), Hint(text="h2", penalty=1.0)]
-            }
-        )
-        records = {"user": record(achieved=True), "root": record(achieved=True)}
-        assert aggregate(challenge, records, hints_used=[0]) == pytest.approx(0.9)
-        assert aggregate(challenge, records, hints_used=[0, 1]) == 0.0
-
-    def test_unknown_hint_index_ignored(self) -> None:
-        challenge = two_flag_challenge("weights")
-        records = {"user": record(achieved=True), "root": record(achieved=True)}
-        assert aggregate(challenge, records, hints_used=[7]) == 1.0
-
 
 # -- compare paths (pure, host-side) ----------------------------------------------
 
@@ -816,24 +799,3 @@ class TestMultiCandidateScoring:
             return scored
 
         assert asyncio.run(scenario()) == 1.0
-
-    def test_duplicate_hint_indices_penalize_once(self, tmp_path: Path) -> None:
-        async def scenario() -> float:
-            oracle, _, handle = make_oracle(tmp_path, session=FakePlantSession())
-            handle.spec = minimal_spec()
-            challenge = Challenge(
-                id="c",
-                prompt="p",
-                goals=[FlagGoal(id="only", host="box", path="/tmp/f", owner="root")],
-                hints=[Hint(text="h", penalty=0.3)],
-            )
-            await run_setup(oracle, challenge)
-            value = oracle.store.get("flag:only").decode()
-            store = Store()
-            store.set("inspect_ranges:hints_used", [0, 0])
-            scored, _ = await score_challenge(
-                oracle, store, challenge, submissions(only=value)
-            )
-            return scored
-
-        assert asyncio.run(scenario()) == pytest.approx(0.7)

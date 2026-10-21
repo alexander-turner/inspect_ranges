@@ -446,9 +446,6 @@ class DataFile(_StrictModel):
     sensitive: bool = False
     """Whether the file is a scenario target (e.g. data worth exfiltrating)."""
 
-    contents: str | None = None
-    """Small inline contents, recorded only; nothing writes them to the guest."""
-
 
 class HostDefense(_StrictModel):
     """Per-host protection toggles (typed knowns; extended when evidence forces)."""
@@ -1288,6 +1285,35 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                     hint="Windows guests resolve it; Linux guests need resolver domain routing (see the netsvc spike findings)",
                 )
             )
+
+    # Windows addressing is baked statically into the per-boot unattend seed,
+    # so a `dhcp: true` network hands leases to its Linux guests only: a
+    # Windows guest on it is configured statically, which the author may not
+    # expect (the range still realizes correctly, hence a warning). Hosts
+    # only: routers are addressed statically by design (they take the first
+    # usable addresses, and a Windows router refuses at planning anyway) and
+    # the attacker is Linux by construction (no `os` field to declare)
+    for host_index, host in enumerate(spec.hosts):
+        if host.os.type != "windows":
+            continue
+        for interface_index, interface in enumerate(host.interfaces):
+            network_spec = networks.get(interface.network)
+            if network_spec is not None and network_spec.dhcp:
+                issues.append(
+                    Issue(
+                        code="windows-dhcp-static",
+                        severity="warning",
+                        path=(
+                            "hosts",
+                            host_index,
+                            "interfaces",
+                            interface_index,
+                            "network",
+                        ),
+                        message=f"Windows guest {host.name!r} on DHCP network {interface.network!r} is configured statically: Windows addressing bakes into the per-boot unattend seed and never takes a lease",
+                        hint="DHCP addressing reaches Linux guests only; the Windows guest's addressing is static either way",
+                    )
+                )
 
     # dns records without an explicit ip must resolve to a guest on the network
     for network_index, network in enumerate(spec.networks):
