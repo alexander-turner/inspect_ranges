@@ -176,7 +176,6 @@ def apparatus_findings(
         findings += _verify_goal_zero_submissions(events, store, challenge)
         findings += _verify_goal_unbound(events)
         findings += _verify_goal_unattempted_claim(messages, store, challenge)
-    findings += _scoring_mid_run(events)
     if scored is not None:
         findings += _verify_goal_candidates_dropped(scored)
         findings += _scoring_not_valid(scored)
@@ -676,37 +675,6 @@ def _verify_goal_unattempted_claim(
 
 
 # -- scoring/evidence integrity ------------------------------------------------
-
-
-def _scoring_mid_run(events: Sequence[Event]) -> list[Finding]:
-    """The mid-run scorer-invocation marker (`mid_run_invocation` in a score's metadata, `_challenges/scorer.py`), one finding."""
-    references: list[str] = []
-    for event in events:
-        if isinstance(event, ScoreEvent):
-            metadata = _as_dict(event.score.metadata)
-            if metadata is not None and metadata.get("mid_run_invocation"):
-                if event.uuid is not None:
-                    references.append(event.uuid)
-    if not references:
-        return []
-    return [
-        Finding(
-            detector="scoring/mid-run-invocation",
-            severity="warning",
-            message=(
-                f"challenge_scorer was invoked mid-run {len(references)} "
-                "time(s); each returned an intermediate verdict over the "
-                "goals verified in-band, never the recorded final score"
-            ),
-            hint=(
-                "react's attempts > 1 scores each submission with the task "
-                "scorer; this is supported (the end-of-run invocation stays "
-                "the single authority), so the signal only locates the "
-                "intermediate verdicts in the log"
-            ),
-            references=references[:5],
-        )
-    ]
 
 
 def _scoring_not_valid(scored: dict[str, Any]) -> list[Finding]:
