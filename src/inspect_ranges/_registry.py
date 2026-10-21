@@ -7,10 +7,12 @@ from ._challenges.scorer import challenge_scorer
 from ._challenges.setup import challenge_setup
 from ._challenges.verify import verify_goal
 from ._provider.provider import RangeSandboxEnvironment
+from .scanners import range_apparatus
 
 __all__ = [
     "RangeSandboxEnvironment",
     "challenge_scorer",
     "challenge_setup",
+    "range_apparatus",
     "verify_goal",
 ]
