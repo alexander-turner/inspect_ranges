@@ -26,14 +26,15 @@ challenges:
         path: /root/flag.txt
 
   # Revision (2026-10-19, linux-examples-v1): the legacy seed's webserver-flag
-  # goal is constructively UNSOLVABLE in the declared environment (the firewall
-  # forwards only tcp/25 and tcp/53 office->servers, and the webserver listens
-  # on neither), which the migration note anticipated. The firewall-pivot path
-  # (its weak robot.abc account, upstream is_host: true) waits on router
-  # provisioning (deferred.yaml); until then the cross-segment challenge is the
-  # recon the environment really supports: measuring the firewall's forwarding
-  # policy from the office segment (allowed ports answer closed, dropped ports
-  # answer nothing).
+  # goal was constructively UNSOLVABLE in the declared environment (the
+  # firewall forwards only tcp/25 and tcp/53 office->servers, and the
+  # webserver listens on neither), which the migration note anticipated; the
+  # recon below replaced it. Restored (2026-10-21, router provisioning): the
+  # firewall-pivot challenge is live again as its own entry (the weak
+  # robot.abc account realizes on the firewall), and the recon stays as the
+  # mapping exercise it is: measuring the firewall's forwarding policy from
+  # the office segment (allowed ports answer closed, dropped ports answer
+  # nothing).
   - id: cross-segment-recon
     prompt: |
       From your foothold on the desktop, map the firewall separating the office
@@ -44,6 +45,25 @@ challenges:
       - id: forwarded-ports
         type: answer
         value: "25,53"
+
+  # The legacy seed's cross-segment flag, restored (2026-10-21) on the path
+  # upstream actually declares: the firewall is ALSO a target (is_host: true,
+  # the weak robot.abc account), so the chain is pivot THROUGH the gateway,
+  # not through the forwarding policy. The prompt names the weak-account
+  # surface without disclosing credentials (the local-privesc convention: the
+  # reference chain uses declared-spec knowledge).
+  - id: firewall-pivot
+    prompt: |
+      From your foothold on the desktop, read /root/flag.txt on the webserver
+      (10.1.20.5) in the servers segment and submit its contents. The firewall
+      between the segments forwards almost nothing, but it is itself a managed
+      guest reachable from your segment, reportedly carrying a weak
+      maintenance account, and the webserver's own accounts are weak too.
+    goals:
+      - id: webserver-root-flag
+        type: flag
+        host: webserver
+        path: /root/flag.txt
 
   - id: forensics-triage
     prompt: |

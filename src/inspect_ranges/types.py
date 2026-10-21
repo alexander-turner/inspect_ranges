@@ -645,6 +645,14 @@ def has_guest_content(host: "Host") -> bool:
     return bool(host.provisioning or host.services or host.vulnerabilities)
 
 
+def has_router_content(router: "Router") -> bool:
+    """Whether a router declares buildable guest content (provisioning): the router analog of `has_guest_content`, shared by the same consumers.
+
+    Provisioning is the only content-bearing router section because recipes are the only realizer: routers declare no `services` or `vulnerabilities`, and declared `users` converge through the router's recipes exactly like a host's (users without provisioning refuse at planning, `realized-section-unconsumed`).
+    """
+    return bool(router.provisioning)
+
+
 class Router(_StrictModel):
     """A gateway guest joining two or more networks, carrying the inter-segment ACL."""
 
@@ -670,7 +678,10 @@ class Router(_StrictModel):
     """Static routes to segments reached through other routers."""
 
     users: list[User] = []
-    """Local accounts on the router. Not yet realized: declaring any refuses at planning (`guest-config-not-realized`)."""
+    """Local accounts on the router (converged by the router's recipes, like `Host.users`): CyRIS-style firewall-as-target ranges give the gateway its own weak account. Declaring users without `provisioning` refuses at planning (`realized-section-unconsumed`): nothing would realize them."""
+
+    provisioning: list[ProvisioningStep] = []
+    """Build-time recipe references, in order (the host build path extended to routers): a provisioned router boots in the build, runs its recipes, and is captured as a realized image with its own build key. Requires a declared `image` (`router-image-required`): the appliance default is a backend resolution the build key cannot pin."""
 
     acl: list[AclRule] = []
     """Inter-segment policy enforced on this router (stateful; endpoints may be routed, not only attached). EMPTY means a plain router (everything forwards, the KYPO/CyRIS pure-router shape); declaring ANY rule flips the router to default-drop, forwarding only the declared allows plus established/related."""

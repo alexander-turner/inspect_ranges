@@ -50,8 +50,8 @@ $IR images derive "$NOBLE" --sha256 "$(sha256sum "$NOBLE" | cut -d' ' -f1)" --na
 (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 1200 >"$SPIKE/tmp/c1.txt" 2>&1) \
   && grep -q "build OK" "$SPIKE/tmp/c1.txt" && ok "C1 cyris-basic builds green" \
   || { bad "C1 build"; tail -15 "$SPIKE/tmp/c1.txt"; exit 1; }
-grep -q "behavioral checks=9" "$SPIKE/tmp/c1.txt" \
-  && ok "C1b all three trios proved against the captured artifacts (checks=9)" \
+grep -q "behavioral checks=12" "$SPIKE/tmp/c1.txt" \
+  && ok "C1b all four trios proved against the captured artifacts (checks=12)" \
   || { bad "C1b behavioral lines"; grep -i behavioral "$SPIKE/tmp/c1.txt" | tail -6; }
 
 echo "=== C2 every reference chain scores through a real eval ==="
@@ -59,7 +59,7 @@ export INSPECT_RANGES_IMAGE_CACHE="$CACHE"
 export INSPECT_RANGES_BUILD_CACHE="$BUILDS"
 if (cd "$ROOT" && uv run python "$SPIKE/cyris_eval.py" "$RANGE" >"$SPIKE/tmp/c2.txt" 2>&1); then
   grep -E "^(PASS|FAIL)" "$SPIKE/tmp/c2.txt" || true
-  ok "C2 the eval leg ran green (3 chains, 1.0 valid, wall held)"
+  ok "C2 the eval leg ran green (4 chains, 1.0 valid, wall held)"
 else
   bad "C2 eval"; tail -40 "$SPIKE/tmp/c2.txt"
 fi

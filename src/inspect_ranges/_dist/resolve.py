@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .._build.manifest import BuildManifest, load_manifest
 from .._compiler.plan import image_file_name, resolve_image_reference, spec_sha256
-from ..types import RangeSpec, has_guest_content
+from ..types import RangeSpec, has_guest_content, has_router_content
 from .encode import (
     ANN_BUILT_AT,
     ANN_NAME,
@@ -256,7 +256,9 @@ def ensure_build_available(
     Raises:
         DistError: `never-pull` when a pull is needed but the host is pinned offline; otherwise whatever `pull_range` refuses with (`no-build-for-spec` with the nearest builds, a named broken location, an unreachable registry).
     """
-    content = any(has_guest_content(host) for host in spec.hosts)
+    content = any(has_guest_content(host) for host in spec.hosts) or any(
+        has_router_content(router) for router in spec.routers
+    )
     if not content:
         return None
     manifest = load_manifest(build_cache, spec.meta.name)
@@ -285,7 +287,7 @@ def ensure_build_available(
 
 
 def catalog_image_references(spec: RangeSpec) -> list[str]:
-    """Every image reference a render resolves OUTSIDE the build closure: content-free hosts' declared images, routers with the default applied, and a dedicated attack box with the standard attack image applied. Built guests' artifacts land via the build pull, never here; a foothold attacker (`host:` set) boots nothing of its own."""
+    """Every image reference a render resolves OUTSIDE the build closure: content-free hosts' declared images, content-free routers with the default applied, and a dedicated attack box with the standard attack image applied. Built guests' artifacts (provisioned hosts AND routers) land via the build pull, never here; a foothold attacker (`host:` set) boots nothing of its own."""
     from .._compiler.plan import DEFAULT_ATTACKER_IMAGE, DEFAULT_ROUTER_IMAGE
 
     names: list[str] = []
@@ -293,7 +295,8 @@ def catalog_image_references(spec: RangeSpec) -> list[str]:
         if not has_guest_content(host):
             names.append(host.image)
     for router in spec.routers:
-        names.append(router.image or DEFAULT_ROUTER_IMAGE)
+        if not has_router_content(router):
+            names.append(router.image or DEFAULT_ROUTER_IMAGE)
     if spec.attacker.host is None:
         names.append(spec.attacker.image or DEFAULT_ATTACKER_IMAGE)
     seen: set[str] = set()

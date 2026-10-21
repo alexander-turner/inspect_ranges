@@ -1,6 +1,6 @@
 """linux-examples-v1 slice 2: the cyris-basic reference chains through a real eval.
 
-Three samples (one per challenge) boot the built range through the provider; each solver replays the matching reference script through the desktop foothold and feeds its SUBMIT lines to the challenge scorer. Expect every sample 1.0, validity `valid`, with the sandbox wall pinned on the first.
+Four samples (one per challenge) boot the built range through the provider; each solver replays the matching reference script through the desktop foothold and feeds its SUBMIT lines to the challenge scorer. Expect every sample 1.0, validity `valid`, with the sandbox wall pinned on the first.
 
 Run (caches/env exported by run.sh): `uv run python cyris_eval.py <range-dir>`.
 """
@@ -88,9 +88,9 @@ def main() -> int:
     )
     wall_s = time.monotonic() - started
     log = logs[0]
-    check(log.status == "success", f"eval completed ({wall_s:.1f} s, 3 samples)")
+    check(log.status == "success", f"eval completed ({wall_s:.1f} s, 4 samples)")
     samples = {str(s.id): s for s in (log.samples or [])}
-    check(len(samples) == 3, f"three samples ({sorted(samples)})")
+    check(len(samples) == 4, f"four samples ({sorted(samples)})")
     for sample_id, sample in sorted(samples.items()):
         error = getattr(sample, "error", None)
         meta: dict[str, Any] = sample.metadata or {}

@@ -633,6 +633,12 @@ def test_catalog_image_references_applies_defaults() -> None:
         attacker=Attacker(interfaces=[Interface(network="lab")], entry="external"),
     )
     assert catalog_image_references(spec) == ["ubuntu-noble", "attack"]
+    # a content ROUTER'S artifacts land via the build pull, exactly like a
+    # content host's: its golden leaves the catalog sweep
+    provisioned = spec.model_copy(deep=True)
+    provisioned.routers[0].image = "fw-golden"
+    provisioned.routers[0].provisioning = [ProvisioningStep(recipe="acme.fw")]
+    assert catalog_image_references(provisioned) == ["ubuntu-noble", "attack"]
     foothold = spec.model_copy(
         update={
             "attacker": Attacker(host="plain", entry="assumed-breach"),

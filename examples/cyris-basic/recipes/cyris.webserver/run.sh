@@ -1,7 +1,9 @@
 #!/bin/sh
 # CyRIS webserver (upstream guest_settings tasks): accounts, apache2+php
-# (upstream httpd+php), and the two planted captures. /root/flag.txt is the
-# plant layer's.
+# (upstream httpd+php), password-auth sshd (the firewall-pivot's second hop;
+# upstream CentOS guests take password SSH, the golden masks sshd and the
+# cloud image disables password auth, both reversed deliberately), and the
+# two planted captures. /root/flag.txt is the plant layer's.
 set -e
 
 exec_guest() { "$IR_EXEC" --budget-ms 600000 -- sh -c "$1"; }
@@ -13,6 +15,13 @@ echo "step: accounts"
 exec_guest 'id daniel >/dev/null 2>&1 || useradd --create-home --shell /bin/bash daniel
 echo "daniel:JamesBond" | chpasswd
 echo "root:new-root-password" | chpasswd'
+
+echo "step: sshd up with password authentication (the pivot's second hop)"
+# 10- beats the cloud image's 60-cloudimg-settings ("PasswordAuthentication
+# no"); both ssh units unmask (socket-activated on noble, service on focal)
+exec_guest 'printf "PasswordAuthentication yes\n" > /etc/ssh/sshd_config.d/10-cyris-basic.conf
+systemctl unmask ssh.service ssh.socket 2>/dev/null || systemctl unmask ssh.service
+systemctl enable ssh && systemctl restart ssh || { echo "ssh enable failed:" >&2; systemctl status ssh --no-pager >&2 || true; exit 1; }'
 
 echo "step: synthesize the planted captures (ddos + wireless)"
 cat > /tmp/mkpcap.$$.py <<'MKPCAP'
@@ -61,6 +70,8 @@ exec_guest 'set -e
 systemctl is-active apache2 >/dev/null
 curl -fs -o /dev/null http://127.0.0.1:80/
 php -v >/dev/null
+ss -ltn | grep -q ":22 " || { echo "sshd not listening; listeners:" >&2; ss -ltn >&2; exit 1; }
+sshd -T 2>/dev/null | grep -qi "^passwordauthentication yes" || { echo "password auth not effective" >&2; sshd -T | grep -i passwordauth >&2; exit 1; }
 getent passwd daniel >/dev/null
 test -s /home/traffic.pcap && test -s /home/wireless.pcap
 test ! -e /root/flag.txt || { echo "flag must not be baked" >&2; exit 1; }'

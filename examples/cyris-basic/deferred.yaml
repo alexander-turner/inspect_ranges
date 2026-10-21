@@ -1,17 +1,19 @@
 # Sections still awaiting schema design — NOT valid range.yaml and not consumed
 # by anything. Guest configuration (users, the httpd service, planted data
 # files) migrated into range.yaml under schema v0.3 (2026-10-07, see
-# ../../guest-config-v0.3.md); the firewall router's account and the top-level
-# defense tier moved BACK here 2026-10-19 (linux-examples-v1: router content
-# is unrealized, defense tiers gate the build; see the entries below).
+# ../../guest-config-v0.3.md); the firewall router's account moved back here
+# 2026-10-19 (router content was unrealized) and RETURNED to range.yaml
+# 2026-10-21 when router provisioning landed (parked entry 2 closed); the
+# top-level defense tier stays here (defense tiers gate the build).
 # What remains here: the inline CyRIS task lists (recipe-language material,
 # deliberately undecided), deployment plumbing, and the sections deferred per
 # that record's table.
 #
 # Also parked from the core file: the firewall router's upstream NIC pinning
-# (`iface: eth0/eth1` per interface) and `is_host: true` (the firewall is a
-# cloned guest, i.e. also a target); its `forwarding` rules were translated
-# into routers[].acl in range.yaml.
+# (`iface: eth0/eth1` per interface); `is_host: true` (the firewall is a
+# cloned guest, i.e. also a target) is realized as routers[].users plus
+# routers[].provisioning in range.yaml, and its `forwarding` rules were
+# translated into routers[].acl there.
 
 # CyRIS deployment plumbing (host_settings): one physical KVM host, management
 # bridge virbr0 at 192.168.122.1, management account cyuser. Kept here because
@@ -76,16 +78,6 @@ lifecycle:
   isolation: per-instance cloned networks/bridges (CyRIS clone phase)
   reset: re-clone from base images
   clock_sync: ntp   # default: no Kerberos constraint
-
-# router guest content (moved from range.yaml 2026-10-19, linux-examples-v1):
-# the firewall is also a target upstream (is_host: true, account robot.abc);
-# router PROVISIONING does not exist yet, so its content is unrealized and the
-# firewall-pivot attack path (weak firewall account -> hop into the servers
-# segment) waits on it (recorded in linux-examples-v1-parked-decisions.md)
-routers:
-  firewall:
-    users:
-      - { name: robot.abc, password: abcrb1357 }
 
 # in-range defense posture (moved from range.yaml 2026-10-19): D0 is "no
 # defenders"; the pre-planted traces ARE realized (the desktop recipe plants

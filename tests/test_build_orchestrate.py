@@ -1825,3 +1825,142 @@ def test_stale_bx_state_rotates_aside_before_the_proof_boot(tmp_path: Path) -> N
     kept = [p for p in stale.parent.iterdir() if p.name.startswith("ir-acme-bx-stale-")]
     assert len(kept) == 1
     assert (kept[0] / "evidence" / "marker").read_bytes() == b"new"
+
+
+def router_spec_fixture(tmp_path: Path) -> tuple[RangeSpec, Path]:
+    """A two-segment spec whose router carries content (users realized by its recipe), plus a stranded content host; both networks are router-attached, so the host exercises the build uplink while the router stays off it."""
+    from inspect_ranges.types import Router, User
+
+    range_dir = tmp_path / "range"
+    if not (range_dir / "recipes" / "acme.fw").exists():
+        write_recipe(range_dir, name="acme.fw")
+        write_recipe(range_dir, name="acme.web", inputs={"marker": {}})
+    spec = RangeSpec(
+        meta=RangeMeta(name="routed-build", description="router provisioning fixture"),
+        networks=[
+            Network(name="office", cidr="10.1.10.0/24", mode="isolated"),
+            Network(name="servers", cidr="10.1.20.0/24", mode="isolated"),
+        ],
+        routers=[
+            Router(
+                name="fw",
+                image="tiny-golden",
+                interfaces=[
+                    Interface(network="office"),
+                    Interface(network="servers"),
+                ],
+                users=[User(name="robot.abc", password="abcrb1357")],
+                provisioning=[ProvisioningStep(recipe="acme.fw")],
+            )
+        ],
+        hosts=[
+            Host(
+                name="web",
+                os=Os(type="linux"),
+                image="tiny-golden",
+                interfaces=[Interface(network="office")],
+                provisioning=[
+                    ProvisioningStep(recipe="acme.web", vars={"marker": "m"})
+                ],
+            )
+        ],
+        attacker=Attacker(
+            image="tiny-golden",
+            interfaces=[Interface(network="office")],
+            entry="external",
+        ),
+    )
+    return spec, range_dir
+
+
+def test_egress_build_spec_gives_routers_no_uplink(tmp_path: Path) -> None:
+    """The build variant uplinks the stranded content HOST and leaves the provisioned router untouched: router-attached egress is unrealized, so router recipes run offline instead."""
+    spec, _ = router_spec_fixture(tmp_path)
+    build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
+    assert [i.network for i in build.routers[0].interfaces] == ["office", "servers"]
+    web = next(host for host in build.hosts if host.name == "web")
+    assert any(i.network == "build-uplink" for i in web.interfaces)
+
+
+def test_build_provisions_routers_on_the_host_path(tmp_path: Path, cache: Path) -> None:
+    """A provisioned router builds like a host with the one declared difference: its recipes run (hosts first, declaration order), the settle gate skips it (no build egress), its disk is captured, and the manifest records it under its own build key; an unchanged rebuild is the cached no-op."""
+    from inspect_ranges._build import load_manifest
+
+    spec, range_dir = router_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "fw", "attacker"])
+    settled: list[str] = []
+
+    def settle(
+        cids: dict[str, int],
+        guest: str,
+        probe: str,
+        timeout_s: float,
+        hybrid_sockets: Any = None,
+        windows_resolver: str | None = None,
+    ) -> float:
+        settled.append(guest)
+        return 0.5
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache, settle_probe="archive.ubuntu.com"),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        settle_fn=settle,
+    )
+    assert [(name, guest) for name, guest, _ in fakes.recipe_calls] == [
+        ("acme.web", "web"),
+        ("acme.fw", "fw"),
+    ]
+    assert settled == ["web"]  # the router's recipe ran without the egress gate
+    assert [guest for guest, _, _ in fakes.captures] == ["web", "fw"]
+    manifest = load_manifest(tmp_path / "builds", "routed-build")
+    assert manifest is not None
+    record = manifest.guest("fw")
+    web_record = manifest.guest("web")
+    assert record is not None and web_record is not None
+    assert record.golden_reference == "tiny-golden"
+    assert record.recipes[0].name == "acme.fw" and record.build_key
+    assert record.build_key != web_record.build_key
+    # unchanged rebuild: every key matches, nothing boots
+    second = Fakes(["web", "fw", "attacker"])
+    rebuilt = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=second.up_fn,
+        down_fn=second.down_fn,
+        recipe_fn=second.recipe_fn,
+        ensure_uplink=second.ensure_uplink,
+        capture_fn=second.capture_fn,
+    )
+    assert rebuilt.cached and second.up_calls == [] and second.recipe_calls == []
+    assert result.project != "" and rebuilt.project == result.project
+
+
+def test_build_refuses_router_content_without_image(
+    tmp_path: Path, cache: Path
+) -> None:
+    """Provisioning on the appliance default refuses before anything resolves or boots: the build key must pin the golden the content realizes on."""
+    spec, range_dir = router_spec_fixture(tmp_path)
+    spec.routers[0].image = None
+    fakes = Fakes(["web", "fw", "attacker"])
+    with pytest.raises(IssueError) as excinfo:
+        build_range(
+            spec,
+            range_dir,
+            options_for(tmp_path, cache),
+            up_fn=fakes.up_fn,
+            down_fn=fakes.down_fn,
+            recipe_fn=fakes.recipe_fn,
+            ensure_uplink=fakes.ensure_uplink,
+            capture_fn=fakes.capture_fn,
+        )
+    assert [(i.code, i.path) for i in excinfo.value.issues] == [
+        ("router-image-required", ("routers", 0, "image"))
+    ]
+    assert fakes.up_calls == []

@@ -19,11 +19,15 @@ from inspect_ranges._build.manifest import (
 )
 from inspect_ranges._build.recipes import RecipeSpec, ResolvedRecipe
 from inspect_ranges.types import (
+    AclRule,
     Host,
     Interface,
     Os,
     ProvisioningStep,
+    Resources,
+    Router,
     Service,
+    User,
     Vulnerability,
 )
 
@@ -40,6 +44,18 @@ def make_host(**overrides: object) -> Host:
     }
     base.update(overrides)
     return Host.model_validate(base)
+
+
+def make_router(**overrides: object) -> Router:
+    base: dict[str, object] = {
+        "name": "fw",
+        "image": "noble-guest",
+        "interfaces": [Interface(network="dmz"), Interface(network="internal")],
+        "users": [User(name="robot.abc", password="abcrb1357")],
+        "provisioning": [ProvisioningStep(recipe="acme.fw", vars={"marker": "x"})],
+    }
+    base.update(overrides)
+    return Router.model_validate(base)
 
 
 def resolved(digest: str) -> ResolvedRecipe:
@@ -417,6 +433,130 @@ def test_apply_build_manifest_passthrough_without_content(tmp_path: Path) -> Non
         spec, image_cache=tmp_path, build_cache=tmp_path / "builds"
     )
     assert same is spec and sections == frozenset() and consumed is None
+
+
+def test_router_projection_covers_provisioning_only() -> None:
+    """A router's realized disk holds its recipes' output alone: ACL, routes, addressing, and sizing re-render per boot, and declared `users` ride the recipes the key already carries, so only `provisioning` participates in the projection."""
+    same = spec_projection(make_router())
+    unchanged: list[Router] = [
+        make_router(acl=[AclRule(from_="dmz", to="internal", allow=["tcp/25"])]),
+        make_router(users=[]),
+        make_router(
+            interfaces=[
+                Interface(network="dmz", ip="10.80.10.1"),
+                Interface(network="internal"),
+            ]
+        ),
+        make_router(resources=Resources(cpus=2, memory_mb=2048)),
+    ]
+    for other in unchanged:
+        assert spec_projection(other) == same
+    moved = make_router(
+        provisioning=[ProvisioningStep(recipe="acme.fw", vars={"marker": "y"})]
+    )
+    assert spec_projection(moved) != same
+
+
+def test_router_build_key_moves_with_each_input() -> None:
+    """The host build-key algebra applied to a router: golden digest, recipe digest, vars, and identity all move the key; a host with identical provisioning never shares it (the projections differ by shape, and identity differs by name anyway)."""
+    router = make_router()
+    steps: Steps = [(resolved("recipe-digest-1"), {"marker": "x"})]
+    key = guest_build_key("sha-golden", router, steps, range_name="keyed")
+    assert guest_build_key("sha-other", router, steps, range_name="keyed") != key
+    other_digest: Steps = [(resolved("recipe-digest-2"), {"marker": "x"})]
+    assert (
+        guest_build_key("sha-golden", router, other_digest, range_name="keyed") != key
+    )
+    other_vars: Steps = [(resolved("recipe-digest-1"), {"marker": "y"})]
+    assert guest_build_key("sha-golden", router, other_vars, range_name="keyed") != key
+    assert guest_build_key("sha-golden", router, steps, range_name="other") != key
+    twin_host = make_host(
+        name="fw",
+        services=[],
+        vulnerabilities=[],
+        provisioning=list(router.provisioning),
+    )
+    assert guest_build_key("sha-golden", twin_host, steps, range_name="keyed") != key
+
+
+def test_apply_build_manifest_covers_routers(tmp_path: Path) -> None:
+    """The range-not-built gate sees router content: a provisioned router demands a manifest, swaps to its digest-verified realized image when one matches, and refuses when the manifest never recorded it."""
+    import hashlib
+
+    from inspect_ranges._build.manifest import apply_build_manifest
+    from inspect_ranges._compiler.plan import spec_sha256
+    from inspect_ranges.types import (
+        Attacker,
+        IssueError,
+        Network,
+        RangeMeta,
+        RangeSpec,
+    )
+
+    spec = RangeSpec(
+        meta=RangeMeta(name="routed", description="x"),
+        networks=[
+            Network(name="dmz", cidr="10.80.10.0/24", mode="isolated"),
+            Network(name="internal", cidr="10.80.20.0/24", mode="isolated"),
+        ],
+        routers=[make_router()],
+        hosts=[
+            Host(
+                name="plain",
+                os=Os(type="linux"),
+                image="focal-guest",
+                interfaces=[Interface(network="dmz")],
+            )
+        ],
+        attacker=Attacker(host="plain", entry="assumed-breach"),
+    )
+    image_cache = tmp_path / "images"
+    image_cache.mkdir()
+    builds = tmp_path / "builds"
+
+    with pytest.raises(IssueError) as excinfo:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+    assert excinfo.value.issues[0].code == "range-not-built"
+
+    realized = image_cache / "routed-fw-abcdefabcdef.qcow2"
+    realized.write_bytes(b"realized-router")
+    golden = image_cache / "noble-guest.qcow2"
+    golden.write_bytes(b"golden-bytes")
+    manifest = BuildManifest(
+        range_name="routed",
+        schema_version="0.3",
+        spec_sha256=spec_sha256(spec),
+        built_at=now_iso(),
+        project="ir-routed-x",
+        guests=(
+            GuestRecord(
+                name="fw",
+                golden_reference="noble-guest",
+                golden_digest=f"sha256:{hashlib.sha256(b'golden-bytes').hexdigest()}",
+                realized_file=realized.name,
+                realized_sha256=hashlib.sha256(b"realized-router").hexdigest(),
+                build_key="k" * 64,
+                recipes=(),
+            ),
+        ),
+        verification=VerificationRecord(verified_at=now_iso(), declarations=()),
+    )
+    save_manifest(manifest, builds)
+    swapped, sections, consumed = apply_build_manifest(
+        spec, image_cache=image_cache, build_cache=builds
+    )
+    assert swapped.routers[0].image == realized.name
+    assert "users" in sections and "provisioning" in sections
+    assert consumed is not None
+    assert spec.routers[0].image == "noble-guest"  # the input spec is untouched
+
+    renamed = manifest.model_copy(
+        update={"guests": (manifest.guests[0].model_copy(update={"name": "other"}),)}
+    )
+    save_manifest(renamed, builds)
+    with pytest.raises(IssueError) as excinfo:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+    assert "has no record for guest 'fw'" in excinfo.value.issues[0].message
 
 
 def test_identity_participates_in_the_build_key() -> None:
