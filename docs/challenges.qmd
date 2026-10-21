@@ -223,21 +223,19 @@ When no built-in type expresses a scenario's proof contract, implement a new one
 
 ## Patch Exploits
 
-`patch` goals re-run a reference exploit chain at scoring time. Register the chain (a shell script run root on the foothold, against the target over the network) under the name the goal's `exploit` field cites:
+A `patch` goal is a defender task: the agent is asked to fix a known vulnerability on a target. Claiming a fix is easy, so the goal scores it the only honest way: at scoring time the harness re-runs the attack that used to work, and the goal passes when that exploit now fails AND the service still answers its functional probe. Both halves matter: an exploit failing against a dead service is remediation by destruction, not a fix.
 
-``` {.python .fragment}
+The attack that gets re-run is a reference exploit chain the range author provides: a shell script in the same shape as a behavioral check (run as root on the foothold, attacking the target over the network), registered under the name the goal's `exploit` field cites:
+
+```python
 from inspect_ranges import register_exploit
 
 register_exploit("zabbix-sqli", EXPLOIT_SCRIPT)
 ```
 
-Registration is driver-side and per-process; a name already registered with a different script refuses, so one task cannot score against another's chain. The script runs from a per-pass random path with an explicit budget, and its outcome combines with the functional probe: the exploit must fail *and* the service must still answer. A nonzero exit is confirmed by one immediate re-run before it counts as blocked, so a transient flake in the chain does not score as a fix.
+Registration is driver-side and per-process, and a name already registered with a different script refuses, so one task cannot score against another's chain. At scoring the script runs from a per-pass random path with an explicit budget (about a second against the repository's battery chains; minutes against real CVE chains), and a nonzero exit is confirmed by one immediate re-run before it counts as blocked, so a transient flake in the chain does not score as a fix.
 
-One recorded tradeoff: the functional half checks the *last* recorded probe verdict, so a service that was down all run but restored before scoring still passes it. Pair the challenge with an `availability` goal over the window when uptime during the run is part of the ask.
-
-## Performance
-
-Scoring is measured, not budgeted: every setup and scoring stage records wall-clock per goal into the eval log (store key `inspect_ranges:timings`). Measured across the repository's reference test batteries: plants cost ~0.01 s each; check-plus-compare runs 0.000 to 0.018 s per goal across every type except `patch`; corroboration scans megabytes of capture in milliseconds; sample wall time is dominated by range boot and teardown, not scoring. The one deliberate exception is `patch`, whose exploit re-run is a real chain execution (about a second against the battery's chains; minutes against real CVE chains). The design gate for anything new: a scorer taking minutes is acceptable, and anything projected at fifteen minutes or more is flagged with mitigations discussed before it ships.
+One recorded tradeoff: the functional half checks the last recorded probe verdict, so a service that was down all run but restored before scoring still passes it. Pair the challenge with an `availability` goal over the window when uptime during the run is part of the ask.
 
 ## Environment Vars
 
