@@ -17,11 +17,7 @@ A range declaring guest content needs a matching build first: your own ([Buildin
 
 Each stage consumes only the verified output of the one before it: `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify.
 
-This page is the narrative tour of the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
-
-## `push`, `pull`, and `mirror`
-
-`push` publishes the current range's build to a location, bare `pull` fetches the build matching this `range.yaml` exactly (the provider also pulls implicitly at eval init), and `mirror` moves content between locations, including the air-gap directory form. `publish` promotes built guests, goldens, and the daemon artifact to bare catalog names and rewrites a location's catalog list (`--list`). `images pull` and `images refresh` fetch and advance catalog images; `images pin` writes the fleet pin file; `images prune --chains` reclaims unreferenced chains. The whole surface, with the location forms and the search path, lives in [Distribution](distribution.qmd) and [Images](images.qmd).
+Moving builds and images between machines (`push`, `pull`, `mirror`, `publish`) is [Distribution](distribution.qmd); the deployment-shape recipes are [Images](images.qmd). This page is the narrative tour of the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
 
 ## `up`
 

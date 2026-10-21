@@ -10,6 +10,8 @@ A range is built once and consumed everywhere: `inspect-ranges build` produces c
 
 Every artifact is content-addressed: qcow2 images, provenance sidecars (each image's record of the digests it was built from), recipe bundles, and the build manifest itself publish as OCI artifacts whose blobs verify against their digests on every path (push, pull, mirror, and out of a directory archive). A pulled range is byte-identical to the built one, and nothing unverified ever lands under a consumable name.
 
+Deployment recipes (mirroring for an air gap, pinning a fleet, running offline) live in [Images](images.qmd); this page is the mechanics those recipes rest on.
+
 ## Locations
 
 Everywhere a registry location appears (`push --to`, `pull --from`, `mirror`, the configured search path) it takes one of three interchangeable forms:
@@ -20,7 +22,11 @@ Everywhere a registry location appears (`push --to`, `pull --from`, `mirror`, th
 
 The search path is `INSPECT_RANGES_REGISTRY`, an ordered comma-separated list, first match wins. A deployment prepends its own registry and its artifacts shadow public names deterministically; the public org stays as the fallback so connected deployments never need to mirror. A broken location in the path (an unmounted mirror directory, a registry answering errors) aborts resolution with the location named rather than silently falling through, because silent fallback would un-shadow the location the operator put first. Nothing in any spec or manifest names a registry host: redirection is configuration, never spec content.
 
-## Publishing a Range: `push`
+## Publishing
+
+Everything in this section is the producer's side: pushing range builds, promoting images, and maintaining the catalog list. Consumers never run these verbs.
+
+### Range Builds: `push`
 
 From a built range's directory:
 
@@ -33,6 +39,16 @@ push OK   vulhub-zabbix@sha256:ab12e0...
 `push` reads the current directory's build manifest and uploads its transitive closure: every realized image with its provenance sidecar, the goldens and vendor bases they chain onto (each realized image rebases onto a golden, which derives from a vendor base), the referenced recipe bundles (which must still resolve at the digests the build recorded), and the build manifest itself as the pull root. Blobs the destination already holds are skipped by digest, so pushing a rebuilt range moves only what changed. The printed `name@digest` is the range's publishable identity. Each push also tags the root with a reference derived from the spec's normalized-form hash (the exact-spec reference); a later `pull` holding the same spec resolves that reference to this build.
 
 `push` has no default destination: pass `--to` or configure `INSPECT_RANGES_REGISTRY`. Pushing to the public org is the project publisher's job, never a user move, and user ranges must not aim anywhere public by accident.
+
+### Images and the Catalog List {#the-catalog-list}
+
+`publish` promotes a built guest's realized image, a cache golden, or the daemon artifact to a bare catalog name, and every image publish appends the name to the location's published catalog list (the reserved `catalog` ref). `publish --list` rewrites the list to an exact set of names: the repair and rename verb, and how a publisher adds pushed ranges to enumeration.
+
+The list is typed: each entry records a name and its kind (`image` or `range`), and a pre-kind list of bare strings reads as all images, so earlier published lists keep working unchanged. `publish --list` detects each kind from what the destination actually serves (a pushed range's root records its build identity and spec-suffixed refs; a published image's root records its published name, the same identity `images pull` verifies) and refuses `catalog-kind-unknown` for a root recording neither, rather than guessing. The kinds split consumers by purpose: enumeration (`mirror`, whole-location) carries every entry, so one command mirrors images and published range builds together, while `images pin` writes the image entries only. A range never enters a pin file: it pins via the consuming clone's spec hash, and a pin-file entry would refuse `pin-mismatch` on every republish, since a republished build mints a new root digest by design.
+
+### Republish Discipline
+
+Every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so a rebuilt image gets a new identity instead of silently replacing the old one under the same name. Between publishes the catalog deliberately lags upstream package feeds; the manifest records what shipped.
 
 ## Consuming a Range: `pull`
 
@@ -104,9 +120,7 @@ $ inspect-ranges mirror vulhub-zabbix@sha256:ab12e0... --from X --to Y
 
 A mirrored root carries its transitive closure and its exact-spec reference, so spec-driven `pull` works from the mirror; manifests move as raw verified bytes, so digests survive the copy even for foreign-produced content. The air-gap recipe (mirror to a directory, carry it across, point `INSPECT_RANGES_REGISTRY` at it) is in [Images](images.qmd#air-gap).
 
-A whole-location mirror carries the source's catalog list verbatim, replacing the destination's: names published only at the destination stay served by ref but drop out of enumeration and pin generation, so merge-style syncs between two publishing locations should republish rather than mirror. Whole-location mirroring enumerates the source's published catalog list first (the reserved `catalog` ref every image publish updates; `publish --list` rewrites it to an exact set of names, which also lets the publisher add pushed ranges to enumeration), falling back to the location's own listing surface (a layout's refs, a registry's `/v2/_catalog`). The public hub exposes neither org enumeration through the OCI API nor a listing fallback, so a hub location that has not published a list refuses whole-org mirrors and takes explicit names; the public org publishes its list.
-
-The list is typed: each entry records a name and its kind (`image` or `range`), and a pre-kind list of bare strings reads as all images, so earlier published lists keep working unchanged. `publish --list` detects each kind from what the destination actually serves (a pushed range's root records its build identity and spec-suffixed refs; a published image's root records its published name, the same identity `images pull` verifies) and refuses `catalog-kind-unknown` for a root recording neither, rather than guessing. The kinds split consumers by purpose: enumeration (`mirror`, whole-location) carries every entry, so one command mirrors images and published range builds together, while `images pin` writes the image entries only. A range never enters a pin file: it pins via the consuming clone's spec hash, and a pin-file entry would refuse `pin-mismatch` on every republish, since a republished build mints a new root digest by design.
+A whole-location mirror enumerates the source through its published catalog list (see [the Catalog List](#the-catalog-list)) and carries that list verbatim, replacing the destination's: names published only at the destination stay served by ref but drop out of enumeration and pin generation, so merge-style syncs between two publishing locations should republish rather than mirror. A location with no published list falls back to its own listing surface (a layout's refs, a registry's `/v2/_catalog`); the public hub exposes neither, so a hub location that has not published a list refuses whole-org mirrors and takes explicit names (the public org publishes its list).
 
 ## Reclaiming Space: `images prune --chains`
 

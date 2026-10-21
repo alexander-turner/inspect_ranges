@@ -39,7 +39,7 @@ The standard images publish at the project org, each consumable by bare name (hu
 
 The goldens are minimal Ubuntu cloud images with nothing enabled beyond the daemon: derivation disables ssh and the systemd-resolved DNS stub listener. A recipe installs and enables whatever its scenario needs; `apt` works, and builds run with network egress so recipes can install packages.
 
-The republish discipline: every consumer-held artifact is digest-verified, a republished image is a new digest, and the attack image's recipe version must bump for each republish, so a rebuilt image gets a new identity instead of silently replacing the old one under the same name. Between publishes the catalog deliberately lags upstream package feeds; the manifest records what shipped.
+A republished image is always a new digest, never a silent replacement; the publisher-side rules are in [Distribution](distribution.qmd#republish-discipline).
 
 ## Deployment Shapes
 
