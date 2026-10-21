@@ -137,7 +137,15 @@ def attach_oracle(
     state = state_dir if state_dir is not None else default_state_dir()
     boot = _recorded_boot(state, project)
     run = runner if runner is not None else run_command
-    if not project_containers(run, project):
+    try:
+        running = project_containers(run, project, running_only=True)
+    except FileNotFoundError as error:
+        raise OracleSetupError(
+            f"range_oracle({project!r}) checks range liveness with docker, "
+            "which this machine does not have; attach on the host where the "
+            "range runs"
+        ) from error
+    if not running:
         raise OracleSetupError(
             f"project {project!r} is registered under "
             f"{project_dir(state, project)} but has no running containers; "

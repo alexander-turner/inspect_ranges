@@ -492,13 +492,15 @@ async def _await_ready(
     return True, None
 
 
-def project_containers(runner: Runner, project: str) -> list[str]:
-    """Container ids carrying the project's compose label (live or exited)."""
+def project_containers(
+    runner: Runner, project: str, *, running_only: bool = False
+) -> list[str]:
+    """Container ids carrying the project's compose label (live or exited by default; `running_only` narrows to running ones, the oracle attach's liveness question)."""
     result = runner(
         [
             "docker",
             "ps",
-            "-a",
+            *([] if running_only else ["-a"]),
             "-q",
             "--filter",
             f"label=com.docker.compose.project={project}",

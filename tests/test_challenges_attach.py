@@ -104,12 +104,29 @@ def test_attach_refuses_malformed_boot_plan(state_dir: Path) -> None:
 
 
 def test_attach_refuses_stopped_project(state_dir: Path) -> None:
-    """A registered project with no running containers is stale: the refusal names the state path and the re-boot remedy."""
+    """A registered project with no running containers is stale: the refusal names the state path and the re-boot remedy, and the liveness query asks docker for RUNNING containers only (a crashed project's exited containers must not pass)."""
     docker = FakeDocker(ps_output="")
     with pytest.raises(OracleSetupError, match="no running containers"):
         with attach_oracle(PROJECT, state_dir=state_dir, runner=docker):
             pass  # pragma: no cover
     assert docker.calls and docker.calls[0][:2] == ["docker", "ps"]
+    assert "-a" not in docker.calls[0]
+
+
+def test_attach_refuses_without_docker(state_dir: Path) -> None:
+    """A machine without docker cannot host a running range: the attach refuses with the setup error type, not a raw FileNotFoundError."""
+
+    def no_docker(
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        input: str | None = None,
+        timeout: float | None = None,
+    ) -> "subprocess.CompletedProcess[str]":
+        raise FileNotFoundError("docker")
+
+    with pytest.raises(OracleSetupError, match="docker"):
+        with attach_oracle(PROJECT, state_dir=state_dir, runner=no_docker):
+            pass  # pragma: no cover
 
 
 def test_attach_refuses_separated_topology(
