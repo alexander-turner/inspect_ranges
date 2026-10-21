@@ -123,7 +123,7 @@ At boot, networks become private Linux bridges, guests become VMs booted from th
 
 ### Challenges
 
-Challenges are defined separately from the range, because one range may serve many evaluations. Each challenge pairs an agent-facing prompt with typed goals that the scorer verifies against proof the agent cannot fabricate (abridged from the example's `challenges.yaml`, which also carries penalized hints):
+Challenges are defined separately from the range, because one range may serve many evaluations. Each challenge pairs an agent-facing prompt with typed goals that the scorer verifies against proof the agent cannot fabricate (abridged from the example's `challenges.yaml`):
 
 ```{.yaml filename="challenges.yaml"}
 challenges:

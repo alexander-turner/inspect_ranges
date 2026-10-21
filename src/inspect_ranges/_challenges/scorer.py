@@ -19,7 +19,6 @@ from .corroborate import CorroborationReport, corroborate
 from .dataset import CHALLENGE_METADATA_KEY
 from .engine import (
     CANDIDATE_CAP,
-    HINTS_USED_STORE_KEY,
     Assurance,
     GoalResult,
     LatchRecord,
@@ -78,18 +77,11 @@ def _latched_score(
         for goal in challenge.goals
         if goal.id in all_records
     }
-    try:
-        raw_hints = store.get(HINTS_USED_STORE_KEY, [])
-    except Exception as error:
-        logger.warning("hints read failed: %s", type(error).__name__)
-        raw_hints = []
-    hints_used = list(dict.fromkeys(index for index in raw_hints if type(index) is int))
-    value = aggregate(challenge, records, assurances=assurances, hints_used=hints_used)
+    value = aggregate(challenge, records, assurances=assurances)
     metadata: dict[str, object] = {
         "validity": "indeterminate",
         "scoring_mode": challenge.scoring.mode,
         "achieved_count": sum(1 for record in records.values() if record.achieved),
-        "hints_used": hints_used,
         "goals": {
             goal_id: record.model_dump(mode="json")
             for goal_id, record in records.items()
@@ -294,20 +286,11 @@ async def score_challenge(
         if any(record.indeterminate for record in records.values())
         else "valid"
     )
-    try:
-        raw_hints = store.get(HINTS_USED_STORE_KEY, [])
-    except Exception as error:
-        # the one store read the latch guards did not cover (coverage pass
-        # T5): a failing read costs the hint penalties, never the sample
-        logger.warning("hints read failed: %s", type(error).__name__)
-        raw_hints = []
-    hints_used = list(dict.fromkeys(index for index in raw_hints if type(index) is int))
-    value = aggregate(challenge, records, assurances=assurances, hints_used=hints_used)
+    value = aggregate(challenge, records, assurances=assurances)
     metadata: dict[str, object] = {
         "validity": validity,
         "scoring_mode": challenge.scoring.mode,
         "achieved_count": sum(1 for record in records.values() if record.achieved),
-        "hints_used": hints_used,
         "goals": {
             goal_id: record.model_dump(mode="json")
             for goal_id, record in records.items()

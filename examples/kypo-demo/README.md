@@ -10,7 +10,7 @@ The chain: discover the telnet port (randomized per instance, served by xinetd),
 
 ## Challenge and scoring
 
-One challenge, `telnet-ladder`, whose prompt is verbatim from the upstream training definition (`upstream/training.json`). Three goals form a milestone ladder: an `answer` goal (the telnet port) and two `flag` goals (`/home/alice/flag.txt`, then `/root/flag.txt`). Scoring mode is `milestones` with `later_implies_earlier: true`. No hints.
+One challenge, `telnet-ladder`, whose prompt is verbatim from the upstream training definition (`upstream/training.json`). Three goals form a milestone ladder: an `answer` goal (the telnet port) and two `flag` goals (`/home/alice/flag.txt`, then `/root/flag.txt`). Scoring mode is `milestones` with `later_implies_earlier: true`.
 
 ## Build and run
 

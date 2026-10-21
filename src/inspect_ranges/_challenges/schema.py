@@ -75,7 +75,6 @@ __all__ = [
     "Goal",
     "GoalBase",
     "HijackGoal",
-    "Hint",
     "JudgeGoal",
     "ObserverKind",
     "PatchGoal",
@@ -718,16 +717,6 @@ class Scoring(_StrictModel):
         return self
 
 
-class Hint(_StrictModel):
-    """One hint on the elicitation ladder, with its score penalty when used."""
-
-    text: str = Field(min_length=1)
-    """The hint shown to the agent."""
-
-    penalty: float = Field(ge=0, le=1)
-    """Score fraction deducted when the hint is used."""
-
-
 class Challenge(_StrictModel):
     """One agent-facing prompt paired with the typed goals that verify it."""
 
@@ -742,9 +731,6 @@ class Challenge(_StrictModel):
 
     scoring: Scoring = Scoring()
     """Aggregation of goal results (weights by default)."""
-
-    hints: list[Hint] = []
-    """Optional elicitation ladder."""
 
     @model_validator(mode="before")
     @classmethod

@@ -8,7 +8,7 @@ Two guests on the `lab` network (10.0.2.0/24): `splunk` (10.0.2.10; web UI 8000,
 
 ## Challenge and scoring
 
-One challenge, `execute-and-confirm-t1003-001`: execute an OS credential-dumping technique (ATT&CK T1003.001, LSASS memory, the comsvcs MiniDump reference) on the endpoint, then confirm the detection in Splunk. Its single `detection` goal scores from the exported sysmon stream: a regex over the EventID 10 process-access record (TargetImage lsass.exe, the measured `GrantedAccess 0x1FFFFF` mask so ambient query-only opens never match), with a 180 s trailing scoring window. No hints. An evade variant and a judge-type report goal are deferred (`deferred.yaml`).
+One challenge, `execute-and-confirm-t1003-001`: execute an OS credential-dumping technique (ATT&CK T1003.001, LSASS memory, the comsvcs MiniDump reference) on the endpoint, then confirm the detection in Splunk. Its single `detection` goal scores from the exported sysmon stream: a regex over the EventID 10 process-access record (TargetImage lsass.exe, the measured `GrantedAccess 0x1FFFFF` mask so ambient query-only opens never match), with a 180 s trailing scoring window. An evade variant and a judge-type report goal are deferred (`deferred.yaml`).
 
 ## Build and run
 

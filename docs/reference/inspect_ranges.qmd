@@ -24,8 +24,6 @@ The package's top-level surface. The eval wiring is covered in [Challenges](../c
 
 ### Goal
 
-### Hint
-
 ### Scoring
 
 ### Primitive
