@@ -61,19 +61,42 @@ function Link(el)
   end
 end
 
--- Insert a "Source: src/inspect_ranges/examples/_<name>" line pointing at
--- the repository directory (the example's true package location), directly
--- under the page title (after the first h1 when it is still present; the
--- title promotion may have already lifted it out).
+-- The README's upstream marker: an HTML comment near the top of the file
+-- (`<!-- upstream: [GOAD](https://...) -->`, invisible on GitHub) carries
+-- the example's upstream as a markdown link, so the data lives with the
+-- example rather than in this filter. dmz-pivot is original and carries no
+-- marker.
+local function upstream_marker(doc)
+  for _, block in ipairs(doc.blocks) do
+    if block.t == "RawBlock" and block.format:match("html") then
+      local marker = block.text:match("<!%-%-%s*upstream:%s*(.-)%s*%-%->")
+      if marker then
+        return marker
+      end
+    end
+  end
+  return nil
+end
+
+-- Insert a Source row (the example's true package location in the
+-- repository) and, when the README carries an upstream marker, an Upstream
+-- row, as a borderless two-column table directly under the page title
+-- (after the first h1 when it is still present; the title promotion may
+-- have already lifted it out).
 function Pandoc(doc)
-  local para = pandoc.Para({
-    pandoc.Str("Source:"),
-    pandoc.Space(),
-    pandoc.Link(
-      { pandoc.Code(EXAMPLES .. "/" .. dir) },
-      REPO .. "/tree/main/" .. EXAMPLES .. "/" .. dir
-    ),
-  })
+  local path = EXAMPLES .. "/" .. dir
+  local md = "|  |  |\n|----|----|\n"
+      .. "| Source: | [`" .. path .. "`](" .. REPO .. "/tree/main/" .. path .. ") |\n"
+  local upstream = upstream_marker(doc)
+  if upstream then
+    md = md .. "| Upstream: | " .. upstream .. " |\n"
+  end
+  local tbl = pandoc.read(md, "markdown").blocks[1]
+  -- the house borderless idiom (`: {.borderless tbl-colwidths=[...]}`),
+  -- applied directly to the table's attributes and column widths so the
+  -- label column hugs regardless of where this filter runs in the chain
+  tbl.attr = pandoc.Attr("", { "borderless" }, { ["tbl-colwidths"] = "[14,86]" })
+  tbl.colspecs = { { pandoc.AlignDefault, 0.14 }, { pandoc.AlignDefault, 0.86 } }
   local pos = 1
   for i, block in ipairs(doc.blocks) do
     if block.t == "Header" and block.level == 1 then
@@ -81,7 +104,7 @@ function Pandoc(doc)
       break
     end
   end
-  table.insert(doc.blocks, pos, para)
+  table.insert(doc.blocks, pos, tbl)
   return doc
 end
 

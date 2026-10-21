@@ -1,5 +1,7 @@
 # kypo_demo
 
+<!-- upstream: [KYPO CRP demo (Masaryk)](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) -->
+
 Range name: `kypo-demo`.
 
 The [KYPO Cyber Range Platform](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) demo training sandbox (Masaryk University, MIT): a client and a server on two routed /24 subnets joined by an explicit router. It is the routed-topology reference: a declared router with per-network gateway IPs, static IP mappings, and a declared randomization layer (`variables:`) covering the telnet port and both flags (defaults substitute today; per-instance draws are deferred).

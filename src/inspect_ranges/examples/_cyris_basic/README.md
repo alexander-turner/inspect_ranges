@@ -1,5 +1,7 @@
 # cyris_basic
 
+<!-- upstream: [CyRIS reference (JAIST)](https://github.com/crond-jaist/cyris) -->
+
 Range name: `cyris-basic`.
 
 A faithful translation of [CyRIS](https://github.com/crond-jaist/cyris)'s annotated reference range `examples/full.yml` (JAIST, BSD-3-Clause). CyRIS is KVM/libvirt-native, the closest substrate precedent for inspect_ranges, and this example is the firewall-ACL reference: a desktop in an office segment and a webserver in a servers segment, joined by a firewall guest that forwards only ports 25 and 53 office to servers, plus planted forensic noise (pcaps, log noise, a dummy resident process).

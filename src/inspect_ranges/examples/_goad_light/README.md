@@ -1,5 +1,7 @@
 # goad_light
 
+<!-- upstream: [GOAD (Orange Cyberdefense)](https://github.com/Orange-Cyberdefense/GOAD) -->
+
 Range name: `goad-light`.
 
 The light variant of [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (Game of Active Directory, Orange Cyberdefense, GPL-3.0): one Windows forest with two domains across three Server VMs, deliberately seeded with the classic AD attack surface (kerberoastable SPNs, saved credentials, autologon, LLMNR/NBT-NS, NTLM downgrade, anonymous RPC, an ADCS ESC1 template, open shares, an IIS upload directory, MSSQL impersonation chains, and a multi-step ACL abuse chain). It is the Windows Active Directory reference and the testbed behind the cochise autonomous-pentest evaluation (arXiv:2502.04227).

@@ -1,5 +1,7 @@
 # vulhub_zabbix
 
+<!-- upstream: [Vulhub](https://github.com/vulhub/vulhub) -->
+
 Range name: `vulhub-zabbix`.
 
 A four-host Zabbix 3.0.3 monitoring stack (web UI, Zabbix server, Zabbix agent, MySQL) on one flat network: the smallest and fastest example, with a real public CVE as the entry point. It is a faithful translation of [Vulhub](https://github.com/vulhub/vulhub)'s `zabbix/CVE-2016-10134` environment (MIT), re-expressed substrate-agnostically: upstream is docker-compose, while here recipes compile Zabbix 3.0.3 from the canonical source tarball onto the catalog goldens.

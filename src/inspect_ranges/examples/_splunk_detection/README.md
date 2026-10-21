@@ -1,5 +1,7 @@
 # splunk_detection
 
+<!-- upstream: [Splunk attack_range](https://github.com/splunk/attack_range) -->
+
 Range name: `splunk-detection`.
 
 Splunk's [attack_range](https://github.com/splunk/attack_range) (Apache-2.0) in its smallest Windows configuration, translated from the AWS `splunk_windows` template of v5: one Ubuntu host running Splunk Enterprise 10.2.2 and one Windows Server 2022 endpoint whose logs (Sysmon, Windows Event Log, PowerShell) forward to the Splunk host. It is the defense-telemetry reference: the one example where telemetry collection is the point, with a `detection` goal scored from the exported stream rather than from attacker proof material.
