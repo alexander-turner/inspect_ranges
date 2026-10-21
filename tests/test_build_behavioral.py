@@ -696,7 +696,9 @@ def test_build_parse_loads_entry_point_registrations(
         return fakes if group == "inspect_ai" else []
 
     monkeypatch.setattr("importlib.metadata.entry_points", fake_entry_points)
-    with caplog.at_level(logging.WARNING, logger="inspect_ranges._build.behavioral"):
+    with caplog.at_level(
+        logging.WARNING, logger="inspect_ranges._challenges.registration"
+    ):
         challenges = load_challenges(_write_challenges(tmp_path, MARKER_YAML))
     assert isinstance(challenges.challenges[0].goals[0], MarkerGoal)
     warning = next(

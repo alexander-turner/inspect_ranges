@@ -37,7 +37,7 @@ ssh inspect-ranges-devbox
 
 ## Iteration Loop
 
-1. **Validate.** `inspect-ranges validate range.yaml` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)).
+1. **Validate.** `inspect-ranges validate range.yaml` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)). A `challenges.yaml` beside the spec is validated too, cross-referenced against the range, so a dangling goal host or an unknown goal type surfaces here instead of at build or eval time.
 
 2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot. For a range declaring guest content, `plan` refuses with `range-not-built` until a matching build exists, so on a first authoring pass it slots after `build`; it works immediately for topology-only ranges.
 

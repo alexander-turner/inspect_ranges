@@ -68,12 +68,68 @@ def test_validate_json_contract(tmp_path: Path) -> None:
     result = CliRunner().invoke(ranges, ["validate", "--json", EXAMPLE, str(bad)])
     assert result.exit_code == 1
     reports = json.loads(result.output)
-    assert [report["valid"] for report in reports] == [True, False]
+    # EXAMPLE's directory carries a challenges.yaml, reported as its own file
+    assert [report["valid"] for report in reports] == [True, True, False]
+    assert reports[1]["path"].endswith("challenges.yaml")
     issue = next(
-        issue for issue in reports[1]["issues"] if issue["code"] == "unknown-key"
+        issue for issue in reports[2]["issues"] if issue["code"] == "unknown-key"
     )
     assert issue["path"] == "unknown_section"
     assert issue["line"] == 2
+
+
+def test_validate_covers_sibling_challenges(tmp_path: Path) -> None:
+    """A challenges.yaml beside the spec is validated too; without one, validate behaves exactly as before (one report)."""
+    range_dir = Path(EXAMPLE).parent
+    both = CliRunner().invoke(ranges, ["validate", str(range_dir)])
+    assert both.exit_code == 0
+    assert "vulhub-zabbix" in both.output and "challenges.yaml" in both.output
+    (tmp_path / "range.yaml").write_text(Path(EXAMPLE).read_text())
+    alone = CliRunner().invoke(ranges, ["validate", str(tmp_path)])
+    assert alone.exit_code == 0 and "challenges.yaml" not in alone.output
+
+
+def test_validate_cross_references_challenges_against_the_range(
+    tmp_path: Path,
+) -> None:
+    """Sibling challenges validate against the range spec: a goal naming an undeclared host is a positioned error in the challenges report."""
+    (tmp_path / "range.yaml").write_text(Path(EXAMPLE).read_text())
+    (tmp_path / "challenges.yaml").write_text(
+        "challenges:\n"
+        "  - id: c\n"
+        "    prompt: p\n"
+        "    goals:\n"
+        "      - { id: g, type: flag, host: nosuch, path: /f }\n"
+    )
+    result = CliRunner().invoke(ranges, ["validate", "--json", str(tmp_path)])
+    assert result.exit_code == 1
+    reports = json.loads(result.output)
+    assert [report["valid"] for report in reports] == [True, False]
+    issue = next(
+        issue for issue in reports[1]["issues"] if issue["code"] == "unknown-goal-host"
+    )
+    assert issue["line"] is not None
+
+
+def test_validate_refuses_unregistered_goal_type_with_known_names(
+    tmp_path: Path,
+) -> None:
+    """The refusal posture matches the build: a custom type whose registration did not load reads unknown-goal-type with the known-name listing, never a misparse."""
+    (tmp_path / "range.yaml").write_text(Path(EXAMPLE).read_text())
+    (tmp_path / "challenges.yaml").write_text(
+        "challenges:\n"
+        "  - id: c\n"
+        "    prompt: p\n"
+        "    goals:\n"
+        "      - { id: g, type: zzz }\n"
+    )
+    result = CliRunner().invoke(ranges, ["validate", "--json", str(tmp_path)])
+    assert result.exit_code == 1
+    reports = json.loads(result.output)
+    issue = next(
+        issue for issue in reports[1]["issues"] if issue["code"] == "unknown-goal-type"
+    )
+    assert "known types:" in issue["message"] and "flag" in issue["message"]
 
 
 def test_plan_json_contract(tmp_path: Path) -> None:

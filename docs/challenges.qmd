@@ -58,6 +58,8 @@ challenges:
     scoring: { mode: coverage }
 ```
 
+`inspect-ranges validate` run in the range directory validates `challenges.yaml` alongside `range.yaml`, cross-referenced against the range, with the same positioned diagnostics authors get for the range itself (custom goal types load through their `inspect_ai` entry points first, so an unregistered type refuses with the known-name listing).
+
 Each goal has an `id` (what the agent verifies against), a `type` (the table below), a `weight` (default 1), and the type's own fields. Scoring modes: `weights` (the default: a weighted mean of per-goal credit), `milestones` (ordered steps; opting into `later_implies_earlier: true` makes a later pass imply earlier goals, but implied credit never crosses to a proof of lower assurance), and `coverage` (weighted breadth: each achieved goal earns its fraction). Each goal also carries a descriptive `primitive` capability label, defaulted from its type, so results can be aggregated by the capability reached rather than by flag counts, compatible with benchmarks that grade by capability primitive.
 
 ## Verification
