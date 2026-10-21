@@ -593,9 +593,10 @@ def _netplan(plan: ResolvedPlan, guest: PlannedGuest) -> dict[str, Any]:
                         # explicit sibling-subnet routes so cross-segment
                         # traffic still crosses the router. Siblings exclude
                         # the guest's own attachments (connected routes win)
-                        # and, until multi-router plans exist (parked: router
-                        # provisioning), every non-NAT segment routes via this
-                        # gateway.
+                        # and, until a multi-homed guest sits between TWO
+                        # routers (no consumer yet; router provisioning landed
+                        # without needing it), every non-NAT segment routes
+                        # via this gateway.
                         default_metric = 50 if network.mode == "nat" else 200 + index
                         routes = [
                             {
