@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE="$ROOT/examples/equifax"
+RANGE="$ROOT/src/inspect_ranges/examples/_equifax"
 ATTACK_RANGE="$ROOT/catalog/attack"
 
 NOBLE="${NOBLE:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64.img}"

@@ -1,1 +1,0 @@
-../../examples/dmz-pivot/README.md

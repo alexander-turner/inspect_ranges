@@ -6,7 +6,10 @@ from click.testing import CliRunner
 from inspect_ranges import __version__
 from inspect_ranges._cli.main import ranges
 
-EXAMPLE = str(Path(__file__).parent.parent / "examples/vulhub-zabbix/range.yaml")
+EXAMPLE = str(
+    Path(__file__).parent.parent
+    / "src/inspect_ranges/examples/_vulhub_zabbix/range.yaml"
+)
 
 
 def test_version() -> None:
@@ -176,7 +179,10 @@ def test_plan_refuses_windows_examples(
 ) -> None:
     """Content-carrying Windows examples hit the build-aware gate first (the Windows-specific refusals — vmm, foothold, ip-required — are unit-covered in test_plan.py)."""
     monkeypatch.setenv("INSPECT_RANGES_BUILD_CACHE", str(tmp_path / "builds"))
-    goad = str(Path(__file__).parent.parent / "examples/goad-light/range.yaml")
+    goad = str(
+        Path(__file__).parent.parent
+        / "src/inspect_ranges/examples/_goad_light/range.yaml"
+    )
     result = CliRunner().invoke(ranges, ["plan", goad])
     assert result.exit_code == 1
     assert "declares guest content but" in result.output

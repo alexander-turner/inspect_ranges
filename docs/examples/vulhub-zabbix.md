@@ -1,1 +1,0 @@
-../../examples/vulhub-zabbix/README.md

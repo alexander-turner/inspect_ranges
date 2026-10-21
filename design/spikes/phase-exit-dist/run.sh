@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 SPIKE="$PWD"
 ROOT="$(cd ../../.. && pwd)"
-RANGE_SRC="$ROOT/examples/vulhub-zabbix"
+RANGE_SRC="$ROOT/src/inspect_ranges/examples/_vulhub_zabbix"
 
 ERA="${ERA:-$HOME/.cache/inspect-ranges/images/focal-server-cloudimg-amd64.img}"
 export XDG_STATE_HOME="$SPIKE/tmp/state"

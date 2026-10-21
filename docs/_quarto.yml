@@ -51,20 +51,20 @@ inspect-docs:
           href: cli.qmd
     - text: Examples
       contents:
-        - text: dmz-pivot
-          href: examples/dmz-pivot.md
-        - text: vulhub-zabbix
-          href: examples/vulhub-zabbix.md
-        - text: kypo-demo
-          href: examples/kypo-demo.md
-        - text: cyris-basic
-          href: examples/cyris-basic.md
+        - text: dmz_pivot
+          href: examples/dmz_pivot.md
+        - text: vulhub_zabbix
+          href: examples/vulhub_zabbix.md
+        - text: kypo_demo
+          href: examples/kypo_demo.md
+        - text: cyris_basic
+          href: examples/cyris_basic.md
         - text: equifax
           href: examples/equifax.md
-        - text: goad-light
-          href: examples/goad-light.md
-        - text: splunk-detection
-          href: examples/splunk-detection.md
+        - text: goad_light
+          href: examples/goad_light.md
+        - text: splunk_detection
+          href: examples/splunk_detection.md
   sidebar: unified
   navbar:
     right:

@@ -1,0 +1,1 @@
+../../src/inspect_ranges/examples/_splunk_detection/README.md

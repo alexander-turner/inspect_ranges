@@ -1,1 +1,0 @@
-../../examples/goad-light/README.md

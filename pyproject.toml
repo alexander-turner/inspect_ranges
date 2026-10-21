@@ -56,8 +56,20 @@ dist = ["twine", "build"]
 
 [tool.hatch.build]
 only-packages = true
-exclude = ["docs/", "tests/"]
-artifacts = ["src/**/*.yaml", "src/**/*.md", "src/**/*.txt", "src/**/*.sh", "src/**/py.typed"]
+# the examples' vendored upstream/ trees are repo-only provenance: never
+# distributed (examples-into-package slice)
+exclude = ["docs/", "tests/", "src/inspect_ranges/examples/_*/upstream/"]
+artifacts = [
+    "src/**/*.yaml",
+    "src/**/*.md",
+    "src/**/*.txt",
+    "src/**/*.sh",
+    "src/**/py.typed",
+    # the examples ship their full data trees (recipes/, checks/, yaml, docs);
+    # artifacts bypass `exclude`, so upstream/ needs the negated pattern too
+    "src/inspect_ranges/examples/_*/**",
+    "!src/inspect_ranges/examples/_*/upstream/**",
+]
 
 [tool.hatch.version]
 source = "vcs"
@@ -82,7 +94,7 @@ exclude = [
     "design",
     # vendored upstream provenance under the examples is FROZEN: neither
     # linted nor reformatted (linux-examples-v1 phase review round 1)
-    "examples/*/upstream",
+    "src/inspect_ranges/examples/_*/upstream",
 ]
 src = ["."]
 
@@ -110,6 +122,8 @@ addopts = "-n auto"
 
 [tool.pyright]
 include = ["src", "tests"]
+# vendored upstream provenance under the examples is FROZEN: never typechecked
+exclude = ["src/inspect_ranges/examples/*/upstream"]
 extraPaths = ["."]
 typeCheckingMode = "strict"
 pythonPlatform = "All"
