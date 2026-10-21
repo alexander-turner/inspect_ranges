@@ -109,11 +109,21 @@ Unset (the default and the dev loop), `up` builds the image locally from package
 
 ### Self-Derived Goldens
 
-Deriving your own goldens is the alternative to pulling the published ones: the fleet and air-gap path, and the only path for vendor images the catalog does not publish. It extends the digest chain back to the vendor image: `derive` pins the vendor image by digest and, given `--daemon-sha256` (the digest `daemon-bundle` printed at publish), pins the daemon artifact out of band too; without that flag the artifact is verified against its co-located sidecar only, which proves internal consistency, not provenance.
+A golden is a vendor cloud image with the guest control daemon baked in. Deriving your own is the alternative to pulling the published ones: it is how fleet and air-gapped deployments work, and the only path for vendor images the catalog does not publish. Two steps: obtain the daemon artifact, then derive.
 
-`inspect-ranges daemon-bundle -o <dir>` builds the guest control daemon artifact: a byte-deterministic tarball (static Go binary, installer, unit file) plus its `daemon.json` digest sidecar. It requires the pinned Go toolchain and is the only command that does (`--pull` fetches the published bundle instead, needing no toolchain); built artifacts are consumed everywhere else by digest, so one publish serves every host. Write the bundle to the shared artifact cache (`~/.cache/inspect-ranges/artifacts`) and `images derive` finds it by default. The publish output ends with the bundle digest; record it and pass it to `derive --daemon-sha256`. A missing or wrong-version toolchain refuses with the pin named; builds are reproducible, so an unchanged source tree yields the identical bundle digest.
+First, the daemon artifact. `inspect-ranges daemon-bundle --pull` fetches the published bundle (a tarball holding the static daemon binary, its installer, and its unit file, plus a digest sidecar) into the shared artifact cache (`~/.cache/inspect-ranges/artifacts`), where `images derive` finds it by default. Building it from source instead (`daemon-bundle -o <dir>`) is the publisher's job and the only command that requires the pinned Go toolchain; builds are byte-deterministic, so an unchanged source tree yields the identical bundle digest, and a missing or wrong-version toolchain refuses with the pin named.
 
-`images derive <vendor-image> --sha256 <digest>` produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon artifact verifies against its sidecar, the daemon and its unit are baked, ssh and the systemd-resolved DNS stub listener are disabled, and a provenance sidecar records all input digests. Re-running with the same inputs is a cache hit that re-verifies the recorded digests. Failure modes, each stage-named:
+Then derive:
+
+``` {.bash filename="Terminal"}
+inspect-ranges images derive <vendor-image> --sha256 <digest>
+```
+
+This produces a daemon-baked golden overlay in the image cache: the vendor digest verifies before anything is written, the daemon and its unit are baked, ssh and the systemd-resolved DNS stub listener are disabled, and a provenance sidecar records every input digest. Re-running with the same inputs is a cache hit that re-verifies the recorded digests.
+
+The trust story: derivation extends the digest chain back to the vendor image. The vendor side is pinned by `--sha256`. The daemon side is verified against its co-located sidecar by default, which proves the artifact is internally consistent but not where it came from; passing `derive --daemon-sha256 <digest>` (the digest `daemon-bundle` prints at publish, recorded out of band) pins its provenance too.
+
+Failure modes, each stage-named:
 
 - vendor digest mismatch: nothing is written;
 
@@ -121,10 +131,12 @@ Deriving your own goldens is the alternative to pulling the published ones: the 
 
 - an unmanaged file squatting on the target name: never clobbered;
 
-- a corrupt provenance sidecar;
+- a corrupt provenance sidecar: refuses rather than trusting unverifiable recorded inputs;
 
 - an interrupted derive: self-healing on the next run.
 
-On Linux, Ubuntu noble is the supported vendor image for derivation. Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad-light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_goad_light), [splunk-detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_splunk_detection)) cover the specifics.
+On Linux, Ubuntu noble is the supported vendor image for derivation. Windows goldens derive locally with `images derive-windows` from user-supplied evaluation media (install ISO + virtio-win ISO, both sha256-pinned) and are never published; the Windows examples' READMEs ([goad_light](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_goad_light), [splunk_detection](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_splunk_detection)) cover the specifics.
+
+### Image Cache
 
 `images list` shows managed goldens with provenance, build-captured realized images (flagging superseded generations no manifest references), and everything else: unmanaged files, stale derivation and capture temps, goldens whose recipe version is behind, and legacy double-suffix names. `images prune` reclaims what no manifest references; it reports by default, deletes with `--yes`, and refuses while registered projects exist unless forced (build success already prunes its own range's garbage, keeping one previous generation for rollback).
