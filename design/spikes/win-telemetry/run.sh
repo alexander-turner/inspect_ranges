@@ -3,10 +3,12 @@
 # splunk-detection pair (Splunk Enterprise on noble + the instrumented
 # Server 2022 endpoint) builds on the production pipeline — the FIRST
 # detection-bearing build: the trio plants through the Windows oracle, the
-# behavioral runner drives the collectors.yaml export, reference fires
-# T1003.001 and scores 1.0 from the stream, insufficient flows without the
-# signal (0.0 over a complete window), forged proves the collector binding
-# (base64-shielded signal text in an uncollected file) — then two real eval
+# behavioral runner drives the collectors.yaml export, and BOTH trios prove:
+# detection (reference fires T1003.001 and scores 1.0 from the stream,
+# insufficient flows without the signal, forged proves the collector binding)
+# and evade (reference raw-reads lsass from one minimal-mask open, 1.0 quiet,
+# insufficient trips the declared alert, forged forges the exporter gap
+# marker and the on_sensor_tamper=fail rule zeroes it) — then two real eval
 # legs boot the captured pair through the provider with the same collectors
 # file: the detection leg scores 1.0/valid, and the gap-marker leg forces a
 # read-bound exporter overflow and proves it surfaces as an incomplete window.
@@ -82,7 +84,7 @@ stage_prep() {
 }
 
 stage_build() {
-  echo "=== T2 the pair builds: splunk, endpoint, verify, mixed-OS converged capture, detection trio ==="
+  echo "=== T2 the pair builds: splunk, endpoint, verify, mixed-OS converged capture, both trios ==="
   if (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" --recipe-budget 2700 >"$SPIKE/tmp/t2.txt" 2>&1); then
     grep -q "build OK" "$SPIKE/tmp/t2.txt" && ok "T2 splunk-detection builds green" \
       || { bad "T2 output"; tail -15 "$SPIKE/tmp/t2.txt"; }
@@ -97,12 +99,14 @@ stage_build() {
   VOK=$(grep -c '^verify    ok' "$SPIKE/tmp/t2.txt" || true)
   [[ "$VOK" -eq 5 ]] && ok "T2c verify attributed the declared surface ($VOK declarations ok: splunk-enterprise 10.2.2 via dpkg, splunk-forwarding, splunk-rest, rdp, smb)" \
     || { bad "T2c verify count (got: $VOK)"; grep '^verify' "$SPIKE/tmp/t2.txt" | tail -8; }
-  grep -q "behavioral.*check=reference" "$SPIKE/tmp/t2.txt" \
-    && grep -q "behavioral.*check=insufficient" "$SPIKE/tmp/t2.txt" \
-    && grep -q "behavioral.*check=forged" "$SPIKE/tmp/t2.txt" \
-    && grep -q "behavioral checks=3" "$SPIKE/tmp/t2.txt" \
-    && ok "T2d the detection trio proved against the exported stream" \
-    || { bad "T2d behavioral lines"; grep -i behavioral "$SPIKE/tmp/t2.txt" | tail -5; }
+  grep -q "behavioral.*challenge=execute-and-confirm-t1003-001.*check=forged" "$SPIKE/tmp/t2.txt" \
+    && grep -q "behavioral.*challenge=evade-detection-t1003-001.*check=forged" "$SPIKE/tmp/t2.txt" \
+    && [[ "$(grep -c "behavioral.*check=reference" "$SPIKE/tmp/t2.txt")" -eq 2 ]] \
+    && [[ "$(grep -c "behavioral.*check=insufficient" "$SPIKE/tmp/t2.txt")" -eq 2 ]] \
+    && [[ "$(grep -c "behavioral.*check=forged" "$SPIKE/tmp/t2.txt")" -eq 2 ]] \
+    && grep -q "behavioral checks=6" "$SPIKE/tmp/t2.txt" \
+    && ok "T2d both trios proved against the exported stream (detection + evade)" \
+    || { bad "T2d behavioral lines"; grep -i behavioral "$SPIKE/tmp/t2.txt" | tail -8; }
 
   echo "=== T3 the unchanged fixture is a cached no-op ==="
   (cd "$RANGE" && "$IRBIN" build "${FLAGS[@]}" >"$SPIKE/tmp/t3.txt" 2>&1) \

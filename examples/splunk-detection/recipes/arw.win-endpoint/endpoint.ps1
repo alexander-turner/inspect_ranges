@@ -68,10 +68,19 @@ if (-not (Get-Service Sysmon64 -ErrorAction SilentlyContinue)) {
       </ProcessAccess>
     </RuleGroup>
     <!-- measured ambient lsass opens on an idle Server 2022 guest: svchost
-         0x1000 every ~10s, csrss/wininit 0x1FFFFF once at boot, the forwarder
-         and sysmon themselves from Program Files; excluded at the sensor so
-         the exported stream carries only interesting access (the upstream
-         sysmon-config convention) -->
+         0x1000 every ~10s, csrss/wininit 0x1FFFFF once at boot, the splunk
+         forwarder's own periodic opens; excluded at the sensor so the
+         exported stream carries only interesting access (the upstream
+         sysmon-config convention). Every exclusion is an EXACT image path:
+         the earlier `begin with C:\Program Files` prefix class was a
+         documented hiding spot (any tool run from under Program Files evaded
+         EventID 10 entirely) and the evade challenge's stealth-grade bar
+         removed it (followups brief issue 2); only the forwarder binary the
+         measurements justify stays excluded. Unexcluded benign opens (other
+         UF helpers, powershell's 0x1410 recon) now SHIP, which is fine: the
+         detection signal and the evade match both require the measured
+         MiniDump mask (GrantedAccess 0x1FFFFF), and the ambient rate is far
+         under the bridge's 4000-event read bound. -->
     <RuleGroup name="" groupRelation="or">
       <ProcessAccess onmatch="exclude">
         <SourceImage condition="is">C:\Windows\system32\csrss.exe</SourceImage>
@@ -81,7 +90,7 @@ if (-not (Get-Service Sysmon64 -ErrorAction SilentlyContinue)) {
         <SourceImage condition="is">C:\Windows\system32\svchost.exe</SourceImage>
         <SourceImage condition="is">C:\Windows\system32\lsass.exe</SourceImage>
         <SourceImage condition="is">C:\Windows\system32\wbem\wmiprvse.exe</SourceImage>
-        <SourceImage condition="begin with">C:\Program Files</SourceImage>
+        <SourceImage condition="is">C:\Program Files\SplunkUniversalForwarder\bin\splunkd.exe</SourceImage>
       </ProcessAccess>
     </RuleGroup>
   </EventFiltering>
