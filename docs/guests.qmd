@@ -134,7 +134,7 @@ Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ra
 
 ## Routers {#routers-are-guests-too}
 
-A router is an ordinary guest with one interface per joined segment, running a generated firewall that a defender inside the range can inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used:
+A router is an ordinary guest with one interface per joined segment, running a generated firewall that a defender inside the range can inspect. `os` and `image` are optional; when omitted, the backend's default router appliance is used. A router can also be a target in its own right: it takes [`users`](#users) and `provisioning` like a host (the CyRIS firewall shape, a gateway with its own weak account), built and captured on the same path as host content ([Building Ranges](building.qmd)). A router declaring content must declare `image` as well (`router-image-required`), since the appliance default is a backend resolution its build key cannot pin. For example:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -289,11 +289,11 @@ With `host:`, the attacker declares no machine of its own (the foothold is the m
 
 Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest (what the guest looks like once fully set up), not boot-time actions. Each declaration is realized at build time and the range ships verified; the runtime never applies guest content per sample.
 
-[`inspect-ranges build`](building.qmd) converges nothing itself: the range's recipes create the accounts, write the files, and seed the weaknesses ([Authoring Recipes](building.qmd#authoring-recipes)). The build then independently verifies every declared `services` and `vulnerabilities` entry against the live guests and captures each guest's disk as a realized image. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and behavioral checks confirm whichever the attack chains depend on. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
+[`inspect-ranges build`](building.qmd) converges nothing itself: the range's recipes create the accounts, write the files, and seed the weaknesses ([Authoring Recipes](building.qmd#authoring-recipes)). The build then independently verifies every declared `services` and `vulnerabilities` entry against the live guests and captures each guest's disk as a realized image. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and behavioral checks confirm whichever the attack chains depend on. Routers carry content too (`users` realized by their `provisioning` recipes); they declare no `services` or `vulnerabilities`, so a router's verification is its recipes' own assertions plus the behavioral checks. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
 
 ## Users {#users}
 
-`users` declares a host's local accounts: the recipe creates them, and the declaration records the converged state. Declaring users on a router refuses at planning (`guest-config-not-realized`): router content has no realizer yet. Domain accounts belong in [`active_directory`](#active-directory), not here:
+`users` declares a guest's local accounts: the recipe creates them, and the declaration records the converged state. Routers take `users` the same way, realized by their own `provisioning` recipes (a router declaring users without a recipe refuses at planning, `realized-section-unconsumed`, because nothing would realize them). Domain accounts belong in [`active_directory`](#active-directory), not here:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
