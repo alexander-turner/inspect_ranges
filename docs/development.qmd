@@ -1,7 +1,7 @@
 ---
 title: "Development"
 description: "The range author's loop: a development machine (devbox or your own), then validate, plan, build, boot interactively, and smoke-eval."
-llms-description: "Range development: provisioning a dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM meeting the listed requirements, verified by doctor), then the iteration loop: validate for diagnostics, plan to resolve without booting, build with --keep/--reverify/--cid-base and the recipe log location, interactive boot via up --from-spec with INSPECT_RANGES_REGISTER_ALL_GUESTS, down, and the smoke eval."
+llms-description: "Range development: provisioning a dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM meeting the listed requirements, verified by doctor), then the iteration loop: validate for diagnostics (range.yaml plus a sibling challenges.yaml), plan to resolve without booting, build with --keep/--reverify/--cid-base and the recipe log location, interactive boot via up --from-spec with INSPECT_RANGES_REGISTER_ALL_GUESTS, down, and the smoke eval."
 ---
 
 ## Overview

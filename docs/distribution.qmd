@@ -1,7 +1,7 @@
 ---
 title: "Distribution"
 description: "Publishing and consuming built ranges: locations in three forms, push and spec-driven pull, the implicit pull at eval init, catalog images, mirroring and the air gap, and cache reclamation."
-llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, the hardened range container image's INSPECT_RANGES_RANGE_IMAGE digest pin with the local build as the default, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows."
+llms-description: "The distribution layer: registry locations (public hub, private OCI registry, OCI-layout directory) and the INSPECT_RANGES_REGISTRY search path, inspect-ranges push/pull with the normalized-spec-hash join and the name@sha256 pin form, publish --list and catalog-list-first whole-location enumeration, the provider's automatic pull in task_init with the docker-pull transfer UX and INSPECT_RANGES_NEVER_PULL, images pull/refresh for catalog images with sticky-then-explicit-refresh semantics, the hardened range container image's INSPECT_RANGES_RANGE_IMAGE digest pin with the local build as the default, mirror in all four forms including the air-gap directory shape, images prune --chains whole-chain eviction, doctor's Distribution rows."
 ---
 
 ## Overview
