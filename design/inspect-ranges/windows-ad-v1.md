@@ -9,7 +9,7 @@ timestamp: 2026-10-19
 
 # Decision: Windows/AD v1
 
-*Phase plan for the Windows phase of the ratified arc (phase 4 of the 2026-10-18 sequencing), promoting the two translated Windows fixtures — [goad-light](../../examples/goad-light/notes.md) and [attack-range-windows](../../examples/splunk-detection/notes.md) — to built, verified, solved ranges, on the substrate the early spikes proved ([ad-domain](../spikes/ad-domain/README.md), [goad-forest](../spikes/goad-forest/README.md): the full GOAD-light forest built unattended in ~17 min from Server 2022 eval media, cross-domain Kerberos verified, whole-forest restore in 48 s). The exit criterion: both fixtures build from clean caches and their reference chains score through real evals, Windows guests first-class through render/build/provider.*
+*Phase plan for the Windows phase of the ratified arc (phase 4 of the 2026-10-18 sequencing), promoting the two translated Windows fixtures — [goad-light](../../src/inspect_ranges/examples/_goad_light/notes.md) and [attack-range-windows](../../src/inspect_ranges/examples/_splunk_detection/notes.md) — to built, verified, solved ranges, on the substrate the early spikes proved ([ad-domain](../spikes/ad-domain/README.md), [goad-forest](../spikes/goad-forest/README.md): the full GOAD-light forest built unattended in ~17 min from Server 2022 eval media, cross-domain Kerberos verified, whole-forest restore in 48 s). The exit criterion: both fixtures build from clean caches and their reference chains score through real evals, Windows guests first-class through render/build/provider.*
 
 ## Ratified inputs (user, 2026-10-19)
 

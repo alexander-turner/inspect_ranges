@@ -799,7 +799,7 @@ forest = RangeSpec(
 ```
 :::
 
-ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects). The shipped [goad-light](examples/goad-light.md) example is the built exemplar: one forest, two domains, three Windows Server guests, and a seeded ACL-abuse chain to Domain Admin.
+ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects). The shipped [goad_light](examples/goad_light.md) example is the built exemplar: one forest, two domains, three Windows Server guests, and a seeded ACL-abuse chain to Domain Admin.
 
 ## Provisioning References {#provisioning-references}
 

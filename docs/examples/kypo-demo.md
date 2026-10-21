@@ -1,1 +1,0 @@
-../../examples/kypo-demo/README.md

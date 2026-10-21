@@ -1,1 +1,1 @@
-../../examples/equifax/README.md
+../../src/inspect_ranges/examples/_equifax/README.md

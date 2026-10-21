@@ -72,7 +72,7 @@ Evaluation goals live in a separate `challenges.yaml` consumed by the task, beca
 
 ## Example: Zabbix
 
-This example comes from the [Vulhub](https://vulhub.org) Zabbix scenario ([CVE-2016-10134](https://www.cve.org/CVERecord?id=CVE-2016-10134)) and ships as the [vulhub-zabbix](examples/vulhub-zabbix.md) example, already built and runnable: a four-host monitoring stack on one flat network with an unauthenticated SQL injection. This range defines a dedicated `attacker` VM. It is defined like any other VM and can start outside the network (`entry: external`) or from a foothold inside it; the designation only marks which VM `sandbox("default")` resolves to (see [Guests](guests.qmd#the-attacker-guest)).
+This example comes from the [Vulhub](https://vulhub.org) Zabbix scenario ([CVE-2016-10134](https://www.cve.org/CVERecord?id=CVE-2016-10134)) and ships as the [vulhub_zabbix](examples/vulhub_zabbix.md) example, already built and runnable: a four-host monitoring stack on one flat network with an unauthenticated SQL injection. This range defines a dedicated `attacker` VM. It is defined like any other VM and can start outside the network (`entry: external`) or from a foothold inside it; the designation only marks which VM `sandbox("default")` resolves to (see [Guests](guests.qmd#the-attacker-guest)).
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -331,7 +331,7 @@ vulhub_zabbix = RangeSpec(
 
 ## Example: Corp Breach
 
-This example exercises both network and guest configuration: segmentation and policy from the networking side, services, a seeded weakness, accounts, and planted data from the guest side. The shipped [dmz-pivot](examples/dmz-pivot.md) example is the built, solvable version of this topology (weak credentials in place of the CVE):
+This example exercises both network and guest configuration: segmentation and policy from the networking side, services, a seeded weakness, accounts, and planted data from the guest side. The shipped [dmz_pivot](examples/dmz_pivot.md) example is the built, solvable version of this topology (weak credentials in place of the CVE):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

@@ -27,8 +27,7 @@ cd inspect_ranges && pip install .
 inspect-ranges doctor
 
 # run an example
-cd examples/dmz-pivot
-inspect eval task.py --model openai/gpt-6-astra
+inspect eval inspect_ranges/dmz_pivot --model openai/gpt-5.5
 ```
 
 This documentation is also available in LLM-friendly markdown ([llms.txt](https://llmstxt.org/)): register the index with an IDE or coding agent, or paste a variant directly into a model's context window.
@@ -47,7 +46,7 @@ Ranges are specified using a `range.yaml` file or a `RangeSpec` Python model. Fo
 
 ![](diagrams/dmz-pivot.excalidraw.png){fig-alt="The dmz-pivot topology: an attacker VM and web server on the DMZ segment, a database on the internal segment, and a router joining the two segments whose ACL allows only tcp/5432 from dmz to internal."}
 
-Here is the definition for this network (abridged from the [dmz-pivot example](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/examples/dmz-pivot)'s `range.yaml`):
+Here is the definition for this network (abridged from the [dmz-pivot example](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_dmz_pivot)'s `range.yaml`):
 
 ```{.yaml filename="range.yaml"}
 range:
@@ -217,9 +216,14 @@ def dmz_pivot() -> Task:
     )
 ```
 
+The seven packaged examples ship this wiring ready-made: each registers as a task (`inspect_ranges/dmz_pivot`) and is importable directly (`from inspect_ranges.examples import dmz_pivot`).
+
 ### Evaluation
 
+Evaluate a packaged example by its registry name, or a `task.py` beside your own range definition:
+
 ```{.bash filename="Terminal"}
+inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5-5
 inspect eval task.py --model anthropic/claude-opus-5-5
 ```
 
@@ -249,17 +253,17 @@ def dmz_pivot_swe() -> Task:
 
 ## Example Ranges
 
-Inspect Ranges includes seven examples: the original dmz-pivot above, and six translated from published range definitions in the literature: 
+Inspect Ranges includes seven examples: the original dmz-pivot above, and six translated from published range definitions in the literature. Each ships in the package as a ready-to-run task (`from inspect_ranges.examples import goad_light`) with its range definition, challenges, recipes, and checks alongside:
 
 | Example | Upstream | Chain |
 |---|---|---|
-| [dmz-pivot](examples/dmz-pivot.md) | original | wordlist ssh guess, planted db credentials, pivot through the router ACL to postgres |
-| [vulhub-zabbix](examples/vulhub-zabbix.md) | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution |
-| [kypo-demo](examples/kypo-demo.md) | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation |
-| [cyris-basic](examples/cyris-basic.md) | CyRIS reference (JAIST) | weak-password privesc, pivot through the firewall's weak account, forensics triage |
+| [dmz_pivot](examples/dmz_pivot.md) | original | wordlist ssh guess, planted db credentials, pivot through the router ACL to postgres |
+| [vulhub_zabbix](examples/vulhub_zabbix.md) | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution |
+| [kypo_demo](examples/kypo_demo.md) | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation |
+| [cyris_basic](examples/cyris_basic.md) | CyRIS reference (JAIST) | weak-password privesc, pivot through the firewall's weak account, forensics triage |
 | [equifax](examples/equifax.md) | MHBench (CMU) | CVE-2017-5638 Struts RCE, SSH-key pivot, four-database exfiltration |
-| [goad-light](examples/goad-light.md) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
-| [splunk-detection](examples/splunk-detection.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection and evasion scored from the exported Splunk stream |
+| [goad_light](examples/goad_light.md) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
+| [splunk_detection](examples/splunk_detection.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection and evasion scored from the exported Splunk stream |
 
 ## Architecture
 

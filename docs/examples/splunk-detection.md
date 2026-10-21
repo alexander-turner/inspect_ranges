@@ -1,1 +1,0 @@
-../../examples/splunk-detection/README.md
