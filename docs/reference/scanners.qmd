@@ -4,7 +4,7 @@ description: Deterministic apparatus checking over sample transcripts, as inspec
 reference: inspect_ranges.scanners
 ---
 
-Scanners checking that the range apparatus itself behaved, built on [inspect_scout](https://meridianlabs-ai.github.io/inspect_scout/). The scanner form covers both consumption paths: scan finished logs with `scout scan inspect_ranges/range_apparatus -T ./logs` (or `inspect_scout.scan` from Python), or wrap with `inspect_scout.as_scorer` to run online in a task's scorer list. See [Development](../development.qmd#iteration-loop) for the iteration-loop usage and what a finding looks like.
+Scanners checking that the range apparatus itself behaved, built on [inspect_scout](https://meridianlabs-ai.github.io/inspect_scout/). The scanner form covers both consumption paths: scan finished logs with `scout scan inspect_ranges/range_apparatus -T ./logs` (or `inspect_scout.scan` from Python), or put it directly in a task's scorer list to run online beside `challenge_scorer`, as the packaged example tasks do. See [Building](../building.qmd#iteration-loop) for the iteration-loop usage and what a finding looks like.
 
 ## Scanners
 
