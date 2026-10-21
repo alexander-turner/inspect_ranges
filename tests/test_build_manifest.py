@@ -436,7 +436,7 @@ def test_apply_build_manifest_passthrough_without_content(tmp_path: Path) -> Non
 
 
 def test_router_projection_covers_provisioning_only() -> None:
-    """A router's realized disk holds its recipes' output alone: ACL, users, routes, addressing, and sizing re-render per boot, so only `provisioning` participates in the projection."""
+    """A router's realized disk holds its recipes' output alone: ACL, routes, addressing, and sizing re-render per boot, and declared `users` ride the recipes the key already carries, so only `provisioning` participates in the projection."""
     same = spec_projection(make_router())
     unchanged: list[Router] = [
         make_router(acl=[AclRule(from_="dmz", to="internal", allow=["tcp/25"])]),
