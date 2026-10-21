@@ -167,6 +167,80 @@ def test_realized_sections_exempt_exactly_their_gate() -> None:
     assert excinfo.value.issues[0].path == ("hosts", 0, "provisioning")
 
 
+def test_router_content_gates_at_planning() -> None:
+    """Router `users`/`provisioning` gate exactly like host content: refused on the runtime path, lifted by the build's realized sections, with the coherence rules on top (users realize only through router recipes; content pins a declared image)."""
+    from inspect_ranges.types import ProvisioningStep, User
+
+    runtime: frozenset[str] = frozenset()
+    build = frozenset({"users", "provisioning"})
+    users = [User(name="robot.abc", password="abcrb1357")]
+    steps = [ProvisioningStep(recipe="acme.fw")]
+    cases: list[
+        tuple[
+            str,
+            list[User],
+            list[ProvisioningStep],
+            str | None,
+            frozenset[str],
+            str,
+            tuple[str | int, ...],
+        ]
+    ] = [
+        (
+            "users gate on the runtime path",
+            users,
+            [],
+            "fw-golden",
+            runtime,
+            "guest-config-not-realized",
+            ("routers", 0, "users"),
+        ),
+        (
+            "provisioning gates on the runtime path",
+            [],
+            steps,
+            "fw-golden",
+            runtime,
+            "guest-config-not-realized",
+            ("routers", 0, "provisioning"),
+        ),
+        (
+            "users without provisioning never realize",
+            users,
+            [],
+            "fw-golden",
+            build,
+            "realized-section-unconsumed",
+            ("routers", 0, "provisioning"),
+        ),
+        (
+            "content on the appliance default cannot key",
+            [],
+            steps,
+            None,
+            build,
+            "router-image-required",
+            ("routers", 0, "image"),
+        ),
+    ]
+    for label, declared_users, declared_steps, image, sections, code, path in cases:
+        spec = two_segment_spec()
+        spec.routers[0].users = declared_users
+        spec.routers[0].provisioning = declared_steps
+        spec.routers[0].image = image
+        with pytest.raises(IssueError) as excinfo:
+            resolve_plan(spec, PlanOptions(realized_sections=sections))
+        assert [(i.code, i.path) for i in excinfo.value.issues] == [(code, path)], label
+    # the build path with recipes and a declared image plans clean
+    spec = two_segment_spec()
+    spec.routers[0].users = users
+    spec.routers[0].provisioning = steps
+    spec.routers[0].image = "fw-golden"
+    plan = resolve_plan(spec, PlanOptions(realized_sections=build))
+    router = next(g for g in plan.guests if g.kind == "router")
+    assert router.image.reference == "fw-golden"
+
+
 def test_hostname_renders_and_fqdn_gates_at_planning() -> None:
     """A declared `hostname:` renders (realized at render as of windows-ad-v1 slice 4: the plan resolves it, sanitized, for every injector); `fqdn` stays gated on the runtime path — only the build's AD recipes realize it (promotion/join set the primary DNS suffix)."""
     spec = two_segment_spec()

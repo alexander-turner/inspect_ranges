@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict
 
 from .._diagnostics import Issue
-from ..types import Host, has_guest_content
+from ..types import Host, Router, has_guest_content, has_router_content
 
 if TYPE_CHECKING:
     from ..types import RangeSpec
@@ -213,15 +213,26 @@ def windows_key_facts(
 
 
 def spec_projection(
-    host: Host, *, network_state: dict[str, object] | None = None
+    host: Host | Router, *, network_state: dict[str, object] | None = None
 ) -> str:
-    """Canonical hash of the host's realized-relevant declarations.
+    """Canonical hash of the guest's realized-relevant declarations.
 
     Only the sections the build realizes participate (provisioning, services, vulnerabilities), so edits elsewhere (addresses, resources, notes on other hosts) re-render without rebuilding this guest; the projection principle from the spine's checkpoint decision, applied per guest.
 
+    A ROUTER's projection carries its provisioning alone: routers declare no `services`/`vulnerabilities`, declared `users` ride the recipes exactly as a host's do (never the projection), and the router's ACL, routes, and addressing are per-boot cloud-init that re-renders without a rebuild.
+
     A WINDOWS host's projection also carries its name, interface addressing, and `network_state` (`windows_network_projection`; windows-ad-v1 slice 2, completed by the phase review): the unattend specialize pass runs once on the generalized golden, so the captured realized disk holds the hostname, static addresses, routes, and resolvers PERSISTENTLY — a consumer boot cannot re-apply them the way cloud-init re-seeds a Linux guest. Excluding any of it would let an edit re-render against a disk that still holds the old state, with no rebuild and no refusal; including it makes the edit an honest rebuild. A Windows host with no `network_state` refuses here, fail closed.
     """
-    projected: dict[str, object] = {
+    if isinstance(host, Router):
+        projected: dict[str, object] = {
+            "provisioning": [
+                step.model_dump(mode="json") for step in host.provisioning
+            ],
+        }
+        return hashlib.sha256(
+            json.dumps(projected, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    projected = {
         "provisioning": [step.model_dump(mode="json") for step in host.provisioning],
         "services": [service.model_dump(mode="json") for service in host.services],
         "vulnerabilities": [v.model_dump(mode="json") for v in host.vulnerabilities],
@@ -254,7 +265,7 @@ def spec_projection(
 
 def guest_build_key(
     golden_digest: str,
-    host: Host,
+    host: Host | Router,
     recipes: list[tuple[ResolvedRecipe, dict[str, VarValue]]],
     *,
     range_name: str,
@@ -434,7 +445,7 @@ def apply_build_manifest(
 ) -> "tuple[RangeSpec, frozenset[str], BuildManifest | None]":
     """The build-aware runtime gate (ratified 2026-10-17): consume a matching build manifest, or refuse.
 
-    A spec with no realized-content sections passes through untouched. One with content requires a manifest built from exactly this (normalized) spec whose realized images verify in the cache: hosts then boot their captured realized images and the manifest's sections count as realized at planning. Anything else refuses with `range-not-built`: honest-but-inert became honest-or-built.
+    A spec with no realized-content sections passes through untouched. One with content (on hosts or routers) requires a manifest built from exactly this (normalized) spec whose realized images verify in the cache: content guests then boot their captured realized images and the manifest's sections count as realized at planning. Anything else refuses with `range-not-built`: honest-but-inert became honest-or-built.
 
     Returns:
         The (possibly swapped) spec, the realized sections for `PlanOptions`, and the consumed manifest (None when the spec carries no content).
@@ -444,8 +455,11 @@ def apply_build_manifest(
     """
     from ..types import IssueError  # local: keep module import-light
 
-    content_hosts = [host for host in spec.hosts if has_guest_content(host)]
-    if not content_hosts:
+    content_guests: list[Host | Router] = [
+        *(host for host in spec.hosts if has_guest_content(host)),
+        *(router for router in spec.routers if has_router_content(router)),
+    ]
+    if not content_guests:
         return spec, frozenset(), None
 
     def refuse(reason: str, hint: str) -> "IssueError":
@@ -533,7 +547,7 @@ def swap_realized_spec(
     *,
     image_cache: Path,
 ) -> "tuple[RangeSpec, frozenset[str]]":
-    """The gate's consumption step on an already-matched manifest: every content host boots its digest-verified realized image.
+    """The gate's consumption step on an already-matched manifest: every content guest (host or router) boots its digest-verified realized image.
 
     Also used by the build's behavioral phase on the not-yet-saved manifest (the checks must prove the captured artifacts before any manifest becomes consumable), which is why this takes the manifest object rather than loading one.
 
@@ -559,10 +573,16 @@ def swap_realized_spec(
 
     swapped = spec.model_copy(deep=True)
     golden_digests: dict[str, str | None] = {}
-    for host in swapped.hosts:
+    swap_guests: list[Host | Router] = [*swapped.hosts, *swapped.routers]
+    for host in swap_guests:
         record = manifest.guest(host.name)
         if record is None:
-            if has_guest_content(host):
+            content = (
+                has_router_content(host)
+                if isinstance(host, Router)
+                else has_guest_content(host)
+            )
+            if content:
                 raise refuse(
                     f"its build manifest has no record for guest {host.name!r}",
                     "run `inspect-ranges build` again",

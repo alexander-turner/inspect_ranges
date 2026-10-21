@@ -470,13 +470,45 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 )
             )
     for index, router in enumerate(spec.routers):
-        if router.users:
+        for field_name in ("users", "provisioning"):
+            if field_name in options.realized_sections:
+                continue
+            if getattr(router, field_name):
+                issues.append(
+                    Issue(
+                        code="guest-config-not-realized",
+                        path=("routers", index, field_name),
+                        message=f"router {router.name!r} declares {field_name}, which only the build realizes",
+                        hint=_GUEST_CONTENT_HINT,
+                    )
+                )
+        if (
+            router.users
+            and "users" in options.realized_sections
+            and not router.provisioning
+        ):
+            # router users converge through the router's recipes exactly like
+            # a host's; a recipe-less router would mint the claim unrealized
+            # and unverified (the slice-4 unconsumed rule, extended)
             issues.append(
                 Issue(
-                    code="guest-config-not-realized",
-                    path=("routers", index, "users"),
-                    message=f"router {router.name!r} declares users, which the build phase has not yet realized",
-                    hint=_GUEST_CONTENT_HINT,
+                    code="realized-section-unconsumed",
+                    path=("routers", index, "provisioning"),
+                    message=f"router {router.name!r} declares users but no provisioning recipe realizes them",
+                    hint="give the router a recipe that realizes its declared users, or drop the declaration",
+                )
+            )
+        if router.provisioning and router.image is None:
+            # the appliance default is a backend resolution
+            # (PlanOptions.default_router_image), so content on it would key
+            # against an image the spec never pinned; mirror of the Windows
+            # declared-addressing rule: the build key must see its inputs
+            issues.append(
+                Issue(
+                    code="router-image-required",
+                    path=("routers", index, "image"),
+                    message=f"router {router.name!r} declares provisioning but no image; the default router appliance is a backend resolution its build key cannot pin",
+                    hint="declare image: on a content-bearing router (the build key pins the golden its recipes realize on)",
                 )
             )
     if spec.defense is not None and (
