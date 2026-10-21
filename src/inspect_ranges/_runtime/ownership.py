@@ -130,7 +130,10 @@ def owner_record(
 
 
 class StageLog:
-    """Append-only JSONL stage log under the project state directory."""
+    """Append-only JSONL stage log under the project state directory.
+
+    Each write re-ensures the directory: teardown is process-independent by design, so a sweep from another process (`down --all`, `cli_cleanup`, the reaper) can `remove_project` a live project's state dir between a boot's stage writes, and the log must keep recording rather than crash the writer with `FileNotFoundError`. Nothing reads directory absence as the torn-down signal (registration keys on `owner.json`, which the recreated dir does not have, and sweeps are idempotent), so a resurrected dir is harmlessly re-swept.
+    """
 
     def __init__(self, state_dir: Path, project: str) -> None:
         directory = project_dir(state_dir, project)
@@ -141,6 +144,9 @@ class StageLog:
         """One stage transition; `status` is `start`, `ok`, or `fail` (failures carry `guest` and `error` where they apply)."""
         entry: dict[str, Any] = {"ts": time.time(), "stage": stage, "status": status}
         entry.update(fields)
+        # recreate-on-write: a concurrent teardown sweep may have removed the
+        # project dir mid-boot (see the class docstring); the row must land
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as handle:
             handle.write(json.dumps(entry) + "\n")
 
