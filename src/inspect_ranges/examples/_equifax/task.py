@@ -10,6 +10,7 @@ from inspect_ranges import (
     challenge_setup,
     verify_goal,
 )
+from inspect_ranges.scanners import range_apparatus
 
 _DIR = Path(__file__).parent
 
@@ -23,6 +24,6 @@ def equifax() -> Task:
         ),
         setup=challenge_setup(),
         solver=react(tools=[bash(), verify_goal()]),
-        scorer=challenge_scorer(),
+        scorer=[challenge_scorer(), range_apparatus()],
         sandbox=("range", str(_DIR / "range.yaml")),
     )
