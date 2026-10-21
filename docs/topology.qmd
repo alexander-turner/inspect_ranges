@@ -55,7 +55,7 @@ Realize is gated: the requested bundle digest must match the lease's rendered bu
 
 ## Grants Convention {#the-grants-convention}
 
-`realize` carries a list of fetch grants for image delivery. Today the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
+`realize` carries a list of fetch grants for image delivery. Today the only supported delivery is **pre-seeded**: the image cache on the host already holds the verified golden chain, and the grants list must be empty. Pre-seeding is any of the [Images](images.qmd#deployment-shapes) recipes run on the host (`images pull`, a mirror, or a pin file) plus `inspect-ranges pull` for published range builds. A non-empty grants list refuses with `ENOTSUP` rather than silently ignoring it, so a deployment that expects granted-URL delivery fails at realize, not mid-boot. Granted-URL and registry delivery are the image-distribution growth path.
 
 ## Isolation Claim
 
