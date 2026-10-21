@@ -560,3 +560,25 @@ def test_router_without_acl_is_a_plain_router() -> None:
     plain.routers[0].acl = []
     ruleset = render_router_nftables(plain, "router", allocate(plain))
     assert "policy accept" in ruleset and "policy drop" not in ruleset
+
+
+def test_multihomed_guest_endpoint_renders_the_address_set() -> None:
+    """Invariance pin for the multi-address guest branch (`ip saddr { a, b }`), the one renderer branch the pre-evaluator capture set missed; the expected bytes were differentially verified identical to the pre-evaluator renderer."""
+    spec = two_segment_spec()
+    spec.hosts.append(
+        Host(
+            name="dualhome",
+            os=Os(type="linux", distro="ubuntu-24.04"),
+            image="ubuntu-noble",
+            interfaces=[
+                Interface(network=spec.networks[0].name),
+                Interface(network=spec.networks[1].name),
+            ],
+        )
+    )
+    router = spec.routers[0]
+    router.acl.append(
+        AclRule(from_="dualhome", to=spec.networks[1].name, allow=["tcp/8443"])
+    )
+    expected = 'table inet fw {\n  chain forward {\n    type filter hook forward priority 0; policy drop;\n    ct state established,related accept\n    iifname "eth0" ip daddr 10.80.20.10 tcp dport 22 drop\n    iifname "eth0" oifname "eth1" tcp dport 22 accept\n    iifname "eth0" oifname "eth1" tcp dport 5432 accept\n    iifname "eth0" oifname "eth1" meta l4proto icmp accept\n    ip saddr 10.80.10.10/32 oifname "eth1" tcp dport 80-90 accept\n    oifname "eth0" tcp dport 443 accept\n    ip saddr { 10.80.10.11, 10.80.20.11 } oifname "eth1" tcp dport 8443 accept\n  }\n}\n'
+    assert render_router_nftables(spec, router.name, allocate(spec)) == expected

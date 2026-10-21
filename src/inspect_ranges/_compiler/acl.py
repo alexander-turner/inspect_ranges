@@ -129,7 +129,7 @@ def acl_admits(
     guest_networks: dict[str, set[str]],
     service: Service | None = None,
 ) -> bool:
-    """Whether the ACL admits a flow from `source` to `destination`, under the contract in the module docstring.
+    """Whether the ACL admits a flow from `source` to `destination`, under the contract in the module docstring. A range-valued `Service` query asks containment (the whole range admitted by one entry), not any-port; current callers pass a single port or `None`.
 
     Args:
         acl: The router's declared rules (empty admits everything: a plain router).

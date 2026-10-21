@@ -33,7 +33,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 ## `down`
 
-`inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. A failed removal keeps the ownership record so a retry can still find the project.
+`inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. The sweep asserts operator quiescence: it cannot tell a crashed project from one mid-boot, so run it only when nothing on the host should be live. A failed removal keeps the ownership record so a retry can still find the project.
 
 ## `applier`
 
