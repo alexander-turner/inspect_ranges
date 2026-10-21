@@ -288,11 +288,8 @@ def test_realize_gap_allowances_floor_at_each_occupants_bound(tmp_path: Path) ->
     assert realize_gap_allowances(plan, long)["construct"] >= 900.0 + 60.0
 
 
-def test_provider_lifecycle_over_the_uds_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_provider_lifecycle_over_the_uds_backend(tmp_path: Path) -> None:
     """`INSPECT_RANGES_HOST=uds:` end to end on CI: sample_init realizes through the applier, ops relay to guests, teardown goes through `channel.teardown`, and every lease is released."""
-    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
     from inspect_ai.util._sandbox.lifecycle import sandbox_lifecycle_scope
     from inspect_ranges._provider.provider import (
         RangeSandboxEnvironment as Env,

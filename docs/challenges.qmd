@@ -148,7 +148,7 @@ The agent loop owns termination; verifying a goal does not end the run. The appe
 
 **Setup.** `challenge_setup()` generates each proof value from independent entropy and plants it with no world-readable window, owned by the declared account. Values never appear in process arguments, environment, logs, or the durable evidence record; the `plants` evidence stream carries digests and metadata only.
 
-**The wall.** Only the foothold (the attack box the agent starts on) is registered as the sample's sandbox, so the agent's tool loop cannot reach targets by name: targets are reachable solely through the range network (tradecraft) and the scoring oracle (a privileged surface never handed to solvers). A named `sandbox(name)` call for an unregistered guest raises `ValueError` (inspect_ai 0.3.282 removed the earlier single-environment fallback that silently returned the foothold for any name); solver code should call `sandbox()` and reach targets over the range network. `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` restores all-guest registration for interactive range development and is logged loudly because it removes the wall.
+**The wall.** Only the foothold (the attack box the agent starts on) is registered as the sample's sandbox, so the agent's tool loop cannot reach targets by name: targets are reachable solely through the range network (tradecraft) and the scoring oracle (a privileged surface never handed to solvers). A named `sandbox(name)` call for an unregistered guest raises `ValueError` (inspect_ai 0.3.282 removed the earlier single-environment fallback that silently returned the foothold for any name); solver code should call `sandbox()` and reach targets over the range network. The wall is invariant: no setting registers targets as sandboxes, and interactive range development pokes at guests through the out-of-band oracle attach instead ([Running the Range](building.qmd#poke)).
 
 **During the run.** `verify_goal` calls verify and latch cheap-tier goals as the agent works, and a mid-run poller re-checks unlatched goals on a cadence (`INSPECT_RANGES_POLL_S`, default 10 s) with zero guest or evidence reads per tick. Latching is first-pass-wins, so transient achievements survive to the end of the run even if the state reverts.
 
@@ -229,4 +229,3 @@ Scoring is measured, not budgeted: every setup and scoring stage records wall-cl
 | Variable | Default | Effect |
 |---|---|---|
 | `INSPECT_RANGES_POLL_S` | 10 | Mid-run submission poll cadence, seconds. |
-| `INSPECT_RANGES_REGISTER_ALL_GUESTS` | unset | Development-only: registers every guest as a named sandbox, removing the foothold wall (logged loudly; never set on scoring runs). |

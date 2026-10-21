@@ -185,19 +185,13 @@ def renewal_tasks() -> list["asyncio.Task[None]"]:
     ]
 
 
-def test_sample_init_boots_and_orders_the_default_first(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # the default-registration assertion must not depend on the developer's
-    # ambient environment (CLAUDE.md: tests are isolated)
-    monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
-
+def test_sample_init_boots_and_registers_the_foothold_only(tmp_path: Path) -> None:
     async def scenario() -> None:
         with sandbox_lifecycle_scope():
             runtime, seams = rigged_runtime(tmp_path)
             envs = await Env.sample_init("task", small_spec(), {"__sample_id__": "s1"})
             assert list(envs) == ["attacker"], (
-                "foothold-only registration is the default: the attacker is the "
+                "foothold-only registration is invariant: the attacker is the "
                 "one sandbox, and targets are not reachable by name (the wall)"
             )
             assert all(isinstance(env, Env) for env in envs.values())
@@ -843,13 +837,10 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
 
 
 class TestFootholdOnlyRegistration:
-    """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
+    """The agent/target wall through the public `sample_init` seam: foothold-only, invariant (pinned alongside `test_sample_init_boots_and_registers_the_foothold_only`); no opt-out exists, and interactive poking goes through the out-of-band oracle attach."""
 
-    def test_named_lookup_of_unregistered_guest_raises(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_named_lookup_of_unregistered_guest_raises(self, tmp_path: Path) -> None:
         """inspect_ai 0.3.282 removed the single-environment any-name fallback: `sandbox(<unregistered name>)` now raises `ValueError` while `sandbox()` still lands on the foothold, which STRENGTHENS the agent/target wall (a named target lookup fails loudly instead of silently landing on the attacker); this pin guards the new semantics the same way the old pin guarded the fallback (drift here must fail CI, not the live battery)."""
-        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
         from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
             sandbox,
             sandbox_default_context_var,
@@ -879,31 +870,9 @@ class TestFootholdOnlyRegistration:
 
         asyncio.run(scenario())
 
-    def test_opt_out_registers_all_guests_foothold_first(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", "1")
-
-        async def scenario() -> None:
-            with sandbox_lifecycle_scope():
-                rigged_runtime(tmp_path)
-                with caplog.at_level(logging.WARNING, logger="inspect_ranges.provider"):
-                    envs = await Env.sample_init(
-                        "task", small_spec(), {"__sample_id__": "w1"}
-                    )
-                assert list(envs) == ["attacker", "web"]
-                assert any("wall" in record.message for record in caplog.records)
-                await Env.sample_cleanup("task", None, envs, interrupted=False)
-
-        asyncio.run(scenario())
-
     def test_foothold_on_existing_host_is_the_one_registered(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
-        monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
         spec = small_spec().model_copy(
             update={"attacker": Attacker(host="web", entry="assumed-breach")}
         )

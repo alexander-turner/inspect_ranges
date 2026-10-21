@@ -71,7 +71,7 @@ from inspect_ai.util import sandbox
 await sandbox().exec(["id", "-un"])  # the attacker box
 ```
 
-The wall this registration creates, the `sandbox(name)` semantic to watch for in solver code, and the `INSPECT_RANGES_REGISTER_ALL_GUESTS` development override are covered in [Challenges](challenges.qmd#scoring-lifecycle).
+The wall this registration creates and the `sandbox(name)` semantic to watch for in solver code are covered in [Challenges](challenges.qmd#scoring-lifecycle). The wall has no opt-out; for ad-hoc commands against a running range's guests, attach the oracle out of band ([Running the Range](building.qmd#poke)).
 
 ## Retry Contract {#the-retry-contract}
 
@@ -112,7 +112,6 @@ Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults
 | `INSPECT_RANGES_IMAGE_CACHE` | `~/.cache/inspect-ranges/images` | Where goldens and vendor images live (`images derive` writes here). |
 | `XDG_STATE_HOME` | `~/.local/state` | Root of provider state: project ownership, CID leases, staging (`<state>/inspect-ranges/`). |
 | `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides Inspect's default sample concurrency for this provider (the resource-weighted admission gate still applies). |
-| `INSPECT_RANGES_REGISTER_ALL_GUESTS` | unset | Registers every guest as a named sandbox (development only; removes the foothold wall and is logged loudly). |
 | `INSPECT_RANGES_RETRY_EXEC_ATTEMPTS` | 3 | Retry attempts for `exec`. |
 | `INSPECT_RANGES_RETRY_FILE_ATTEMPTS` | 5 | Retry attempts for file operations. |
 | `INSPECT_RANGES_RETRY_WAIT_INITIAL_S` | 1 | First retry backoff (exponential with jitter). |
