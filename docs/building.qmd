@@ -64,6 +64,28 @@ Range development is a loop: edit the definition and recipes, validate, build, p
 
 5. **Smoke eval.** Run the real consumption path early: `inspect eval inspect_ranges/dmz_pivot` runs the shipped task through the `range` sandbox provider, and your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider). A one-sample smoke catches registration and readiness issues that direct booting cannot show.
 
+6. **Scan the apparatus.** [range_apparatus](reference/scanners.qmd#range_apparatus) is a deterministic checker for the range plumbing itself: post-readiness channel failures, spec-contradicting reachability, `verify_goal` wiring trouble, and scoring-integrity flags, each with a remediation hint. Run it online by adding it to the smoke eval's scorer list, where findings land beside the challenge score in the normal log view:
+
+   ```python
+   from inspect_ranges import challenge_scorer
+   from inspect_ranges.scanners import range_apparatus
+   from inspect_scout import as_scorer
+
+   scorer = [
+       challenge_scorer(),
+       as_scorer(range_apparatus(range_spec="range.yaml")),
+   ]
+   ```
+
+   Or scan finished logs after the fact:
+
+   ```bash
+   scout scan inspect_ranges/range_apparatus \
+       -S range_spec=range.yaml -T ./logs
+   ```
+
+   The score value is the finding count, so a healthy range reads `0` with explanation `no findings`. A finding reads like `[warning] reachability/declared-unreachable: 10.80.20.10 is declared reachable from the foothold but tool output shows 'no route to host'`, followed by its hint; the structured findings (detector id, severity, message, hint, event references) ride the score metadata.
+
 ## Range Build
 
 A definition's [guest content](guests.qmd#guest-content) describes converged state: services listening at versions, seeded vulnerabilities, provisioning steps that produce them. None of it is applied at boot. The build realizes it once:

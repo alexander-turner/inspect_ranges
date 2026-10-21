@@ -16,6 +16,7 @@ from .examples import (
     splunk_detection,
     vulhub_zabbix,
 )
+from .scanners import range_apparatus
 
 __all__ = [
     "RangeSandboxEnvironment",
@@ -27,6 +28,7 @@ __all__ = [
     "goad_light",
     "kypo_demo",
     "splunk_detection",
+    "range_apparatus",
     "verify_goal",
     "vulhub_zabbix",
 ]

@@ -845,10 +845,10 @@ def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
 class TestFootholdOnlyRegistration:
     """The agent/target wall through the public `sample_init` seam: foothold-only by default (pinned alongside `test_sample_init_boots_and_orders_the_default_first`); `INSPECT_RANGES_REGISTER_ALL_GUESTS=1` is the loudly-logged development opt-out."""
 
-    def test_single_env_fallback_lands_on_the_foothold(
+    def test_named_lookup_of_unregistered_guest_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """inspect_ai's single-environment fallback returns the registered env for ANY name, so the honest pin asserts `sandbox(<any name>)` IS the foothold env object (an earlier must-raise pin shipped with wrong semantics and only the live battery caught it; this guards fallback drift at CI cost zero)."""
+        """inspect_ai 0.3.282 removed the single-environment any-name fallback: `sandbox(<unregistered name>)` now raises `ValueError` while `sandbox()` still lands on the foothold, which STRENGTHENS the agent/target wall (a named target lookup fails loudly instead of silently landing on the attacker); this pin guards the new semantics the same way the old pin guarded the fallback (drift here must fail CI, not the live battery)."""
         monkeypatch.delenv("INSPECT_RANGES_REGISTER_ALL_GUESTS", raising=False)
         from inspect_ai.util._sandbox.context import (  # pyright: ignore[reportPrivateUsage]
             sandbox,
@@ -867,8 +867,11 @@ class TestFootholdOnlyRegistration:
                 default_token = sandbox_default_context_var.set(next(iter(envs)))
                 try:
                     assert sandbox() is envs["attacker"]
-                    assert sandbox("web") is envs["attacker"]
-                    assert sandbox("absolutely-not-a-guest") is envs["attacker"]
+                    assert sandbox("attacker") is envs["attacker"]
+                    with pytest.raises(ValueError, match="web"):
+                        sandbox("web")
+                    with pytest.raises(ValueError, match="absolutely-not-a-guest"):
+                        sandbox("absolutely-not-a-guest")
                 finally:
                     sandbox_default_context_var.reset(default_token)
                     sandbox_environments_context_var.reset(token)

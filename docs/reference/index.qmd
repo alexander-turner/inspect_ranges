@@ -7,6 +7,7 @@ title: Reference
 | | |
 |---|---|
 | [inspect_ranges](inspect_ranges.qmd) | Challenges and goals (dataset, setup, scoring, verification), the goal types, and range definition loading. |
+| [inspect_ranges.scanners](scanners.qmd) | Deterministic apparatus checking over sample transcripts, as inspect_scout scanners. |
 | [inspect_ranges.types](types.qmd) | Range definition types, usable directly as sandbox configuration. |
 : {.borderless tbl-colwidths=[35,65]}
 
