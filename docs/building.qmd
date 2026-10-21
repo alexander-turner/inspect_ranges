@@ -93,7 +93,7 @@ async def poke(project: str) -> None:
 asyncio.run(poke("ir-dmz-pivot-..."))
 ```
 
-The attach rides the same vsock channel the provider uses, so it reaches every guest without touching the range's network posture, and it logs loudly (an out-of-band oracle appearing in a scoring run's logs must be visible). Confirm what the build claims: the service listening, the planted file in place, the content you declared. Then tear down:
+The attach rides the same vsock channel the provider uses, so it reaches every guest without touching the range's network posture, and it logs loudly (an out-of-band oracle attached during a scoring run must be visible in that run's logs). Confirm what the build claims: the service listening, the planted file in place, the content you declared. Then tear down:
 
 ``` {.bash filename="Terminal"}
 inspect-ranges down <project>
