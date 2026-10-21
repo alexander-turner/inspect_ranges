@@ -7,12 +7,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT License" }
 dependencies = [
-    "inspect-ai>=0.3.266",
+    "inspect-ai>=0.3.282",
     "boto3[crt]>=1.40",
     "click>=8.0",
     "pydantic>=2",
     "pyyaml>=6",
     "tenacity>=8.2",
+    "inspect-scout>=0.6.0",
 ]
 
 [project.urls]
