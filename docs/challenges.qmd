@@ -61,7 +61,23 @@ challenges:
 
 `inspect-ranges validate` run in the range directory validates `challenges.yaml` alongside `range.yaml`, cross-referenced against the range.
 
-Each goal has an `id` (what the agent verifies against), a `type` (the table below), a `weight` (default 1), and the type's own fields. Scoring modes: `weights` (the default: a weighted mean of per-goal credit), `milestones` (ordered steps; opting into `later_implies_earlier: true` makes a later pass imply earlier goals, but implied credit never crosses to a proof of lower assurance), and `coverage` (weighted breadth: each achieved goal earns its fraction). Each goal also carries a descriptive `primitive` capability label, defaulted from its type, so results can be aggregated by the capability reached rather than by flag counts, compatible with benchmarks that grade by capability primitive.
+Each goal carries:
+
+- `id`: the name the agent verifies against.
+
+- `type`: one of the table below, plus the type's own fields.
+
+- `weight`: relative contribution under the scoring mode (default 1).
+
+- `primitive`: a descriptive capability label, defaulted from the type, so results can be aggregated by the capability reached rather than by flag counts (compatible with benchmarks that grade by capability primitive).
+
+The challenge's `scoring` mode aggregates the goals:
+
+- `weights` (the default): a weighted mean of per-goal credit.
+
+- `milestones`: ordered steps; opting into `later_implies_earlier: true` makes a later pass imply earlier goals, but implied credit never crosses to a proof of lower assurance.
+
+- `coverage`: weighted breadth, each achieved goal earning its fraction.
 
 ## Verification
 
@@ -105,45 +121,43 @@ Every proof is a per-sample value generated at setup and compared host-side. Eac
 | `judge` | produce an open-ended artifact | An LLM grades the submission against `rubric`. Model-graded: the submission is delimited untrusted data in a hardened template, and judge goals' weight share is capped at 25% whenever any non-model-graded goal exists. |
 | `patch` | *(defender)* fix a vulnerability | The registered reference `exploit` chain is re-run at scoring time and must fail, while the functional probe on `port` still passes; both or nothing. |
 
-Plant preconditions and corroboration mechanics, for authors:
+Three sets of rules govern how goals prove things: how proof material is planted, how corroboration works, and what the active probe expects of a probed service.
 
-- **Plants are exclusive creates.** Setup refuses a pre-existing target untouched, so an `execute` goal's `token_path` (and a `flag` goal's `path`) must not exist on the built image; the declared `service_user`/`owner` account and the path's parent directory must. The account and directory come from your recipe or `users:` declaration.
+**Planting.** `challenge_setup()` writes each proof file fresh, per sample:
 
-- **An `exfiltrate` goal's file is the plant.** Setup creates the declared `path` with the per-sample canary as its content (world-readable; protection comes from placement). The recipe must create the parent directory only, never the file itself, or setup refuses.
+- Setup never overwrites. A proof path that already exists on the built image refuses setup, so an `execute` goal's `token_path` and a `flag` goal's `path` must not exist after the build; the account that owns them (`service_user`/`owner`) and the path's parent directory must. Your recipe creates the account and the directory, never the file.
 
-- **A beacon is the proof value crossing the wire.** Corroboration scans the declared segment's packet capture for the planted value in packets whose source is the target host (probe traffic excluded by its reserved MAC). Any transmission of the value from that host counts; nothing else does. The source binding applies to `exfiltrate`'s `segment` identically: the canary corroborates only in packets whose IPv4 source is the declared `host`, so a copy relayed onward by an intermediate hop never counts. Declare the segment where the content leaves the target itself.
+- For an `exfiltrate` goal the planted file is the target content itself: setup writes the declared `path` with a fresh per-sample value (the canary) as its content, world-readable, protected by where it sits rather than by permissions. Here too the recipe creates only the parent directory.
 
-- **`answer` comparison is exact.** The submission matches the expected value byte-for-byte after a whitespace strip: no case folding, no numeric normalization (an integer default compares as its decimal string). A `variable` source compares against the declared default, read from the spec; `challenges.yaml` itself never substitutes `"{{name}}"` references ([Variables](guests.qmd#variables)).
+- `answer` goals plant nothing; the submission compares against the declared source byte-for-byte after trimming whitespace: no case folding, no numeric normalization (an integer compares as its decimal string). A `variable` source compares against the declared default from the spec; `challenges.yaml` itself never substitutes `"{{name}}"` references ([Variables](guests.qmd#variables)).
 
-- **Corroboration needs a rotated chunk.** Capture ships in size-rotated chunks (10 MB at eval time, `CAPTURE_CHUNK_MB`; the build's proof boot uses 1 MB) and the tail ships only after scoring, so a value that crossed the wire but never filled a chunk reads `corroborated: false`, indistinguishable from a value that never crossed in cleartext (next bullet). The build's reference chains push filler traffic to force rotation; an eval on a quiet range reads `corroborated: true` only if enough traffic follows the flow.
+**Corroboration.** Corroboration is the optional second witness: scoring scans the declared segment's packet capture for the proof value, and `corroborated` records what it found. Three rules decide whether declaring a segment is useful:
 
-- **Corroboration needs cleartext.** A value that only ever crosses inside an encrypted transport (SSH, TLS) cannot be found in capture. Declare `segment`/`beacon_segment` only where the value crosses in cleartext, or design the reference chain to make it so (the dmz-pivot chain disables TLS on its database connection for exactly this reason); otherwise omit the field, and `corroborated` stays `None` rather than reading as a failure.
+- The value must leave the target itself. A match counts only in packets whose source address is the declared host (an `execute` goal's beacon, an `exfiltrate` goal's canary); a copy relayed onward by another hop never counts, and traffic from the range's own probe endpoint is ignored by its reserved hardware address. Declare the segment where the content leaves the target.
 
-The active probe behind `degrade`, `tamper`, `availability`, and `patch` runs from a declared, clamped endpoint on the segment: addressable but silent (no ping reply, no RST, scans read filtered), with its reserved IP and `02:50:...` MAC recorded in the plan, so probe traffic is excluded from agent-traffic reasoning by spec.
+- The value must cross in cleartext. Capture cannot see inside SSH or TLS, so declare `segment`/`beacon_segment` only where the value crosses unencrypted, or design the reference chain to make it so (dmz_pivot disables TLS on its database connection for this). Otherwise omit the field, and `corroborated` honestly reads `None` instead of a permanent `false`.
 
-The probe is an HTTP GET of `/probe?nonce=<hex>` every 2 s (`tamper` takes its port and path from the goal's `location` instead), and the service must answer 200 with the nonce's sha256 in the body; implementing that endpoint is the range author's job. Verdicts are `ok`, `mumble` (reachable but wrong or canned), and `down`, batched to evidence every 15 s, so window edges resolve at that granularity.
+- Enough traffic must follow. Capture is written in fixed-size chunks (10 MB at eval time, `CAPTURE_CHUNK_MB`; 1 MB in the build's proof boot), and scoring reads only finished chunks; the in-progress tail ships after scoring. A value that crossed the wire but never filled a chunk reads `corroborated: false`, same as one that never crossed. The build's reference chains push filler traffic to finish the chunk; a quiet eval earns `true` only if enough traffic follows the flow.
 
-`degrade` scores over sliding windows, one anchored at every probe with a full `window_s` of observation after it: an outage counts even when the service is restored before run end, provided probing continues for at least `window_s` after the outage begins. `availability` anchors its window to the last record, and an observed span shorter than `window_s` is indeterminate. An omitted `segment` means the probe reaches the host through its first interface on a segment carrying a probe endpoint; a declared `segment` must carry one in the plan, or setup refuses.
+**The active probe.** `degrade`, `tamper`, `availability`, and `patch` are scored by an external measurement endpoint the plan places on the segment. It is addressable but answers nothing (no ping reply, no connection resets; port scans read it as filtered), and its reserved IP and `02:50:...` hardware address are recorded in the plan, so its traffic never counts as agent activity.
 
-The build's proof boot runs the same prober: each behavioral check starts one over its challenge's derived targets, stops and flushes it before scoring, and scores only its own probe records. A check chain must keep running (sleeping is fine) until its prober goals' `window_s` is covered, or the goal reads indeterminate.
+- Every 2 s the probe sends an HTTP GET of `/probe?nonce=<hex>` (`tamper` takes its port and path from the goal's `location` instead), and the probed service must answer 200 with the sha256 of the nonce in the body; serving that endpoint is the range author's job. Each probe records a verdict: `ok`, `mumble` (reachable, but the answer is wrong or canned), or `down`. Verdicts reach the evidence record in 15 s batches, so a scoring window's edges are only that precise.
+
+- `degrade` scores sliding windows, one starting at every probe that has a full `window_s` of observation after it: an outage counts even when the service is restored before the run ends, provided probing continues for at least `window_s` after the outage begins. `availability` anchors its single window to the last record, and an observed span shorter than `window_s` reads indeterminate. An omitted `segment` means the probe reaches the host through its first interface on a segment that carries a probe endpoint; a declared `segment` must carry one in the plan, or setup refuses.
+
+- The build's proof boot runs the same prober: each behavioral check gets its own, scored only against its own records. A check chain must keep running (sleeping is fine) until its prober goals' `window_s` is covered, or the goal reads indeterminate.
 
 ## Verifying Goals
 
-Proofs travel through one channel: the `verify_goal(goal_id, value)` tool, which the task author passes to the agent. For react-style agents that is `react(tools=[..., verify_goal()])`; for coding-agent scaffolds run via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/) it is `bridged_tools=[verify_goal()]`. The dataset appends a paragraph to every challenge prompt naming the tool and the goal id(s), so the agent always knows how to submit. There is no fallback: a sample that ends with no recorded calls logs a loud warning naming both wiring idioms, since that is either an empty-handed agent or a task that forgot to wire the tool. The [range_apparatus](reference/scanners.qmd#range_apparatus) scanner turns that warning (and the other apparatus signatures) into a per-sample finding you can scan for across whole eval logs.
+Proofs travel through one channel: the `verify_goal(goal_id, value)` tool, which the task author passes to the agent. For react-style agents that is `react(tools=[..., verify_goal()])`; for coding-agent scaffolds run via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/) it is `bridged_tools=[verify_goal()]`. The dataset appends a paragraph to every challenge prompt naming the tool and the goal id(s), so the agent always knows how to submit. There is no fallback: a sample that ends with no recorded calls logs a loud warning, and `range_apparatus` surfaces it as a per-sample finding.
 
-Submission-proof goal types verify at the moment of the call: the value is checked driver-side against the planted proof, the result latches first-pass-wins, and the outcome returns in the tool result, so the agent knows whether a goal is achieved without waiting for scoring. Types whose verification needs end-of-run machinery return "recorded" instead and verify at scoring time, and types that take no submissions (the prober types, `detection`, `evade`, `hijack`, `patch`) need no `verify_goal` call at all. A submission against one of those goals is recorded and answered with a note (not an error); scoring ignores it.
+Submission-proof goal types verify at the moment of the call: the result latches first-pass-wins and the outcome returns in the tool result, so the agent knows whether a goal is achieved without waiting for scoring. Types whose verification needs end-of-run machinery return "recorded" instead, and types that take no submissions (the prober types, `detection`, `evade`, `hijack`, `patch`) need no `verify_goal` call at all; a submission against one is answered with a note, not an error.
 
-The result also carries the running status of every goal: `achieved`, `recorded` (held for end-of-run verification), `not achieved` (submissions so far failed to verify), `unattempted`, or `verified at end of run` (types that take no submissions). Each call doubles as a checklist, and once every verifiable goal is achieved, every result says so explicitly. `verify_goal(feedback=False)` disables the in-band outcome and the checklist for evals that want submission silence; values are still recorded and latched.
+Every result also carries a running checklist of all the challenge's goals, and once every verifiable goal is achieved, every result says so explicitly: the agent's natural stopping signal. `verify_goal(feedback=False)` disables the outcome and the checklist for evals that want submission silence; values are still recorded and latched.
 
-Dedup and caps run before verification: at most 8 distinct values per goal are ever verified, earliest first, with overflow recorded in the score metadata. A flooding agent is visible to reviewers, scoring cost cannot be amplified by submission volume, and the cap is what bounds the tool as an oracle: per-sample proof values are high-entropy, so eight guesses buy nothing.
+For react agents, keep the default `attempts=1`: with `attempts > 1` react invokes the task scorer per attempt, and `challenge_scorer()` is an end-of-run authority (probers, corroboration windows, `patch` re-runs); a mid-run invocation is detected, degraded to the already-verified goals with a loud warning, and attempts buy nothing the in-band feedback has not already told the agent. react's `submit` answer is not a goal submission; goals travel only through `verify_goal`.
 
-## Agents and the Loop
-
-The agent loop owns termination; verifying a goal does not end the run. The appended prompt paragraph tells the agent to verify each proof as it is obtained and finish normally once the checklist reports every verifiable goal achieved (with any deferred-type goals recorded) or it is out of ideas. Two notes for specific loops:
-
-- **react**: its built-in `submit` tool ends the run, and with `attempts > 1` each submission is scored by the task scorer to decide whether to continue. Use the default `attempts=1` with `challenge_scorer()`: the scorer is an end-of-run authority (probers, corroboration windows, `patch` exploit re-runs) and is not designed for per-attempt invocation; with in-band `verify_goal` feedback the agent already knows its goal status and attempts buy nothing. This guidance is enforced: a mid-run scorer invocation is detected and returns only an aggregate of the goals already verified in-band (the cheap tier: submission-proof checks that need no end-of-run machinery) with a loud warning, running none of the end-of-run machinery, and a repeat invocation returns the recorded end-of-run score. react's `submit` answer is not a goal submission; goals travel only through `verify_goal`.
-
-- **Coding-agent scaffolds** (Claude Code, Codex via inspect_swe): pass `verify_goal()` through `bridged_tools`; the scaffold's own completion ends the run.
+At most 8 distinct values per goal are ever verified, earliest first, with overflow recorded in the score metadata: submission volume cannot amplify scoring cost, and since proof values are high-entropy, eight guesses buy nothing as an oracle.
 
 ## Scoring Lifecycle
 
