@@ -62,6 +62,18 @@ if (-not (Get-Service Sysmon64 -ErrorAction SilentlyContinue)) {
     <RuleGroup name="" groupRelation="or">
       <ProcessCreate onmatch="exclude"/>
     </RuleGroup>
+    <!-- EventID 8 (CreateRemoteThread) ships unfiltered: the 2026-10-21
+         review round recorded injection into an excluded image as the
+         residual exclusion surface, with EventID 8 uncollected. Ambient
+         CreateRemoteThread on an idle Server 2022 guest is near zero
+         (battery-measured), so collecting it costs nothing against the
+         bridge's 4000-event read bound or the wrapper's 5000-record poll
+         cap, and its records carry no GrantedAccess field and sit under the
+         evade goal's severity floor of 10, so they can match neither the
+         detection signal nor a qualifying alert. -->
+    <RuleGroup name="" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude"/>
+    </RuleGroup>
     <RuleGroup name="" groupRelation="or">
       <ProcessAccess onmatch="include">
         <TargetImage condition="image">lsass.exe</TargetImage>
@@ -69,28 +81,60 @@ if (-not (Get-Service Sysmon64 -ErrorAction SilentlyContinue)) {
     </RuleGroup>
     <!-- measured ambient lsass opens on an idle Server 2022 guest: svchost
          0x1000 every ~10s, csrss/wininit 0x1FFFFF once at boot, the splunk
-         forwarder's own periodic opens; excluded at the sensor so the
-         exported stream carries only interesting access (the upstream
-         sysmon-config convention). Every exclusion is an EXACT image path:
-         the earlier `begin with C:\Program Files` prefix class was a
-         documented hiding spot (any tool run from under Program Files evaded
-         EventID 10 entirely) and the evade challenge's stealth-grade bar
-         removed it (followups brief issue 2); only the forwarder binary the
-         measurements justify stays excluded. Unexcluded benign opens (other
-         UF helpers, powershell's 0x1410 recon) now SHIP, which is fine: the
-         detection signal and the evade match both require the measured
-         MiniDump mask (GrantedAccess 0x1FFFFF), and the ambient rate is far
-         under the bridge's 4000-event read bound. -->
+         forwarder's own periodic opens. Every exclusion is an EXACT image
+         path (the earlier `begin with C:\Program Files` prefix class was a
+         documented hiding spot and the evade challenge's stealth-grade bar
+         removed it, followups brief issue 2), and since the 2026-10-21
+         review round each exclusion is TARGET-SCOPED: a bare SourceImage
+         exclude also hid lsass opens by code HOSTED as that image (a
+         service DLL in svchost, a thread injected into winlogon — the agent
+         has Administrator), so each rule excludes its source image only
+         when TargetImage is NOT lsass. Every lsass-targeted open now ships
+         regardless of source image; against the lsass-only include above
+         the exclude group is deliberately inert, kept so the ambient
+         suppression stays correctly scoped if the include set ever
+         broadens. The ambient lsass-targeted opens that now ship (svchost
+         0x1000 ~6/min at worst) sit far under the bridge's 4000-event read
+         bound and the wrapper's 5000-record poll cap, and the detection
+         signal and the evade match both require the measured MiniDump mask
+         (GrantedAccess 0x1FFFFF), so query-mask chatter never scores; the
+         boot-time csrss/wininit 0x1FFFFF opens index before any collector's
+         bootstrap cursor and age past every 180 s trailing window well
+         before a verdict is read. -->
     <RuleGroup name="" groupRelation="or">
       <ProcessAccess onmatch="exclude">
-        <SourceImage condition="is">C:\Windows\system32\csrss.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\wininit.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\winlogon.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\services.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\svchost.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\lsass.exe</SourceImage>
-        <SourceImage condition="is">C:\Windows\system32\wbem\wmiprvse.exe</SourceImage>
-        <SourceImage condition="is">C:\Program Files\SplunkUniversalForwarder\bin\splunkd.exe</SourceImage>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\csrss.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\wininit.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\winlogon.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\services.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\svchost.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\lsass.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Windows\system32\wbem\wmiprvse.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
+        <Rule groupRelation="and">
+          <SourceImage condition="is">C:\Program Files\SplunkUniversalForwarder\bin\splunkd.exe</SourceImage>
+          <TargetImage condition="is not">C:\Windows\system32\lsass.exe</TargetImage>
+        </Rule>
       </ProcessAccess>
     </RuleGroup>
   </EventFiltering>
@@ -187,7 +231,11 @@ while ($true) {
       Add-Content -Path $out -Value ("$((Get-Date).ToUniversalTime().ToString('o')) channel=$channel $marker exporter-overflow dropped=$dropped first_skipped=$($last + 1) last_skipped=$($events[0].RecordId - 1)")
     }
     foreach ($event in $events) {
-      $message = ($event.Message -replace "\r?\n", ' ')
+      # flatten EVERY line-break class, bare CR included: `\r?\n` missed a
+      # lone \r, and Splunk's default line breaking would have let a crafted
+      # field value smuggle a fake record head onto its own exported line
+      # (2026-10-21 review round; add-direction only, hardening not scoring)
+      $message = ($event.Message -replace "[\r\n]+", ' ')
       Add-Content -Path $out -Value ("$($event.TimeCreated.ToUniversalTime().ToString('o')) channel=$channel EventID=$($event.Id) RecordID=$($event.RecordId) $message")
       $marks[$channel] = [long]$event.RecordId
     }
