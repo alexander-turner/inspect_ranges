@@ -41,8 +41,10 @@ dev = [
     "pytest-timeout>=2.4.0",
     "anthropic>=1.11.0",
     "pytest-cov>=7.1.0",
-    {include-group = "doc"},
+    "types-PyYAML",
 ]
+# Kept out of `dev` and the default groups: quarto-cli has no wheel and is
+# built from its sdist. Docs builds ask for it with `--group doc`.
 doc = [
     "jupyter",
     "panflute",
@@ -50,7 +52,6 @@ doc = [
     "griffe>=2",
     "rich",
     "pyyaml",
-    "types-PyYAML",
     "quarto-cli>=1.9.36",
 ]
 dist = ["twine", "build"]
@@ -83,6 +84,8 @@ local_scheme = "no-local-version" # Important for PyPI compatibility
 
 [tool.uv]
 managed = true
+# uv 0.12.22 is the first release that writes lock revision 5 (this uv.lock)
+required-version = ">=0.12.22"
 
 [tool.ruff]
 # explicit exclude list: ruff's DEFAULT excludes contain "_build", which

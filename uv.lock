@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1341,19 +1341,12 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "anthropic" },
-    { name = "griffe" },
-    { name = "jupyter" },
-    { name = "markdown" },
-    { name = "panflute" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-dotenv" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
-    { name = "pyyaml" },
-    { name = "quarto-cli" },
-    { name = "rich" },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -1369,7 +1362,6 @@ doc = [
     { name = "pyyaml" },
     { name = "quarto-cli" },
     { name = "rich" },
-    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
@@ -1386,19 +1378,12 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "anthropic", specifier = ">=1.11.0" },
-    { name = "griffe", specifier = ">=2" },
-    { name = "jupyter" },
-    { name = "markdown" },
-    { name = "panflute" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-dotenv" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist" },
-    { name = "pyyaml" },
-    { name = "quarto-cli", specifier = ">=1.9.36" },
-    { name = "rich" },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -1414,7 +1399,6 @@ doc = [
     { name = "pyyaml" },
     { name = "quarto-cli", specifier = ">=1.9.36" },
     { name = "rich" },
-    { name = "types-pyyaml" },
 ]
 
 [[package]]
