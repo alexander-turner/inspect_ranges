@@ -695,12 +695,14 @@ def _scoring_mid_run(events: Sequence[Event]) -> list[Finding]:
             severity="warning",
             message=(
                 f"challenge_scorer was invoked mid-run {len(references)} "
-                "time(s); only the latched cheap-tier aggregate was returned"
+                "time(s); each returned an intermediate verdict over the "
+                "goals verified in-band, never the recorded final score"
             ),
             hint=(
                 "react's attempts > 1 scores each submission with the task "
-                "scorer: use attempts=1 (verify_goal already gives in-band "
-                "feedback)"
+                "scorer; this is supported (the end-of-run invocation stays "
+                "the single authority), so the signal only locates the "
+                "intermediate verdicts in the log"
             ),
             references=references[:5],
         )

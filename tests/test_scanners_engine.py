@@ -396,16 +396,25 @@ def test_unattempted_goals_with_completion_claim() -> None:
 # -- scoring/evidence integrity ----------------------------------------------------
 
 
-def test_mid_run_invocation_marker_fires() -> None:
+def test_mid_run_invocation_marker_fires_and_intermediates_stay_excluded() -> None:
+    """The `mid_run_invocation` key is the stable filter: the locator finding fires on it, and the scored-metadata reader skips intermediate verdicts (their `indeterminate` validity must never fire `scoring/not-valid` when the recorded end-of-run verdict is valid)."""
     events: list[Event] = [
         score_event(
-            {"validity": "indeterminate", "mid_run_invocation": True},
+            {
+                "validity": "indeterminate",
+                "mid_run_invocation": True,
+                "intermediate": True,
+                "pending_goals": [],
+            },
             intermediate=True,
         ),
         score_event(VALID_SCORED),
     ]
     findings = apparatus_findings(events, [], None, None)
     assert detectors(findings) == {"scoring/mid-run-invocation"}
+    [finding] = findings
+    assert "intermediate" in finding.message
+    assert "attempts=1" not in finding.hint  # the retired prescription
 
 
 @pytest.mark.parametrize(

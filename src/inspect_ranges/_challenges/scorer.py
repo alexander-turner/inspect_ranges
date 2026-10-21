@@ -4,7 +4,7 @@ The scorer follows the reviewer document's sketch: for each goal, `check` gather
 
 Every `Score` carries the validity state and per-goal detail (assurance, primitive, latch time, elapsed); plant values never appear in scores, logs, or explanations.
 
-The scorer is an end-of-run authority and guards its own invocation accordingly (`challenges-v1.md`, the 2026-10-20 invocation-guard entry). A mid-run invocation (react's `attempts > 1` scores each submission through `inspect_ai.scorer._score.score()`, which copies the live `TaskState` whose `completed` flag is still `False`; the task runner sets `completed = True` before the end-of-sample invocation, and post-hoc re-scoring constructs states with `completed=True`) returns the latched cheap-tier aggregate with a loud warning naming the `attempts=1` guidance, running none of the end-of-run machinery: no probers, no corroboration, no `patch` exploit re-runs, and the sample's poller and verification context stay live. A repeat invocation (the sample already scored: the completed pass records its result under `SCORED_STORE_KEY`) returns the recorded end-of-run score, because the `patch` exploit re-run is destructive on re-entry.
+The scorer is an end-of-run authority with one supported mid-run entry point (`challenges-v1.md`, the 2026-10-20 invocation-guard entry and its 2026-10-21 intermediate-verdicts revision). A mid-run invocation (react's `attempts > 1` scores each submission through `inspect_ai.scorer._score.score()`, which copies the live `TaskState` whose `completed` flag is still `False`; the task runner sets `completed = True` before the end-of-sample invocation, and post-hoc re-scoring constructs states with `completed=True`) returns an intermediate verdict: the fraction of verifiable (submission-taking) goals already achieved among the latched records, exactly `1.0` once every verifiable goal is achieved, which is what ends react's attempt loop (react treats a submission as correct when `attempts.score_value(value) == 1.0`, and the default `value_to_float` passes a float value through unchanged). It runs none of the end-of-run machinery: no probers, no corroboration, no `patch` exploit re-runs, and the sample's poller and verification context stay live; an intermediate verdict is never recorded as the final score. A repeat invocation (the sample already scored: the completed pass records its result under `SCORED_STORE_KEY`) returns the recorded end-of-run score, because the `patch` exploit re-run is destructive on re-entry.
 """
 
 import logging
@@ -88,6 +88,53 @@ def _latched_score(
         },
     }
     return value, metadata
+
+
+def _intermediate_score(
+    challenge: Challenge, store: Store
+) -> tuple[float, dict[str, object]]:
+    """The mid-run intermediate verdict: the fraction of verifiable goals achieved among the latched records.
+
+    Verifiable means submission-taking (the registered type's `uses_submissions`): the agent can still move those goals, so they are the honest denominator for react's per-attempt correctness test (react ends its attempt loop exactly at `1.0`, and a fraction over ALL goals would read "incorrect" to an agent that finished everything checkable, sending it flailing at end-of-run types it cannot influence). Deferred goals (the end-of-run types, plus any type unregistered in this process, which nothing can verify mid-run) are excluded from the value and listed under `pending_goals` in the metadata.
+
+    A challenge with ZERO verifiable goals reads `0.0` (the denominator-zero case made explicit): react then burns its remaining attempts and ends, and the end-of-run pass renders the real verdict.
+
+    No verification work runs here beyond what `verify_goal` and the poller already latched (the cheap tier); the metadata keeps the latched detail and `validity` stays `indeterminate` because the end-of-run checks did not run.
+
+    Args:
+        challenge: The challenge being scored.
+        store: The sample store (latches live here).
+
+    Returns:
+        The intermediate value in [0, 1] and the score metadata (the latched detail plus `intermediate`, `pending_goals`, and the verifiable counts the value is computed from).
+    """
+    _, metadata = _latched_score(challenge, store)
+    latched = cast("dict[str, dict[str, object]]", metadata["goals"])
+
+    def achieved(goal_id: str) -> bool:
+        record = latched.get(goal_id)
+        return record is not None and bool(record.get("achieved"))
+
+    verifiable: list[str] = []
+    pending: list[str] = []
+    for goal in challenge.goals:
+        try:
+            takes_submissions = goal_type(goal.type).uses_submissions
+        except KeyError:
+            takes_submissions = False
+        if takes_submissions:
+            verifiable.append(goal.id)
+        elif not achieved(goal.id):
+            pending.append(goal.id)
+    verifiable_achieved = sum(1 for goal_id in verifiable if achieved(goal_id))
+    value = verifiable_achieved / len(verifiable) if verifiable else 0.0
+    return value, {
+        **metadata,
+        "intermediate": True,
+        "pending_goals": pending,
+        "verifiable_total": len(verifiable),
+        "verifiable_achieved": verifiable_achieved,
+    }
 
 
 def _recorded_or_latched(
@@ -311,7 +358,7 @@ async def score_challenge(
 def challenge_scorer() -> Scorer:
     """Score samples built by `challenge_dataset()` against their typed goals.
 
-    The scorer is a single end-of-run authority; its machinery (probers, corroboration windows, `patch` exploit re-runs) assumes the run is over and must execute at most once per sample. A mid-run invocation (react's `attempts > 1` scores each submission with the task scorer; detected via `state.completed`, which the task runner sets only before the end-of-sample invocation) returns the latched cheap-tier aggregate with a loud warning naming the `attempts=1` guidance, and a repeat invocation returns the recorded end-of-run score; neither runs any scoring machinery, and a legitimate single end-of-run invocation is unaffected.
+    The scorer is a single end-of-run authority; its machinery (probers, corroboration windows, `patch` exploit re-runs) assumes the run is over and must execute at most once per sample. A mid-run invocation (react's `attempts > 1` scores each submission with the task scorer; detected via `state.completed`, which the task runner sets only before the end-of-sample invocation) is supported and returns an intermediate verdict: the fraction of verifiable (submission-taking) goals already achieved among the latched records, exactly `1.0` once every verifiable goal is achieved (which ends react's attempt loop), `0.0` for a challenge whose goals are all end-of-run types (react then burns its remaining attempts and ends), with the pending deferred goal ids in the metadata. A repeat invocation returns the recorded end-of-run score. Neither runs any scoring machinery, an intermediate verdict is never recorded as the final score, and a legitimate single end-of-run invocation is unaffected.
 
     Raises (at scoring time): `RuntimeError` when the sample carries no challenge metadata.
     """
@@ -349,31 +396,37 @@ def challenge_scorer() -> Scorer:
                     f"{metadata.get('validity')}"
                 ),
             )
-        # Mid-run guard: react's attempts > 1 scores each submission through
-        # inspect's score(), which copies the live state (completed False); the
-        # end-of-sample and post-hoc invocations always carry completed True.
-        # The poller and the verification context stay live: the run goes on.
+        # Mid-run invocation (supported): react's attempts > 1 scores each
+        # submission through inspect's score(), which copies the live state
+        # (completed False); the end-of-sample and post-hoc invocations always
+        # carry completed True. The intermediate verdict reads only the latched
+        # records (the cheap tier), and the poller and verification context
+        # stay live: the run goes on.
         if not state.completed:
-            logger.warning(
+            logger.info(
                 "challenge %s: mid-run challenge_scorer() invocation (react "
                 "attempts > 1 scores each submission with the task scorer); "
-                "returning the latched cheap-tier aggregate WITHOUT the "
-                "end-of-run machinery (probers, corroboration, patch exploit "
-                "re-runs). Use attempts=1: verify_goal already gives the agent "
-                "in-band feedback",
+                "returning the intermediate verdict over the latched records "
+                "WITHOUT the end-of-run machinery (probers, corroboration, "
+                "patch exploit re-runs)",
                 challenge.id,
             )
-            value, metadata = _latched_score(challenge, state.store)
+            value, metadata = _intermediate_score(challenge, state.store)
             metadata = {**metadata, "mid_run_invocation": True}
-            achieved = metadata.get("achieved_count", 0)
+            pending = cast("list[str]", metadata["pending_goals"])
+            pending_note = (
+                f"; {len(pending)} deferred goal(s) verified at end of run"
+                if pending
+                else ""
+            )
             return Score(
                 value=value,
                 metadata=metadata,
                 explanation=(
-                    f"mid-run invocation: {achieved}/{len(challenge.goals)} "
-                    "goals latched so far; end-of-run machinery did not run "
-                    "(use attempts=1 with challenge_scorer(); verify_goal "
-                    "provides in-band feedback)"
+                    f"intermediate verdict: {metadata['verifiable_achieved']}/"
+                    f"{metadata['verifiable_total']} verifiable goals achieved"
+                    f"{pending_note}; end-of-run machinery did not run and the "
+                    "final score is recorded at end of run"
                 ),
             )
         # End of run: the cheap-tier poller stops and the verify context is
