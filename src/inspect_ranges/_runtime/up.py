@@ -492,13 +492,15 @@ async def _await_ready(
     return True, None
 
 
-def project_containers(runner: Runner, project: str) -> list[str]:
-    """Container ids carrying the project's compose label (live or exited)."""
+def project_containers(
+    runner: Runner, project: str, *, running_only: bool = False
+) -> list[str]:
+    """Container ids carrying the project's compose label (live or exited by default; `running_only` narrows to running ones, the oracle attach's liveness question)."""
     result = runner(
         [
             "docker",
             "ps",
-            "-a",
+            *([] if running_only else ["-a"]),
             "-q",
             "--filter",
             f"label=com.docker.compose.project={project}",
@@ -644,6 +646,14 @@ def up(
 
     # ownership registers before the first compose resource (cleanup registry)
     write_owner(options.state_dir, owner_record(project, range_name, spec_sha, bundle))
+    # the verified boot plan is recorded beside the owner record: the
+    # out-of-band oracle attach (`range_oracle("<project>")`) rebuilds the
+    # guest channel from it, and the bundle itself may be temporary
+    # (`up --from-spec` renders into a TemporaryDirectory that is gone by
+    # the time anything attaches)
+    (project_dir(options.state_dir, project) / "boot.json").write_bytes(
+        (bundle / "boot.json").read_bytes()
+    )
     log = _StageTee(StageLog(options.state_dir, project), on_stage)
     log.log("verify-bundle", "ok", files=len(cast(dict[str, Any], manifest["files"])))
     log.log("verify-images", "ok", guests=len(guests))

@@ -1,13 +1,13 @@
 """The range oracle: privileged, scoring-only access to one sample's range.
 
-The oracle is the surface goal types run against (`challenges-v1.md`): it binds the RAW `MessageChannel`, never the provider's convenience wrappers, because the provider's oversized-exec wrapper persists argv and env as an on-guest script and would deposit plant material where a compromised guest can read it (the residue leak recorded in `challenges-scoring-integrity.md`). It is constructed from provider internals by `range_oracle()` and is never registered as a sandbox or handed to a solver's tools.
+The oracle is the surface goal types run against (`challenges-v1.md`): it binds the RAW `MessageChannel`, never the provider's convenience wrappers, because the provider's oversized-exec wrapper persists argv and env as an on-guest script and would deposit plant material where a compromised guest can read it (the residue leak recorded in `challenges-scoring-integrity.md`). It is constructed from provider internals by `range_oracle()`, or out of band by `range_oracle("<project>")` against a running `up` project (`attach.py`), and is never registered as a sandbox or handed to a solver's tools.
 
 Residue rule, enforced here by construction: plant VALUES never ride argv, env, stdin of oracle execs, any log line, or evidence in the clear. File content travels only as `write_file` bulk; the owner flow is write-0600-then-chown so only the path appears in argv.
 """
 
 import secrets
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, overload
 
 from inspect_ai.util import sandbox
 
@@ -28,6 +28,8 @@ from .plants import PlantStore
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Generator
+    from contextlib import AbstractContextManager
+    from pathlib import Path
 
     from .._provider.evidence import EvidenceSession
 
@@ -85,7 +87,7 @@ WIN_UNPLANT_SCRIPT = (
 class RangeOracle:
     """Privileged access to one sample's range for setup and scoring. Not a `SandboxEnvironment`.
 
-    Obtain one with `range_oracle()` from setup or scoring code running in the sample context.
+    Obtain one with `range_oracle()` from setup or scoring code running in the sample context, or attach out of band to a running `up` project with `with range_oracle("<project>") as oracle:`.
     """
 
     def __init__(self, handle: SampleHandle) -> None:
@@ -400,12 +402,36 @@ class RangeOracle:
         return store_for_location(session.location)
 
 
-def range_oracle() -> RangeOracle:
-    """The current sample's oracle, resolved through the default sandbox.
+@overload
+def range_oracle() -> RangeOracle: ...
 
-    Call only from setup (`challenge_setup`) or scoring code running inside the sample context. The returned capability must never be exposed to the agent's tool loop.
+
+@overload
+def range_oracle(
+    project: str, *, state_dir: "Path | None" = None
+) -> "AbstractContextManager[RangeOracle]": ...
+
+
+def range_oracle(
+    project: str | None = None, *, state_dir: "Path | None" = None
+) -> "RangeOracle | AbstractContextManager[RangeOracle]":
+    """The range oracle: the current sample's, or an out-of-band attach to a running project.
+
+    Without arguments, the current sample's oracle, resolved through the default sandbox: call only from setup (`challenge_setup`) or scoring code running inside the sample context. The returned capability must never be exposed to the agent's tool loop.
+
+    With a `project` name, a context manager attaching to a RUNNING range booted with `inspect-ranges up` (or `up --from-spec`), for poking at a range from a REPL or script: `with range_oracle("ir-dmz-pivot-...") as oracle:` yields the same oracle verbs (`exec`, `read_file`, `write_file`, ...) over a transport rebuilt from the project's recorded state (`state_dir` overrides the default project state directory). The attach is local-backend only and logs loudly, so an attach during a scoring run is visible in the run's logs; leaving the context detaches the oracle, and later verbs refuse. An attached oracle carries no sample context: `resolved()`, `range_spec()`, and the evidence accessors refuse, and `is_windows` reads an empty plan, so the owner-flow `write_file` dispatches the POSIX script on every guest.
 
     Raises:
-        TypeError: The sample's sandbox is not a `range` environment.
+        TypeError: The sample's sandbox is not a `range` environment (sample form).
+        OracleSetupError: The attach refused: separated topology (`INSPECT_RANGES_HOST` set), unknown or stale project, or a project that is registered but no longer running (attach form; the message names the state path and the remedy).
     """
+    if project is not None:
+        from .attach import attach_oracle
+
+        return attach_oracle(project, state_dir=state_dir)
+    if state_dir is not None:
+        raise OracleSetupError(
+            "state_dir applies only to the attach-by-project form "
+            "(range_oracle('<project>', state_dir=...))"
+        )
     return RangeOracle(sample_handle_for(sandbox()))

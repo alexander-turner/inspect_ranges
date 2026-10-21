@@ -72,6 +72,10 @@ The package's top-level surface. The eval wiring is covered in [Challenges](../c
 
 ### RangeOracle
 
+### range_oracle
+
+### OracleSetupError
+
 ### Observations
 
 ### ObserverKind

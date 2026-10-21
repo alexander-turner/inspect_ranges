@@ -1,7 +1,7 @@
 ---
 title: "Building Ranges"
 description: "Developing and building ranges. Covers the development machine, the iteration loop, the build command, writing recipes, verification, and behavioral checks."
-llms-description: "Range development and the build. The dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM, verified by doctor) and the iteration loop walked against dmz_pivot (validate incl. sibling challenges.yaml, plan, build with --keep/--reverify/--cid-base, interactive boot via up --from-spec with INSPECT_RANGES_REGISTER_ALL_GUESTS, smoke eval). Plus the overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
+llms-description: "Range development and the build. The dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM, verified by doctor), the iteration loop walked against dmz_pivot (validate incl. sibling challenges.yaml, plan, build with --keep/--reverify/--cid-base), and Running the Range at escalating fidelity (Poke: up --from-spec plus a range_oracle attach from a REPL or script; Smoke Eval: one sample through the real provider; Scan: range_apparatus in the scorer list or scout scan over finished logs). Plus the overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
 ---
 
 ## Overview
@@ -14,7 +14,7 @@ A definition (`range.yaml`, or a typed `RangeSpec` in Python) declares the netwo
 
 - [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
 
-This page covers the machine development runs on, the iteration loop, and the build: how declared guest content becomes captured, verified images. For what happens after a build in production, see [Operations](cli.qmd).
+This page covers the machine development runs on, the iteration loop, the build (how declared guest content becomes captured, verified images), and [Running the Range](#running-the-range): confirming a built range at escalating fidelity. For what happens after a build in production, see [Operations](cli.qmd).
 
 ## Development Machine
 
@@ -45,7 +45,7 @@ ssh inspect-ranges-devbox
 
 ## Iteration Loop
 
-Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. The steps below walk it against [dmz_pivot](examples/dmz_pivot.md), the smallest built example; the same loop applies to your own range directory.
+Range development is a loop: edit the definition and recipes, validate, plan, build, then confirm the result at escalating fidelity ([Running the Range](#running-the-range)). The authoring steps below walk it against [dmz_pivot](examples/dmz_pivot.md), the smallest built example; the same loop applies to your own range directory.
 
 1. **Validate.**
 
@@ -58,28 +58,75 @@ Range development is a loop: edit the definition and recipes, validate, build, p
 
 2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot. For a range declaring guest content (dmz_pivot does), `plan` refuses with `range-not-built` until a matching build exists, so on a first authoring pass it slots after `build`; it works immediately for topology-only ranges.
 
-3. **Build.** `inspect-ranges build` realizes the declared guest content: for dmz_pivot, two guests provisioned over the published golden and three challenge trios proven, a few minutes on a warm image cache. The stage lines to expect are in [Reading Build Output](#reading-build-output). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. When a stage goes red, start at [Diagnosing Failures](#diagnosing-failures).
+3. **Build.** `inspect-ranges build` realizes the declared guest content: for dmz_pivot, two guests provisioned over the published golden and three challenge trios proven, a few minutes on a warm image cache. The stage lines to expect are in [Reading Build Output](#reading-build-output). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. When a stage goes red, start at [Diagnosing Failures](#diagnosing-failures); a green build is the entry to [Running the Range](#running-the-range).
 
-4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Operations](cli.qmd)). There is no CLI shell into a live guest; the supported way to run ad-hoc commands in guests is a one-sample eval with `INSPECT_RANGES_REGISTER_ALL_GUESTS=1`, which registers every guest as a named sandbox so solver code can call `sandbox("<guest>").exec(...)` directly; it removes the foothold wall (normally only the attacker's foothold is registered as a sandbox, so solver code cannot address targets directly; see [Challenges](challenges.qmd#scoring-lifecycle)) and is logged loudly, so never set it on scoring runs.
+## Running the Range {#running-the-range}
 
-5. **Smoke eval.** Run the real consumption path early: `inspect eval inspect_ranges/dmz_pivot` runs the shipped task through the `range` sandbox provider, and your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider). A one-sample smoke catches registration and readiness issues that direct booting cannot show.
+A green build is an artifact, not evidence that the range behaves. Three checks confirm it at escalating fidelity, each led by the question it answers; a new range earns all three before it ships.
 
-6. **Scan the apparatus.** [range_apparatus](reference/scanners.qmd#range_apparatus) is a deterministic checker for the range plumbing itself: post-readiness channel failures, spec-contradicting reachability, `verify_goal` wiring trouble, and scoring-integrity flags, each with a remediation hint. Run it online by adding it to the smoke eval's scorer list, where findings land beside the challenge score in the normal log view:
+### Poke {#poke}
 
-   ```python
-   from inspect_ranges import challenge_scorer
-   from inspect_ranges.scanners import range_apparatus
+Did the build produce the range I meant? Boot the built range directly, with no solver, no eval, and no environment variable:
 
-   scorer = [challenge_scorer(), range_apparatus()]
-   ```
+``` {.bash filename="Terminal"}
+inspect-ranges up --from-spec range.yaml
+```
 
-   Or scan finished logs after the fact:
+`up` prints the compose project name (`ir-dmz-pivot-...`). Attach the range oracle (the privileged guest-access surface scoring uses; see [Challenges](challenges.qmd#scoring-lifecycle)) by that name from a REPL or script and run commands against any guest, targets included:
 
-   ```bash
-   scout scan inspect_ranges/range_apparatus -T ./logs
-   ```
+```python
+import asyncio
 
-   The score value is the finding count, so a healthy range reads `0` with explanation `no findings`. A finding reads like `[warning] reachability/declared-unreachable: 10.80.20.10 is declared reachable from the foothold but tool output shows 'no route to host'`, followed by its hint; the structured findings (detector id, severity, message, hint, event references) ride the score metadata.
+from inspect_ranges import range_oracle
+
+
+async def poke(project: str) -> None:
+    with range_oracle(project) as oracle:
+        out = await oracle.exec("db", ["ss", "-ltn"])
+        print(out.stdout.decode())
+        creds = await oracle.read_file(
+            "web", "/home/deploy/.pgpass", user="deploy"
+        )
+        print(creds.decode())
+
+
+asyncio.run(poke("ir-dmz-pivot-..."))
+```
+
+The attach rides the same vsock channel the provider uses, so it reaches every guest without touching the range's network posture, and it logs loudly (an out-of-band oracle attached during a scoring run must be visible in that run's logs). Confirm what the build claims: the service listening, the planted file in place, the content you declared. Then tear down:
+
+``` {.bash filename="Terminal"}
+inspect-ranges down <project>
+```
+
+### Smoke Eval {#smoke-eval}
+
+Does the whole consumption path work? Run one sample through the real `range` sandbox provider early: registration, readiness, challenge setup, and scoring exercise paths a direct boot cannot show.
+
+``` {.bash filename="Terminal"}
+inspect eval inspect_ranges/dmz_pivot
+```
+
+The registry form runs the shipped task; your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider).
+
+### Scan {#scan}
+
+Did the apparatus misbehave? [range_apparatus](reference/scanners.qmd#range_apparatus) is a deterministic checker for the range plumbing itself: post-readiness channel failures, spec-contradicting reachability, `verify_goal` wiring trouble, and scoring-integrity flags, each with a remediation hint. Run it online by adding it to the smoke eval's scorer list, where findings land beside the challenge score in the normal log view:
+
+```python
+from inspect_ranges import challenge_scorer
+from inspect_ranges.scanners import range_apparatus
+
+scorer = [challenge_scorer(), range_apparatus()]
+```
+
+Or scan accumulated logs after the fact:
+
+```bash
+scout scan inspect_ranges/range_apparatus -T ./logs
+```
+
+The score value is the finding count, so a healthy range reads `0` with explanation `no findings`. A finding reads like `[warning] reachability/declared-unreachable: 10.80.20.10 is declared reachable from the foothold but tool output shows 'no route to host'`, followed by its hint; the structured findings (detector id, severity, message, hint, event references) ride the score metadata.
 
 ## Range Build
 
