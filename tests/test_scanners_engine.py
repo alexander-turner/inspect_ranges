@@ -221,7 +221,7 @@ def test_repeated_retry_against_one_guest_needs_the_threshold() -> None:
     assert "'web'" in message and "3" in message
 
 
-def test_finalize_signatures_fire_anywhere(caplog: pytest.LogCaptureFixture) -> None:
+def test_finalize_signatures_fire_anywhere() -> None:
     events: list[Event] = [
         logger("evidence finalize failed: location=/tmp/e", "error"),
         logger("no host seal at /tmp/e after teardown and nothing to reap-seal"),
