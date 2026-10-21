@@ -344,6 +344,12 @@ def mirror(
     help="Publish the daemon artifact directory (its bundle tar and daemon.json) under the reserved 'daemon-bundle' ref.",
 )
 @click.option(
+    "--list",
+    "list_names",
+    multiple=True,
+    help="Rewrite the destination's catalog list to exactly these names (repeatable), each verified to resolve there first; image publishes append on their own, this flag covers renames and repairs.",
+)
+@click.option(
     "--to",
     "to_location",
     required=True,
@@ -369,17 +375,41 @@ def publish(
     catalog_name: str | None,
     golden: str | None,
     daemon_dir: Path | None,
+    list_names: tuple[str, ...],
     to_location: str,
     image_cache: Path | None,
     build_cache: Path | None,
 ) -> None:
-    """The deliberate promotion act: a built guest's realized image (or a cache golden, or the daemon artifact) becomes consumable at a location; image promotions update the location's catalog list."""
-    from .._dist.catalog import publish_daemon_bundle, publish_golden, publish_realized
+    """The deliberate promotion act: a built guest's realized image (or a cache golden, or the daemon artifact) becomes consumable at a location; image promotions update the location's catalog list, and `--list` rewrites that list to an exact set of names."""
+    from .._dist.catalog import (
+        publish_catalog_list,
+        publish_daemon_bundle,
+        publish_golden,
+        publish_realized,
+    )
 
     display = TransferDisplay()
     try:
         location = parse_location(to_location)
         images, builds, _ = _caches(image_cache, build_cache, None)
+        if list_names:
+            if (
+                daemon_dir is not None
+                or golden is not None
+                or guest is not None
+                or catalog_name is not None
+                or spec is not None
+            ):
+                raise click.UsageError(
+                    "--list stands alone (it rewrites the catalog list, nothing else)"
+                )
+            root = publish_catalog_list(list(list_names), location)
+            display.close()
+            click.echo(
+                f"publish OK  catalog@{root.digest} -> {location.describe()} "
+                f"({len(set(list_names))} name(s))"
+            )
+            return
         if daemon_dir is not None:
             if (
                 golden is not None

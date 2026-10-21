@@ -320,6 +320,78 @@ def test_publish_golden_and_catalog_enumeration(tmp_path: Path) -> None:
     assert source_names(location) == ["focal-guest"]
 
 
+def test_publish_catalog_list_rewrites_enumeration(tmp_path: Path) -> None:
+    """`publish --list` rewrites the list to an exact set: a pushed range joins enumeration, a dropped name leaves it while staying served by ref, and a refused rewrite never touches the published list."""
+    from inspect_ranges._dist.catalog import (
+        catalog_names,
+        publish_catalog_list,
+        publish_golden,
+    )
+
+    fixture = Fixture(tmp_path)
+    _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    # a range push never appends to the list; the rewrite adds it deliberately
+    assert catalog_names(location) == ["focal-guest"]
+    publish_catalog_list(["distfix", "focal-guest"], location)
+    assert catalog_names(location) == ["distfix", "focal-guest"]
+    assert source_names(location) == ["distfix", "focal-guest"]
+    # the rename move: the rewrite drops the name from enumeration, the ref stays
+    publish_catalog_list(["distfix"], location)
+    assert catalog_names(location) == ["distfix"]
+    served = location.store_for("focal-guest").ref(location.latest_ref("focal-guest"))
+    assert served.digest.startswith("sha256:")
+    # refusals validate before anything writes: the published list is untouched
+    with pytest.raises(DistError, match="ref-not-found"):
+        publish_catalog_list(["distfix", "never-published"], location)
+    with pytest.raises(DistError, match="name-reserved"):
+        publish_catalog_list(["distfix", "catalog"], location)
+    with pytest.raises(DistError, match="catalog-invalid"):
+        publish_catalog_list([], location)
+    assert catalog_names(location) == ["distfix"]
+
+
+def test_publish_list_cli_flag(tmp_path: Path) -> None:
+    """The CLI wiring: `publish --list` stands alone, rewrites the destination's list, and reports the name count."""
+    from click.testing import CliRunner
+    from inspect_ranges._cli.main import ranges
+    from inspect_ranges._dist.catalog import catalog_names, publish_golden
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    result = CliRunner().invoke(
+        ranges,
+        ["publish", "--list", "focal-guest", "--to", str(tmp_path / "catalog-loc")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "publish OK  catalog@sha256:" in result.output
+    assert "1 name(s)" in result.output
+    assert catalog_names(location) == ["focal-guest"]
+    mixed = CliRunner().invoke(
+        ranges,
+        [
+            "publish",
+            "--list",
+            "focal-guest",
+            "--golden",
+            "focal-guest",
+            "--to",
+            str(tmp_path / "catalog-loc"),
+        ],
+    )
+    assert mixed.exit_code == 2
+    assert "--list stands alone" in mixed.output
+
+
 def test_pin_file_round_trip_and_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

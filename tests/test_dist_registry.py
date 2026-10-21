@@ -32,7 +32,7 @@ def fake_backing_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeRegistryState:
-    """One registry's content: blobs and manifests by reference, plus auth and behavior knobs."""
+    """One registry's content: blobs by digest, manifests by repo-scoped reference (`repo:ref`, so same-named tags in different repos never collide), plus auth and behavior knobs."""
 
     def __init__(self, *, require_token: bool = False) -> None:
         self.blobs: dict[str, bytes] = {}
@@ -111,7 +111,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, blob)
             return
         if "/manifests/" in self.path:
-            entry = self.state.manifests.get(urllib.parse.unquote(parts[-1]))
+            repo, _, reference = self.path.split("/v2/")[1].partition("/manifests/")
+            entry = self.state.manifests.get(
+                f"{repo}:{urllib.parse.unquote(reference)}"
+            )
             if entry is None:
                 self._send(404)
             else:
@@ -159,11 +162,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(201, Docker_Content_Digest=digest)
             return
         if "/manifests/" in self.path:
-            reference = urllib.parse.unquote(self.path.split("/manifests/")[1])
+            repo, _, raw_reference = self.path.split("/v2/")[1].partition("/manifests/")
+            reference = urllib.parse.unquote(raw_reference)
             media = self.headers.get("Content-Type", "")
             digest = f"sha256:{hashlib.sha256(body).hexdigest()}"
-            self.state.manifests[reference] = (body, media)
-            self.state.manifests[digest] = (body, media)
+            self.state.manifests[f"{repo}:{reference}"] = (body, media)
+            self.state.manifests[f"{repo}:{digest}"] = (body, media)
             self._send(201, Docker_Content_Digest=digest)
             return
         self._send(404)
@@ -260,7 +264,10 @@ def test_registry_get_verifies_bytes(tmp_path: Path, fake_registry: Any) -> None
     assert not (tmp_path / "out.bin").exists()
     manifest = OciManifest(config=repo.ensure_empty_config(), layers=[descriptor])
     put = repo.put_manifest(manifest)
-    state.manifests[put.digest] = (b'{"schemaVersion": 2, "evil": true}', "x")
+    state.manifests[f"ranges/tamper:{put.digest}"] = (
+        b'{"schemaVersion": 2, "evil": true}',
+        "x",
+    )
     with pytest.raises(DistError, match="blob-digest-mismatch"):
         repo.manifest(put)
 
@@ -456,3 +463,38 @@ def test_off_origin_upload_location_refuses(tmp_path: Path, fake_registry: Any) 
     repo = RegistryRepo(url_reg, "ranges/offorigin")
     with pytest.raises(DistError, match="different origin"):
         repo.put_blob_bytes(b"must not travel")
+
+
+def test_catalog_list_drives_registry_enumeration(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """The published list is a registry location's first-class enumeration: `source_names`, whole-location mirror, and pin generation all ride it, the list travels with the mirror, and `publish --list` rewrites it over the same HTTP path."""
+    from inspect_ranges._dist.catalog import (
+        catalog_names,
+        generate_pin_file,
+        publish_catalog_list,
+        publish_golden,
+    )
+    from inspect_ranges._dist.location import parse_location
+    from inspect_ranges._dist.mirror import mirror_names, source_names
+
+    url, _ = fake_registry()
+    fixture = Fixture(tmp_path)
+    location = parse_location(f"{url}/ranges")
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    assert source_names(location) == ["focal-guest"]
+    pins = generate_pin_file(location, tmp_path / "pins.json")
+    assert set(pins) == {"focal-guest"}
+    assert pins["focal-guest"].startswith("sha256:")
+    destination = parse_location(str(tmp_path / "mirror"))
+    report = mirror_names(source_names(location), location, destination)
+    assert report.copied > 0
+    # the list traveled: the seeded location enumerates and pins on its own
+    assert catalog_names(destination) == ["focal-guest"]
+    assert source_names(destination) == ["focal-guest"]
+    # the rewrite verb works against the registry form and validates first
+    root = publish_catalog_list(["focal-guest"], location)
+    assert root.digest.startswith("sha256:")
+    with pytest.raises(DistError, match="ref-not-found"):
+        publish_catalog_list(["never-published"], location)
+    assert source_names(location) == ["focal-guest"]
