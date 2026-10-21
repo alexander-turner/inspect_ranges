@@ -20,7 +20,7 @@ Ranges build and run on any Linux x86_64 machine with KVM: bare metal with virtu
 
 - `br_netfilter` unloaded, or loaded with `bridge-nf-call-iptables=0`, so host iptables never filters bridged range traffic.
 
-- IPv6 enabled, for ranges that use it (mitm6-style scenarios).
+- IPv6 enabled. This one is forward-looking only: IPv6 is not realized yet (every IPv6 construct in a definition refuses validation with `ipv6-not-realized`), so no current range needs it; `doctor` checks it ahead of future mitm6-style scenarios.
 
 `inspect-ranges doctor` verifies all of this and prints an exact fix for anything missing.
 

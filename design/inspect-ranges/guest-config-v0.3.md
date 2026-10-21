@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Guest configuration (schema v0.3): converged-state declarations, parsed now, realized at build"
-status: proposed
+status: accepted
 tags: [inspect-ranges, range-yaml, schema, guest-config, decision]
 timestamp: 2026-10-07
 ---

@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Networking v0.2: richer ACLs, explicit routing, scoped egress, dual-stack types — under a lockstep rule"
-status: proposed
+status: accepted
 tags: [inspect-ranges, range-yaml, schema, networking, decision]
 timestamp: 2026-10-06
 ---
