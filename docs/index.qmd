@@ -27,8 +27,7 @@ cd inspect_ranges && pip install .
 inspect-ranges doctor
 
 # run an example
-cd examples/dmz-pivot
-inspect eval task.py --model openai/gpt-6-astra
+inspect eval inspect_ranges/dmz_pivot --model openai/gpt-5.5
 ```
 
 This documentation is also available in LLM-friendly markdown ([llms.txt](https://llmstxt.org/)): register the index with an IDE or coding agent, or paste a variant directly into a model's context window.
@@ -117,7 +116,7 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd) (`ubuntu-noble` is a published golden image, a shared read-only base disk; the attacker declares no image, so it boots the standard kali-class attack box). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable: `inspect-ranges build` realizes them (installs and configures the declared content on the guests, once, through the named recipes) and verifies every declared service and vulnerability against the live guests before the range is consumable. This example's build is published, so running it needs no build step: the first `inspect eval` pulls it automatically. Definitions can go much further: Active Directory identity data, defenders and telemetry, and declared randomization variables (defaults apply today; per-instance draws are deferred; see [Building Ranges](building.qmd)).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd): `ubuntu-noble` is a published golden image, a shared read-only base disk, and the attacker declares no image, so it boots the standard kali-class attack box. The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable, realized and verified by [`inspect-ranges build`](building.qmd).
 
 ## Range Tasks
 
@@ -263,7 +262,7 @@ Inspect Ranges includes seven examples: the original dmz-pivot above, and six tr
 
 ## Architecture
 
-Each range runs in a single unprivileged Docker container. Every guest, including the attack box, is a KVM virtual machine inside that container. Bridges and firewall rules exist only in the container's network namespace, so the host's own networking carries no range state. Removing the container destroys every VM, bridge, firewall rule, and disk overlay. A host needs only Docker and KVM; libvirt and QEMU ship inside the container image.
+Each range runs in a single unprivileged Docker container, which provides the packaged virtualization stack, the network namespace that keeps range state off the host, and one-step teardown. Every guest, including the attack box, is a KVM virtual machine inside that container. Bridges and firewall rules exist only in the container's network namespace, so the host's own networking carries no range state. Removing the container destroys every VM, bridge, firewall rule, and disk overlay. A host needs only Docker and KVM; libvirt and QEMU ship inside the container image.
 
 Guests boot from shared, read-only golden images. Each VM writes its changes to a small private overlay, so every sample starts from a pristine disk and full images are never copied. Images are published as stacks of layers, each fetched once and verified by digest. Ranges with heavy cross-host state (such as Active Directory) are provisioned once at build time; each sample then cold-boots the captured disks:
 
