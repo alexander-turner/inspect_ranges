@@ -396,16 +396,22 @@ def test_unattempted_goals_with_completion_claim() -> None:
 # -- scoring/evidence integrity ----------------------------------------------------
 
 
-def test_mid_run_invocation_marker_fires() -> None:
+def test_intermediate_verdicts_stay_excluded_and_fire_nothing() -> None:
+    """The `mid_run_invocation` key is the stable filter: the scored-metadata reader skips intermediate verdicts (their `indeterminate` validity must never fire `scoring/not-valid` when the recorded end-of-run verdict is valid), and a supported mid-run invocation (react `attempts > 1`) is not an anomaly, so it fires no finding at all."""
     events: list[Event] = [
         score_event(
-            {"validity": "indeterminate", "mid_run_invocation": True},
+            {
+                "validity": "indeterminate",
+                "mid_run_invocation": True,
+                "intermediate": True,
+                "pending_goals": [],
+            },
             intermediate=True,
         ),
         score_event(VALID_SCORED),
     ]
     findings = apparatus_findings(events, [], None, None)
-    assert detectors(findings) == {"scoring/mid-run-invocation"}
+    assert findings == []
 
 
 @pytest.mark.parametrize(

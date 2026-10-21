@@ -35,6 +35,7 @@ from inspect_ranges._challenges.schema import (
     Challenge,
     ExecuteGoal,
     FlagGoal,
+    Goal,
     HijackGoal,
     JudgeGoal,
 )
@@ -397,12 +398,12 @@ class TestScorerGuardPins:
         assert metadata["validity"] == "valid"  # a crash flags, never invalidates
 
 
-def guard_challenge() -> Challenge:
-    """A single cheap-tier flag goal: enough to exercise every guard path."""
+def guard_challenge(goals: list[Goal] | None = None) -> Challenge:
+    """A scoring-ready challenge; defaults to a single cheap-tier flag goal."""
     return Challenge(
         id="c",
         prompt="p",
-        goals=[FlagGoal(id="f", host="box", path="/f")],
+        goals=goals or [FlagGoal(id="f", host="box", path="/f")],
     )
 
 
@@ -420,12 +421,12 @@ def guard_state(challenge: Challenge, *, completed: bool) -> TaskState:
 
 
 class TestInvocationGuard:
-    """`challenge_scorer()` is an end-of-run authority invoked at most once per sample: a mid-run invocation (react `attempts > 1`) returns the latched cheap-tier aggregate, a repeat invocation returns the recorded end-of-run score, and neither runs probers, corroboration, or patch exploit re-runs. No sandbox or oracle exists in these tests, so a guard miss fails loudly on the machinery it must not reach."""
+    """`challenge_scorer()` is an end-of-run authority with one supported mid-run entry point: a mid-run invocation (react `attempts > 1`) returns an intermediate verdict over the latched records, a repeat invocation returns the recorded end-of-run score, and neither runs probers, corroboration, or patch exploit re-runs. No sandbox or oracle exists in most of these tests, so a guard miss fails loudly on the machinery it must not reach."""
 
-    def test_mid_run_invocation_returns_latched_aggregate_without_machinery(
+    def test_mid_run_invocation_runs_no_machinery_and_logs_info(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """The mid-run guard aggregates the latches, names the attempts=1 guidance, writes no scored marker, and leaves the sample's poller and verification context running."""
+        """The supported mid-run path reads only the latches, logs at info (not warning: it is no longer misuse), writes no scored marker, and leaves the sample's poller and verification context running."""
 
         async def scenario() -> tuple[Score | None, str, bool, bool]:
             challenge = guard_challenge()
@@ -457,24 +458,131 @@ class TestInvocationGuard:
                 discard_verify_context(state.store)
             return result, str(tool_result), same_poller, marker_absent
 
-        with caplog.at_level(logging.WARNING, logger="inspect_ranges.challenges"):
+        with caplog.at_level(logging.INFO, logger="inspect_ranges.challenges"):
             result, tool_result, same_poller, marker_absent = asyncio.run(scenario())
         assert result is not None and result.value == 1.0
         metadata = result.metadata
         assert metadata is not None
         assert metadata["mid_run_invocation"] is True
+        assert metadata["intermediate"] is True
         assert metadata["validity"] == "indeterminate"
         assert metadata["achieved_count"] == 1
-        assert result.explanation is not None and "attempts=1" in result.explanation
-        assert same_poller, "the mid-run guard must not stop the sample's poller"
-        assert marker_absent, "a mid-run invocation must not arm the repeat guard"
+        assert result.explanation is not None
+        assert "intermediate verdict" in result.explanation
+        assert same_poller, "the mid-run path must not stop the sample's poller"
+        assert marker_absent, "an intermediate verdict must never arm the repeat guard"
         assert "Goal status:" in tool_result, "verification context must stay live"
-        [warning] = [
-            record.getMessage()
+        [record] = [
+            record
             for record in caplog.records
-            if "mid-run" in record.getMessage()
+            if "mid-run challenge_scorer() invocation" in record.getMessage()
         ]
-        assert "attempts=1" in warning
+        assert record.levelno == logging.INFO, "the supported path must not warn"
+
+    @pytest.mark.parametrize(
+        ("goals", "achieved_ids", "expected_value", "expected_pending"),
+        [
+            # mixed: the deferred hijack goal is excluded from the denominator
+            # and listed pending, so finishing the flag reads exactly 1.0 (the
+            # value react's attempt loop treats as correct)
+            pytest.param(
+                [
+                    FlagGoal(id="f", host="box", path="/f"),
+                    HijackGoal(id="h", host="box", service="svc"),
+                ],
+                {"f"},
+                1.0,
+                ["h"],
+                id="mixed-verifiable-achieved",
+            ),
+            pytest.param(
+                [
+                    FlagGoal(id="f", host="box", path="/f"),
+                    HijackGoal(id="h", host="box", service="svc"),
+                ],
+                set[str](),
+                0.0,
+                ["h"],
+                id="mixed-nothing-achieved",
+            ),
+            # verifiable-only: a plain fraction over the latched records
+            pytest.param(
+                [
+                    FlagGoal(id="a", host="box", path="/a"),
+                    FlagGoal(id="b", host="box", path="/b"),
+                ],
+                {"a"},
+                0.5,
+                [],
+                id="verifiable-only-half",
+            ),
+            pytest.param(
+                [
+                    FlagGoal(id="a", host="box", path="/a"),
+                    FlagGoal(id="b", host="box", path="/b"),
+                ],
+                {"a", "b"},
+                1.0,
+                [],
+                id="verifiable-only-all",
+            ),
+            # judge takes submissions, so it counts in the denominator even
+            # though only the end-of-run pass can verify it (the ratified
+            # uses_submissions line, deliberately not the cheap-tier allowlist)
+            pytest.param(
+                [
+                    FlagGoal(id="f", host="box", path="/f"),
+                    JudgeGoal(id="j", rubric="r"),
+                ],
+                {"f"},
+                0.5,
+                [],
+                id="judge-counts-verifiable",
+            ),
+            # deferred-only: zero verifiable goals reads 0.0 with the pending
+            # list (react burns its attempts and ends; the documented caveat)
+            pytest.param(
+                [HijackGoal(id="h", host="box", service="svc")],
+                set[str](),
+                0.0,
+                ["h"],
+                id="deferred-only-zero-denominator",
+            ),
+        ],
+    )
+    def test_mid_run_intermediate_verdict(
+        self,
+        goals: list[Goal],
+        achieved_ids: set[str],
+        expected_value: float,
+        expected_pending: list[str],
+    ) -> None:
+        """A mid-run invocation returns the fraction of verifiable (submission-taking) goals achieved, with the pending deferred ids in the metadata and nothing recorded as final."""
+
+        async def scenario() -> tuple[Score | None, bool]:
+            challenge = guard_challenge(goals)
+            state = guard_state(challenge, completed=False)
+            for goal_id in sorted(achieved_ids):
+                latch(
+                    state.store,
+                    goal_id,
+                    GoalResult(achieved=True, reason="latched mid-run"),
+                    assurance="host-anchored",
+                    primitive=None,
+                    elapsed_s=0.0,
+                )
+            result = await challenge_scorer()(state, Target(""))
+            return result, state.store.get(SCORED_STORE_KEY, None) is None
+
+        result, marker_absent = asyncio.run(scenario())
+        assert result is not None and result.value == expected_value
+        metadata = result.metadata
+        assert metadata is not None
+        assert metadata["mid_run_invocation"] is True
+        assert metadata["intermediate"] is True
+        assert metadata["pending_goals"] == expected_pending
+        assert metadata["validity"] == "indeterminate"
+        assert marker_absent, "an intermediate verdict must never arm the repeat guard"
 
     def test_repeat_invocation_returns_the_recorded_score(self) -> None:
         async def scenario() -> Score | None:
@@ -497,18 +605,22 @@ class TestInvocationGuard:
         assert metadata["validity"] == "valid"
         assert result.explanation is not None and "repeat" in result.explanation
 
-    def test_end_of_run_invocation_unchanged_then_repeat_guards(
+    def test_mid_then_end_then_repeat_ordering(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The legitimate single end-of-run invocation runs the full pass exactly as before (and records the repeat guard's marker); a second invocation returns the recorded score without re-entering the machinery (the oracle resolves exactly once)."""
+        """The react `attempts > 1` ordering contract: a mid-run invocation returns an intermediate verdict and records nothing, the end-of-run invocation runs the full pass exactly as before and records ITS verdict (never the intermediate), and a repeat returns the recorded score without re-entering the machinery (the oracle resolves exactly once across all three)."""
 
-        async def scenario() -> tuple[Score | None, Score | None, int]:
+        async def scenario() -> tuple[Score | None, Score | None, Score | None, int]:
             challenge = guard_challenge()
-            state = guard_state(challenge, completed=True)
+            state = guard_state(challenge, completed=False)
             oracle, _, _ = make_oracle(tmp_path, session=FakePlantSession())
             await oracle.store.record(
                 "flag:f", b"VAL-7b7b", goal_id="f", guest="box", path="/f"
             )
+            # the submission is recorded but never latched (no verify context,
+            # no poller), so the intermediate verdict reads 0.0 while the
+            # end-of-run pass verifies it to 1.0: the recorded score proves
+            # which invocation is the authority
             state.store.set(
                 SUBMISSIONS_STORE_KEY,
                 [{"goal_id": "f", "value": "VAL-7b7b", "wall": time.time()}],
@@ -523,22 +635,31 @@ class TestInvocationGuard:
 
             monkeypatch.setattr(scorer_module, "range_oracle", counting_range_oracle)
             scorer_fn = challenge_scorer()
-            first = await scorer_fn(state, Target(""))
-            second = await scorer_fn(state, Target(""))
-            return first, second, calls["oracle"]
+            mid = await scorer_fn(state, Target(""))
+            state.completed = True  # the task runner's end-of-sample flip
+            end = await scorer_fn(state, Target(""))
+            repeat = await scorer_fn(state, Target(""))
+            return mid, end, repeat, calls["oracle"]
 
-        first, second, oracle_calls = asyncio.run(scenario())
-        assert first is not None and first.value == 1.0
-        first_metadata = first.metadata
-        assert first_metadata is not None
-        assert first_metadata["validity"] == "valid"
-        assert "mid_run_invocation" not in first_metadata
-        assert "repeat_invocation" not in first_metadata
-        assert second is not None and second.value == 1.0
-        second_metadata = second.metadata
-        assert second_metadata is not None
-        assert second_metadata["repeat_invocation"] is True
-        assert oracle_calls == 1, "the repeat guard must not re-enter the machinery"
+        mid, end, repeat, oracle_calls = asyncio.run(scenario())
+        assert mid is not None and mid.value == 0.0
+        mid_metadata = mid.metadata
+        assert mid_metadata is not None and mid_metadata["intermediate"] is True
+        assert end is not None and end.value == 1.0
+        end_metadata = end.metadata
+        assert end_metadata is not None
+        assert end_metadata["validity"] == "valid"
+        assert "mid_run_invocation" not in end_metadata
+        assert "intermediate" not in end_metadata
+        assert "repeat_invocation" not in end_metadata
+        assert repeat is not None and repeat.value == 1.0
+        repeat_metadata = repeat.metadata
+        assert repeat_metadata is not None
+        assert repeat_metadata["repeat_invocation"] is True
+        assert "intermediate" not in repeat_metadata
+        assert oracle_calls == 1, (
+            "the mid-run path and the repeat guard must not enter the machinery"
+        )
 
 
 class TestHijackFloor:
