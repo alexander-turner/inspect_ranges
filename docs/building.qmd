@@ -1,6 +1,6 @@
 ---
 title: "Building Ranges"
-description: "Authoring a range from definition to verified images: the definition language pages, then the build command, recipe authoring, verification, and behavioral checks."
+description: "How a range definition becomes built, verified images. Covers the build command, writing recipes, verification, and behavioral checks."
 llms-description: "Overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
 ---
 

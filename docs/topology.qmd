@@ -1,6 +1,6 @@
 ---
 title: "Range Host"
-description: "Co-resident versus separated realization: the INSPECT_RANGES_HOST switch, the applier and reaper processes, the lease contract, what the isolation claim means, and the host-provider seam a future backend implements."
+description: "Running the range on the eval machine, or on a separate range host. Covers the applier, the reaper, and host leases."
 llms-description: "The range host: the local (co-resident) and uds (separated, applier-backed) backends behind INSPECT_RANGES_HOST; operating the applier and reaper processes; the lease contract including the expiry-mid-sample reclaim policy; the fetch-grants convention; the isolation claim; the HostProvider/RangeHost seam (acquire/release/abandon, check_lease, HostCapabilities) with its not-yet-public status and the contracts a future backend must honor; and the environment knob table."
 ---
 

@@ -1,6 +1,6 @@
 ---
 title: "Challenges"
-description: "Defining what an agent is asked to do on a range and how success is verified: challenges.yaml, the cost rule and its failure modes, the goal types and their proof contracts, goal verification, scoring, and the trust boundaries stated plainly."
+description: "Defining what an agent is asked to do on a range and how success is verified. Covers challenges.yaml, the built-in goal types, verification, and scoring."
 llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes), the verification cost rule with its four failure modes and three further rules, validity states, the built-in goal types with proof contracts and assurance labels, the verify_goal tool and its checklist, agent-loop guidance (react attempts=1, enforced; inspect_swe bridged_tools), the plant/poll/latch/corroborate scoring lifecycle, the foothold-only sandbox wall, custom goal types via register_goal_type, patch exploit registration, and the measure-first performance posture."
 ---
 

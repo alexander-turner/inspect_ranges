@@ -1,6 +1,6 @@
 ---
 title: "Security"
-description: "The containment model for untrusted agents: the threat model, the nested boundaries, the virtual machine monitors, the vsock control plane, network containment authority, build-time conformance proof, and the detection-over-prevention score integrity posture."
+description: "How untrusted agents stay contained while they attack the range. Covers the threat model, the layered boundaries, and how containment is proven."
 llms-description: "The security model: everything in-range is hostile; three nested boundaries (minimal-device VMs with per-guest unprivileged uids and a Cloud Hypervisor attack box, the unprivileged range container, a dedicated instance per sample); the VMM defaults and opt-ins (`vmm:`) with the Cloud Hypervisor planning refusals; the vsock-only control plane rules; the three network containment authorities; the build's conformance stage; detection-over-prevention score integrity via streamed evidence; topology and credential guidance."
 ---
 

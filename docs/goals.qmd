@@ -1,6 +1,6 @@
 ---
 title: "Custom Goals"
-description: "Creating new goal types: the GoalType contract (spec, setup, check, compare), the oracle surface, proof-design rules, assurance labels, testing, registration, and authoring the type in challenges.yaml."
+description: "Creating custom goal types with their own proof contracts. Covers the GoalType interface, the oracle, testing, and registration."
 llms-description: "How to implement a custom goal type for inspect_ranges challenges: the GoalType protocol and its proof-design rules (forgery cost, the residue rule, host-side compare), the RangeOracle and PlantStore surfaces, Observations and GoalResult semantics (partial, indeterminate, corroborated, latching), assurance labels and their scoring consequences, the GoalBase spec contract and ObserverKind exports, unit testing without VMs, the measure-first performance gate, register_goal_type and entry-point registration (which opens both scoring and YAML parsing), and the registration load-order requirement."
 ---
 

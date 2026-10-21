@@ -1,6 +1,6 @@
 ---
 title: "Guests"
-description: "The guest side of a range definition: hosts, images, resources, accounts, services, seeded weaknesses, defense, and Active Directory."
+description: "The guest side of a range definition: hosts, images, and the content they carry, from accounts and services to defense and Active Directory."
 llms-description: "Guest side of range.yaml: hosts, images, resources, routers, the attacker, guest content (users, services, weaknesses, planted data, defense, Active Directory, provisioning, scheduled activity, variables), and how configuration reaches a guest."
 ---
 

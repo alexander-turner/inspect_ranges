@@ -1,6 +1,6 @@
 ---
 title: "Images"
-description: "The operator's images guide: how names resolve, what the catalog publishes, and a recipe for each deployment shape (connected, mirrored, private registry, air gap, pinned fleet, offline)."
+description: "How images resolve and what the catalog publishes. A recipe for each deployment shape, from fully connected to air-gapped."
 llms-description: "Operator images guide: the resolution model (pin, then local cache, then the INSPECT_RANGES_REGISTRY search path ending at the public org; locations interchangeable across the hub org, a private OCI registry, and an OCI-layout directory; sticky names with explicit refresh; specs by git and artifacts by registry joined by the spec hash), the published catalog (attack image with its recorded manifest and zero-listener invariant, ubuntu-noble/focal goldens, daemon-bundle, the range container image) with the republish discipline, the published machine-readable catalog list (the reserved catalog ref), and per-shape recipes: connected default with hub rate limits, mirroring the catalog, a private registry for your own ranges, the air-gap directory, fleet pins with INSPECT_RANGES_PIN_FILE, INSPECT_RANGES_NEVER_PULL, the INSPECT_RANGES_RANGE_IMAGE digest pin, and self-derived goldens."
 ---
 

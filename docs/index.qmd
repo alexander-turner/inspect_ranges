@@ -1,6 +1,6 @@
 ---
 title: "Inspect Ranges"
-description: "Inspect AI framework for cyber range evaluations."
+description: "Inspect AI extension for cyber range evaluations."
 llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox), the SWE-agent variant (inspect_swe claude_code with bridged_tools), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
 ---
 

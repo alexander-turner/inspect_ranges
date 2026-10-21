@@ -1,6 +1,6 @@
 ---
 title: "Evidence"
-description: "What the range records outside every VM, where it streams, the tamper-evidence guarantee and its exact scope, and how to verify a record."
+description: "What the range records outside every VM and where it streams. Covers the tamper-evidence guarantee and how to verify a record."
 llms-description: "The evidence layer: per-segment pcap, consoles, stage and verification streams, and in-guest telemetry export captured outside every VM; the per-sample location beside the eval log; the hash-chained write-once format with its seal and the sample-store binding; gap and seal semantics; dual-clock records; inspect-ranges evidence verify including --expect-seal; deployment guidance for store-side prevention; the environment knob table."
 ---
 
