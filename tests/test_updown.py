@@ -1,6 +1,7 @@
 """`up`/`down` behavior through their public surfaces, with docker faked and real rendered bundles."""
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,12 @@ from inspect_ranges._runtime import (
     up,
     verify_bundle,
 )
-from inspect_ranges._runtime.ownership import StageLog, list_projects, read_owner
+from inspect_ranges._runtime.ownership import (
+    StageLog,
+    list_projects,
+    read_owner,
+    remove_project,
+)
 from inspect_ranges._runtime.up import boot_script
 from inspect_ranges.types import (
     Attacker,
@@ -961,3 +967,64 @@ def test_up_verifies_the_golden_to_vendor_edge(tmp_path: Path, cache: Path) -> N
         UpError, match=r"\[verify-images\].*vendor base.*not in the cache"
     ):
         up(out, options(cache, tmp_path / "gone"), runner=FakeDocker())
+
+
+def _sweep_remove_project(state: Path) -> None:
+    remove_project(state, "ir-tiny-raced")
+
+
+def _sweep_down(state: Path) -> None:
+    down("ir-tiny-raced", state_dir=state, runner=FakeDocker())
+
+
+@pytest.mark.parametrize(
+    "sweep",
+    [
+        pytest.param(_sweep_remove_project, id="remove_project"),
+        pytest.param(_sweep_down, id="down"),
+    ],
+)
+def test_stage_log_recreates_its_directory_after_concurrent_teardown(
+    tmp_path: Path, sweep: Callable[[Path], object]
+) -> None:
+    """The stages.jsonl race: teardown is process-independent by design, so a sweep from another process can remove a live project's state dir between stage writes; a later write recreates the directory and lands instead of crashing with FileNotFoundError."""
+    state = tmp_path / "state"
+    log = StageLog(state, "ir-tiny-raced")
+    log.log("verify-bundle", "ok")
+    sweep(state)  # raced FileNotFoundError here before recreate-on-write
+    log.log("range-container", "start")
+    log.log("range-container", "ok")
+    assert [(e["stage"], e["status"]) for e in log.events()] == [
+        ("range-container", "start"),
+        ("range-container", "ok"),
+    ]
+
+
+def test_up_keeps_logging_through_a_concurrent_sweep_mid_boot(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The realistic sequence behind the boot flake: another process's teardown sweep removes the booting project's state dir mid-up; up() keeps recording stages into a recreated directory and completes, instead of dying pre-readiness with FileNotFoundError on stages.jsonl."""
+    ready_probes(monkeypatch)
+    state = tmp_path / "state"
+    swept = False
+
+    def sweep_once(stage: str, status: str, fields: dict[str, Any]) -> None:
+        # fires right after the "guest-boot start" row lands, mid-boot
+        nonlocal swept
+        if not swept and stage == "guest-boot" and status == "start":
+            swept = True
+            down("ir-tiny-raced", state_dir=state, runner=FakeDocker())
+
+    result = up(
+        bundle,
+        options(cache, tmp_path, project="ir-tiny-raced"),
+        runner=FakeDocker(),
+        on_stage=sweep_once,
+    )
+    assert swept and result.project == "ir-tiny-raced"
+    transitions = [
+        (e["stage"], e["status"]) for e in StageLog(state, "ir-tiny-raced").events()
+    ]
+    # every post-sweep stage landed in the recreated log, through to ready
+    assert ("guest-boot", "ok") in transitions
+    assert transitions[-1] == ("ready", "ok")
