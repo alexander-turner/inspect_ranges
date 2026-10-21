@@ -1289,7 +1289,10 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
     # Windows addressing is baked statically into the per-boot unattend seed,
     # so a `dhcp: true` network hands leases to its Linux guests only: a
     # Windows guest on it is configured statically, which the author may not
-    # expect (the range still realizes correctly, hence a warning)
+    # expect (the range still realizes correctly, hence a warning). Hosts
+    # only: routers are addressed statically by design (they take the first
+    # usable addresses, and a Windows router refuses at planning anyway) and
+    # the attacker is Linux by construction (no `os` field to declare)
     for host_index, host in enumerate(spec.hosts):
         if host.os.type != "windows":
             continue
