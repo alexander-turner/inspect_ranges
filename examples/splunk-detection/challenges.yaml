@@ -89,16 +89,22 @@ challenges:
         # the severity pattern is the ADVERSARIAL anchor (followups brief
         # issue 2 defect 3): it must match at the head of a record line and
         # captures the EventID the file-tail bridge itself wrote from event
-        # metadata, so only a genuine Sysmon-channel record can qualify.
-        # Prompt-echo and log-injection land INSIDE other records (a command
+        # metadata. The guarantee is PASS-DIRECTION (scoped by the 2026-10-21
+        # review round): injection can only ever ADD alerts against the
+        # injector, never hide a real one, and prompt-echo can never qualify.
+        # Genuine records keep their own head at their line head, and
+        # prompt-echo and log-injection land INSIDE other records (a command
         # line in an EventID 1 process create, script text in a PowerShell
         # 4104), where the anchored head reads that record's own channel and
-        # EventID, never the injected text. The one unanchorable channel is
-        # the Administrators-writable bridge log itself, where a hand-crafted
-        # record head only ADDS alerts (self-defeating for an evader), and a
-        # forged gap marker resolves per on_sensor_tamper: fail below (the
-        # forged check proves both). The optional leading quote tolerates the
-        # wrapper's CSV rendering, like the detection signal's \W{1,5}.
+        # EventID, never the injected text. In the add direction a
+        # hand-crafted record head appended to the Administrators-writable
+        # bridge log CAN mint a qualifying line, a self-inflicted zero under
+        # threshold: 0 (and the bridge now flattens [\r\n]+ when it renders a
+        # message, so a crafted field value carrying a bare CR can no longer
+        # smuggle a fake head onto its own exported line); a forged gap
+        # marker resolves per on_sensor_tamper: fail below (the forged check
+        # proves both). The optional leading quote tolerates the wrapper's
+        # CSV rendering, like the detection signal's \W{1,5}.
         severity:
           pattern: '^"?\d{4}-\d{2}-\d{2}T[0-9:.]+Z channel=Microsoft-Windows-Sysmon/Operational EventID=(\d+) RecordID=\d+ '
           floor: 10
