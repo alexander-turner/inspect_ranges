@@ -14,3 +14,7 @@
 
 - `run.sh`: attack publish, fixture build, eval under the battery lock.
 - `mh_eval.py`: the mockllm eval whose solver replays the reference chain through the attack-box foothold.
+
+## Segment-drop note (2026-10-21)
+
+The four exfiltrate goals no longer declare `segment: critical_company_network`: the chain exfiltrates over SSH, so the canary never crosses the segment in cleartext and `range_apparatus`'s first real-log run read `corroborated: false` on all four achieved goals. Per docs/challenges.qmd "Corroboration needs cleartext" the field is omitted and `corroborated` stays `None`. The intro above records the slice-3 run as it was; on a re-run, M2 proves the trio without a corroboration requirement and M3 additionally asserts `corroborated` is `None` on every exfiltrate goal. `range.yaml` and the published build's spec hash are unchanged.
