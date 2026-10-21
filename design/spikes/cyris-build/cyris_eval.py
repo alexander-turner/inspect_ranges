@@ -1,6 +1,6 @@
 """linux-examples-v1 slice 2: the cyris-basic reference chains through a real eval.
 
-Four samples (one per challenge) boot the built range through the provider; each solver replays the matching reference script through the desktop foothold and feeds its SUBMIT lines to the challenge scorer. Expect every sample 1.0, validity `valid`, with the sandbox wall pinned on the first.
+Four samples (one per challenge) boot the built range through the provider; each solver replays the matching reference script through the desktop foothold and feeds its SUBMIT lines to the challenge scorer. Expect every sample 1.0, validity `valid`, a zero-finding `range_apparatus` score beside each, with the sandbox wall pinned on the first.
 
 Run (caches/env exported by run.sh): `uv run python cyris_eval.py <range-dir>`.
 """
@@ -20,6 +20,7 @@ from inspect_ranges._challenges.dataset import challenge_dataset
 from inspect_ranges._challenges.scorer import challenge_scorer
 from inspect_ranges._challenges.setup import challenge_setup
 from inspect_ranges._challenges.submission import SUBMISSIONS_STORE_KEY
+from inspect_ranges.scanners import range_apparatus
 
 RANGE_DIR = Path(sys.argv[1]).resolve()
 SPIKE = Path(__file__).parent
@@ -41,9 +42,14 @@ def chain_solver() -> Solver:
         state.metadata["foothold"] = (
             (await sandbox().exec(["hostname"])).stdout.strip()
         )
-        state.metadata["wall"] = (
-            (await sandbox("webserver").exec(["hostname"])).stdout.strip()
-        )
+        # inspect-ai 0.3.282 dropped the single-environment fallback: an
+        # unregistered sandbox name refuses with ValueError (the stronger
+        # wall) instead of silently returning the foothold.
+        try:
+            await sandbox("webserver").exec(["hostname"])
+            state.metadata["wall"] = "crossed"
+        except ValueError:
+            state.metadata["wall"] = "refused"
         script = (
             RANGE_DIR / "checks" / challenge_id / "reference.sh"
         ).read_text()
@@ -75,7 +81,7 @@ def main() -> int:
             str(RANGE_DIR / "challenges.yaml"), str(RANGE_DIR / "range.yaml")
         ),
         solver=[challenge_setup(), chain_solver()],
-        scorer=challenge_scorer(),
+        scorer=[challenge_scorer(), range_apparatus()],
         sandbox=("range", str(RANGE_DIR / "range.yaml")),
     )
     started = time.monotonic()
@@ -95,9 +101,10 @@ def main() -> int:
         error = getattr(sample, "error", None)
         meta: dict[str, Any] = sample.metadata or {}
         scores = sample.scores or {}
-        score = next(iter(scores.values()), None)
+        score = scores.get("challenge_scorer")
         value = getattr(score, "value", None)
         validity = (getattr(score, "metadata", None) or {}).get("validity")
+        apparatus = scores.get("range_apparatus")
         check(
             error is None and meta.get("chain_rc") == 0,
             f"{sample_id}: chain clean (error={error}, rc={meta.get('chain_rc')}, "
@@ -108,7 +115,13 @@ def main() -> int:
             f"{sample_id}: scores 1.0 valid (got {value!r}, {validity!r})",
         )
         check(
-            meta.get("foothold") == "desktop" and meta.get("wall") == "desktop",
+            apparatus is not None and apparatus.value == 0,
+            f"{sample_id}: range_apparatus aboard with zero findings (got "
+            f"{getattr(apparatus, 'value', None)!r}, explanation: "
+            f"{getattr(apparatus, 'explanation', None)!r})",
+        )
+        check(
+            meta.get("foothold") == "desktop" and meta.get("wall") == "refused",
             f"{sample_id}: the foothold wall held (foothold={meta.get('foothold')!r}, "
             f"wall={meta.get('wall')!r})",
         )
