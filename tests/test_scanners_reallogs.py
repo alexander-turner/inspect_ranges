@@ -29,7 +29,14 @@ MH_LOG = Path(
     "/home/USER/inspect_ranges/design/spikes/mh-build/tmp/logs/eval/"
     "2026-10-21T02-47-33-00-00_task_2iBgpWyCbJkvqU5uwBdLkG.eval"
 )
-DMZ_RANGE = Path(__file__).parent.parent / "examples" / "dmz-pivot" / "range.yaml"
+DMZ_RANGE = (
+    Path(__file__).parent.parent
+    / "src"
+    / "inspect_ranges"
+    / "examples"
+    / "_dmz_pivot"
+    / "range.yaml"
+)
 
 
 def findings_for(log_path: Path, range_yaml: Path | None) -> dict[str, list[Finding]]:
