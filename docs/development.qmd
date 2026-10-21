@@ -46,3 +46,25 @@ ssh inspect-ranges-devbox
 4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Operations](cli.qmd)). There is no CLI shell into a live guest; the supported way to run ad-hoc commands in guests is a one-sample eval with `INSPECT_RANGES_REGISTER_ALL_GUESTS=1`, which registers every guest as a named sandbox so solver code can call `sandbox("<guest>").exec(...)` directly; it removes the foothold wall (normally only the attacker's foothold is registered as a sandbox, so solver code cannot address targets directly; see [Challenges](challenges.qmd#scoring-lifecycle)) and is logged loudly, so never set it on scoring runs.
 
 5. **Smoke eval.** Run the real consumption path early: a one-sample task through the `range` sandbox provider ([Range Sandbox](provider.qmd), with the [Range Tasks](index.qmd#range-tasks) wiring) catches registration and readiness issues that direct booting cannot show.
+
+6. **Scan the apparatus.** [range_apparatus](reference/scanners.qmd#range_apparatus) is a deterministic checker for the range plumbing itself: post-readiness channel failures, spec-contradicting reachability, `verify_goal` wiring trouble, and scoring-integrity flags, each with a remediation hint. Run it online by adding it to the smoke eval's scorer list, where findings land beside the challenge score in the normal log view:
+
+   ```python
+   from inspect_ranges import challenge_scorer
+   from inspect_ranges.scanners import range_apparatus
+   from inspect_scout import as_scorer
+
+   scorer = [
+       challenge_scorer(),
+       as_scorer(range_apparatus(range_spec="range.yaml")),
+   ]
+   ```
+
+   Or scan finished logs after the fact:
+
+   ```bash
+   scout scan inspect_ranges/range_apparatus \
+       -S range_spec=range.yaml -T ./logs
+   ```
+
+   The score value is the finding count, so a healthy range reads `0` with explanation `no findings`. A finding reads like `[warning] reachability/declared-unreachable: 10.80.20.10 is declared reachable from the foothold but tool output shows 'no route to host'`, followed by its hint; the structured findings (detector id, severity, message, hint, event references) ride the score metadata.
