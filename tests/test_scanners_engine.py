@@ -554,3 +554,34 @@ def test_scanner_result_shape() -> None:
     assert findings[0]["detector"] == "verify-goal/zero-submissions"
     assert dirty.explanation is not None
     assert "verify-goal/zero-submissions" in dirty.explanation
+
+
+def test_metadata_spec_arms_the_config_detectors() -> None:
+    """A sample whose metadata carries the range definition (written by `challenge_dataset(range_spec=...)`) arms the config-aware detectors; unparseable metadata text disarms quietly."""
+    import yaml as _yaml
+    from inspect_ranges._metadata import RANGE_SPEC_METADATA_KEY
+
+    spec = spec_two_segments()
+    spec_yaml = _yaml.safe_dump(
+        spec.model_dump(mode="json", exclude_none=True), sort_keys=False
+    )
+    phantom = exec_event("nc 192.168.77.5 445")
+
+    def transcript(tid: str, spec_text: str) -> Transcript:
+        return Transcript(
+            transcript_id=tid,
+            metadata={"sample_metadata": {RANGE_SPEC_METADATA_KEY: spec_text}},
+            messages=[],
+            events=[phantom],
+        )
+
+    async def run() -> tuple[Any, Any]:
+        bare = range_apparatus()
+        armed = await bare(transcript("m1", spec_yaml))
+        garbage = await bare(transcript("m2", ":\nnot yaml ["))
+        return armed, garbage
+
+    armed, garbage = asyncio.run(run())
+    assert isinstance(armed, Result) and armed.value == 1
+    assert "phantom-address" in (armed.explanation or "")
+    assert isinstance(garbage, Result) and garbage.value == 0

@@ -7,9 +7,10 @@ Every challenge gets a standard verification paragraph appended to the prompt, n
 
 from pathlib import Path
 
+import yaml
 from inspect_ai.dataset import Dataset, MemoryDataset, Sample
 
-from .._metadata import PROBE_SEGMENTS_METADATA_KEY
+from .._metadata import PROBE_SEGMENTS_METADATA_KEY, RANGE_SPEC_METADATA_KEY
 from ..schema import load_range
 from ..types import IssueError, RangeSpec
 from .schema import Challenge, Challenges, challenge_issues, load_challenges
@@ -82,8 +83,15 @@ def challenge_dataset(
     if not isinstance(challenges, Challenges):
         location = str(challenges)
         challenges = load_challenges(Path(challenges))
+    range_spec_text: str | None = None
     if range_spec is not None:
-        if not isinstance(range_spec, RangeSpec):
+        if isinstance(range_spec, RangeSpec):
+            range_spec_text = yaml.safe_dump(
+                range_spec.model_dump(mode="json", exclude_none=True),
+                sort_keys=False,
+            )
+        else:
+            range_spec_text = Path(range_spec).read_text()
             range_spec = load_range(Path(range_spec))
         errors = [
             issue
@@ -97,6 +105,8 @@ def challenge_dataset(
         metadata: dict[str, object] = {
             CHALLENGE_METADATA_KEY: challenge.model_dump(mode="json", exclude_none=True)
         }
+        if range_spec_text is not None:
+            metadata[RANGE_SPEC_METADATA_KEY] = range_spec_text
         if isinstance(range_spec, RangeSpec):
             segments = _probe_segments(challenge, range_spec)
             if segments:

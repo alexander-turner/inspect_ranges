@@ -7,7 +7,7 @@ import yaml
 from inspect_ranges import challenge_dataset
 from inspect_ranges._challenges import Challenge, Challenges
 from inspect_ranges._challenges.dataset import CHALLENGE_METADATA_KEY
-from inspect_ranges.types import IssueError
+from inspect_ranges.types import IssueError, RangeSpec
 
 from .test_challenges_schema import challenge_with, fixture_spec
 
@@ -113,3 +113,28 @@ def test_dataset_refuses_cross_reference_errors() -> None:
 def test_dataset_accepts_valid_range() -> None:
     dataset = challenge_dataset(two_challenges(), range_spec=fixture_spec())
     assert len(dataset) == 2
+
+
+def test_dataset_carries_the_range_spec_text() -> None:
+    """`challenge_dataset(range_spec=<path>)` writes the file's verbatim text into each sample's metadata; a typed spec serializes; omitting `range_spec` writes nothing."""
+    from inspect_ranges._metadata import RANGE_SPEC_METADATA_KEY
+    from inspect_ranges.schema import load_range
+
+    dmz = (
+        Path(__file__).parent.parent
+        / "src"
+        / "inspect_ranges"
+        / "examples"
+        / "_dmz_pivot"
+    )
+    by_path = challenge_dataset(dmz / "challenges.yaml", range_spec=dmz / "range.yaml")
+    carried = (by_path[0].metadata or {})[RANGE_SPEC_METADATA_KEY]
+    assert carried == (dmz / "range.yaml").read_text()
+
+    spec = load_range(dmz / "range.yaml")
+    by_spec = challenge_dataset(dmz / "challenges.yaml", range_spec=spec)
+    serialized = (by_spec[0].metadata or {})[RANGE_SPEC_METADATA_KEY]
+    assert RangeSpec.model_validate(yaml.safe_load(serialized)) == spec
+
+    bare = challenge_dataset(dmz / "challenges.yaml")
+    assert RANGE_SPEC_METADATA_KEY not in (bare[0].metadata or {})

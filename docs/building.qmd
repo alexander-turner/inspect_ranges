@@ -45,7 +45,7 @@ ssh inspect-ranges-devbox
 
 ## Iteration Loop
 
-Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. The steps below walk it against [dmz_pivot](examples/dmz_pivot.md), the smallest built example; in the repository it lives at `src/inspect_ranges/examples/_dmz_pivot`, and the same loop applies unchanged to a range directory of your own.
+Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. The steps below walk it against [dmz_pivot](examples/dmz_pivot.md), the smallest built example; the same loop applies to your own range directory.
 
 1. **Validate.**
 
@@ -69,19 +69,14 @@ Range development is a loop: edit the definition and recipes, validate, build, p
    ```python
    from inspect_ranges import challenge_scorer
    from inspect_ranges.scanners import range_apparatus
-   from inspect_scout import as_scorer
 
-   scorer = [
-       challenge_scorer(),
-       as_scorer(range_apparatus(range_spec="range.yaml")),
-   ]
+   scorer = [challenge_scorer(), range_apparatus()]
    ```
 
    Or scan finished logs after the fact:
 
    ```bash
-   scout scan inspect_ranges/range_apparatus \
-       -S range_spec=range.yaml -T ./logs
+   scout scan inspect_ranges/range_apparatus -T ./logs
    ```
 
    The score value is the finding count, so a healthy range reads `0` with explanation `no findings`. A finding reads like `[warning] reachability/declared-unreachable: 10.80.20.10 is declared reachable from the foothold but tool output shows 'no route to host'`, followed by its hint; the structured findings (detector id, severity, message, hint, event references) ride the score metadata.

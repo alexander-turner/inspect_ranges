@@ -15,7 +15,7 @@ from inspect_ai.log import read_eval_log
 from inspect_ranges._scanners.engine import Finding, apparatus_findings
 from inspect_ranges.scanners import range_apparatus
 from inspect_ranges.schema import load_range
-from inspect_scout import as_scorer, scan, scan_results_df, transcripts_from
+from inspect_scout import scan, scan_results_df, transcripts_from
 
 DMZ_LOG = Path(
     "/tmp/publish-day/logs/dmz-eval/"
@@ -93,7 +93,7 @@ def test_mh_log_fires_the_uncorroborated_segments_hint() -> None:
 def test_scout_scan_over_the_green_log_reads_zero(tmp_path: Path) -> None:
     """The native after-the-fact path: scout's eval-log loader feeds the same engine and reads zero findings."""
     status = scan(
-        [range_apparatus(range_spec=DMZ_RANGE)],
+        [range_apparatus()],
         transcripts_from(str(DMZ_LOG)),
         scans=str(tmp_path),
         display="none",
@@ -107,11 +107,11 @@ def test_scout_scan_over_the_green_log_reads_zero(tmp_path: Path) -> None:
     assert list(frame["explanation"]) == ["no findings"]  # pyright: ignore[reportUnknownArgumentType]
 
 
-def test_as_scorer_runs_online(tmp_path: Path) -> None:
-    """The online seam: the scanner rides the scorer list through `as_scorer` and lands a 0/no-findings score on a healthy mockllm sample."""
+def test_scanner_rides_the_scorer_list_directly(tmp_path: Path) -> None:
+    """The online seam: the scanner sits directly in the scorer list (no adapter) and lands a 0/no-findings score on a healthy mockllm sample."""
     task = Task(
         dataset=[Sample(input="say hi", target="hi")],
-        scorer=as_scorer(range_apparatus()),
+        scorer=[range_apparatus()],
     )
     log = inspect_eval(
         task, model="mockllm/model", display="none", log_dir=str(tmp_path)
