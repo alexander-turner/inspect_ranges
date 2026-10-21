@@ -2,10 +2,13 @@
 # Reference: the Equifax-shaped chain, exercised for real from the attacker.
 # CVE-2017-5638 (the Content-Type OGNL injection against the struts2-showcase
 # on webserver_0) yields execution as tomcat; tomcat's planted pivot key
-# reaches every database user; each canary is read AND beaconed in cleartext
-# UDP from the DATABASE across the critical segment (source-bound pcap
-# corroboration), then volume is pushed across the segment so the beacons
-# land in a harvested capture chunk. Must score 1.0, every goal corroborated.
+# reaches every database user; each canary is read over SSH and SUBMITted.
+# Must score 1.0 valid. The goals declare no `segment` (2026-10-21): the
+# chain's exfil transport is SSH, so the canary never crosses the critical
+# segment in cleartext and `corroborated` stays `None` (docs/challenges.qmd
+# "Corroboration needs cleartext"). The cleartext UDP beacon and the volume
+# push below predate that drop and are kept as realistic segment traffic;
+# nothing asserts on them any more.
 # The OGNL payload also lives in recipes/mh.webserver/payload/struts_probe.sh
 # and the sibling check scripts; change one, keep the others in step.
 set -euo pipefail

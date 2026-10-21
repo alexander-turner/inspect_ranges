@@ -7,7 +7,9 @@
 # webservers with the CVE-2017-5638 OGNL probe asserted live in-recipe, the
 # pivot key on webserver_0, four database hosts authorizing it); the
 # behavioral trio proves the Equifax chain; and a real inspect eval scores
-# 1.0 coverage with pcap corroboration on the critical segment.
+# 1.0 coverage, valid, with `corroborated` None on every exfiltrate goal
+# (the goals declare no `segment` since 2026-10-21: the exfil transport is
+# SSH-encrypted, so capture can never corroborate it).
 # Usage: ./run.sh [down]. CID band 4130.
 set -euo pipefail
 cd "$(dirname "$0")"
