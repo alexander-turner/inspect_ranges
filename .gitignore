@@ -231,3 +231,8 @@ src/inspect_ranges/_version.py
 *.pdf
 /.quarto/
 **/*.quarto_ipynb
+
+# quarto preview output written in place under docs/
+docs/**/*.html
+docs/site_libs/
+docs/**/*_files/
