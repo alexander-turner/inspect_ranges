@@ -18,7 +18,7 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 ## Getting Started
 
-To get started, ensure you are running on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](development.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
+To get started, ensure you are running on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](building.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
 
 ```{.bash filename="Terminal"}
 # install and configure host

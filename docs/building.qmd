@@ -1,7 +1,7 @@
 ---
 title: "Building Ranges"
-description: "How a range definition becomes built, verified images. Covers the build command, writing recipes, verification, and behavioral checks."
-llms-description: "Overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
+description: "Developing and building ranges. Covers the development machine, the iteration loop, the build command, writing recipes, verification, and behavioral checks."
+llms-description: "Range development and the build. The dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM, verified by doctor) and the iteration loop walked against dmz_pivot (validate incl. sibling challenges.yaml, plan, build with --keep/--reverify/--cid-base, interactive boot via up --from-spec with INSPECT_RANGES_REGISTER_ALL_GUESTS, smoke eval). Plus the overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
 ---
 
 ## Overview
@@ -14,7 +14,55 @@ A definition (`range.yaml`, or a typed `RangeSpec` in Python) declares the netwo
 
 - [Networks](networks.qmd): addressing, DHCP, name resolution, segmentation, firewall rules, routing topology, and egress.
 
-This page covers the build: how declared guest content becomes captured, verified images. For what happens after a build (rendering, booting, running evals), see [Operations](cli.qmd).
+This page covers the machine development runs on, the iteration loop, and the build: how declared guest content becomes captured, verified images. For what happens after a build in production, see [Operations](cli.qmd).
+
+## Development Machine
+
+Ranges build and run on any Linux x86_64 machine with KVM: bare metal with virtualization enabled in firmware, or a VM with nested virtualization. Beyond KVM, the requirements:
+
+- Docker Engine 24+ with the Compose plugin (2.22+) and cgroup v2.
+
+- Kernel modules `tun`, `vhost_net`, and `vhost_vsock`.
+
+- `qemu-utils` and `libguestfs-tools` for building images (libguestfs also requires that the host kernel be readable).
+
+- `br_netfilter` unloaded, or loaded with `bridge-nf-call-iptables=0`, so host iptables never filters bridged range traffic.
+
+- IPv6 enabled. This one is forward-looking only: IPv6 is not realized yet (every IPv6 construct in a definition refuses validation with `ipv6-not-realized`), so no current range needs it; `doctor` checks it ahead of future mitm6-style scenarios.
+
+`inspect-ranges doctor` verifies all of this and prints an exact fix for anything missing.
+
+### `devbox`
+
+The `devbox` command provisions a remote EC2 instance as a development environment:
+
+``` {.bash filename="Terminal"}
+inspect-ranges devbox up --instance-type m8i.8xlarge
+ssh inspect-ranges-devbox
+```
+
+`up` creates (or starts) a devbox and writes an SSH configuration for it. The default AWS region and profile come from the local AWS configuration; the default instance type is `m8i.8xlarge` (32 vCPUs / 128 GB). To manage costs, an idle devbox stops itself (after 60 idle minutes by default, with a CloudWatch backstop after 6 hours of low CPU). Reconnecting with `ssh` or VS Code starts it again: the SSH configuration's proxy starts the instance and tunnels over AWS SSM, so the devbox has no open inbound ports.
+
+## Iteration Loop
+
+Range development is a loop: edit the definition and recipes, validate, build, poke at the booted range, run a smoke eval. The steps below walk it against [dmz_pivot](examples/dmz_pivot.md), the smallest built example; in the repository it lives at `src/inspect_ranges/examples/_dmz_pivot`, and the same loop applies unchanged to a range directory of your own.
+
+1. **Validate.**
+
+   ``` {.bash filename="Terminal"}
+   cd src/inspect_ranges/examples/_dmz_pivot
+   inspect-ranges validate range.yaml
+   ```
+
+   `validate` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)), and validates the `challenges.yaml` beside the spec too, cross-referenced against the range, so a dangling goal host surfaces here instead of at build time.
+
+2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot. For a range declaring guest content (dmz_pivot does), `plan` refuses with `range-not-built` until a matching build exists, so on a first authoring pass it slots after `build`; it works immediately for topology-only ranges.
+
+3. **Build.** `inspect-ranges build` realizes the declared guest content: for dmz_pivot, two guests provisioned over the published golden and three challenge trios proven, a few minutes on a warm image cache. The stage lines to expect are in [Reading Build Output](#reading-build-output). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. When a stage goes red, start at [Diagnosing Failures](#diagnosing-failures).
+
+4. **Boot and poke.** `inspect-ranges up --from-spec range.yaml` boots the built range directly, and `inspect-ranges down <project>` tears it down ([Operations](cli.qmd)). There is no CLI shell into a live guest; the supported way to run ad-hoc commands in guests is a one-sample eval with `INSPECT_RANGES_REGISTER_ALL_GUESTS=1`, which registers every guest as a named sandbox so solver code can call `sandbox("<guest>").exec(...)` directly; it removes the foothold wall (normally only the attacker's foothold is registered as a sandbox, so solver code cannot address targets directly; see [Challenges](challenges.qmd#scoring-lifecycle)) and is logged loudly, so never set it on scoring runs.
+
+5. **Smoke eval.** Run the real consumption path early: `inspect eval inspect_ranges/dmz_pivot` runs the shipped task through the `range` sandbox provider, and your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider). A one-sample smoke catches registration and readiness issues that direct booting cannot show.
 
 ## Range Build
 
