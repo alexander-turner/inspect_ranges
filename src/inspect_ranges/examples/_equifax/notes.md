@@ -10,7 +10,7 @@ timestamp: 2026-09-30
 
 *Status: translated requirements fixture. `range.yaml` validates against schema v0.3 and preserves upstream semantics; it has not been built or booted as a VM range (images are logical references, provisioning is deferred). Promotion to a runnable range requires the build pipeline and behavioral verification.*
 
-Translation of MHBench's `equifax_small` topology (repo `github.com/bsinger98/MHBench`, MIT, cloned 2026-09-30; companion paper arXiv:2501.16466). **The full MHBench repo is public**, including all 40 network definitions: 10 hand-designed under `src/environments/terraform/topologies/` + specs, 30 generated as JSON under `src/environments/generated/` (corpus assessment in [../../survey.md](../../survey.md) §1a).
+Translation of MHBench's `equifax_small` topology (repo `github.com/bsinger98/MHBench`, MIT, cloned 2026-09-30; companion paper arXiv:2501.16466). **The full MHBench repo is public**, including all 40 network definitions: 10 hand-designed under `src/environments/terraform/topologies/` + specs, 30 generated as JSON under `src/environments/generated/` (corpus assessment in [survey.md](../../../../design/inspect-ranges/survey.md) §1a).
 
 ## Where each fact comes from (all files vendored in `upstream/`)
 
@@ -39,9 +39,9 @@ Translation of MHBench's `equifax_small` topology (repo `github.com/bsinger98/MH
 
 ## What this example exercises in the schema
 
-Multi-subnet segmentation with **asymmetric per-subnet ACLs** (open DMZ, restricted corporate), `count:` host expansion with sequential static IPs, a planted credential-reuse path kept distinct from the exploitable entry vuln (the exploitable-vs-misconfiguration split), a management plane that must be declared but excluded from play, and a machine-readable planted attack path (L5 — see [../../range-yaml-swag.md](../../range-yaml-swag.md) §0 and §3).
+Multi-subnet segmentation with **asymmetric per-subnet ACLs** (open DMZ, restricted corporate), `count:` host expansion with sequential static IPs, a planted credential-reuse path kept distinct from the exploitable entry vuln (the exploitable-vs-misconfiguration split), a management plane that must be declared but excluded from play, and a machine-readable planted attack path (L5 — see [range-yaml-swag.md](../../../../design/inspect-ranges/range-yaml-swag.md) §0 and §3).
 
-> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../schema-v0.1-scope.md).
+> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../../../design/inspect-ranges/schema-v0.1-scope.md).
 
 
 ## Realized (2026-10-19, linux-examples-v1 slice 3)

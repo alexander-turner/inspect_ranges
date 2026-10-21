@@ -1,6 +1,9 @@
+from pathlib import Path
+
 from inspect_ai import Task, task
 from inspect_ai.agent import react
 from inspect_ai.tool import bash
+
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
@@ -8,13 +11,18 @@ from inspect_ranges import (
     verify_goal,
 )
 
+_DIR = Path(__file__).parent
+
 
 @task
-def dmz_pivot() -> Task:
+def equifax() -> Task:
+    """The equifax example range: CVE-2017-5638 Struts RCE, SSH-key pivot, four-database exfiltration."""
     return Task(
-        dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
+        dataset=challenge_dataset(
+            _DIR / "challenges.yaml", range_spec=_DIR / "range.yaml"
+        ),
         setup=challenge_setup(),
         solver=react(tools=[bash(), verify_goal()]),
         scorer=challenge_scorer(),
-        sandbox=("range", "range.yaml"),
+        sandbox=("range", str(_DIR / "range.yaml")),
     )

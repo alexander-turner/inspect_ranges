@@ -8,7 +8,7 @@ timestamp: 2026-09-30
 
 # goad-light — source note
 
-*Status: translated requirements fixture, now partially exercised: the [goad-forest spike](../../design/spikes/goad-forest/README.md) (2026-10-04) derived its build plan from this `range.yaml` (hosts, addressing, FQDN-derived forest shape, DNS chain) and built the two-domain forest end to end, verified by cross-domain auth and in-zone Linux resolution. Superseded (windows-ad-v1 slice 4): the fixture now BUILDS, VERIFIES, and SOLVES on the production pipeline — see the Realized addendum below.*
+*Status: translated requirements fixture, now partially exercised: the [goad-forest spike](../../../../design/spikes/goad-forest/README.md) (2026-10-04) derived its build plan from this `range.yaml` (hosts, addressing, FQDN-derived forest shape, DNS chain) and built the two-domain forest end to end, verified by cross-domain auth and in-zone Linux resolution. Superseded (windows-ad-v1 slice 4): the fixture now BUILDS, VERIFIES, and SOLVES on the production pipeline — see the Realized addendum below.*
 
 Translation of GOAD-Light from `github.com/Orange-Cyberdefense/GOAD` (`ad/GOAD-Light/`, GPL-3.0, cloned 2026-09-30). This is the testbed behind the cochise autonomous-AD-pentest evaluation (arXiv:2502.04227, ACM TOSEM — that paper used full GOADv3; Light is the 3-VM variant). It is the example that forces AD realities into the format: static DC addressing, AD-integrated DNS chains, identity data (users/groups/ACLs/SPNs) as first-class configuration, and per-host defender toggles.
 
@@ -29,7 +29,7 @@ Translation of GOAD-Light from `github.com/Orange-Cyberdefense/GOAD` (`ad/GOAD-L
 - `goals:` — GOAD defines no scoring; domain-admin objectives follow the assumed-breach framing of the cochise evaluation (arXiv:2502.04227).
 - `attacker:` — GOAD ships no attacker VM; assumed-breach Kali on the lab subnet is the standard usage.
 - `attack_path:` — GOAD seeds many paths by design; the listed one is a canonical example, each edge traceable to a seeded vuln. Not a unique solution.
-- `defense.tier: D4` is our classification (real Defender, autonomous), per the D0–D5 spectrum in [range-yaml-swag.md](../../design/inspect-ranges/range-yaml-swag.md) §0.
+- `defense.tier: D4` is our classification (real Defender, autonomous), per the D0–D5 spectrum in [range-yaml-swag.md](../../../../design/inspect-ranges/range-yaml-swag.md) §0.
 
 ## To-verify
 
@@ -45,7 +45,7 @@ GOAD is GPL-3.0. `upstream/` files are verbatim copies for provenance (GPL permi
 
 An `active_directory:` block (domains, trust shape, identity data), **static addressing + authoritative DNS chain** as hard constraints, per-host **defender toggles** (D1↔D4 within one range), **scheduled bot activity** (dc02's scripts), vulns expressed as **named roles with variables** rather than CVEs, and the Kerberos **clock-sync lifecycle constraint** (snapshot/resume clock skew produces auth failures that masquerade as agent failure).
 
-> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../design/inspect-ranges/schema-v0.1-scope.md).
+> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../../../design/inspect-ranges/schema-v0.1-scope.md).
 
 ## Realized (2026-10-19, windows-ad-v1 slice 4)
 

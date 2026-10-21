@@ -1,4 +1,6 @@
-# vulhub-zabbix
+# vulhub_zabbix
+
+Range name: `vulhub-zabbix`.
 
 A four-host Zabbix 3.0.3 monitoring stack (web UI, Zabbix server, Zabbix agent, MySQL) on one flat network: the smallest and fastest example, with a real public CVE as the entry point. It is a faithful translation of [Vulhub](https://github.com/vulhub/vulhub)'s `zabbix/CVE-2016-10134` environment (MIT), re-expressed substrate-agnostically: upstream is docker-compose, while here recipes compile Zabbix 3.0.3 from the canonical source tarball onto the catalog goldens.
 
@@ -15,10 +17,12 @@ One challenge, `zabbix-rce`, with two `execute` goals (one per compromisable hos
 ## Build and run
 
 ```bash
-cd examples/vulhub-zabbix
+cd src/inspect_ranges/examples/_vulhub_zabbix
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/vulhub_zabbix --model <model>
 ```
+
+The shipped task's wiring (what you would write beside your own `range.yaml`):
 
 ```python
 from inspect_ai import Task, task

@@ -37,9 +37,9 @@ Translation of the KYPO Cyber Range Platform demo sandbox definition (`gitlab.ic
 
 ## What this example exercises in the schema
 
-Explicit **router as first-class object** with per-network gateway IPs, **CIDR + static-IP mappings** (KYPO's `net_mappings`/`router_mappings` — adopted nearly verbatim), a **user-accessibility flag** on networks (which networks the agent may attach to), and a **per-instance randomization layer** (`variables:`) — the smallest working precedent for the generation-policy layer (L2 in [../../range-yaml-swag.md](../../range-yaml-swag.md) §0).
+Explicit **router as first-class object** with per-network gateway IPs, **CIDR + static-IP mappings** (KYPO's `net_mappings`/`router_mappings` — adopted nearly verbatim), a **user-accessibility flag** on networks (which networks the agent may attach to), and a **per-instance randomization layer** (`variables:`) — the smallest working precedent for the generation-policy layer (L2 in [range-yaml-swag.md](../../../../design/inspect-ranges/range-yaml-swag.md) §0).
 
-> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../schema-v0.1-scope.md).
+> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../../../design/inspect-ranges/schema-v0.1-scope.md).
 
 
 ## Realized (2026-10-19, linux-examples-v1 slice 1)

@@ -6,14 +6,17 @@ import yaml
 from inspect_ranges.schema import RangeSpec, load_range, range_json_schema
 from pydantic import ValidationError
 
-# built examples graduate from design/inspect-ranges/ranges/ to examples/
-# (vulhub-zabbix first, 2026-10-18); both tiers must keep validating
+# built examples graduate from design/inspect-ranges/ranges/ to
+# src/inspect_ranges/examples/ (vulhub-zabbix first, 2026-10-18); both tiers
+# must keep validating
 EXAMPLES = sorted(
     [
         *(Path(__file__).parent.parent / "design/inspect-ranges/ranges").glob(
             "*/range.yaml"
         ),
-        *(Path(__file__).parent.parent / "examples").glob("*/range.yaml"),
+        *(Path(__file__).parent.parent / "src/inspect_ranges/examples").glob(
+            "*/range.yaml"
+        ),
     ]
 )
 

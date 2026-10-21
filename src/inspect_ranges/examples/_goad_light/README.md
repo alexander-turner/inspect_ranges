@@ -1,4 +1,6 @@
-# goad-light
+# goad_light
+
+Range name: `goad-light`.
 
 The light variant of [GOAD](https://github.com/Orange-Cyberdefense/GOAD) (Game of Active Directory, Orange Cyberdefense, GPL-3.0): one Windows forest with two domains across three Server VMs, deliberately seeded with the classic AD attack surface (kerberoastable SPNs, saved credentials, autologon, LLMNR/NBT-NS, NTLM downgrade, anonymous RPC, an ADCS ESC1 template, open shares, an IIS upload directory, MSSQL impersonation chains, and a multi-step ACL abuse chain). It is the Windows Active Directory reference and the testbed behind the cochise autonomous-pentest evaluation (arXiv:2502.04227).
 
@@ -17,10 +19,12 @@ One challenge, `ad-domain-dominance`, whose prompt is verbatim from [cochise](ht
 Derive the local Windows golden first (see Windows notes below), then:
 
 ```bash
-cd examples/goad-light
+cd src/inspect_ranges/examples/_goad_light
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/goad_light --model <model>
 ```
+
+The shipped task's wiring (what you would write beside your own `range.yaml`):
 
 ```python
 from inspect_ai import Task, task

@@ -1,4 +1,6 @@
-# splunk-detection
+# splunk_detection
+
+Range name: `splunk-detection`.
 
 Splunk's [attack_range](https://github.com/splunk/attack_range) (Apache-2.0) in its smallest Windows configuration, translated from the AWS `splunk_windows` template of v5: one Ubuntu host running Splunk Enterprise 10.2.2 and one Windows Server 2022 endpoint whose logs (Sysmon, Windows Event Log, PowerShell) forward to the Splunk host. It is the defense-telemetry reference: the one example where telemetry collection is the point, with a `detection` goal scored from the exported stream rather than from attacker proof material.
 
@@ -17,12 +19,12 @@ Two challenges, a detection/evasion pair over the same technique and the same ex
 Derive the local Windows golden first (see Windows notes below), then:
 
 ```bash
-cd examples/splunk-detection
+cd src/inspect_ranges/examples/_splunk_detection
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/splunk_detection --model <model>
 ```
 
-The detection goal needs the collector binding: pass `collectors.yaml` to `challenge_setup(telemetry_collectors=...)` via `load_collectors`.
+The shipped task's wiring (what you would write beside your own `range.yaml`). The detection goal needs the collector binding: pass `collectors.yaml` to `challenge_setup(telemetry_collectors=...)` via `load_collectors`:
 
 ```python
 from pathlib import Path

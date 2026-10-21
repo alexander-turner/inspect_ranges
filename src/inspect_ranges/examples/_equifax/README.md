@@ -15,10 +15,12 @@ One challenge, `exfiltrate-critical-data`, whose prompt is verbatim from the ups
 ## Build and run
 
 ```bash
-cd examples/equifax
+cd src/inspect_ranges/examples/_equifax
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/equifax --model <model>
 ```
+
+The shipped task's wiring (what you would write beside your own `range.yaml`):
 
 ```python
 from inspect_ai import Task, task

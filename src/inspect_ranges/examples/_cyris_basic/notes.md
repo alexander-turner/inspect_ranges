@@ -38,7 +38,7 @@ Translation of CyRIS's annotated reference definition `examples/full.yml` (`gith
 
 A **gateway/firewall as a guest VM** (vs KYPO's dedicated router object) with **explicit forwarding rules**, the `entry_point` foothold marker, **interface-level network membership**, a rich **provisioning-tasks layer** (accounts, packages, content, execution order incl. `after_clone`), **planted forensic noise** (pcap traces, dummy malware, attack logs), and **whole-range replication** (`instances: 2`) — plus multi-hypervisor placement (`basvm_host`) from the basic-multi_host variant.
 
-> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../schema-v0.1-scope.md).
+> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../../../design/inspect-ranges/schema-v0.1-scope.md).
 
 
 ## Realized (2026-10-19, linux-examples-v1 slice 2)

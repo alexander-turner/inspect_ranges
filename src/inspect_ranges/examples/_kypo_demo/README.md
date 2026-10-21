@@ -1,4 +1,6 @@
-# kypo-demo
+# kypo_demo
+
+Range name: `kypo-demo`.
 
 The [KYPO Cyber Range Platform](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) demo training sandbox (Masaryk University, MIT): a client and a server on two routed /24 subnets joined by an explicit router. It is the routed-topology reference: a declared router with per-network gateway IPs, static IP mappings, and a declared randomization layer (`variables:`) covering the telnet port and both flags (defaults substitute today; per-instance draws are deferred).
 
@@ -15,10 +17,12 @@ One challenge, `telnet-ladder`, whose prompt is verbatim from the upstream train
 ## Build and run
 
 ```bash
-cd examples/kypo-demo
+cd src/inspect_ranges/examples/_kypo_demo
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/kypo_demo --model <model>
 ```
+
+The shipped task's wiring (what you would write beside your own `range.yaml`):
 
 ```python
 from inspect_ai import Task, task

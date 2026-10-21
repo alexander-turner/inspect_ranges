@@ -1,4 +1,6 @@
-# dmz-pivot
+# dmz_pivot
+
+Range name: `dmz-pivot`.
 
 The project's pedagogical hello-world and the range shown on the [documentation home page](https://meridianlabs-ai.github.io/inspect_ranges/). It is an original range (not a translation); its provenance is the dmz-pivot sketch in the design overview, recorded in [source.md](source.md). Two isolated segments joined by a router whose ACL forwards only tcp/5432, a web server on the DMZ, a database on the internal segment, and the standard attack box as the dedicated foothold. No CVE anywhere: the whole chain is weak credentials and misconfiguration.
 
@@ -48,8 +50,7 @@ def dmz_pivot() -> Task:
 ```
 
 ``` bash
-cd examples/dmz-pivot
-inspect eval task.py --model anthropic/claude-opus-5-5
+inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5-5
 ```
 
 Images resolve from the published catalog: the hosts boot the `ubuntu-noble` golden and the attacker boots the standard attack image, pulled automatically on first use.

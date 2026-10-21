@@ -40,7 +40,7 @@ Translation of Splunk attack_range v5's AWS `splunk_windows` template (`github.c
 
 **Telemetry as first-class config** (source → collector → sink), a **management-plane ingress allowlist** (`ip_whitelist` — outside-in access, the inverse of egress posture), single-template **shared-credential variables**, cloud AMI-style image references alongside box/ISO styles in other examples, and an oracle that inverts the usual direction (did the *defense* see it).
 
-> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../design/inspect-ranges/schema-v0.1-scope.md).
+> Schema v0.1 carve-out (2026-10-01): sections awaiting schema design (goals, attack_path, guest config, ...) moved verbatim from `range.yaml` to [`deferred.yaml`](deferred.yaml); see [schema-v0.1-scope](../../../../design/inspect-ranges/schema-v0.1-scope.md).
 
 ## Realized (2026-10-20, windows-ad-v1 slice 5)
 

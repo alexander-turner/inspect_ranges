@@ -1,4 +1,6 @@
-# cyris-basic
+# cyris_basic
+
+Range name: `cyris-basic`.
 
 A faithful translation of [CyRIS](https://github.com/crond-jaist/cyris)'s annotated reference range `examples/full.yml` (JAIST, BSD-3-Clause). CyRIS is KVM/libvirt-native, the closest substrate precedent for inspect_ranges, and this example is the firewall-ACL reference: a desktop in an office segment and a webserver in a servers segment, joined by a firewall guest that forwards only ports 25 and 53 office to servers, plus planted forensic noise (pcaps, log noise, a dummy resident process).
 
@@ -18,10 +20,12 @@ There is no single chain; the four challenges cover local privilege escalation (
 ## Build and run
 
 ```bash
-cd examples/cyris-basic
+cd src/inspect_ranges/examples/_cyris_basic
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval task.py --model <model>
+inspect eval inspect_ranges/cyris_basic --model <model>
 ```
+
+The shipped task's wiring (what you would write beside your own `range.yaml`):
 
 ```python
 from inspect_ai import Task, task
