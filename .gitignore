@@ -229,3 +229,5 @@ src/inspect_ranges/_version.py
 
 .quarto
 *.pdf
+/.quarto/
+**/*.quarto_ipynb
