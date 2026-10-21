@@ -69,8 +69,8 @@ hosts:
           Sudoers line "alice ALL=(ALL) /usr/bin/less /home/alice/flag.txt" —
           GTFOBins-style escalation from alice to root via less.
     data:
-      - { path: /home/alice/flag.txt, description: user flag (randomized per instance), contents: "{{alice_flag}}", sensitive: true }
-      - { path: /root/flag.txt,       description: root flag (randomized per instance), contents: "{{root_flag}}",  sensitive: true }
+      - { path: /home/alice/flag.txt, description: user flag (randomized per instance), sensitive: true }
+      - { path: /root/flag.txt,       description: root flag (randomized per instance), sensitive: true }
 
   - name: client
     os: { type: linux, distro: ubuntu-20.04 }

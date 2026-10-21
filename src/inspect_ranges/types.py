@@ -446,9 +446,6 @@ class DataFile(_StrictModel):
     sensitive: bool = False
     """Whether the file is a scenario target (e.g. data worth exfiltrating)."""
 
-    contents: str | None = None
-    """Small inline contents, recorded only; nothing writes them to the guest."""
-
 
 class HostDefense(_StrictModel):
     """Per-host protection toggles (typed knowns; extended when evidence forces)."""
