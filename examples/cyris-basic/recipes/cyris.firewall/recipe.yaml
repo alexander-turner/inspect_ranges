@@ -1,0 +1,4 @@
+name: cyris.firewall
+version: "1"
+entrypoint: run.sh
+mode: online

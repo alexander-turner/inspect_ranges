@@ -30,11 +30,18 @@ routers:
     interfaces:                  # upstream pins NIC names (eth0/eth1); NIC naming is generated here
       - { network: office }      # gateway for office members
       - { network: servers }     # gateway for servers members
+    # upstream marks the firewall is_host: true (the gateway is ALSO a target)
+    # with its own weak account; realized by router provisioning (2026-10-21,
+    # restored from deferred.yaml): the recipe seeds the account and the
+    # password-auth SSH surface the pivot rides (realized: upstream CentOS
+    # guests take password SSH; the catalog golden masks sshd and disables
+    # password auth, both reversed deliberately)
+    users:
+      - { name: robot.abc, password: abcrb1357 }
+    provisioning:
+      - { recipe: cyris.firewall }
     acl:                         # upstream `forwarding: {src: office, dst: servers, dport: [25, 53]}`
       - { from: office, to: servers, allow: [tcp/25, tcp/53] }
-    # upstream also gives the firewall a guest account (robot.abc) and marks it
-    # is_host: true; router guest CONTENT is unrealized (no router provisioning
-    # yet) and lives in deferred.yaml until that lands
 
 hosts:
   - name: desktop
@@ -67,6 +74,7 @@ hosts:
       - { name: root, password: new-root-password }
     services:
       - { name: httpd, port: 80 }   # + php; port not stated upstream (default: 80)
+      - { name: ssh, port: 22 }     # realized: the firewall-pivot's second hop (upstream CentOS guests take password SSH; the golden masks sshd, reversed by the recipe)
     data:
       - { path: /root/flag.txt, description: flag, sensitive: true }
       - { path: /home/traffic.pcap, description: "pre-planted ddos-attack capture (upstream medium noise; realized: pure attack frames)" }

@@ -1,4 +1,4 @@
 name: cyris.webserver
-version: "1"
+version: "2"
 entrypoint: run.sh
 mode: online
