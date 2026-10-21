@@ -277,6 +277,16 @@ def test_up_happy_path_env_and_stages(
     )
 
 
+def test_up_records_boot_plan_in_project_state(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`up` copies the verified boot.json beside the owner record: the out-of-band oracle attach reads it there, and a `--from-spec` bundle is temporary."""
+    ready_probes(monkeypatch)
+    result = up(bundle, options(cache, tmp_path), runner=FakeDocker())
+    recorded = tmp_path / "state" / result.project / "boot.json"
+    assert recorded.read_bytes() == (bundle / "boot.json").read_bytes()
+
+
 def test_run_command_timeout_surfaces_as_rc_124() -> None:
     """A wedged subprocess returns rc 124 with the timeout named, feeding the normal stage-named failure path instead of hanging up() (quality-review B21)."""
     result = up_module().run_command(["sleep", "5"], timeout=0.2)
