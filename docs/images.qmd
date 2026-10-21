@@ -58,7 +58,7 @@ export INSPECT_RANGES_REGISTRY=registry.example.net/ranges,\
 docker.io/meridianlabsai/inspect-ranges
 ```
 
-A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. The hub does not expose org enumeration, so whole-org mirrors from it name their artifacts explicitly (the catalog does not yet publish a machine-readable list of its artifacts). Mechanics: [Distribution](distribution.qmd).
+A mirrored root carries its transitive closure, so pulls work identically from the mirror; prepending your registry shadows catalog names deterministically, with the org as the fallback for anything not mirrored. The hub does not expose org enumeration, but the catalog publishes a machine-readable list of its names (the reserved `catalog` ref, updated by every image publish), so the whole-org mirror above enumerates through it; a hub location that has not published a list still takes explicit names. Mechanics: [Distribution](distribution.qmd).
 
 ### Private Registry for Your Own Ranges
 

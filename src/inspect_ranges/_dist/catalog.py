@@ -40,6 +40,7 @@ __all__ = [
     "catalog_names",
     "fetch_daemon_bundle",
     "generate_pin_file",
+    "publish_catalog_list",
     "publish_daemon_bundle",
     "publish_golden",
     "publish_realized",
@@ -86,17 +87,9 @@ def _read_catalog_list(location: Location, store: ContentStore) -> list[str]:
     return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
 
 
-def _update_catalog_index(location: Location, name: str) -> None:
-    """Add `name` to the location's published-name list (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture)."""
+def _write_catalog_list(location: Location, names: list[str]) -> Descriptor:
+    """Write `names` as the location's catalog list: a digest-addressed JSON layer under a fresh manifest, with the `catalog` ref swapped to the new root last (a layout swaps under its index lock, a registry tag moves in one PUT after the digest-named bytes land), so a reader sees the old complete list or the new one, never a torn write."""
     store = location.store_for(CATALOG_REF, create=True)
-    names: list[str] = []
-    try:
-        names = _read_catalog_list(location, store)
-    except DistError as error:
-        if error.code != "ref-not-found":
-            raise
-    if name not in names:
-        names.append(name)
     payload = json.dumps(
         {
             "names": sorted(names),
@@ -112,7 +105,52 @@ def _update_catalog_index(location: Location, name: str) -> None:
     )
     member = store.put_manifest(manifest)
     index = OciIndex(manifests=[member], annotations={ANN_KIND: "catalog"})
-    store.put_index(location.latest_ref(CATALOG_REF), index)
+    return store.put_index(location.latest_ref(CATALOG_REF), index)
+
+
+def _update_catalog_index(location: Location, name: str) -> None:
+    """Add `name` to the location's published-name list (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture)."""
+    names: list[str] = []
+    try:
+        names = _read_catalog_list(
+            location, location.store_for(CATALOG_REF, create=True)
+        )
+    except DistError as error:
+        if error.code != "ref-not-found":
+            raise
+    if name not in names:
+        names.append(name)
+    _write_catalog_list(location, names)
+
+
+def publish_catalog_list(names: list[str], location: Location) -> Descriptor:
+    """Rewrite `location`'s catalog list to exactly `names` (the regeneration and repair verb behind `publish --list`; image publishes append to the list on their own, but only a rewrite can drop a renamed or retired name).
+
+    Every name must resolve at the destination first, so the list never claims a name the location does not serve. The write is the same digest-addressed update every publish performs: the ref swap is atomic per store form, and the returned descriptor is the new list root.
+
+    Raises:
+        DistError: `catalog-invalid` for an empty name list, `name-reserved` when `names` includes a reserved ref, `ref-not-found` for a name with no published root at the location.
+    """
+    if not names:
+        raise DistError(
+            "catalog-invalid",
+            f"the catalog list for {location.describe()} needs at least one name; "
+            "nothing publishes an empty list",
+        )
+    unique = sorted(set(names))
+    for name in unique:
+        refuse_reserved(name, "the list enumerates published names, never its own refs")
+        try:
+            location.store_for(name).ref(location.latest_ref(name))
+        except DistError as error:
+            if error.code != "ref-not-found":
+                raise
+            raise DistError(
+                "ref-not-found",
+                f"{name!r} has no published root at {location.describe()}; the "
+                "catalog list only names what the location serves",
+            ) from error
+    return _write_catalog_list(location, unique)
 
 
 def catalog_names(location: Location) -> list[str]:

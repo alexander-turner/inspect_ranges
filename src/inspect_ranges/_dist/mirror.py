@@ -1,6 +1,6 @@
 """The mirror verb's engine: seed or sync a whole location, or copy one range's closure, between any two location forms (Journey B's operator sessions).
 
-Mirroring rides `copy_closure` (raw verified bytes, destination index named LAST), so a mirrored root is complete by construction and byte-identical to its source. A whole-location mirror copies EVERYTHING the source serves: every name, and for each name every published build's spec ref with its closure, not just the latest root (round-5 B3: a disconnected consumer holding an older spec must pull from the archive exactly what the source would have served). Enumeration: a layout lists its index refs; a registry lists `/v2/_catalog` under the location's prefix through the same bearer-auth flow as every other request, paginated. Docker Hub does not expose org enumeration through the OCI API, so whole-org mirroring FROM the hub refuses with a named cause and the per-name form remains (the catalog phase's published name list is the recorded follow-up; spine Q12).
+Mirroring rides `copy_closure` (raw verified bytes, destination index named LAST), so a mirrored root is complete by construction and byte-identical to its source. A whole-location mirror copies EVERYTHING the source serves: every name, and for each name every published build's spec ref with its closure, not just the latest root (round-5 B3: a disconnected consumer holding an older spec must pull from the archive exactly what the source would have served). Enumeration: a published catalog list is the first-class listing at every form; without one, a layout lists its index refs and a registry lists `/v2/_catalog` under the location's prefix through the same bearer-auth flow as every other request, paginated. Docker Hub does not expose org enumeration through the OCI API and has no structural fallback, so whole-org mirroring FROM a hub location without a published list refuses with a named cause and the per-name form remains (spine Q12).
 
 An explicit root (the `name@sha256:` pin and spec-driven forms) never overwrites a newer `latest` at the destination (round-5 N6): when the destination already serves the name, the pinned root lands under its spec ref (or a digest alias) and `latest` stays.
 """
@@ -43,7 +43,7 @@ def source_names(location: Location) -> list[str]:
     """Every artifact name a location can enumerate.
 
     Raises:
-        DistError: `location-unenumerable` for sources with no listing surface (the public hub), with the per-name form as the remedy.
+        DistError: `location-unenumerable` for sources with no listing surface (a hub location that never published its catalog list), with the per-name form and `publish --list` as the remedies.
     """
     from .catalog import CATALOG_REF, DAEMON_REF, catalog_names
 
@@ -79,9 +79,10 @@ def source_names(location: Location) -> list[str]:
     if base == "https://registry-1.docker.io":
         raise DistError(
             "location-unenumerable",
-            "the public hub does not enumerate an org through the OCI API; "
-            "mirror explicit names (the published catalog list is the "
-            "catalog phase's follow-up)",
+            "the public hub does not enumerate an org through the OCI API "
+            "and this location publishes no catalog list; mirror explicit "
+            "names, or have the publisher run 'inspect-ranges publish --list' "
+            "there first",
         )
     from .registry import registry_catalog
 

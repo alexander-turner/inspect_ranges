@@ -72,3 +72,12 @@ inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out p
 
 - A CI publisher is a recorded follow-up (phase non-goal); this runbook is the publisher until then.
 - Windows artifacts never appear in any of these repositories (ratified).
+
+## Addendum (2026-10-21): the catalog list's regeneration verb
+
+`publish --list` rewrites a location's catalog list to exactly the names given, each verified to resolve at the destination before anything writes (so the list never claims a name the org does not serve). Image publishes keep appending to the list on their own; this verb exists for renames (only a rewrite drops a name from enumeration and pin generation), torn or missing lists, and names pushed without a list update (a pushed range can join hub enumeration this way). The regeneration command for the public org as published today:
+
+```bash
+inspect-ranges publish --list attack --list ubuntu-noble --list ubuntu-focal \
+  --to docker.io/meridianlabsai/inspect-ranges
+```

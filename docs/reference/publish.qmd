@@ -1,5 +1,5 @@
 ---
 title: "inspect-ranges publish"
-description: "Promote a built guest's realized image, a cache golden, or the daemon artifact to a bare catalog name."
+description: "Promote a built guest's realized image, a cache golden, or the daemon artifact to a bare catalog name, or rewrite a location's catalog list."
 reference: inspect-ranges publish
 ---
