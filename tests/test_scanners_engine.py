@@ -556,6 +556,46 @@ def test_scanner_result_shape() -> None:
     assert "verify-goal/zero-submissions" in dirty.explanation
 
 
+def test_registry_name_resolves_via_the_entry_point_module() -> None:
+    """`inspect_ranges/range_apparatus` resolves by name through the inspect_ai registry (what `scout scan inspect_ranges/range_apparatus` goes through), registered by the `inspect_ai` entry point importing `inspect_ranges._registry`."""
+    from inspect_scout._scanner.scanner import scanner_create
+
+    scan = scanner_create("inspect_ranges/range_apparatus", {})
+    transcript = Transcript(
+        transcript_id="t-reg", metadata={"sample_metadata": {}}, messages=[], events=[]
+    )
+
+    async def run() -> Result[Any]:
+        result = await scan(transcript)
+        assert isinstance(result, Result)
+        return result
+
+    result = asyncio.run(run())
+    assert result.value == 0 and result.explanation == "no findings"
+
+
+def test_result_references_point_at_the_triggering_events() -> None:
+    """Findings carry the uuids of the events they key on, and the scanner surfaces them as event references on the `Result`."""
+    trouble = logger("exec id=abc: unreachable after 5 attempts (x)")
+    transcript = Transcript(
+        transcript_id="t-ref",
+        metadata={"sample_metadata": {}},
+        messages=[],
+        events=[exec_event("hostname"), trouble],
+    )
+
+    async def run() -> Result[Any]:
+        result = await range_apparatus()(transcript)
+        assert isinstance(result, Result)
+        return result
+
+    result = asyncio.run(run())
+    assert result.value == 1
+    assert [(reference.type, reference.id) for reference in result.references] == [
+        ("event", trouble.uuid)
+    ]
+
+
 def test_metadata_spec_arms_the_config_detectors() -> None:
     """A sample whose metadata carries the range definition (written by `challenge_dataset(range_spec=...)`) arms the config-aware detectors; unparseable metadata text disarms quietly."""
     import yaml as _yaml

@@ -1,9 +1,10 @@
 """Render a router guest's nftables ruleset from its ordered ACL.
 
-The ruleset is default-deny and stateful: policy `drop` on the forward hook, `established,related` accepted first, then the spec's rules in declaration order (first-match, so `deny` carve-outs work by preceding broader allows). Endpoint forms compile as: network name → interface match (`iifname`/`oifname` against the router's deterministic NIC names, `eth0..n` in interface declaration order, applied by the generated guest network config via MAC match); guest name → address-set match over the guest's allocated addresses; CIDR → address match (`0.0.0.0/0` compiles to no match at all).
+The rule-evaluation semantics (plain router accepts, declared rules flip to default-drop first-match with `established,related` accepted ahead of them) are stated once in `acl.py`; this module renders that contract, emitting one nftables rule per `acl_entries` element. Endpoint forms compile as: network name → interface match (`iifname`/`oifname` against the router's deterministic NIC names, `eth0..n` in interface declaration order, applied by the generated guest network config via MAC match); guest name → address-set match over the guest's allocated addresses; CIDR → address match (`0.0.0.0/0` compiles to no match at all).
 """
 
-from ..types import AclRule, RangeSpec, Router, endpoint_kind
+from ..types import RangeSpec, Router, endpoint_kind
+from .acl import acl_entries
 from .allocate import Allocation
 
 
@@ -50,23 +51,14 @@ def render_router_nftables(
         "    type filter hook forward priority 0; policy drop;",
         "    ct state established,related accept",
     ]
-    for rule in router.acl:
-        lines += [f"    {line}" for line in _render_rule(spec, rule, nics, allocation)]
+    for entry in acl_entries(router.acl):
+        source = _endpoint_match(spec, entry.source, "src", nics, allocation)
+        dest = _endpoint_match(spec, entry.destination, "dst", nics, allocation)
+        verdict = "accept" if entry.allowed else "drop"
+        matches = [match for match in (source, dest, service_match(entry.raw)) if match]
+        lines.append("    " + " ".join(matches + [verdict]))
     lines += ["  }", "}"]
     return "\n".join(lines) + "\n"
-
-
-def _render_rule(
-    spec: RangeSpec, rule: AclRule, nics: dict[str, str], allocation: Allocation
-) -> list[str]:
-    source = _endpoint_match(spec, rule.from_, "src", nics, allocation)
-    dest = _endpoint_match(spec, rule.to, "dst", nics, allocation)
-    verdict = "accept" if rule.allow is not None else "drop"
-    rendered: list[str] = []
-    for entry in rule.allow if rule.allow is not None else rule.deny or []:
-        matches = [match for match in (source, dest, service_match(entry)) if match]
-        rendered.append(" ".join(matches + [verdict]))
-    return rendered
 
 
 def _endpoint_match(

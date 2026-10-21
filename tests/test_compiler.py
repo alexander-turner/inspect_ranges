@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from ipaddress import IPv4Address
 
 import pytest
@@ -9,6 +10,7 @@ from inspect_ranges._compiler import (
     render_router_nftables,
     resolvers_for,
 )
+from inspect_ranges._compiler.acl import FlowEndpoint, Service, acl_admits
 from inspect_ranges._diagnostics import IssueError
 from inspect_ranges.types import (
     AclRule,
@@ -410,6 +412,145 @@ def test_router_ruleset_renders_in_rule_order() -> None:
     ]
     # 0.0.0.0/0 compiles to no source match at all
     assert lines[9] == 'oifname "eth0" tcp dport 443 accept'
+
+
+TWO_SEGMENT_RULESET = """\
+table inet fw {
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+    iifname "eth0" ip daddr 10.80.20.10 tcp dport 22 drop
+    iifname "eth0" oifname "eth1" tcp dport 22 accept
+    iifname "eth0" oifname "eth1" tcp dport 5432 accept
+    iifname "eth0" oifname "eth1" meta l4proto icmp accept
+    ip saddr 10.80.10.10/32 oifname "eth1" tcp dport 80-90 accept
+    oifname "eth0" tcp dport 443 accept
+  }
+}
+"""
+
+PLAIN_RULESET = """\
+table inet fw {
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+  }
+}
+"""
+
+CHAINED_R1_RULESET = """\
+table inet fw {
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+    iifname "eth0" ip daddr 10.80.30.0/24 tcp dport 443 accept
+  }
+}
+"""
+
+CHAINED_R2_RULESET = """\
+table inet fw {
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+    ip saddr 10.80.10.0/24 oifname "eth1" tcp dport 443 accept
+  }
+}
+"""
+
+
+def plain_router_spec() -> RangeSpec:
+    spec = two_segment_spec().model_copy(deep=True)
+    spec.routers[0].acl = []
+    return spec
+
+
+@pytest.mark.parametrize(
+    ("spec_factory", "router_name", "expected"),
+    [
+        # deny shadowing, network/guest/CIDR endpoints, 0.0.0.0/0, port range
+        (two_segment_spec, "router", TWO_SEGMENT_RULESET),
+        # empty ACL: the plain-router policy-accept shape
+        (plain_router_spec, "router", PLAIN_RULESET),
+        # routed network as destination (vault not attached to r1: subnet match)
+        (chained_spec, "r1", CHAINED_R1_RULESET),
+        # routed network as source (dmz not attached to r2: subnet match)
+        (chained_spec, "r2", CHAINED_R2_RULESET),
+    ],
+)
+def test_rendered_rulesets_are_byte_identical_to_the_pre_evaluator_output(
+    spec_factory: Callable[[], RangeSpec], router_name: str, expected: str
+) -> None:
+    """Renderer invariance pin: these strings were captured from `render_router_nftables` BEFORE rule evaluation moved to the shared `_compiler/acl.py` evaluator; the refactored renderer must emit identical bytes."""
+    spec = spec_factory()
+    assert render_router_nftables(spec, router_name, allocate(spec)) == expected
+
+
+def acl_flow_fixture() -> tuple[
+    RangeSpec, dict[str, Network], dict[str, set[str]], dict[str, FlowEndpoint]
+]:
+    """The two-segment spec's declared names plus one `FlowEndpoint` per interesting flow side."""
+    spec = two_segment_spec()
+    allocation = allocate(spec)
+    networks = {network.name: network for network in spec.networks}
+    guest_networks = {
+        guest.name: {interface.network for interface in guest.interfaces}
+        for guest in allocation.guests
+    }
+    endpoints = {
+        name: FlowEndpoint(
+            guest=name,
+            networks=frozenset(guest_networks[name]),
+            addresses=tuple(allocation.addresses(name)),
+        )
+        for name in ("attacker", "web", "db")
+    }
+    return spec, networks, guest_networks, endpoints
+
+
+@pytest.mark.parametrize(
+    ("source", "destination", "service", "admitted"),
+    [
+        # the deny carve-out precedes the broader allow: first-match drops it
+        ("attacker", "db", Service("tcp", 22, 22), False),
+        # the allow after the carve-out admits its other services
+        ("attacker", "db", Service("tcp", 5432, 5432), True),
+        ("attacker", "db", Service("icmp", 0, 0), True),
+        # the CIDR rule admits only web's /32, inside the declared range
+        ("web", "db", Service("tcp", 85, 85), True),
+        ("attacker", "db", Service("tcp", 85, 85), False),
+        # 0.0.0.0/0 covers any source toward the dmz destination
+        ("db", "web", Service("tcp", 443, 443), True),
+        # default drop: no entry covers this service
+        ("attacker", "db", Service("udp", 53, 53), False),
+    ],
+)
+def test_acl_admits_decides_a_concrete_service_first_match(
+    source: str, destination: str, service: Service, admitted: bool
+) -> None:
+    spec, networks, guest_networks, endpoints = acl_flow_fixture()
+    assert (
+        acl_admits(
+            spec.routers[0].acl,
+            source=endpoints[source],
+            destination=endpoints[destination],
+            networks=networks,
+            guest_networks=guest_networks,
+            service=service,
+        )
+        is admitted
+    )
+
+
+def test_acl_admits_empty_acl_accepts_everything() -> None:
+    _, networks, guest_networks, endpoints = acl_flow_fixture()
+    assert acl_admits(
+        [],
+        source=endpoints["attacker"],
+        destination=endpoints["db"],
+        networks=networks,
+        guest_networks=guest_networks,
+        service=Service("tcp", 9999, 9999),
+    )
 
 
 def test_router_without_acl_is_a_plain_router() -> None:
