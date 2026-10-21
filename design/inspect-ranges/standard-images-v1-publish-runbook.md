@@ -81,3 +81,14 @@ inspect-ranges images pin --from docker.io/meridianlabsai/inspect-ranges --out p
 inspect-ranges publish --list attack --list ubuntu-noble --list ubuntu-focal \
   --to docker.io/meridianlabsai/inspect-ranges
 ```
+
+## Addendum (2026-10-21, later): typed list entries and the current regenerate command
+
+The catalog list is now typed: each entry records its name and kind (`image` or `range`), detected by `publish --list` at the destination from what each name's root actually serves (a pushed range records its build identity; a published image records its published name; anything else refuses `catalog-kind-unknown`). The bare-strings list published earlier today keeps reading as all images, so nothing republishes for compatibility alone. Enumeration (`mirror`) carries every entry; `images pin` writes the image entries only, because a published range pins via the consuming clone's spec hash and must never enter the pin file (its republish churn would break fleets with `pin-mismatch` noise). The regeneration command for the public org with all eight names published today:
+
+```bash
+inspect-ranges publish --list attack --list ubuntu-noble --list ubuntu-focal \
+  --list vulhub-zabbix --list kypo-demo --list cyris-basic \
+  --list dmz-pivot --list equifax \
+  --to docker.io/meridianlabsai/inspect-ranges
+```

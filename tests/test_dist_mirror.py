@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from inspect_ranges._dist import DistError, parse_location, pull_range, push_range
 from inspect_ranges._dist.gc import unreferenced_chain_files
+from inspect_ranges._dist.location import Location
 from inspect_ranges._dist.mirror import mirror_names, mirror_one, source_names
 
 from tests.test_dist_encode import GOLDEN, Fixture, fresh_dirs
@@ -580,6 +581,187 @@ def test_pulled_catalog_realized_is_not_prune_bait(tmp_path: Path) -> None:
     )
     assert not frozen
     assert victims == []
+
+
+# -- typed catalog list: per-entry kinds -----------------------------------------
+
+
+def _raw_list_payload(location: Location) -> "dict[str, object]":
+    """The catalog list's JSON payload exactly as published (the wire shape under test)."""
+    from inspect_ranges._dist.catalog import CATALOG_REF
+
+    store = location.store_for(CATALOG_REF)
+    root = store.ref(location.latest_ref(CATALOG_REF))
+    manifest = store.manifest(store.read_index(root).manifests[0])
+    return json.loads(store.read_blob(manifest.layers[0]))
+
+
+def test_catalog_list_reads_the_pre_kind_payload(tmp_path: Path) -> None:
+    """Backward compatibility: a bare-strings list (yesterday's published hub payload) reads as all kind `image`, so enumeration and pin generation keep working against it unchanged."""
+    from inspect_ranges._dist.catalog import (
+        CATALOG_ARTIFACT,
+        CATALOG_LAYER,
+        CATALOG_REF,
+        CatalogEntry,
+        catalog_entries,
+        catalog_names,
+        generate_pin_file,
+        publish_golden,
+    )
+    from inspect_ranges._dist.oci import Descriptor as Desc
+    from inspect_ranges._dist.oci import OciIndex, OciManifest
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    # overwrite the (typed) list with the pre-kind payload: bare strings
+    store = location.store_for(CATALOG_REF, create=True)
+    payload = json.dumps(
+        {"names": ["focal-guest"], "updated": "2026-10-21T00:00:00Z"}
+    ).encode()
+    digest = store.put_blob_bytes(payload)
+    member = store.put_manifest(
+        OciManifest(
+            artifact_type=CATALOG_ARTIFACT,
+            config=store.ensure_empty_config(),
+            layers=[Desc(media_type=CATALOG_LAYER, digest=digest, size=len(payload))],
+        )
+    )
+    store.put_index(location.latest_ref(CATALOG_REF), OciIndex(manifests=[member]))
+    assert catalog_names(location) == ["focal-guest"]
+    assert catalog_entries(location) == [CatalogEntry(name="focal-guest", kind="image")]
+    pins = generate_pin_file(location, tmp_path / "pins.json")
+    assert set(pins) == {"focal-guest"}
+
+
+def test_publish_list_detects_kinds_and_writes_the_typed_payload(
+    tmp_path: Path,
+) -> None:
+    """`publish --list` detects each name's kind from what sits at the destination (a pushed range's build identity vs a published image's recorded name) and always writes the typed payload; the round trip reads the same entries back."""
+    from inspect_ranges._dist.catalog import (
+        CatalogEntry,
+        catalog_entries,
+        publish_catalog_list,
+        publish_golden,
+    )
+
+    fixture = Fixture(tmp_path)
+    _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    publish_catalog_list(["distfix", "focal-guest"], location)
+    assert catalog_entries(location) == [
+        CatalogEntry(name="distfix", kind="range"),
+        CatalogEntry(name="focal-guest", kind="image"),
+    ]
+    payload = _raw_list_payload(location)
+    assert payload["names"] == [
+        {"name": "distfix", "kind": "range"},
+        {"name": "focal-guest", "kind": "image"},
+    ]
+
+
+def test_image_publish_preserves_range_kinds_in_the_list(tmp_path: Path) -> None:
+    """The read-modify-write append (every image publish) keeps a range entry's kind instead of degrading it to the bare-string form."""
+    from inspect_ranges._dist.catalog import (
+        CatalogEntry,
+        catalog_entries,
+        publish_catalog_list,
+        publish_golden,
+    )
+
+    fixture = Fixture(tmp_path)
+    _spec_for_fixture(fixture, tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    publish_catalog_list(["distfix"], location)
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    assert catalog_entries(location) == [
+        CatalogEntry(name="distfix", kind="range"),
+        CatalogEntry(name="focal-guest", kind="image"),
+    ]
+
+
+def test_publish_list_refuses_an_undeterminable_kind(tmp_path: Path) -> None:
+    """A name resolving to a root this tool did not publish (no recorded identity) refuses with a coded, positioned error instead of guessing a kind, and the published list stays untouched."""
+    from inspect_ranges._dist.catalog import (
+        catalog_names,
+        publish_catalog_list,
+        publish_golden,
+    )
+    from inspect_ranges._dist.oci import OciIndex
+
+    fixture = Fixture(tmp_path)
+    location = parse_location(str(tmp_path / "catalog-loc"))
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    store = location.store_for("mystery", create=True)
+    store.put_index(location.latest_ref("mystery"), OciIndex(manifests=[]))
+    with pytest.raises(DistError) as excinfo:
+        publish_catalog_list(["focal-guest", "mystery"], location)
+    assert excinfo.value.code == "catalog-kind-unknown"
+    assert "mystery" in str(excinfo.value)
+    assert catalog_names(location) == ["focal-guest"]
+
+
+def test_whole_location_mirror_carries_both_kinds_and_pins_images_only(
+    tmp_path: Path,
+) -> None:
+    """The one-command mirror story: enumeration carries images AND ranges, the typed list travels, and pin generation (at source or mirror) covers images only; ranges pin via the consumer clone's spec hash, never the pin file."""
+    from inspect_ranges._dist.catalog import (
+        CatalogEntry,
+        catalog_entries,
+        generate_pin_file,
+        publish_catalog_list,
+        publish_golden,
+    )
+
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    origin = parse_location(str(tmp_path / "origin"))
+    publish_golden("focal-guest", origin, image_cache=fixture.image_cache)
+    push_range(
+        fixture.manifest,
+        origin,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    publish_catalog_list(["distfix", "focal-guest"], origin)
+    assert source_names(origin) == ["distfix", "focal-guest"]
+    destination = parse_location(str(tmp_path / "dest"))
+    mirror_names(source_names(origin), origin, destination)
+    assert catalog_entries(destination) == [
+        CatalogEntry(name="distfix", kind="range"),
+        CatalogEntry(name="focal-guest", kind="image"),
+    ]
+    # the range pulls from the mirror by its clone's spec hash (its drift anchor)
+    images, builds, recipes = fresh_dirs(tmp_path)
+    report = pull_range(
+        spec,  # type: ignore[arg-type]
+        [destination],
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert report.location == destination.describe()
+    # the pin file is image-only, from the origin and from the mirror alike
+    pins = generate_pin_file(destination, tmp_path / "pins.json")
+    assert set(pins) == {"focal-guest"}
+    pin_payload = json.loads((tmp_path / "pins.json").read_text())
+    assert set(pin_payload["pins"]) == {"focal-guest"}
 
 
 # -- standard-images-v1 slice 4: the published daemon bundle ---------------------

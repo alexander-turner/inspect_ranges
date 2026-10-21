@@ -498,3 +498,39 @@ def test_catalog_list_drives_registry_enumeration(
     with pytest.raises(DistError, match="ref-not-found"):
         publish_catalog_list(["never-published"], location)
     assert source_names(location) == ["focal-guest"]
+
+
+def test_catalog_kinds_detect_over_http_and_pins_stay_image_only(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """Kind auto-detection against the registry form: a pushed range (spec-tagged, build-manifest closure) reads as `range`, a published golden as `image`, enumeration carries both, and the pin file carries images only."""
+    from inspect_ranges._dist.catalog import (
+        CatalogEntry,
+        catalog_entries,
+        generate_pin_file,
+        publish_catalog_list,
+        publish_golden,
+    )
+    from inspect_ranges._dist.location import parse_location
+    from inspect_ranges._dist.mirror import source_names
+    from inspect_ranges._dist.resolve import push_range
+
+    url, _ = fake_registry()
+    fixture = Fixture(tmp_path)
+    location = parse_location(f"{url}/ranges")
+    publish_golden("focal-guest", location, image_cache=fixture.image_cache)
+    push_range(
+        fixture.manifest,
+        location,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    publish_catalog_list(["distfix", "focal-guest"], location)
+    assert catalog_entries(location) == [
+        CatalogEntry(name="distfix", kind="range"),
+        CatalogEntry(name="focal-guest", kind="image"),
+    ]
+    assert source_names(location) == ["distfix", "focal-guest"]
+    pins = generate_pin_file(location, tmp_path / "pins.json")
+    assert set(pins) == {"focal-guest"}

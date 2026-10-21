@@ -2,13 +2,15 @@
 
 `publish` is the deliberate promotion act distribution v1 deferred (Journey B: "push mints no image names"): a built guest's realized image, or a cache golden, becomes consumable by other ranges' `image:` lines under a bare catalog name. A promoted realized image travels with its whole chain (golden, vendor base, provenance sidecars) and lands in consumer caches under the catalog name's file (`attack.qcow2`), so bare-name resolution, stickiness, and `images refresh` all apply to it exactly like any catalog image.
 
-The catalog also publishes its own name list as a well-known artifact (the reserved ref `catalog`): a JSON layer enumerating the published names. That list is what closes the hub-enumeration gap mirror recorded (the hub exposes no org listing through the OCI API), and the Q11 fleet pin file is generated from the same resolution (name to root digest, consumed as refusals on divergence).
+The catalog also publishes its own name list as a well-known artifact (the reserved ref `catalog`): a JSON layer enumerating the published names, each with its kind (`image` or `range`; a pre-kind bare-string entry reads as `image`). That list is what closes the hub-enumeration gap mirror recorded (the hub exposes no org listing through the OCI API). Consumers split by purpose (user-ratified 2026-10-21): whole-location enumeration (`mirror`, `source_names`) carries every entry so a mirror is one command, while the Q11 fleet pin file is generated from the image entries only (name to root digest, consumed as refusals on divergence); ranges pin via the consumer clone's spec hash and never enter pin files, where their republish churn would break fleets with pin-mismatch noise.
 """
 
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
+
+from pydantic import BaseModel, ConfigDict
 
 from .._build.manifest import BuildManifest
 
@@ -19,6 +21,8 @@ from .encode import (
     ANN_BACKING_FILE,
     ANN_KIND,
     ANN_NAME,
+    ANN_RANGE,
+    ANN_SPEC_SHA256,
     ARTIFACT_DAEMON_BUNDLE,
     ARTIFACT_REALIZED,
     LAYER_DAEMON_TAR,
@@ -37,6 +41,8 @@ from .resolve import push_image_artifact
 __all__ = [
     "CATALOG_REF",
     "DAEMON_REF",
+    "CatalogEntry",
+    "catalog_entries",
     "catalog_names",
     "fetch_daemon_bundle",
     "generate_pin_file",
@@ -56,9 +62,38 @@ DAEMON_REF = "daemon-bundle"
 CATALOG_ARTIFACT = "application/vnd.inspect-ranges.catalog.v1"
 CATALOG_LAYER = "application/vnd.inspect-ranges.catalog.v1+json"
 
+CatalogKind = Literal["image", "range"]
+"""The two artifact classes a catalog list enumerates: a published image (a chain with provenance, pinnable by root digest) and a pushed range build (spec-suffixed refs, pinned by the consumer clone's spec hash)."""
 
-def _read_catalog_list(location: Location, store: ContentStore) -> list[str]:
-    """The validated name list a location's catalog ref holds (the one reader `catalog_names` and the publisher's read-modify-write share).
+
+class CatalogEntry(BaseModel):
+    """One catalog list entry: a published name and its kind.
+
+    The list payload's `names` array holds these as `{"name": ..., "kind": ...}` objects; a bare string entry (the pre-kind payload yesterday's published lists carry) reads as kind `image`, because images were the only kind the list enumerated before ranges joined. The writer always writes the typed form.
+
+    The kinds exist because enumeration and drift protection split by purpose (user-ratified 2026-10-21): a mirror must be one command, so enumeration carries EVERY entry regardless of kind, while drift protection stays per-class (images pin via `pins.json`; ranges pin via the consumer clone's spec hash and never enter pin files, where their republish churn would break fleets with pin-mismatch noise).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: CatalogKind
+
+
+def _parse_entry(raw: object) -> CatalogEntry | None:
+    """One payload entry: a bare string (kind `image`, the pre-kind form) or a typed object; `None` for anything else (the reader's lenient posture: an unrecognized entry drops rather than poisoning the whole list)."""
+    if isinstance(raw, str):
+        return CatalogEntry(name=raw, kind="image")
+    if isinstance(raw, dict):
+        name = cast("dict[str, object]", raw).get("name")
+        kind = cast("dict[str, object]", raw).get("kind")
+        if isinstance(name, str) and kind in ("image", "range"):
+            return CatalogEntry(name=name, kind=kind)
+    return None
+
+
+def _read_catalog_list(location: Location, store: ContentStore) -> list[CatalogEntry]:
+    """The validated entry list a location's catalog ref holds (the one reader `catalog_entries` and the publisher's read-modify-write share).
 
     Raises:
         DistError: `ref-not-found` when no catalog is published, `catalog-invalid` for a ref holding something else or an unparseable list.
@@ -84,15 +119,19 @@ def _read_catalog_list(location: Location, store: ContentStore) -> list[str]:
     names = data.get("names")
     if not isinstance(names, list):
         return []
-    return [entry for entry in cast("list[object]", names) if isinstance(entry, str)]
+    entries = (_parse_entry(raw) for raw in cast("list[object]", names))
+    return [entry for entry in entries if entry is not None]
 
 
-def _write_catalog_list(location: Location, names: list[str]) -> Descriptor:
-    """Write `names` as the location's catalog list: a digest-addressed JSON layer under a fresh manifest, with the `catalog` ref swapped to the new root last (a layout swaps under its index lock, a registry tag moves in one PUT after the digest-named bytes land), so a reader sees the old complete list or the new one, never a torn write."""
+def _write_catalog_list(location: Location, entries: list[CatalogEntry]) -> Descriptor:
+    """Write `entries` as the location's catalog list: a digest-addressed JSON layer under a fresh manifest, with the `catalog` ref swapped to the new root last (a layout swaps under its index lock, a registry tag moves in one PUT after the digest-named bytes land), so a reader sees the old complete list or the new one, never a torn write. Every entry writes in the typed `{"name": ..., "kind": ...}` form; only readers accept the pre-kind bare-string form."""
     store = location.store_for(CATALOG_REF, create=True)
     payload = json.dumps(
         {
-            "names": sorted(names),
+            "names": [
+                {"name": entry.name, "kind": entry.kind}
+                for entry in sorted(entries, key=lambda entry: entry.name)
+            ],
             "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     ).encode()
@@ -109,27 +148,53 @@ def _write_catalog_list(location: Location, names: list[str]) -> Descriptor:
 
 
 def _update_catalog_index(location: Location, name: str) -> None:
-    """Add `name` to the location's published-name list (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture)."""
-    names: list[str] = []
+    """Add `name` to the location's published-name list as kind `image` (read-modify-write; the layout's index lock or the registry's last-write serialize publishers, who are one deliberate actor by posture). The only callers are the image promotion verbs, so the kind is theirs; a pushed range joins the list through `publish --list`, which detects kinds at the destination."""
+    entries: list[CatalogEntry] = []
     try:
-        names = _read_catalog_list(
+        entries = _read_catalog_list(
             location, location.store_for(CATALOG_REF, create=True)
         )
     except DistError as error:
         if error.code != "ref-not-found":
             raise
-    if name not in names:
-        names.append(name)
-    _write_catalog_list(location, names)
+    entry = CatalogEntry(name=name, kind="image")
+    entries = [existing for existing in entries if existing.name != name]
+    entries.append(entry)
+    _write_catalog_list(location, entries)
+
+
+def _published_kind(location: Location, name: str) -> CatalogKind:
+    """What kind of artifact `name`'s current root at `location` actually is, read off the root index's recorded identity.
+
+    The encoding is unambiguous for everything this tool publishes: a pushed range's root index records the range annotations (`org.inspect-ranges.range` and `org.inspect-ranges.spec-sha256`, the identity its spec-suffixed refs and build-manifest member serve), while a published image's root index records the published name annotation (`org.inspect-ranges.name`, the same identity `pull_image` verifies before landing anything). A root recording neither, or confusingly both, is not something this tool published under that name, so the kind refuses rather than guessing.
+
+    Raises:
+        DistError: `ref-not-found` for a name with no published root at the location, `catalog-kind-unknown` for a root whose index records neither identity (or both).
+    """
+    store = location.store_for(name)
+    root = store.ref(location.latest_ref(name))
+    annotations = store.read_index(root).annotations or {}
+    is_range = ANN_SPEC_SHA256 in annotations or ANN_RANGE in annotations
+    is_image = ANN_NAME in annotations
+    if is_range and not is_image:
+        return "range"
+    if is_image and not is_range:
+        return "image"
+    raise DistError(
+        "catalog-kind-unknown",
+        f"{name!r} at {location.describe()} resolves to {root.digest[:19]}..., "
+        "whose index records neither a published image name nor a range build "
+        "identity; only artifacts this tool published enter the catalog list",
+    )
 
 
 def publish_catalog_list(names: list[str], location: Location) -> Descriptor:
     """Rewrite `location`'s catalog list to exactly `names` (the regeneration and repair verb behind `publish --list`; image publishes append to the list on their own, but only a rewrite can drop a renamed or retired name).
 
-    Every name must resolve at the destination first, so the list never claims a name the location does not serve. The write is the same digest-addressed update every publish performs: the ref swap is atomic per store form, and the returned descriptor is the new list root.
+    Every name must resolve at the destination first, so the list never claims a name the location does not serve, and the same resolution detects each name's kind from what actually sits there (`_published_kind`): a pushed range joins the list as kind `range`, a published image as kind `image`, with no flag to mislabel either. The kinds keep the mirror one command (enumeration carries everything) while drift protection stays per-class: images pin via `pins.json`, ranges pin via the consumer clone's spec hash and never enter pin files, where their republish churn would break fleets with pin-mismatch noise (user-ratified 2026-10-21). The write is the same digest-addressed update every publish performs: the ref swap is atomic per store form, and the returned descriptor is the new list root.
 
     Raises:
-        DistError: `catalog-invalid` for an empty name list, `name-reserved` when `names` includes a reserved ref, `ref-not-found` for a name with no published root at the location.
+        DistError: `catalog-invalid` for an empty name list, `name-reserved` when `names` includes a reserved ref, `ref-not-found` for a name with no published root at the location, `catalog-kind-unknown` for a root whose kind cannot be determined.
     """
     if not names:
         raise DistError(
@@ -137,11 +202,11 @@ def publish_catalog_list(names: list[str], location: Location) -> Descriptor:
             f"the catalog list for {location.describe()} needs at least one name; "
             "nothing publishes an empty list",
         )
-    unique = sorted(set(names))
-    for name in unique:
+    entries: list[CatalogEntry] = []
+    for name in sorted(set(names)):
         refuse_reserved(name, "the list enumerates published names, never its own refs")
         try:
-            location.store_for(name).ref(location.latest_ref(name))
+            kind = _published_kind(location, name)
         except DistError as error:
             if error.code != "ref-not-found":
                 raise
@@ -150,11 +215,21 @@ def publish_catalog_list(names: list[str], location: Location) -> Descriptor:
                 f"{name!r} has no published root at {location.describe()}; the "
                 "catalog list only names what the location serves",
             ) from error
-    return _write_catalog_list(location, unique)
+        entries.append(CatalogEntry(name=name, kind=kind))
+    return _write_catalog_list(location, entries)
 
 
 def catalog_names(location: Location) -> list[str]:
-    """The names a location's catalog artifact lists (the hub-safe enumeration).
+    """The names a location's catalog artifact lists (the hub-safe enumeration), every kind included: this is what whole-location consumers (`mirror`, `source_names`) ride, and its meaning is stable across the typed payload. Kind-aware consumers use the parallel `catalog_entries` accessor.
+
+    Raises:
+        DistError: `ref-not-found` when the location publishes no catalog.
+    """
+    return [entry.name for entry in catalog_entries(location)]
+
+
+def catalog_entries(location: Location) -> list[CatalogEntry]:
+    """The typed entries a location's catalog artifact lists: each published name with its kind (`image` or `range`; a pre-kind bare-string list reads as all `image`). The kind-aware twin of `catalog_names`, for consumers that split by purpose, like `generate_pin_file`.
 
     Raises:
         DistError: `ref-not-found` when the location publishes no catalog.
@@ -421,10 +496,15 @@ def fetch_daemon_bundle(
 
 
 def generate_pin_file(location: Location, out: Path) -> dict[str, str]:
-    """The Q11 fleet pin file: every catalog name's current root digest at `location`, written as JSON; consumers refuse a resolved root diverging from its pin."""
+    """The Q11 fleet pin file: every kind-`image` catalog name's current root digest at `location`, written as JSON; consumers refuse a resolved root diverging from its pin.
+
+    Only images pin here, deliberately (user-ratified 2026-10-21): drift protection is per-class. Images have no other anchor, so the pin file is theirs; a range already pins through the consumer clone's spec hash (`pull` resolves the exact build the local `range.yaml` names), and a range entering the pin file would break fleets with pin-mismatch noise on every republish, since a republished range mints a new root digest by design. Enumeration stays whole regardless: `mirror` and `source_names` carry every entry.
+    """
     pins: dict[str, str] = {}
-    for name in catalog_names(location):
-        store = location.store_for(name)
-        pins[name] = store.ref(location.latest_ref(name)).digest
+    for entry in catalog_entries(location):
+        if entry.kind != "image":
+            continue
+        store = location.store_for(entry.name)
+        pins[entry.name] = store.ref(location.latest_ref(entry.name)).digest
     out.write_text(json.dumps({"pins": pins}, indent=2, sort_keys=True) + "\n")
     return pins
