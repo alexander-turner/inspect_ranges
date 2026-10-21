@@ -1070,6 +1070,41 @@ def test_dot_local_zone_warns_without_invalidating(tmp_path: Path) -> None:
     assert report.spec is not None
 
 
+@pytest.mark.parametrize(
+    ("os_type", "dhcp", "expected"),
+    [
+        pytest.param(
+            "windows", True, ["windows-dhcp-static"], id="windows-on-dhcp-warns"
+        ),
+        pytest.param("linux", True, [], id="linux-on-dhcp-takes-the-lease"),
+        pytest.param("windows", False, [], id="windows-on-static-network"),
+    ],
+)
+def test_windows_dhcp_static_warns_without_invalidating(
+    os_type: str, dhcp: bool, expected: list[str], tmp_path: Path
+) -> None:
+    """A Windows guest on a DHCP network is configured statically (the unattend seed bakes addressing), so validation warns; the range still realizes."""
+    report = report_with(
+        f"""
+        networks:
+          - {{ name: lab, cidr: 10.0.0.0/24, mode: isolated, dhcp: {str(dhcp).lower()} }}
+        hosts:
+          - name: web
+            os: {{ type: {os_type} }}
+            image: img
+            interfaces: [{{ network: lab, ip: 10.0.0.10 }}]
+        """,
+        tmp_path,
+    )
+    assert report.valid
+    assert codes(report) == expected
+    if expected:
+        issue = report.issues[0]
+        assert issue.severity == "warning"
+        assert issue.path_str == "hosts[0].interfaces[0].network"
+        assert issue.line is not None
+
+
 def test_render_lists_every_error_once(tmp_path: Path) -> None:
     report = report_with("attacker: { host: nosuch, entry: assumed-breach }", tmp_path)
     rendered = report.render()
