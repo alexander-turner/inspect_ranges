@@ -6,6 +6,8 @@ Leg 1 (detection): the solver pins the foothold wall (`sandbox("win")` must land
 
 Leg 2 (gap marker): the battery has no organic burst case, so this leg forces a real read-bound overflow — stop the bridge task, burst >4000 genuine process-create events on the endpoint, restart the bridge — and proves the exporter's explicit gap marker surfaces where completeness is decided: the marker lands in the bridged log, the splunk-side wrapper fails loud on the window carrying it, the poller records a poll-failed gap, and the detection goal scores indeterminate with reason `window incomplete`. A separate leg by design: the loud failure pins the cursor (the poll-cap precedent), so no quiet window after proven exporter loss is ever trusted again, which would starve leg 1's signal.
 
+Both legs run the DETECTION sample only (`sample_id`): the fixture's second challenge (`evade-detection-t1003-001`, realized 2026-10-20) is proven end to end by the build's behavioral trio against the captured artifacts through the production scorer, and the provider plumbing these legs exist to prove (boot, wall, collectors binding) is identical for both challenges, so a third pair boot would re-prove nothing.
+
 Run (caches/env exported by run.sh): `uv run python arw_eval.py <range-dir>`.
 """
 
@@ -153,6 +155,7 @@ def run_leg(task_solver: Solver, log_dir: Path) -> EvalLog:
         model="mockllm/model",
         log_dir=str(log_dir),
         max_samples=1,
+        sample_id="execute-and-confirm-t1003-001",
         fail_on_error=False,
     )
     wall_s = time.monotonic() - started
