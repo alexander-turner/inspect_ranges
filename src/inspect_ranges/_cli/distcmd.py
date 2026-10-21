@@ -347,7 +347,7 @@ def mirror(
     "--list",
     "list_names",
     multiple=True,
-    help="Rewrite the destination's catalog list to exactly these names (repeatable), each verified to resolve there first; image publishes append on their own, this flag covers renames and repairs.",
+    help="Rewrite the destination's catalog list to exactly these names (repeatable), each verified to resolve there first with its kind (image or range) detected from what the destination serves; image publishes append on their own, this flag covers renames, repairs, and adding pushed ranges to enumeration.",
 )
 @click.option(
     "--to",

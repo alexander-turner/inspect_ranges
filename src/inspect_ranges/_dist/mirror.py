@@ -40,7 +40,7 @@ class MirrorReport(BaseModel):
 
 
 def source_names(location: Location) -> list[str]:
-    """Every artifact name a location can enumerate.
+    """Every artifact name a location can enumerate, every catalog kind included: a whole-location mirror carries published images AND pushed ranges in one command (enumeration is whole by design; the per-class drift split lives in pin generation, which filters to images).
 
     Raises:
         DistError: `location-unenumerable` for sources with no listing surface (a hub location that never published its catalog list), with the per-name form and `publish --list` as the remedies.

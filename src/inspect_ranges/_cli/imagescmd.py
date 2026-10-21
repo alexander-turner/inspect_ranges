@@ -583,7 +583,7 @@ def prune(
     "--out", type=click.Path(path_type=Path), required=True, help="Pin file to write."
 )
 def images_pin(from_location: str, out: Path) -> None:
-    """Write the fleet pin file (every catalog name's current root digest); hosts consuming it via INSPECT_RANGES_PIN_FILE refuse a catalog that moved past the pinned state."""
+    """Write the fleet pin file (every catalog IMAGE's current root digest; published ranges never enter it, they pin via the consumer clone's spec hash); hosts consuming it via INSPECT_RANGES_PIN_FILE refuse a catalog that moved past the pinned state."""
     from .._dist import DistError
     from .._dist.catalog import generate_pin_file
     from .._dist.location import parse_location
