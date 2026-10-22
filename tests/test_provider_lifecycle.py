@@ -819,6 +819,32 @@ def test_host_backend_selection(tmp_path: Path) -> None:
         )
 
 
+def test_custom_backend_value_installs_the_factory_bundle(tmp_path: Path) -> None:
+    """A dotted `INSPECT_RANGES_HOST` value resolves through its factory: the runtime carries the factory's provider and, for a separated bundle, the derived channel seams."""
+    from tests.test_host_backend import _StubProvider
+
+    with sandbox_lifecycle_scope():
+        runtime, _seams = rigged_runtime(tmp_path)
+        original_up = runtime.up_fn
+        runtime.host_backend = "tests.test_host_backend.separated_backend_factory"
+        runtime._host_provider = None  # pyright: ignore[reportPrivateUsage]
+        provider = runtime.host_provider
+        assert isinstance(provider, _StubProvider)
+        assert runtime.backend_separated
+        assert runtime.up_fn is not original_up, (
+            "a separated bundle derives up/down/channel seams from its channel hook"
+        )
+
+
+def test_unresolvable_backend_refuses_at_runtime_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A value that does not resolve refuses when the runtime is CONSTRUCTED, before admission, CID lease, or render ever run."""
+    monkeypatch.setenv("INSPECT_RANGES_HOST", "no_such_pkg_xyz.hosts.fleet:region-a")
+    with pytest.raises(ValueError, match="INSPECT_RANGES_HOST"):
+        ProviderRuntime()
+
+
 def test_stale_golden_ping_failure_names_the_remedy(tmp_path: Path) -> None:
     """A pre-3.1.0 daemon's session-less pong fails the strict decode tamper-shaped (the recorded stale-golden/new-host hazard); the boot-time failure must name the operator's remedy and still destroy the booted range."""
 

@@ -45,7 +45,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 - **Realizer**: the hardened range image, the daemon artifact, and the Go toolchain (warnings, not failures: `up` builds the image on demand and `daemon-bundle` publishes the artifact once per fleet).
 
-- **Provider and host**: entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, and the applier socket probe when `INSPECT_RANGES_HOST` points at one.
+- **Provider and host**: entry-point registration, goldens, CID and host lease registry health with an expired-leases hint naming the reaper, lease origins this machine can resolve, and the selected backend itself: the applier socket probe when `INSPECT_RANGES_HOST` points at one, or resolution plus the bundle's own probe for a [registered backend](topology.qmd#registering-a-backend).
 
 - **Evidence**: knob validity, a writability probe of a configured sink, and a warning when evidence resolves to instance-local storage (see [Evidence](evidence.qmd)).
 

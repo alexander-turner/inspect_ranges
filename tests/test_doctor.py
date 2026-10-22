@@ -555,6 +555,73 @@ def test_check_host_fails_an_unknown_backend(tmp_path: Path) -> None:
     assert "uds:<socket>" in backend.detail
 
 
+def test_check_host_resolves_a_registered_backend(tmp_path: Path) -> None:
+    """A dotted INSPECT_RANGES_HOST value that resolves reports ok and runs the bundle's doctor probe."""
+    from inspect_ranges._doctor.checks import check_host
+
+    value = "tests.test_host_backend.probing_backend_factory:healthy"
+    results = {
+        r.name: r for r in check_host(state_dir=tmp_path / "state", backend=value)
+    }
+    assert results["backend"].status == "ok"
+    assert results["backend probe"].status == "ok"
+
+
+def test_check_host_reports_a_failing_backend_probe(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_host
+
+    value = "tests.test_host_backend.probing_backend_factory:region-down"
+    results = {
+        r.name: r for r in check_host(state_dir=tmp_path / "state", backend=value)
+    }
+    assert results["backend"].status == "ok"
+    probe = results["backend probe"]
+    assert probe.status == "fail"
+    assert "unreachable: region-down" in probe.detail
+
+
+def test_check_host_fails_an_unimportable_backend(tmp_path: Path) -> None:
+    """A dotted value whose package is not installed fails with the import cause named."""
+    from inspect_ranges._doctor.checks import check_host
+
+    results = {
+        r.name: r
+        for r in check_host(
+            state_dir=tmp_path / "state", backend="no_such_pkg_xyz.hosts.fleet:x"
+        )
+    }
+    backend = results["backend"]
+    assert backend.status == "fail"
+    assert "does not import" in backend.detail
+
+
+def test_check_host_warns_on_a_foreign_lease_origin(tmp_path: Path) -> None:
+    """A lease whose origin this environment cannot resolve is a range the reaper HERE cannot reclaim: doctor warns."""
+    from inspect_ranges._doctor.checks import check_host
+    from inspect_ranges._host import LeaseStore
+
+    from tests.test_host_leases import facts
+
+    state = tmp_path / "state"
+    LeaseStore(state).acquire(
+        project="ir-foreign",
+        task_name="task",
+        sample_id="s1",
+        isolation="shared",
+        origin="no_such_pkg_xyz.hosts.fleet:region-a",
+        bundle_path="/b",
+        bundle_digest="ab" * 32,
+        staging="/s",
+        host_facts=facts(),
+        ttl_s=600,
+    )
+    results = {r.name: r for r in check_host(state_dir=state, backend="local")}
+    origins = results["lease origins"]
+    assert origins.status == "warn"
+    assert "cannot reclaim" in origins.detail
+    assert origins.fix is not None and "install the backend package" in origins.fix
+
+
 def test_applier_socket_probe_shapes(tmp_path: Path) -> None:
     """Missing socket fails; a routing-answering listener (clean close, no ack) is ok; a bogus ack warns."""
     import asyncio

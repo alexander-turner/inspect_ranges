@@ -1,0 +1,75 @@
+---
+title: inspect_ranges.host
+description: "The range-host extension point: implement and register a custom backend for INSPECT_RANGES_HOST."
+reference: inspect_ranges.host
+---
+
+The range-host extension point: a `HostBackendFactory` named by `INSPECT_RANGES_HOST=<module>.<factory>[:<config>]` returns a `HostBackend` bundle, and the lease machinery and channel tier it builds on are public here. See [Implementing a Host Provider](../topology.qmd#implementing-a-host-provider) for the grammar, the registration walkthrough, and the contracts an implementation is held to.
+
+## Registration
+
+### HostBackendFactory
+
+### HostBackendContext
+
+### HostBackend
+
+### ChannelForLease
+
+### ReclaimFn
+
+### DoctorProbe
+
+## Provider Seam
+
+### HostProvider
+
+### RangeHost
+
+### SampleSpec
+
+### LeasePlacement
+
+### HostCapabilities
+
+### HostFacts
+
+### IsolationLevel
+
+## Leases
+
+### HostLease
+
+### LeaseStore
+
+### LeaseLostError
+
+### lease_ttl_s
+
+### LocalRangeHost
+
+### local_host_facts
+
+## Channel
+
+### RangeChannel
+
+### MessageChannel
+
+### Transport
+
+### ByteStream
+
+### ExecRequest
+
+### ExecOutcome
+
+### StageReport
+
+### ForwardReply
+
+### PongReply
+
+### DiagReply
+
+### Heartbeat

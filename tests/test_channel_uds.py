@@ -201,9 +201,9 @@ def test_remote_seams_install_at_runtime_construction(
     """A fresh `ProviderRuntime` under `INSPECT_RANGES_HOST=uds:` carries the derived seams from birth: paths that never touch `host_provider` (cli_cleanup foremost) still tear down THROUGH the applier instead of leaking its charge behind a direct down."""
     monkeypatch.setenv("INSPECT_RANGES_HOST", f"uds:{tmp_path / 'applier.sock'}")
     runtime = ProviderRuntime()
-    assert runtime.down_fn.__module__ == "inspect_ranges._host.remote"
-    assert runtime.up_fn.__module__ == "inspect_ranges._host.remote"
-    assert runtime.channel_factory.__module__ == "inspect_ranges._host.remote"
+    assert runtime.down_fn.__module__ == "inspect_ranges._host.seams"
+    assert runtime.up_fn.__module__ == "inspect_ranges._host.seams"
+    assert runtime.channel_factory.__module__ == "inspect_ranges._host.seams"
 
 
 @pytest.mark.parametrize(
@@ -252,8 +252,10 @@ def test_uds_up_fn_gap_allowances_cover_the_silent_up_phases(
         )
 
     monkeypatch.setattr(remote, "_lease_channel", tiny_budget_channel)
-    up_fn, _down_fn, _factory = remote.remote_seams(
-        tmp_path / "applier.sock", state_dir
+    from inspect_ranges._host.seams import derive_channel_seams
+
+    up_fn, _down_fn, _factory = derive_channel_seams(
+        remote.uds_channel_for_lease(tmp_path / "applier.sock"), state_dir
     )
     result = up_fn(
         bundle, UpOptions(project="ir-slow-phase", image_cache=tmp_path / "cache"), None
@@ -264,7 +266,7 @@ def test_uds_up_fn_gap_allowances_cover_the_silent_up_phases(
 def test_realize_gap_allowances_floor_at_each_occupants_bound(tmp_path: Path) -> None:
     """The driver's per-gap envelopes dominate the up-side bounds that legally occupy them, floored at the applier's own defaults when the driver configures shorter (quality-review R2-3)."""
     from inspect_ranges._compiler.plan import ResolvedPlan
-    from inspect_ranges._host.remote import realize_gap_allowances
+    from inspect_ranges._host.seams import realize_gap_allowances
     from inspect_ranges._runtime.up import IMAGE_BUILD_TIMEOUT_S, UpOptions
 
     bundle = tmp_path / "bundle"

@@ -41,6 +41,7 @@ from .retry import RetryConfig, RetryStats
 if TYPE_CHECKING:
     from .._challenges.plants import PlantStore
     from .._channel.channel import Transport
+    from .._host.backend import HostBackend
     from .evidence import EvidenceSession
 
 logger = logging.getLogger("inspect_ranges.provider")
@@ -169,20 +170,43 @@ class ProviderRuntime:
             str | RangeSpec,
             tuple[RangeSpec, ResolvedPlan, frozenset[str], dict[str, tuple[str, str]]],
         ] = {}
-        if self.host_backend.startswith("uds:"):
-            # the derived seams install at construction, not lazily: paths
-            # that never touch host_provider (cli_cleanup foremost) must
-            # still tear down THROUGH the applier, or its admission charge
-            # and relay map leak silently behind a direct down
-            self._install_remote_seams()
+        self._backend: "HostBackend | None" = None
+        self._backend_value: str | None = None
+        # the backend resolves at construction, not lazily: an unresolvable
+        # value must refuse here, before admission, CID lease, and render,
+        # and a separated backend's derived seams must install for paths
+        # that never touch host_provider (cli_cleanup foremost), or the
+        # backend's host-side state (the applier's admission charge and
+        # relay map foremost) leaks silently behind a direct down
+        self._install_backend()
 
-    def _install_remote_seams(self) -> None:
-        from .._host.remote import remote_seams
+    def _install_backend(self) -> None:
+        """Resolve `host_backend` to its bundle and, for a separated backend, swap in the channel-derived seams.
 
-        socket_path = Path(self.host_backend.removeprefix("uds:"))
-        self.up_fn, self.down_fn, self.channel_factory = remote_seams(
-            socket_path, self.state_dir
-        )
+        Raises:
+            ValueError: The value names a backend that does not resolve.
+        """
+        from .._host.backend import resolve_host_backend
+        from .._host.seams import derive_channel_seams
+
+        self._backend = resolve_host_backend(self.host_backend, self.state_dir)
+        self._backend_value = self.host_backend
+        if self._backend.channel_for_lease is not None:
+            self.up_fn, self.down_fn, self.channel_factory = derive_channel_seams(
+                self._backend.channel_for_lease, self.state_dir
+            )
+
+    def _resolved_backend(self) -> "HostBackend":
+        """The current bundle, re-resolved when a test flipped `host_backend` after construction (so the matching seams install too)."""
+        if self._backend is None or self._backend_value != self.host_backend:
+            self._install_backend()
+        assert self._backend is not None
+        return self._backend
+
+    @property
+    def backend_separated(self) -> bool:
+        """Whether the selected backend reaches its host through a channel (teardown must route through the backend; local capture is unavailable)."""
+        return self._resolved_backend().separated
 
     @property
     def admission(self) -> WeightedAdmission:
@@ -199,28 +223,13 @@ class ProviderRuntime:
 
     @property
     def host_provider(self) -> HostProvider:
-        """The lease-granting backend `INSPECT_RANGES_HOST` selects (default `local`); mutable like the other seams. For `uds:` the derived channel seams (re-)install here too, so a test that flips `host_backend` after construction gets the matching seams.
+        """The lease-granting backend `INSPECT_RANGES_HOST` selects (default `local`); mutable like the other seams. For a separated backend the derived channel seams (re-)install here too, so a test that flips `host_backend` after construction gets the matching seams.
 
         Raises:
-            ValueError: The variable names a backend that does not exist.
+            ValueError: The variable names a backend that does not resolve.
         """
         if self._host_provider is None:
-            if self.host_backend == "local":
-                from .._host.local import LocalHostProvider
-
-                self._host_provider = LocalHostProvider(self.state_dir)
-            elif self.host_backend.startswith("uds:"):
-                from .._host.remote import RemoteHostProvider
-
-                self._install_remote_seams()
-                self._host_provider = RemoteHostProvider(
-                    Path(self.host_backend.removeprefix("uds:")), self.state_dir
-                )
-            else:
-                raise ValueError(
-                    f"unknown INSPECT_RANGES_HOST backend {self.host_backend!r} "
-                    "(expected 'local' or 'uds:<socket>')"
-                )
+            self._host_provider = self._resolved_backend().provider
         return self._host_provider
 
     @host_provider.setter

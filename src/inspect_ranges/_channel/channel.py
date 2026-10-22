@@ -196,7 +196,11 @@ class RangeChannel(Protocol):
     """
 
     def realize(
-        self, bundle_digest: Sha256Hex, grants: Sequence[str]
+        self,
+        bundle_digest: Sha256Hex,
+        grants: Sequence[str],
+        *,
+        gap_allowances: Mapping[str | None, float] | None = None,
     ) -> AsyncIterator[StageReport]: ...
     async def exec(
         self, guest: str, request: ExecRequest, *, stdin: bytes | None = None

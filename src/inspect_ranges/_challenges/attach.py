@@ -2,7 +2,7 @@
 
 The attach rebuilds the guest transport from the project's recorded state alone: the owner record under the project state directory proves the project is registered, the `boot.json` recorded beside it by `up` carries every guest's CID and VMM kind, and Cloud Hypervisor guests dial through the project's hybrid-vsock sockets exactly as the provider does (`ch_vsock_dir` plus the CID-derived VMM uid, `SO_PEERCRED`-checked by the transport). A missing or stale project refuses with the state path and the remedy named; nothing is dialed on a refusal.
 
-Local backend only: with `INSPECT_RANGES_HOST` pointing at an applier the guests live behind the applier socket on another host and no attach relay exists yet, so the attach refuses naming the limitation rather than dialing sockets that are not there.
+Local backend only: with `INSPECT_RANGES_HOST` selecting any other backend (an applier socket, or a registered backend factory) the guests live behind that backend's transport and no attach relay exists yet, so the attach refuses naming the limitation rather than dialing sockets that are not there.
 
 Every attach logs loudly (an out-of-band oracle during a scoring run must be visible in the run's logs), and leaving the context manager detaches the oracle: later verbs refuse instead of silently dialing a range that may since have been torn down.
 """
@@ -130,8 +130,8 @@ def attach_oracle(
     if host_backend != "local":
         raise OracleSetupError(
             f"range_oracle({project!r}) dials this host's guest vsock sockets, "
-            f"but INSPECT_RANGES_HOST={host_backend!r} places ranges behind "
-            "the applier and no attach relay exists; attach on the host where "
+            f"but INSPECT_RANGES_HOST={host_backend!r} places ranges behind a "
+            "host backend and no attach relay exists; attach on the host where "
             "the range runs, or unset INSPECT_RANGES_HOST"
         )
     state = state_dir if state_dir is not None else default_state_dir()

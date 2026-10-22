@@ -1,12 +1,21 @@
 """The independent reaper: on-disk-only sweeps, destroy-before-release, crash resume (range-host-v1 slice 2)."""
 
+import importlib
 import logging
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 from inspect_ranges._cli.main import ranges
-from inspect_ranges._host import HostFacts, HostLease, LeaseStore
+from inspect_ranges._host import (
+    HostBackend,
+    HostFacts,
+    HostLease,
+    LeasePlacement,
+    LeaseStore,
+    RangeHost,
+    SampleSpec,
+)
 from inspect_ranges._host.reaper import ReapOutcome, sweep
 from inspect_ranges._provider.naming import CidAllocator
 from inspect_ranges._runtime.down import DownResult
@@ -104,9 +113,21 @@ def test_crash_resume_completes_on_the_second_invocation(tmp_path: Path) -> None
 
 
 def test_uds_lease_without_applier_falls_back_with_a_warning(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rig = Rig(tmp_path, origin="uds:/tmp/applier.sock")
+    """The REAL uds bundle resolved from the lease origin: the applier at the (dead) socket refuses, so the reclaim warns and falls back to direct down (correct only because a uds host is this machine)."""
+    rig = Rig(tmp_path, origin="uds:/tmp/ir-test-no-applier.sock")
+
+    # importlib, not an import statement: the `_runtime` package re-exports
+    # the `down` FUNCTION under the same name as its submodule
+    down_module = importlib.import_module("inspect_ranges._runtime.down")
+
+    def direct_down(project: str, state_dir: Path) -> DownResult:
+        return rig.down(project, state_dir)
+
+    monkeypatch.setattr(down_module, "down", direct_down)
     with caplog.at_level(logging.WARNING, logger="inspect_ranges.reaper"):
         outcomes = rig.sweep()
     assert [o.action for o in outcomes] == ["reaped"]
@@ -115,39 +136,78 @@ def test_uds_lease_without_applier_falls_back_with_a_warning(
     assert "admission charge" in messages
 
 
-def test_uds_lease_prefers_the_applier_teardown(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, origin="uds:/tmp/applier.sock")
+class _StubProvider:
+    """Satisfies the `HostProvider` protocol for bundles whose reaper path never acquires."""
+
+    async def acquire(self, sample: SampleSpec, placement: LeasePlacement) -> RangeHost:
+        raise NotImplementedError
+
+    async def release(self, host: RangeHost) -> None:
+        raise NotImplementedError
+
+    async def abandon(self, host: RangeHost) -> None:
+        raise NotImplementedError
+
+
+def test_backend_reclaim_owns_the_teardown(tmp_path: Path) -> None:
+    """A lease origin resolving to a bundle with a reclaim connector tears down through it; the local down path is never touched."""
+    rig = Rig(tmp_path, origin="mypkg.hosts.fleet:region-a")
     torn_down: list[str] = []
 
-    def applier_teardown(lease: HostLease) -> None:
+    def reclaim(lease: HostLease, state_dir: Path) -> None:
         torn_down.append(lease.lease_id)
 
+    def resolver(origin: str, state_dir: Path) -> HostBackend:
+        assert origin == rig.lease.origin, "resolution keys on the recorded origin"
+        return HostBackend(provider=_StubProvider(), reclaim=reclaim)
+
     outcomes = sweep(
-        rig.state,
-        store=rig.store,
-        down_fn=rig.down,
-        applier_teardown=applier_teardown,
+        rig.state, store=rig.store, down_fn=rig.down, resolve_origin=resolver
     )
     assert [o.action for o in outcomes] == ["reaped"]
     assert torn_down == [rig.lease.lease_id]
-    assert rig.down_calls == [], "the applier owned the teardown"
+    assert rig.down_calls == [], "the backend owned the teardown"
 
 
-def test_failing_applier_teardown_falls_back_to_direct_down(
+def test_failing_backend_reclaim_frees_nothing(tmp_path: Path) -> None:
+    """A custom backend's failing reclaim gets NO direct-down fallback (the host lives elsewhere): the outcome is down-failed and everything stays findable for the next sweep."""
+    rig = Rig(tmp_path, origin="mypkg.hosts.fleet:region-a")
+
+    def refusing(lease: HostLease, state_dir: Path) -> None:
+        raise ConnectionError("fleet gone")
+
+    def resolver(origin: str, state_dir: Path) -> HostBackend:
+        return HostBackend(provider=_StubProvider(), reclaim=refusing)
+
+    outcomes = sweep(
+        rig.state, store=rig.store, down_fn=rig.down, resolve_origin=resolver
+    )
+    assert [(o.action, o.error) for o in outcomes] == [("down-failed", "fleet gone")]
+    assert rig.down_calls == [], "no vacuous direct down against a remote host"
+    survivor = rig.store.get(rig.lease.lease_id)
+    assert survivor is not None and survivor.state == "reaping"
+    assert rig.allocator.leased_projects() == [rig.project]
+
+
+def test_unresolvable_origin_reclaims_nothing(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    rig = Rig(tmp_path, origin="uds:/tmp/applier.sock")
-
-    def refusing(lease: HostLease) -> None:
-        raise ConnectionError("applier gone")
-
-    with caplog.at_level(logging.WARNING, logger="inspect_ranges.reaper"):
-        outcomes = sweep(
-            rig.state, store=rig.store, down_fn=rig.down, applier_teardown=refusing
-        )
-    assert [o.action for o in outcomes] == ["reaped"]
-    assert rig.down_calls == [rig.project]
-    assert "admission charge" in " ".join(r.getMessage() for r in caplog.records)
+    """A lease origin naming a backend this environment cannot import touches NOTHING: no vacuous down, no release; the lease stays reaping and the next sweep retries the same way."""
+    rig = Rig(tmp_path, origin="no_such_pkg.hosts.fleet:region-a")
+    with caplog.at_level(logging.ERROR, logger="inspect_ranges.reaper"):
+        outcomes = rig.sweep()
+    assert [o.action for o in outcomes] == ["origin-unresolvable"]
+    assert rig.down_calls == [], "a vacuous local down would orphan the remote host"
+    survivor = rig.store.get(rig.lease.lease_id)
+    assert survivor is not None and survivor.state == "reaping"
+    assert rig.allocator.leased_projects() == [rig.project]
+    assert rig.staging.exists()
+    assert read_owner(rig.state, rig.project) is not None
+    assert "install the backend's package" in " ".join(
+        record.getMessage() for record in caplog.records
+    )
+    retry = rig.sweep()
+    assert [o.action for o in retry] == ["origin-unresolvable"]
 
 
 def test_sweep_leaves_healthy_leases_alone(tmp_path: Path) -> None:

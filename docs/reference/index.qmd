@@ -6,6 +6,7 @@ title: Reference
 
 | | |
 |---|---|
+| [inspect_ranges.host](host.qmd) | The range-host extension point: implement and register a custom backend for INSPECT_RANGES_HOST. |
 | [inspect_ranges](inspect_ranges.qmd) | Challenges and goals (dataset, setup, scoring, verification), the goal types, and range definition loading. |
 | [inspect_ranges.scanners](scanners.qmd) | Deterministic apparatus checking over sample transcripts, as inspect_scout scanners. |
 | [inspect_ranges.types](types.qmd) | Range definition types, usable directly as sandbox configuration. |

@@ -201,7 +201,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         session = resolve_evidence_session(
             sample_id=sample_id,
             run_hint=task_name,
-            capture_local=not runtime.host_backend.startswith("uds:"),
+            capture_local=not runtime.backend_separated,
         )
         charged_totals = plan.totals
         if session is not None:
@@ -629,20 +629,21 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                     # LEAVE the lease, so the independent reaper reclaims the
                     # range after the lease expires
                     await runtime.host_provider.abandon(handle.host)
-                if runtime.host_backend.startswith("uds:"):
-                    # a direct `inspect-ranges down` bypasses the applier and
-                    # leaks its admission charge and relay map (the recorded
-                    # direct-down hazard); the recovery advice must not
-                    # recommend it on this topology (quality-review B18)
+                if runtime.backend_separated:
+                    # a direct `inspect-ranges down` bypasses the backend's
+                    # host-side state (the applier's admission charge and
+                    # relay map foremost, the recorded direct-down hazard);
+                    # the recovery advice must not recommend it on a
+                    # separated topology (quality-review B18)
                     logger.warning(
                         "range %s left up (--no-sandbox-cleanup); its host lease "
                         "is no longer renewed, so 'inspect-ranges reaper' "
-                        "reclaims it through the applier after expiry; remove "
-                        "it sooner with: INSPECT_RANGES_HOST=%s "
+                        "reclaims it through the host backend after expiry; "
+                        "remove it sooner with: INSPECT_RANGES_HOST=%s "
                         "inspect sandbox cleanup range %s  (the env "
-                        "prefix is what routes the teardown THROUGH the "
-                        "applier; without it the cleanup is a direct down and "
-                        "leaks the applier's admission charge)",
+                        "value is what routes the teardown THROUGH the "
+                        "backend; without it the cleanup is a direct down on "
+                        "this machine and strands the host's own state)",
                         handle.project,
                         runtime.host_backend,
                         handle.project,

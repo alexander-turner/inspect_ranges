@@ -432,10 +432,11 @@ def _strict_registry_check(
 
 
 def check_host(state_dir: Path, backend: str) -> list[CheckResult]:
-    """The range-host surface: strict `leases.json` health, an expired-leases hint naming the reaper, the applier socket probe when `INSPECT_RANGES_HOST` points at one, and a loud fail for a backend name the provider would refuse at eval time.
+    """The range-host surface: strict `leases.json` health, an expired-leases hint naming the reaper, lease origins this environment can actually resolve (an unresolvable one is a range the reaper HERE cannot reclaim), the applier socket probe when `INSPECT_RANGES_HOST` points at one, resolution of a registered backend factory, and a loud fail for a value the provider would refuse at eval time.
 
     Like the CID registry check, the lease read is deliberately STRICTER than the store's own forgiving reader: an entry the store would preserve-but-skip is a lease the reaper cannot see, so doctor reports it loudly instead.
     """
+    from .._host.backend import parse_host_backend, resolve_host_backend
     from .._host.leases import HostLease, LeaseStore
 
     def parseable(entry: object) -> bool:
@@ -478,9 +479,31 @@ def check_host(state_dir: Path, backend: str) -> list[CheckResult]:
             results.append(
                 CheckResult(HOST, "expired leases", "ok", "every lease is current")
             )
-    if backend.startswith("uds:"):
-        results.append(_probe_applier_socket(Path(backend.removeprefix("uds:"))))
-    elif backend != "local":
+        # per-origin resolvability: a lease whose origin names a backend this
+        # environment cannot import is a range the reaper HERE cannot reclaim
+        foreign: dict[str, str] = {}
+        for lease in LeaseStore(state_dir).leases():
+            if lease.origin in foreign:
+                continue
+            try:
+                resolve_host_backend(lease.origin, state_dir)
+            except Exception as error:
+                foreign[lease.origin] = str(error)
+        if foreign:
+            results.append(
+                CheckResult(
+                    HOST,
+                    "lease origins",
+                    "warn",
+                    f"{len(foreign)} lease origin(s) do not resolve here "
+                    f"({'; '.join(sorted(foreign))}): the reaper on this "
+                    "machine cannot reclaim their ranges",
+                    fix="install the backend package(s) where the reaper runs",
+                )
+            )
+    try:
+        parsed = parse_host_backend(backend)
+    except ValueError as error:
         # the provider raises ValueError for this at eval time; a typo'd
         # backend passing doctor clean is exactly the miss doctor exists for
         results.append(
@@ -488,11 +511,58 @@ def check_host(state_dir: Path, backend: str) -> list[CheckResult]:
                 HOST,
                 "backend",
                 "fail",
-                f"INSPECT_RANGES_HOST={backend!r} is not a backend "
-                "(expected 'local' or 'uds:<socket>')",
-                fix="unset INSPECT_RANGES_HOST, or point it at a running applier: uds:<socket>",
+                str(error),
+                fix=(
+                    "unset INSPECT_RANGES_HOST, point it at a running applier "
+                    "(uds:<socket>), or name a backend factory "
+                    "(<module>.<factory>[:<config>])"
+                ),
             )
         )
+        return results
+    if parsed.kind == "uds":
+        results.append(_probe_applier_socket(Path(parsed.config or "")))
+    elif parsed.kind == "custom":
+        try:
+            bundle = resolve_host_backend(backend, state_dir)
+        except Exception as error:
+            # Exception, not ValueError: a factory's own failure must land as
+            # a report, never crash doctor
+            results.append(
+                CheckResult(
+                    HOST,
+                    "backend",
+                    "fail",
+                    f"INSPECT_RANGES_HOST={backend!r} does not resolve: {error}",
+                    fix=(
+                        "install the package providing the backend factory, "
+                        "or fix INSPECT_RANGES_HOST"
+                    ),
+                )
+            )
+        else:
+            kind = "separated" if bundle.separated else "co-resident"
+            results.append(
+                CheckResult(
+                    HOST,
+                    "backend",
+                    "ok",
+                    f"INSPECT_RANGES_HOST={backend!r} resolves ({kind} backend)",
+                )
+            )
+            if bundle.doctor_probe is not None:
+                detail = bundle.doctor_probe()
+                results.append(
+                    CheckResult(HOST, "backend probe", "ok", "backend reports healthy")
+                    if detail is None
+                    else CheckResult(
+                        HOST,
+                        "backend probe",
+                        "fail",
+                        detail,
+                        fix="start or repair the backend's host, then re-run doctor",
+                    )
+                )
     return results
 
 

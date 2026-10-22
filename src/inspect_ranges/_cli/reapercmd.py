@@ -33,7 +33,7 @@ def _report(outcomes: list[ReapOutcome]) -> None:
 def reaper(state_dir: Path | None, interval: float | None) -> None:
     """Reclaim expired host leases: teardown first, then CID and lease release.
 
-    Reclaims on expiry alone, never probing liveness: a healthy sample never expires because its driver renews independently. A failed teardown frees nothing and the lease stays findable for the next sweep. One-shot mode exits 1 if any teardown failed.
+    Reclaims on expiry alone, never probing liveness: a healthy sample never expires because its driver renews independently. A failed teardown frees nothing and the lease stays findable for the next sweep. A lease whose origin names a backend this machine cannot import reclaims nothing either (install the backend's package where the reaper runs). One-shot mode exits 1 if any lease was not reaped.
     """
     target = state_dir if state_dir is not None else default_state_dir()
     while True:

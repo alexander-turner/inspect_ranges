@@ -2,7 +2,7 @@
 
 Cleanup must never depend on the original driver process reaching `finally` (`host-provider.md`); the reaper runs in a fresh process, reads `leases.json`, and reclaims on expiry alone, never probing liveness (a healthy sample never expires because its driver renews independently of sample activity). Sweep shape, per `range-host-v1.md`: select and mark under the flock (`LeaseStore.mark_reaping`, which re-checks expiry so a just-landed renewal is spared), tear down OUTSIDE the lock, and only after a successful teardown release the project's CID lease, clear the staging and owner record, and remove the host lease LAST: the lease is the retry anchor, so any failure earlier in the release phase leaves it `reaping` and the next sweep genuinely retries. A failed teardown frees nothing (crash-resume works the same way).
 
-For `uds:` leases the reaper prefers teardown through the applier socket (`remote.applier_teardown`, the default connector), which also releases the applier's admission charge and relay map; on connect failure it falls back to direct `down` with a logged warning that a live applier's charge leaks until restart (recorded v1 risk).
+Teardown dispatches on the lease's recorded `origin`, re-resolved through the backend grammar (`backend.py`): a backend with a reclaim connector (the `uds:` backend's applier teardown with its direct-down fallback, or a custom backend's own) tears down through it, a co-resident backend through direct `down`. An origin this process cannot resolve (the backend's package is not installed here) reclaims NOTHING: a direct `down` would "succeed" vacuously against a host that lives elsewhere and release the lease over a still-running range, so the lease stays `reaping` and the sweep reports `origin-unresolvable` until the package is installed where the reaper runs.
 """
 
 import fcntl
@@ -11,7 +11,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .._provider.naming import CidAllocator
 from .._runtime.down import DownResult
@@ -19,11 +19,14 @@ from .._runtime.down import down as run_down
 from .._runtime.ownership import remove_project
 from .leases import HostLease, LeaseStore
 
+if TYPE_CHECKING:
+    from .backend import HostBackend
+
 logger = logging.getLogger("inspect_ranges.reaper")
 
 DownFn = Callable[[str, Path], DownResult]
-ApplierTeardown = Callable[[HostLease], None]
-"""Teardown through the lease's applier socket; raises on connect failure (`remote.applier_teardown` is the real connector)."""
+OriginResolver = Callable[[str, Path], "HostBackend"]
+"""A lease origin to its backend bundle; `resolve_host_backend` is the real resolver, tests inject fakes."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +35,7 @@ class ReapOutcome:
 
     lease_id: str
     project: str
-    action: Literal["reaped", "down-failed", "release-failed"]
+    action: Literal["reaped", "down-failed", "release-failed", "origin-unresolvable"]
     error: str | None = None
 
 
@@ -73,18 +76,18 @@ def sweep(
     *,
     store: LeaseStore | None = None,
     down_fn: DownFn | None = None,
-    applier_teardown: ApplierTeardown | None = None,
+    resolve_origin: OriginResolver | None = None,
 ) -> list[ReapOutcome]:
     """One reaper pass over `state_dir`: one outcome per expired or `reaping` lease, one summary log line each.
 
-    `store` (which carries the injectable clock) and `down_fn` default to the real thing; tests inject both. The whole pass holds a sweep-level flock, so concurrent reapers (a cron pass overlapping a manual one-shot) serialize instead of double-tearing the same lease; a crashed holder releases the flock with its process, so it can never wedge.
+    `store` (which carries the injectable clock), `down_fn`, and `resolve_origin` default to the real thing; tests inject them. The whole pass holds a sweep-level flock, so concurrent reapers (a cron pass overlapping a manual one-shot) serialize instead of double-tearing the same lease; a crashed holder releases the flock with its process, so it can never wedge.
     """
     lease_store = store if store is not None else LeaseStore(state_dir)
     teardown = down_fn if down_fn is not None else _default_down
-    if applier_teardown is None:
-        from .remote import applier_teardown as default_applier_teardown
+    if resolve_origin is None:
+        from .backend import resolve_host_backend
 
-        applier_teardown = default_applier_teardown
+        resolve_origin = resolve_host_backend
     allocator = CidAllocator(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     with open(state_dir / ".reaper.lock", "a+") as lock:
@@ -92,7 +95,7 @@ def sweep(
         try:
             return [
                 _reap_one(
-                    lease, state_dir, lease_store, allocator, teardown, applier_teardown
+                    lease, state_dir, lease_store, allocator, teardown, resolve_origin
                 )
                 for lease in lease_store.mark_reaping()
             ]
@@ -106,35 +109,43 @@ def _reap_one(
     store: LeaseStore,
     allocator: CidAllocator,
     down_fn: DownFn,
-    applier_teardown: ApplierTeardown | None,
+    resolve_origin: OriginResolver,
 ) -> ReapOutcome:
-    torn_down = False
-    if lease.origin.startswith("uds:") and applier_teardown is not None:
-        try:
-            applier_teardown(lease)
-            torn_down = True
-        except Exception as error:
-            logger.warning(
-                "reaper: applier teardown of lease=%s project=%s failed (%s); "
-                "falling back to direct down (a live applier's admission "
-                "charge leaks until restart)",
-                lease.lease_id,
-                lease.project,
-                error,
-            )
-    if not torn_down:
-        try:
+    try:
+        backend = resolve_origin(lease.origin, state_dir)
+    except Exception as error:
+        # NOTHING is touched: a direct down against a host that lives
+        # elsewhere would "succeed" vacuously and release the lease over a
+        # still-running range. The lease stays reaping for the next sweep.
+        logger.error(
+            "reaper: lease=%s project=%s has origin %r this process cannot "
+            "resolve (%s); nothing was reclaimed and the lease stays reaping; "
+            "install the backend's package where the reaper runs, then sweep "
+            "again",
+            lease.lease_id,
+            lease.project,
+            lease.origin,
+            error,
+        )
+        return ReapOutcome(
+            lease.lease_id, lease.project, "origin-unresolvable", str(error)
+        )
+    reclaim = backend.reclaimer()
+    try:
+        if reclaim is not None:
+            reclaim(lease, state_dir)
+        else:
             down_fn(lease.project, state_dir)
-        except Exception as error:
-            logger.error(
-                "reaper: down of lease=%s project=%s failed; the lease stays "
-                "reaping and the CID lease stays held, both findable for the "
-                "next sweep: %s",
-                lease.lease_id,
-                lease.project,
-                error,
-            )
-            return ReapOutcome(lease.lease_id, lease.project, "down-failed", str(error))
+    except Exception as error:
+        logger.error(
+            "reaper: down of lease=%s project=%s failed; the lease stays "
+            "reaping and the CID lease stays held, both findable for the "
+            "next sweep: %s",
+            lease.lease_id,
+            lease.project,
+            error,
+        )
+        return ReapOutcome(lease.lease_id, lease.project, "down-failed", str(error))
     if lease.evidence_location is not None:
         # after teardown (nothing appends anymore), before release: a dead
         # driver's record gets its `reaped` seal so it stays verifiable.
