@@ -73,6 +73,9 @@ class PlanOptions(BaseModel):
     realized_backings: dict[str, tuple[str, str]] = {}
     """Per-guest (backing golden cache file, `sha256:` digest) for realized overlays, recorded into boot.json so `up` verifies the overlay's backing at boot (round-2 review: goldens re-derive in place under the same name, and the overlay's own digest cannot see its backing). Set from the consumed build manifest by every gate consumer that renders."""
 
+    draws: dict[str, int | str] = {}
+    """The sample's drawn variable values (variable-draws-v0), rendered into every Linux guest's cloud-init seed as the draws file. A render input only: planning ignores it, so the plan and build keys never see a draw. Set per sample by the provider (and by the build's proof boot); empty everywhere else."""
+
 
 class ImageRef(BaseModel):
     """An image as the plan records it: the logical reference plus its cache-resolved digest."""

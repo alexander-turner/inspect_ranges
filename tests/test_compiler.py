@@ -11,6 +11,7 @@ from inspect_ranges._compiler import (
     resolvers_for,
 )
 from inspect_ranges._compiler.acl import FlowEndpoint, Service, acl_admits
+from inspect_ranges._compiler.draws import draw_variables
 from inspect_ranges._diagnostics import IssueError
 from inspect_ranges.types import (
     AclRule,
@@ -26,6 +27,7 @@ from inspect_ranges.types import (
     RangeSpec,
     Route,
     Router,
+    Variable,
 )
 
 
@@ -582,3 +584,54 @@ def test_multihomed_guest_endpoint_renders_the_address_set() -> None:
     )
     expected = 'table inet fw {\n  chain forward {\n    type filter hook forward priority 0; policy drop;\n    ct state established,related accept\n    iifname "eth0" ip daddr 10.80.20.10 tcp dport 22 drop\n    iifname "eth0" oifname "eth1" tcp dport 22 accept\n    iifname "eth0" oifname "eth1" tcp dport 5432 accept\n    iifname "eth0" oifname "eth1" meta l4proto icmp accept\n    ip saddr 10.80.10.10/32 oifname "eth1" tcp dport 80-90 accept\n    oifname "eth0" tcp dport 443 accept\n    ip saddr { 10.80.10.11, 10.80.20.11 } oifname "eth1" tcp dport 8443 accept\n  }\n}\n'
     assert render_router_nftables(spec, router.name, allocate(spec)) == expected
+
+
+# -- variable draws (variable-draws-v0) ---------------------------------------
+
+
+def _draw_vars() -> dict[str, Variable]:
+    return {
+        "svc_port": Variable(
+            type="port", min=1500, max=1510, default=1505, draw="boot"
+        ),
+        "retries": Variable(type="int", min=1, max=3, default=2, draw="boot"),
+        "flavor": Variable(
+            type="choice", choices=["a", "b", "c"], default="a", draw="boot"
+        ),
+        "undrawn": Variable(type="port", min=1500, default=2323),
+        "greeting": Variable(default="hello"),
+    }
+
+
+def test_draw_variables_is_deterministic_per_seed() -> None:
+    """Same (variables, seed) always re-derives the same values: the recorded seed is the post-hoc reproduction key."""
+    first = draw_variables(_draw_vars(), "seed-a")
+    assert first == draw_variables(_draw_vars(), "seed-a")
+    assert set(first) == {"svc_port", "retries", "flavor"}, (
+        "only draw: boot variables draw"
+    )
+    # one variable's draw never depends on which siblings are declared
+    alone = draw_variables({"svc_port": _draw_vars()["svc_port"]}, "seed-a")
+    assert alone["svc_port"] == first["svc_port"]
+
+
+def test_draw_variables_respects_constraints_and_excludes_the_default() -> None:
+    variables = _draw_vars()
+    for seed in (f"seed-{index}" for index in range(50)):
+        drawn = draw_variables(variables, seed)
+        port, retries, flavor = drawn["svc_port"], drawn["retries"], drawn["flavor"]
+        assert isinstance(port, int) and 1500 <= port <= 1510 and port != 1505
+        assert isinstance(retries, int) and 1 <= retries <= 3 and retries != 2
+        assert flavor in ("b", "c")
+
+
+def test_draw_variables_port_bounds_default_to_unprivileged() -> None:
+    variables = {"p": Variable(type="port", default=80, draw="boot")}
+    for seed in (f"seed-{index}" for index in range(20)):
+        value = draw_variables(variables, seed)["p"]
+        assert isinstance(value, int) and 1024 <= value <= 65535
+
+
+def test_draw_variables_nothing_to_draw_is_empty() -> None:
+    assert draw_variables({}, "seed") == {}
+    assert draw_variables({"undrawn": Variable(default=1)}, "seed") == {}
