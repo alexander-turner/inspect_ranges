@@ -460,6 +460,8 @@ Each segment is its own broadcast domain: L2 tradecraft like ARP and LLMNR poiso
 
 Rules evaluate first-match in declaration order, and each rule carries exactly one of `allow:` or `deny:`. Endpoints are a network name, a guest name (resolved to its allocated addresses at compile time), or a CIDR (`/32` for a single host, `0.0.0.0/0` for any). Services are `proto/port`, `proto/lo-hi` ranges, or bare `icmp`:
 
+Endpoint matching is on IP addresses, not hardware addresses. A guest-named rule admits any same-segment sender that forges that guest's source IP; the stateful default means a blind TCP spoof cannot complete a handshake (the replies go to the address's real owner), but a one-way UDP flow would cross, so a rule is an authorization statement about addresses, not an anti-spoofing control.
+
 ::: {.panel-tabset group="definition-language"}
 ### YAML
 

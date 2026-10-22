@@ -93,7 +93,13 @@ def _echo_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
     is_flag=True,
     help="Boot and verify in full even when every build key matches the recorded manifest.",
 )
-@click.option("--readiness-timeout", type=float, default=300.0, show_default=True)
+@click.option(
+    "--readiness-timeout",
+    type=float,
+    default=300.0,
+    show_default=True,
+    help="Per-guest readiness deadline in seconds (daemon answer, then cloud-init).",
+)
 @click.option(
     "--settle-probe",
     default=None,

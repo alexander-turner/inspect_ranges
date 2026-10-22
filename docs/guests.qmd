@@ -130,7 +130,7 @@ Resources(cpus=2, memory_mb=4096, disk_gb=20)
 ```
 :::
 
-Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. `inspect-ranges plan` reports the range's totals (guests, vCPUs, memory) so a deployment can admission-check before anything boots.
+Omitted resources resolve to 1 vCPU, 1024 MiB, and a 10 GiB overlay. The defaults suit an idle service host; a guest that compiles from source at build time ([Period Software](building.qmd#period-software)) or runs a database wants 2 vCPUs and 2048 MiB. `inspect-ranges plan` reports the range's totals (guests, vCPUs, memory) so a deployment can admission-check before anything boots.
 
 ## Routers {#routers-are-guests-too}
 

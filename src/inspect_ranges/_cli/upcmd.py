@@ -40,6 +40,7 @@ from .specpath import resolve_spec_path
     type=click.Path(path_type=Path),
     default=None,
     show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
+    help="Image cache the bundle's image digests re-verify against.",
 )
 @click.option(
     "--cid-base",
@@ -48,7 +49,13 @@ from .specpath import resolve_spec_path
     show_default=True,
     help="First vsock CID when rendering `--from-spec` (plan-time input).",
 )
-@click.option("--readiness-timeout", type=float, default=300.0, show_default=True)
+@click.option(
+    "--readiness-timeout",
+    type=float,
+    default=300.0,
+    show_default=True,
+    help="Per-guest readiness deadline in seconds (daemon answer, then cloud-init).",
+)
 @click.option(
     "--keep",
     is_flag=True,

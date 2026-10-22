@@ -56,9 +56,9 @@ Range development is a loop: edit the definition and recipes, validate, plan, bu
 
    `validate` reports complete diagnostics, every error at once, with source positions and hints ([Ranges](ranges.qmd#validation-and-diagnostics)), and validates the `challenges.yaml` beside the spec too, cross-referenced against the range, so a dangling goal host surfaces here instead of at build time.
 
-2. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot. For a range declaring guest content (dmz_pivot does), `plan` refuses with `range-not-built` until a matching build exists, so on a first authoring pass it slots after `build`; it works immediately for topology-only ranges.
+2. **Build.** `inspect-ranges build` realizes the declared guest content: for dmz_pivot, two guests provisioned over the published golden and three challenge trios proven, a few minutes on a warm image cache. The stage lines to expect are in [Reading Build Output](#reading-build-output). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. When a stage goes red, start at [Diagnosing Failures](#diagnosing-failures); a green build is the entry to [Running the Range](#running-the-range).
 
-3. **Build.** `inspect-ranges build` realizes the declared guest content: for dmz_pivot, two guests provisioned over the published golden and three challenge trios proven, a few minutes on a warm image cache. The stage lines to expect are in [Reading Build Output](#reading-build-output). The development knobs: `--keep` holds the build range up for inspection (success or failure); `--reverify` forces the full boot-and-verify pass on an unchanged range; `--cid-base` picks a different host-global vsock CID block while a kept range still holds the default. When a stage goes red, start at [Diagnosing Failures](#diagnosing-failures); a green build is the entry to [Running the Range](#running-the-range).
+3. **Plan.** `inspect-ranges plan` resolves the range into its immutable plan without booting anything: image references against the cache and every address, MAC, and CID allocation. A reference that cannot resolve shows up here, not mid-boot. It sits after `build` here because a range declaring guest content (dmz_pivot does) refuses `plan` with `range-not-built` until a matching build exists; for a topology-only range `plan` works immediately and slots second.
 
 ## Running the Range {#running-the-range}
 
@@ -93,7 +93,7 @@ async def poke(project: str) -> None:
 asyncio.run(poke("ir-dmz-pivot-..."))
 ```
 
-The attach rides the same vsock channel the provider uses, so it reaches every guest without touching the range's network posture, and it logs loudly (an out-of-band oracle attached during a scoring run must be visible in that run's logs). Confirm what the build claims: the service listening, the planted file in place, the content you declared. Then tear down:
+`exec` returns the channel's `ExecOutcome`: `rc` (the signed exit status), `stdout`/`stderr` bytes, and truncation flags. The attach rides the same vsock channel the provider uses, so it reaches every guest without touching the range's network posture, and it logs loudly (an out-of-band oracle attached during a scoring run must be visible in that run's logs). Confirm what the build claims: the service listening, the planted file in place, the content you declared. Then tear down:
 
 ``` {.bash filename="Terminal"}
 inspect-ranges down <project>
@@ -108,6 +108,8 @@ inspect eval inspect_ranges/dmz_pivot
 ```
 
 The registry form runs the shipped task; your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider).
+
+To exercise boot, planting, scoring, and teardown with no model spend, run against inspect's mock model: `inspect eval task.py --model mockllm/model --message-limit 4`. The agent does nothing, so expect a 0 score, the scorer's zero-submissions warning, and the matching `range_apparatus` finding; on this run those are the apparatus working, not trouble.
 
 ### Scan {#scan}
 
@@ -214,7 +216,7 @@ inputs:
     default: false           # optional; no default makes it required
 ```
 
-The entrypoint runs **on the host**, with the bundle directory as working directory and the step's validated `vars` as environment variables (an `IR_*` name always wins a collision with a `vars` name). Guest access goes through the `IR_*` contract:
+The entrypoint runs **on the host**, with the bundle directory as working directory and the step's validated `vars` as environment variables: every value arrives as a string, booleans rendered lowercase (`true`/`false`) and integers decimal, and an `IR_*` name always wins a collision with a `vars` name. Guest access goes through the `IR_*` contract:
 
 | Variable | Contents |
 |---|---|
@@ -279,7 +281,7 @@ rm -f /tmp/host.$$
 
 ### Period Software
 
-Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_vulhub_zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) only needs to be plausible for the CVE's era.
+Ranges reproducing dated CVEs usually need software their golden's distro archives no longer carry. The pattern: fetch the canonical source or vendor tarball from its archive at build time (build egress exists exactly for this), compile or unpack on the guest, and run it under a real systemd unit. [vulhub-zabbix](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_vulhub_zabbix) is the worked reference: MySQL 5.7.44 from Oracle's archive tarball, zabbix 3.0.3 compiled from the canonical SourceForge tarball, each recipe's provenance recorded in the range's `notes.md`. Version-exactness only where the vulnerability demands it; supporting infrastructure (the database, the interpreter) only needs to be plausible for the CVE's era. The two provenance files split by subject: `notes.md` carries period-software provenance (archive URLs, hashes, version rationale), while upstream design provenance (the published range or scenario this one derives from) lives in `source.md` beside it.
 
 ## Verification {#verification}
 
@@ -302,6 +304,8 @@ A range that carries challenges ([Challenges](challenges.qmd)) can prove them at
 | `reference.sh` | Exercise the real attack chain and score 1.0 with validity `valid`; every goal that declares a `beacon_segment` must have its beacon found in that segment's packet capture ([Goal Types](challenges.qmd#goal-types)). |
 | `insufficient.sh` | Do real but incomplete work and score 0.0 with validity `valid` and at least one submission. |
 | `forged.sh` | Submit plausible fakes and score 0.0 with validity `valid` and at least one submission. A chain that submits nothing, or a scorer that never reached a verdict, would otherwise pass vacuously. |
+
+The scores are exact, which pins down "incomplete" for a multi-goal challenge: scoring is a weighted fraction, so any genuinely achieved goal makes the insufficient chain's score nonzero and fails the check. Keep that chain to real work that achieves nothing (recon, partial access, a plausible wrong submission). Corroboration gates the reference chain only where a goal declares `beacon_segment`; an `exfiltrate` goal's `segment` does not gate the trio (an uncorroborated pass records `corroborated: false` rather than failing), though a reference chain that corroborates it proves the declaration is achievable.
 
 The one-submission floor applies only when the challenge has submission-consuming goals: a challenge scored purely by observation (`detection`, `evade`) has nothing to submit, so its insufficient and forged chains need only exit 0 and score 0.0 with validity `valid` (the splunk-detection checks are the worked example). Prober-backed goals score in the trio too: each check runs its own prober, and the chain must keep running until the goal's `window_s` is covered ([Challenges](challenges.qmd#goal-types)).
 

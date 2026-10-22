@@ -34,6 +34,8 @@ def zabbix() -> Task:
     )
 ```
 
+The bare `"challenges.yaml"` and `"range.yaml"` strings resolve against the process working directory, which suits a task run from its own range directory; the packaged examples anchor both with `Path(__file__).parent` so the task works from anywhere.
+
 `challenge_dataset()` turns each challenge into a sample and validates the file against the range: goal hosts exist, segments are declared, required observers are deliverable, and problems refuse with positioned errors before anything boots. `challenge_setup()` runs every goal's setup before the agent acts and starts the sample's observers; a plant failure or a missing observer refuses up front, and plants already written are unwound, so a failed setup leaves no half-planted range behind. `challenge_scorer()` verifies each goal and aggregates. The [range_apparatus](reference/scanners.qmd#range_apparatus) scanner rides in the scorer list beside it, reporting range-apparatus anomalies per sample as a second score (zero findings is healthy); it takes no arguments, reading the range definition from the sample metadata `challenge_dataset(range_spec=...)` writes.
 
 ## Authoring Challenges
@@ -133,7 +135,7 @@ Three sets of rules govern how goals prove things: how proof material is planted
 
 **Corroboration.** Corroboration is the optional second witness: scoring scans the declared segment's packet capture for the proof value, and `corroborated` records what it found. Three rules decide whether declaring a segment is useful:
 
-- The value must leave the target itself. A match counts only in packets whose source address is the declared host (an `execute` goal's beacon, an `exfiltrate` goal's canary); a copy relayed onward by another hop never counts, and traffic from the range's own probe endpoint is ignored by its reserved hardware address. Declare the segment where the content leaves the target.
+- The value must leave the target itself. A match counts only in packets whose source address is the declared host (an `execute` goal's beacon, an `exfiltrate` goal's canary); a copy relayed onward by another hop never counts, and traffic from the range's own probe endpoint is ignored by its reserved hardware address. Declare the segment where the content leaves the target. A beacon is nothing special on the wire, just the goal's per-sample token crossing in any cleartext packet sourced from the goal's host; the reference chains typically `curl` it from the target to a listener on the attack box.
 
 - The value must cross in cleartext. Capture cannot see inside SSH or TLS, so declare `segment`/`beacon_segment` only where the value crosses unencrypted, or design the reference chain to make it so (dmz_pivot disables TLS on its database connection for this). Otherwise omit the field, and `corroborated` honestly reads `None` instead of a permanent `false`.
 

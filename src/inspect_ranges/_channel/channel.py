@@ -168,9 +168,11 @@ class ExecOutcome:
     """
 
     rc: int
+    """Signed exit status (killed-by-signal is negative, `-signal`)."""
     stdout: bytes
     stderr: bytes
     stdout_truncated: bool
+    """Whether stdout was cut at the guest's output cap (`SUBMIT`-style line protocols must treat truncation as failure)."""
     stderr_truncated: bool
     attempts: int = 1
 

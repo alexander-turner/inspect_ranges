@@ -64,7 +64,7 @@ fetch     9 fetched, 0 already present, verified
 pull OK
 ```
 
-Bare `pull` reads the directory's `range.yaml`, computes its normalized-form hash, and selects the published build whose recorded hash matches exactly; comment and formatting edits do not de-match, semantic edits do. When no published build matches, the refusal names the nearest build per location:
+Bare `pull` reads the directory's `range.yaml`, computes its normalized-form hash, and selects the published build whose recorded hash matches exactly; comment and formatting edits do not de-match, semantic edits do. The pin covers `range.yaml` alone: `challenges.yaml` and the check scripts are proven at build time (their digests ride the build manifest) but travel by git, so a consumer running the proven build against a locally edited challenges file is not detected. Treat the range repository as the integrity boundary for everything but the build. When no published build matches, the refusal names the nearest build per location:
 
 ``` {.bash .fragment}
 $ inspect-ranges pull

@@ -57,7 +57,12 @@ def planning_report(path: Path, error: IssueError) -> ValidationReport:
     show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
-@click.option("--cpu-model", default="host-passthrough", show_default=True)
+@click.option(
+    "--cpu-model",
+    default="host-passthrough",
+    show_default=True,
+    help="Guest CPU model rendered into the plan (the VMM's -cpu input).",
+)
 @click.option(
     "--cid-base",
     type=click.IntRange(min=3),
@@ -140,7 +145,12 @@ def plan(
     show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
     help="Image cache used for digest resolution.",
 )
-@click.option("--cpu-model", default="host-passthrough", show_default=True)
+@click.option(
+    "--cpu-model",
+    default="host-passthrough",
+    show_default=True,
+    help="Guest CPU model rendered into the plan (the VMM's -cpu input).",
+)
 @click.option(
     "--cid-base",
     type=click.IntRange(min=3),
