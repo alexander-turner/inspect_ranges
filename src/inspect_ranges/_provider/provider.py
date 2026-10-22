@@ -5,6 +5,7 @@ Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased C
 
 import asyncio
 import logging
+import secrets
 import shutil
 from pathlib import Path
 from typing import Any, Literal, cast, overload
@@ -25,6 +26,7 @@ from .._build.manifest import (
     realized_backings,
 )
 from .._channel.channel import TamperError
+from .._compiler.draws import draw_variables
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
 from .._evidence.sealer import seal_abandoned
 from .._host.host import LeasePlacement, SampleSpec
@@ -195,6 +197,12 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                 ),
             )
 
+        # per-sample draws (variable-draws-v0): drawn before anything renders
+        # so the bundle's draws file and scoring read the same values; the
+        # seed is fresh per sample and recorded with the values after boot
+        draw_seed = secrets.token_hex(8)
+        draws = draw_variables(spec.variables, draw_seed)
+
         # evidence resolves before admission: its buffer caps join the memory
         # charge, and failure to resolve must disable evidence, never the
         # sample (resolve returns None with one INFO line)
@@ -224,6 +232,8 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                 probe_segments,
                 realized_sections,
                 backings,
+                draws,
+                draw_seed if draws else None,
             )
         except BaseException:
             await runtime.admission.release(charged_totals)
@@ -251,6 +261,8 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                 handle.sessions[guest] = pong.session
             if handle.evidence is not None:
                 await handle.evidence.record_session_pins(handle.sessions)
+                if handle.draws and handle.draw_seed is not None:
+                    await handle.evidence.record_draws(handle.draw_seed, handle.draws)
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes
@@ -276,6 +288,8 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         probe_segments: tuple[str, ...] = (),
         realized_sections: frozenset[str] = frozenset(),
         realized_backings: dict[str, tuple[str, str]] | None = None,
+        draws: dict[str, int | str] | None = None,
+        draw_seed: str | None = None,
     ) -> SampleHandle:
         """Lease, render, and boot one range; one respin with fresh identity on transient stages.
 
@@ -309,6 +323,8 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                 retry=runtime.retry_config,
                 plan=plan,
                 spec=spec,
+                draws=draws or {},
+                draw_seed=draw_seed,
             )
             # registered before anything renders or boots: a crash from here on
             # is findable by task_cleanup (registry) and cli_cleanup (lease)
@@ -337,6 +353,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                             probe_segments=probe_segments,
                             realized_sections=realized_sections,
                             realized_backings=realized_backings,
+                            draws=draws,
                         ),
                     )
                 )

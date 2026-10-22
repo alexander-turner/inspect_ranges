@@ -104,6 +104,10 @@ class SampleHandle:
     """The sample's validated range spec, set beside `plan`; the oracle's `range_spec()` reads it for declared variables and scenario content (`challenges-v1.md`). Carries the resolved per-instance values once the generation layer lands."""
     plants: "PlantStore | None" = None
     """The sample's plant store, created lazily by the oracle factory; plant VALUES live only here, in memory (`challenges-v1.md`)."""
+    draws: dict[str, int | str] = field(default_factory=dict[str, int | str])
+    """The sample's drawn variable values (variable-draws-v0), set before render so the bundle's draws file and scoring read the same values; empty when the range declares no `draw: boot` variables."""
+    draw_seed: str | None = None
+    """The seed the sample's draws derive from, recorded with the values on the `draws` evidence stream; `None` when nothing draws."""
 
 
 def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
@@ -274,6 +278,7 @@ class ProviderRuntime:
         probe_segments: tuple[str, ...] = (),
         realized_sections: frozenset[str] = frozenset(),
         realized_backings: dict[str, tuple[str, str]] | None = None,
+        draws: dict[str, int | str] | None = None,
     ) -> PlanOptions:
         if cid_base is None:
             return PlanOptions(
@@ -282,6 +287,7 @@ class ProviderRuntime:
                 probe_segments=probe_segments,
                 realized_sections=realized_sections,
                 realized_backings=realized_backings or {},
+                draws=draws or {},
             )
         return PlanOptions(
             image_cache=self.image_cache,
@@ -290,6 +296,7 @@ class ProviderRuntime:
             probe_segments=probe_segments,
             realized_sections=realized_sections,
             realized_backings=realized_backings or {},
+            draws=draws or {},
         )
 
 

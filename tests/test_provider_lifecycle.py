@@ -19,6 +19,7 @@ from inspect_ranges._channel.channel import (
 )
 from inspect_ranges._channel.mocks import HostileTransport
 from inspect_ranges._channel.vsock import HybridEndpoint
+from inspect_ranges._compiler.draws import draw_variables
 from inspect_ranges._compiler.plan import (
     PlanOptions,
     ResolvedPlan,
@@ -55,6 +56,7 @@ from inspect_ranges.types import (
     Os,
     RangeMeta,
     RangeSpec,
+    Variable,
 )
 
 
@@ -82,6 +84,7 @@ class FakeSeams:
         self.up_calls: list[UpOptions] = []
         self.down_calls: list[str] = []
         self.render_calls: list[Path] = []
+        self.render_options: list[PlanOptions | None] = []
         self.up_errors: list[UpError] = []
         self.down_errors: list[Exception] = []
         self.registered_at_up: list[bool] = []
@@ -91,6 +94,7 @@ class FakeSeams:
         self, spec: RangeSpec, out: Path, options: PlanOptions | None
     ) -> ResolvedPlan:
         self.render_calls.append(out)
+        self.render_options.append(options)
         out.mkdir(parents=True, exist_ok=True)
         plan = resolve_plan(spec, options)
         # mimic the real render contract: plan.json (the remote seams read
@@ -208,6 +212,40 @@ def test_sample_init_boots_and_registers_the_foothold_only(tmp_path: Path) -> No
             assert seams.down_calls == [project]
             assert runtime.registry == {}
             assert runtime.allocator.leased_projects() == []
+
+    asyncio.run(scenario())
+
+
+def test_sample_draws_flow_to_render_and_the_handle(tmp_path: Path) -> None:
+    """A `draw: boot` variable draws once per sample before render: the rendered options carry the values the handle (and so scoring) reads, the draw respects the declared bounds and excludes the default, and the recorded seed re-derives the values (variable-draws-v0). A spec without draw variables leaves both empty."""
+
+    async def scenario() -> None:
+        with sandbox_lifecycle_scope():
+            runtime, seams = rigged_runtime(tmp_path)
+            spec = small_spec("draws")
+            spec.variables = {
+                "svc_port": Variable(
+                    type="port", min=1500, max=1600, default=1550, draw="boot"
+                )
+            }
+            envs = await Env.sample_init("task", spec, {"__sample_id__": "s1"})
+            [handle] = runtime.registry.values()
+            value = handle.draws["svc_port"]
+            assert isinstance(value, int) and 1500 <= value <= 1600 and value != 1550
+            assert handle.draw_seed is not None
+            assert handle.draws == draw_variables(spec.variables, handle.draw_seed)
+            [options] = seams.render_options
+            assert options is not None and options.draws == handle.draws
+            await Env.sample_cleanup("task", None, envs, interrupted=False)
+
+            plain = await Env.sample_init(
+                "task", small_spec("no-draws"), {"__sample_id__": "s2"}
+            )
+            [handle] = runtime.registry.values()
+            assert handle.draws == {} and handle.draw_seed is None
+            last_options = seams.render_options[-1]
+            assert last_options is not None and last_options.draws == {}
+            await Env.sample_cleanup("task", None, plain, interrupted=False)
 
     asyncio.run(scenario())
 
