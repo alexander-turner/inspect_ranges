@@ -97,7 +97,7 @@ stage_build() {
     && ok "T2b mixed-OS converged capture (quiesced=$QUIESCES, all-reused=$REUSED; the Linux guest rode the quiesce path)" \
     || bad "T2b quiesce count (got: $QUIESCES, reused=$REUSED)"
   VOK=$(grep -c '^verify    ok' "$SPIKE/tmp/t2.txt" || true)
-  [[ "$VOK" -eq 5 ]] && ok "T2c verify attributed the declared surface ($VOK declarations ok: splunk-enterprise 10.2.2 via dpkg, splunk-forwarding, splunk-rest, rdp, smb)" \
+  [[ "$VOK" -eq 6 ]] && ok "T2c verify attributed the declared surface ($VOK declarations ok: splunk-enterprise 10.2.2 via dpkg, splunk-forwarding, splunk-rest, rdp, smb, the benign-admin activity)" \
     || { bad "T2c verify count (got: $VOK)"; grep '^verify' "$SPIKE/tmp/t2.txt" | tail -8; }
   grep -q "behavioral.*challenge=execute-and-confirm-t1003-001.*check=forged" "$SPIKE/tmp/t2.txt" \
     && grep -q "behavioral.*challenge=evade-detection-t1003-001.*check=forged" "$SPIKE/tmp/t2.txt" \
