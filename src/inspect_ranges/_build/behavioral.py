@@ -2,7 +2,7 @@
 
 The ratified verification structure puts exploitability proof in exactly one place: the challenge's behavioral checks (the reference solution passes, an insufficient attempt fails, a forged submission fails). The build runs them against the range's CAPTURED artifacts: after capture and the build range's teardown, the realized images boot once more through the gate's own `swap_realized_spec` consumption step, the checks run, and only then does the manifest land on disk with the results in its `behavioral_checks` slot. The save is deferred past this phase deliberately (slice 6 review), and a failed proof lands as a REFUSED manifest (parked-decisions item 4): the failure's records are saved, the gate refuses `range-unproven`, and the next build reuses every guest and re-runs only the proof; under exits that record nothing (a teardown error before the phase, Ctrl-C, a crash) no manifest exists at all. Either way no consumer can boot a range whose challenge is unproven. Running against the captured artifacts rather than the build range proves the thing that ships, and exploit debris dirties only ephemeral per-boot overlays. A declared checks tree must be complete (`_validate_checks`): proof that silently does not run is indistinguishable from proof, so a misnamed directory or a missing trio script refuses instead of skipping. Check scripts and `challenges.yaml` participate in the build's cached fast path through `checks_digest`, never in guest build keys.
 
-Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script run ON THE ATTACKER GUEST via the oracle (outside an eval there is no `sandbox()`; the foothold-only property is held by construction here and enforced by the eval path), with `IR_ATTACKER_IP` exported. Scripts emit `SUBMIT <goal-id> <value>` lines (the refchains contract); `reference` must score 1.0 with validity `valid`, `insufficient` and `forged` must score 0.0. A challenge with prober-backed goals gets a per-check `Prober` over its own derived targets (`probe_segments_for_checks` puts the probe endpoints into the proof boot's bundle), running across the chain and stopped-and-flushed before scoring, and each check's oracle scores only its own probe records (`_scoped_oracle_class`); prober windows are the chain's own responsibility, so a chain must keep running (sleeping is fine) until its goals' `window_s` is covered. Per-check plants are fresh: `run_setup` runs per check with a fresh `PlantStore`, and each check's planted files are removed afterward (the plant script refuses an existing target, and this runner reuses one boot across checks where a sample plants once per boot). Runtime samples re-plant, so nothing a check planted survives as a valid secret.
+Check convention: `<range>/checks/<challenge-id>/{reference,insufficient,forged}.sh`, each a bash script run ON THE ATTACKER GUEST via the oracle (outside an eval there is no `sandbox()`; the foothold-only property is held by construction here and enforced by the eval path), with `IR_ATTACKER_IP` exported. Scripts emit `SUBMIT <goal-id> <value>` lines (the refchains contract); `reference` must score 1.0 with validity `valid`, `insufficient` and `forged` must score 0.0. Model-graded goals are exempt from the trio's scoring (judge-at-build.md): the build has no model, so each check scores the challenge over its non-model-graded goals only (the weighted mean renormalizes over that share), the exempt goal ids ride the check detail as `judge-exempt=<ids>`, and a challenge whose goals are all model-graded refuses `challenge-not-provable` in `_validate_checks`. Eval-time scoring is untouched: judge goals grade there, under the engine's weight cap. A challenge with prober-backed goals gets a per-check `Prober` over its own derived targets (`probe_segments_for_checks` puts the probe endpoints into the proof boot's bundle), running across the chain and stopped-and-flushed before scoring, and each check's oracle scores only its own probe records (`_scoped_oracle_class`); prober windows are the chain's own responsibility, so a chain must keep running (sleeping is fine) until its goals' `window_s` is covered. Per-check plants are fresh: `run_setup` runs per check with a fresh `PlantStore`, and each check's planted files are removed afterward (the plant script refuses an existing target, and this runner reuses one boot across checks where a sample plants once per boot). Runtime samples re-plant, so nothing a check planted survives as a valid secret.
 """
 
 import asyncio
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .._challenges.evidenceread import SpannedRecord
     from .._challenges.oracle import RangeOracle
     from .._challenges.prober import Prober
-    from .._challenges.schema import Challenge, Challenges
+    from .._challenges.schema import Challenge, Challenges, GoalBase
     from .._channel.vsock import HybridEndpoint
     from .._compiler.plan import ResolvedPlan
     from .._provider.state import SampleHandle
@@ -298,11 +298,30 @@ def checks_digest(range_dir: Path) -> str:
     return hasher.hexdigest()
 
 
+def _model_graded(goal: object) -> bool:
+    """Whether the goal's proof is model-graded: the share the build trio exempts from scoring (judge-at-build.md).
+
+    The lookup is conservative: a goal whose type is unregistered in this process stays in the provable share, so a missing registration can only tighten the proof, never widen the exemption.
+    """
+    from .._challenges.engine import goal_type
+
+    type_name = getattr(goal, "type", None)
+    if not isinstance(type_name, str):
+        return False
+    try:
+        engine = goal_type(type_name)
+    except KeyError:
+        return False
+    return engine.assurance_for(cast("GoalBase", goal)) == "model-graded"
+
+
 def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
     """A declared checks tree must be complete: proof that silently does not run is indistinguishable from proof (slice 6 review).
 
+    A challenge whose goals are all model-graded also refuses here: the trio exempts model-graded goals from scoring (judge-at-build.md), so such a challenge has no provable share and its checks could only pass vacuously.
+
     Raises:
-        BuildError: stage `behavioral`, naming the misnamed directory or the missing script.
+        BuildError: stage `behavioral`, naming the misnamed directory, the missing script, or the unprovable challenge (`challenge-not-provable`).
     """
     root = range_dir / CHECKS_DIR_NAME
     declared = {challenge.id for challenge in challenges.challenges}
@@ -314,6 +333,14 @@ def _validate_checks(challenges: "Challenges", range_dir: Path) -> None:
                 f"(declared: {sorted(declared)})",
             )
     for challenge in challenges.challenges:
+        if challenge.goals and all(_model_graded(goal) for goal in challenge.goals):
+            raise BuildError(
+                "behavioral",
+                f"challenge-not-provable: every goal on challenge "
+                f"{challenge.id!r} is model-graded; the trio exempts "
+                "model-graded goals from scoring, so the challenge has no "
+                "provable share (give it a goal the trio can score)",
+            )
         check_dir = root / challenge.id
         if not check_dir.is_dir():
             raise BuildError(
@@ -650,16 +677,32 @@ async def _execute_and_score(
         # stop() force-flushes the rest, which is what makes this check's
         # records readable before score_challenge reads the probe streams
         await prober.stop()
-    value, metadata = await score_challenge(oracle, store, challenge, submissions)
+    # the build has no model, so model-graded goals are exempt from the trio's
+    # scoring (judge-at-build.md): the check scores a copy of the challenge
+    # without them, and aggregate's weighted mean renormalizes over the
+    # remaining share. _validate_checks already refused a challenge with no
+    # provable share. Honest record, never a silent pass: the exempt ids ride
+    # the detail into the stage line and the manifest's behavioral_checks slot
+    exempt = [goal.id for goal in challenge.goals if _model_graded(goal)]
+    scored = (
+        challenge.model_copy(
+            update={"goals": [g for g in challenge.goals if g.id not in exempt]}
+        )
+        if exempt
+        else challenge
+    )
+    value, metadata = await score_challenge(oracle, store, scored, submissions)
     validity = str(metadata.get("validity", ""))
     goals_meta = cast("dict[str, dict[str, Any]]", metadata.get("goals", {}))
     uncorroborated = [
         goal.id
-        for goal in challenge.goals
+        for goal in scored.goals
         if getattr(goal, "beacon_segment", None) is not None
         and goals_meta.get(goal.id, {}).get("corroborated") is not True
     ]
     detail = f"value={value:.2f} validity={validity} submissions={len(entries)}"
+    if exempt:
+        detail += f" judge-exempt={','.join(exempt)}"
     if name == "reference":
         # a declared beacon must corroborate in capture (parked-decisions
         # item 6): a beacon that never has to land is theater
@@ -687,9 +730,12 @@ async def _execute_and_score(
             except KeyError:
                 return True
 
-        # a goal-less challenge cannot prove itself submission-free either
-        expects_submissions = not challenge.goals or any(
-            _uses_submissions(g) for g in challenge.goals
+        # a goal-less challenge cannot prove itself submission-free either; the
+        # floor reads the SCORED goals: an exempt judge goal consumes
+        # submissions at eval but contributes nothing to the trio's verdict,
+        # so it must not force submissions on an otherwise observation-only trio
+        expects_submissions = not scored.goals or any(
+            _uses_submissions(g) for g in scored.goals
         )
         ok = (
             value == 0.0
