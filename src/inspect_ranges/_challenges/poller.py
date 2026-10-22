@@ -71,8 +71,8 @@ def cheap_observations(oracle: "RangeOracle", goal: Goal, value: str) -> Observa
     reads = {"v": value.encode()}
     if isinstance(goal, AnswerGoal):
         if goal.variable is not None:
-            declared = oracle.range_spec().variables[goal.variable]
-            reads["expected"] = str(declared.default).encode()
+            # draw-else-default, same read as AnswerType.check
+            reads["expected"] = str(oracle.variable_value(goal.variable)).encode()
         else:
             assert goal.value is not None  # oracle-read answers are not cheap-tier
             reads["expected"] = goal.value.encode()

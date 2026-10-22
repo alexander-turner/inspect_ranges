@@ -140,16 +140,31 @@ class RangeOracle:
         return frozenset(available)
 
     def resolved(self) -> ResolvedPlan:
-        """The sample's resolved plan (per-guest address and CID allocations; see `guest_segment_ip`). Variables never ride the plan: `answer` goals read declared defaults from `range_spec()`."""
+        """The sample's resolved plan (per-guest address and CID allocations; see `guest_segment_ip`). Variables never ride the plan: `answer` goals read `variable_value()`, which folds the sample's draws over the declared defaults."""
         if self._handle.plan is None:
             raise OracleSetupError("the sample's resolved plan is unavailable")
         return self._handle.plan
 
     def range_spec(self) -> RangeSpec:
-        """The sample's validated range spec: declared variables (defaults until draws land) and scenario content."""
+        """The sample's validated range spec: declared variables (defaults; see `draws()` for the sample's drawn values) and scenario content."""
         if self._handle.spec is None:
             raise OracleSetupError("the sample's range spec is unavailable")
         return self._handle.spec
+
+    def draws(self) -> dict[str, int | str]:
+        """The sample's drawn variable values (variable-draws-v0), keyed by variable name; empty when the range declares no `draw: boot` variables or the handle carries no sample context."""
+        return dict(self._handle.draws)
+
+    def variable_value(self, name: str) -> str | int | bool:
+        """The sample's value for a declared variable: the drawn value when one exists, the declared default otherwise. The one place the draw-else-default rule lives; `answer` scoring reads it.
+
+        Raises:
+            KeyError: The range declares no variable `name`.
+        """
+        drawn = self._handle.draws.get(name)
+        if drawn is not None:
+            return drawn
+        return self.range_spec().variables[name].default
 
     # -- guest verbs (raw channel) ---------------------------------------------
 

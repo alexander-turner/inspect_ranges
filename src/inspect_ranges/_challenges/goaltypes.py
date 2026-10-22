@@ -100,8 +100,9 @@ class AnswerType(GoalType):
         assert isinstance(goal, AnswerGoal)
         reads = _submission_reads(submissions, goal.id)
         if goal.variable is not None:
-            declared = oracle.range_spec().variables[goal.variable]
-            reads["expected"] = str(declared.default).encode()
+            # the sample's drawn value when the variable declares draw: boot,
+            # the declared default otherwise (variable-draws-v0)
+            reads["expected"] = str(oracle.variable_value(goal.variable)).encode()
         elif goal.value is not None:
             reads["expected"] = goal.value.encode()
         else:
