@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from collections.abc import Iterator
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import pytest
 from inspect_ai.util._sandbox.exec_remote import ExecStdout
 from inspect_ranges._terminal.capture import (
     captures_for_tests,
+    discard_sample_captures,
     start_capture,
     stop_all_captures,
     stop_capture,
@@ -59,10 +62,14 @@ class FakeSandbox:
         return self.process
 
 
+_STORE_IDS = count(4242)
+
+
 @pytest.fixture()
 def arm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> tuple[FakeEvidence, FakeProcess, SessionState, int]:
+) -> Iterator[tuple[FakeEvidence, FakeProcess, SessionState, int]]:
+    """A per-test store id (the module registry is shared state, so a reused id would leak one test's sample entry into the next) with the registry entry discarded afterward."""
     evidence = FakeEvidence(str(tmp_path / "evidence"))
     process = FakeProcess(["chunk-one\n", "chunk-two\n"])
     monkeypatch.setattr(capture_module, "_evidence_session", lambda: evidence)
@@ -75,7 +82,11 @@ def arm(
 
     monkeypatch.setattr(capture_module, "background", run_background)
     state = SessionState(opened_wall=1_700_000_000.0, opened_monotonic=0.0)
-    return evidence, process, state, 4242
+    store_id = next(_STORE_IDS)
+    try:
+        yield evidence, process, state, store_id
+    finally:
+        discard_sample_captures(store_id)
 
 
 def test_capture_records_mirrors_and_writes_cast(
@@ -123,6 +134,38 @@ def test_finalize_stops_everything_and_runs_cleanup(
         # idempotent: a second finalize finds nothing
         await stop_all_captures(store_id)
         assert cleaned == [True]
+
+    asyncio.run(scenario())
+
+
+def test_stop_drains_pending_output_before_the_cast(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+) -> None:
+    """An immediate stop must still land every pending output event in the cast: kill enqueues output buffered since the last poll, and the cast waits for the consumer to drain it."""
+    evidence, _, state, store_id = arm
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        await stop_capture(store_id, "s")  # no sleep: the consumer has not run yet
+        cast_file = Path(evidence.location) / "terminal-s.cast"
+        lines = cast_file.read_text().strip().split("\n")
+        kinds = [json.loads(line)[1] for line in lines[1:]]
+        assert kinds.count("o") == 2
+
+    asyncio.run(scenario())
+
+
+def test_discard_sample_captures_drops_the_registry_entry(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+) -> None:
+    """GC-time cleanup: a collected store's capture entry disappears so a reused id never inherits it."""
+    _, _, state, store_id = arm
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        assert "s" in captures_for_tests(store_id)
+        discard_sample_captures(store_id)
+        assert captures_for_tests(store_id) == {}
 
     asyncio.run(scenario())
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from inspect_ai.util import background, sandbox
 from inspect_ai.util._sandbox.exec_remote import ExecRemoteProcess, ExecStdout
 
@@ -23,7 +24,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("inspect_ranges.terminal")
 
-__all__ = ["start_capture", "stop_capture", "stop_all_captures"]
+__all__ = [
+    "discard_sample_captures",
+    "start_capture",
+    "stop_all_captures",
+    "stop_capture",
+]
 
 
 @dataclass
@@ -35,6 +41,7 @@ class _Capture:
     evidence: "EvidenceSession"
     process: ExecRemoteProcess | None = None
     stopped: bool = False
+    drained: anyio.Event = field(default_factory=anyio.Event)
 
 
 @dataclass
@@ -111,10 +118,15 @@ async def _consume(capture: _Capture, process: ExecRemoteProcess) -> None:
                 await capture.evidence.append_driver(stream, data)
     except Exception as error:  # noqa: BLE001
         logger.info("terminal capture stream for %r ended: %s", capture.session, error)
+    finally:
+        capture.drained.set()
 
 
 async def stop_capture(store_id: int, session: str) -> None:
-    """Stop one session's recorder and write its cast; idempotent."""
+    """Stop one session's recorder and write its cast; idempotent.
+
+    `kill` enqueues output buffered since the recorder's last poll, so the cast waits (bounded) for the consume task to drain those final events before assembly.
+    """
     sample = _SAMPLES.get(store_id)
     if sample is None:
         return
@@ -127,7 +139,14 @@ async def stop_capture(store_id: int, session: str) -> None:
             await capture.process.kill()
         except Exception:  # noqa: BLE001
             pass
+        with anyio.move_on_after(10):
+            await capture.drained.wait()
     _write_cast(capture)
+
+
+def discard_sample_captures(store_id: int) -> None:
+    """Drop a sample's capture registry entry without stopping anything (GC-time cleanup when the sample's store was collected before finalize ran, so the id can be reused safely)."""
+    _SAMPLES.pop(store_id, None)
 
 
 async def stop_all_captures(store_id: int) -> None:
