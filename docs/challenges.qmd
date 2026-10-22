@@ -1,7 +1,7 @@
 ---
 title: "Challenges"
 description: "Defining what an agent is asked to do on a range and how success is verified. Covers challenges.yaml, the built-in goal types, verification, and scoring."
-llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes), the verification cost rule with its four failure modes and three further rules, validity states, the built-in goal types with proof contracts and assurance labels, the verify_goal tool and its checklist, agent-loop guidance (react attempts supported via intermediate verdicts; inspect_swe bridged_tools), the plant/poll/latch/corroborate scoring lifecycle, the foothold-only sandbox wall, custom goal types via register_goal_type, and patch exploit registration."
+llms-description: "The challenges layer: challenges.yaml authoring (goals, scoring modes), the verification cost rule with its four failure modes and three further rules, validity states, the built-in goal types with proof contracts and assurance labels, the verify_goal tool and its checklist, the terminal tool (opt-in persistent tmux sessions on the foothold: named sessions, verbatim keystrokes, duration polling vs shell-only blocking sends, per-call screen views, the terminal/<session> evidence stream and asciicast playback), agent-loop guidance (react attempts supported via intermediate verdicts; inspect_swe bridged_tools), the plant/poll/latch/corroborate scoring lifecycle, the foothold-only sandbox wall, custom goal types via register_goal_type, and patch exploit registration."
 ---
 
 ## Overview
@@ -160,6 +160,20 @@ Every result also carries a running checklist of all the challenge's goals, and 
 For react agents, `attempts > 1` is supported: each submission invokes the task scorer, and a mid-run `challenge_scorer()` invocation returns an intermediate verdict, the fraction of verifiable goals (the submission-taking types) already achieved from what `verify_goal` latched, running none of the end-of-run machinery. The value reads exactly 1.0 once every verifiable goal is achieved, which ends react's attempt loop, and an intermediate verdict is never the recorded score: the end-of-run invocation stays the single authority. Keep `challenge_scorer()` first in the task's scorer list: react's continue-or-stop test reads the first scorer's value, so putting another scorer first breaks the attempt loop silently. A challenge whose goals are all end-of-run types has zero verifiable goals, so intermediates read 0.0 and react burns its attempts before finishing. react's `submit` answer is not a goal submission; goals travel only through `verify_goal`.
 
 At most 8 distinct values per goal are ever verified, earliest first, with overflow recorded in the score metadata: submission volume cannot amplify scoring cost, and since proof values are high-entropy, eight guesses buy nothing as an oracle.
+
+## Terminal Sessions
+
+The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell. It is opt-in task wiring, because adding it changes measured difficulty:
+
+``` python
+solver=react(tools=[bash(), terminal(), verify_goal()])
+```
+
+One tool, four actions. `open` creates a named session (and more than one can run at once: a listener in one, the exploit trigger in another). `send` types keystrokes verbatim; a trailing newline executes, and tmux key names (`C-c`) send control sequences. After a send the result reports new output since the agent's last look, or the current screen when the delta cannot be determined. `read` polls without typing. `close` ends the session.
+
+Waiting has two modes. The default sends and waits `duration` seconds (poll with short durations rather than waiting long). `block=True` waits up to `timeout` seconds for the command to complete, using a shell completion signal, so it works only when the session sits at a shell prompt: inside a caught shell or msfconsole the signal text would be typed into the program, and the tool refuses with the foreground command named.
+
+The transcript shows each call against the screen the model saw when it issued it, and the full session records to the `terminal/<session>` evidence stream with an asciicast written beside the evidence at finalize ([Evidence](evidence.qmd#captured-streams)), so a session can be played back after the run. The tool runs on the foothold and changes no containment: reverse-shell reachability stays a topology fact (same-segment always works; cross-segment needs an ACL admitting target-to-attacker flows, as equifax declares).
 
 ## Scoring Lifecycle
 

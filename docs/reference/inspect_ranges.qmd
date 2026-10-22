@@ -16,6 +16,8 @@ The package's top-level surface. The eval wiring is covered in [Challenges](../c
 
 ### verify_goal
 
+### terminal
+
 ## Challenges
 
 ### Challenge
