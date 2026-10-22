@@ -212,6 +212,8 @@ src/inspect_ranges/_version.py
 /runs/
 /scans/
 /transcripts/
+# eval logs and evidence stores written by runs started inside a range directory
+src/inspect_ranges/examples/*/logs/
 
 # MacOS
 .DS_Store
