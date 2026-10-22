@@ -14,7 +14,7 @@ exec_guest 'export DEBIAN_FRONTEND=noninteractive; apt-get update -q && apt-get 
   nmap ncat socat curl wget tcpdump \
   python3-impacket python3-requests python3-pip \
   sqlmap hydra john gobuster ffuf \
-  smbclient ldap-utils dnsutils netcat-openbsd \
+  smbclient ldap-utils dnsutils netcat-openbsd tmux \
   gnupg ca-certificates'
 
 echo "step: metasploit framework (official apt repo, key fingerprint pinned)"
@@ -46,7 +46,7 @@ exec_guest 'dpkg-query -W -f "\${Package} \${Version}\n" > /etc/attack-image.man
 
 echo "step: assert every tool present, metasploit major floor, and ZERO non-loopback listeners"
 exec_guest 'set -e; for t in nmap ncat socat curl wget tcpdump sqlmap hydra john \
-  gobuster ffuf smbclient ldapsearch dig nc msfconsole msfvenom; do \
+  gobuster ffuf smbclient ldapsearch dig nc tmux msfconsole msfvenom; do \
   command -v "$t" >/dev/null || { echo "MISSING: $t" >&2; exit 1; }; done; \
   for t in psexec.py wmiexec.py secretsdump.py GetUserSPNs.py raiseChild.py lookupsid.py atexec.py smbexec.py mssqlclient.py; do \
   command -v "$t" >/dev/null || { echo "MISSING: $t" >&2; exit 1; }; done; \
