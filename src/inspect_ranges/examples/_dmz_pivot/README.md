@@ -144,7 +144,7 @@ def dmz_pivot() -> Task:
 ```
 
 ``` bash
-inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5-5
+inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5
 ```
 
 Images resolve from the published catalog: the hosts boot the `ubuntu-noble` golden and the attacker boots the standard attack image, pulled automatically on first use.

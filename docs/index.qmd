@@ -224,8 +224,8 @@ The seven packaged examples ship this wiring ready-made: each registers as a tas
 Evaluate a packaged example by its registry name, or a `task.py` beside your own range definition:
 
 ```{.bash filename="Terminal"}
-inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5-5
-inspect eval task.py --model anthropic/claude-opus-5-5
+inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5
+inspect eval task.py --model anthropic/claude-opus-5
 ```
 
 Any Inspect agent can be the attacker. The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
