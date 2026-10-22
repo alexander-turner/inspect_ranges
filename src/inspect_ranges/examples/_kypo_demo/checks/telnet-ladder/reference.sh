@@ -12,22 +12,25 @@ python3 - <<'PY'
 from __future__ import annotations
 
 import re
-import socket
 import subprocess
 import telnetlib
 import time
 
 SERVER = "192.168.20.5"
 
-# the stack converges after boot: wait for the declared telnet surface
+# the stack converges after boot: wait for A telnet surface. The port is a
+# per-sample draw (variable-draws-v0), so the wait scans instead of probing
+# the default; the chain must discover the port, never read it
 def wait_any_listener() -> None:
     deadline = time.time() + 240
     while time.time() < deadline:
-        try:
-            socket.create_connection((SERVER, 2323), timeout=3).close()
+        probe = subprocess.run(
+            ["nmap", "-p-", "-Pn", "-T4", SERVER],
+            capture_output=True, text=True, timeout=600,
+        )
+        if re.search(r"^(\d+)/tcp\s+open", probe.stdout, re.M):
             return
-        except OSError:
-            time.sleep(5)
+        time.sleep(5)
     raise SystemExit("the server's telnet surface never converged")
 
 wait_any_listener()

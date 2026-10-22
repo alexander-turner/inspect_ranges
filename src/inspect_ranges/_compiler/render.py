@@ -929,10 +929,11 @@ def _user_data(
             ["sysctl", "-w", "net.ipv4.ip_forward=1"],
             ["systemctl", "enable", "--now", "nftables"],
         ]
-    if draws:
+    if draws and guest.name != spec.foothold_guest:
         # the draws file (variable-draws-v0): non-secret per-sample values,
         # applied by range-authored boot units; every Linux guest gets it
-        # (which guests consume which draw is the range author's knowledge)
+        # EXCEPT the agent's foothold (a drawn value is often a challenge's
+        # expected answer, and a file on the foothold would hand it over)
         write_files.append(
             {
                 "path": DRAWS_GUEST_PATH,

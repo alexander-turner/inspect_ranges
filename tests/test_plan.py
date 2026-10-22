@@ -309,12 +309,12 @@ attacker:
 
 
 def test_render_carries_the_draws_file(cache: Path, tmp_path: Path) -> None:
-    """A render with draws writes the draws file into every Linux guest's seed (routers keep their nftables entry beside it); without draws no file appears, and the plan never sees the draws either way (variable-draws-v0)."""
+    """A render with draws writes the draws file into every Linux guest's seed EXCEPT the agent's foothold (a drawn value is often the expected answer; routers keep their nftables entry beside it); without draws no file appears, and the plan never sees the draws either way (variable-draws-v0)."""
     spec = chained_spec()
     drawn_out = tmp_path / "drawn"
     draws: dict[str, int | str] = {"svc_port": 1507, "flavor": "b"}
     render_bundle(spec, drawn_out, PlanOptions(image_cache=cache, draws=draws))
-    for guest in ("safe", "r1", "r2", "attacker"):
+    for guest in ("safe", "r1", "r2"):
         user_data = yaml.safe_load(
             (drawn_out / f"guests/{guest}/seed/user-data").read_text()
         )
@@ -325,6 +325,10 @@ def test_render_carries_the_draws_file(cache: Path, tmp_path: Path) -> None:
         ]
         assert json.loads(entry["content"]) == draws
         assert entry["permissions"] == "0644"
+    foothold = yaml.safe_load(
+        (drawn_out / "guests/attacker/seed/user-data").read_text()
+    )
+    assert "write_files" not in foothold, "the foothold never gets the draws file"
     r1 = yaml.safe_load((drawn_out / "guests/r1/seed/user-data").read_text())
     assert any(e["path"] == "/etc/nftables.conf" for e in r1["write_files"])
     plain_out = tmp_path / "plain"
