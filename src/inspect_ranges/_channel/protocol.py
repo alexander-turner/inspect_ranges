@@ -213,6 +213,8 @@ class DiagRequest(_MessageBase):
 
 
 class PongReply(_MessageBase):
+    """Reply to `ping`: the daemon's identity string, protocol version, and boot session."""
+
     kind: Literal["pong"] = "pong"
     daemon: Annotated[str, Field(max_length=128), utf8_capped(128)]
     protocol: Literal[3] = PROTOCOL_VERSION
@@ -271,6 +273,8 @@ class PendingReply(_MessageBase):
 
 
 class ForwardReply(_MessageBase):
+    """Reply to a granted `forward`; `handle` names the opened forward (capability-gated, wire-stable ahead of its implementation)."""
+
     kind: Literal["forward_ok"] = "forward_ok"
     handle: RequestId
 
@@ -284,6 +288,8 @@ class DiagEntry(_WireModel):
 
 
 class DiagReply(_MessageBase):
+    """Reply to `diag`: the tail of the daemon's in-guest diagnostic ring buffer."""
+
     kind: Literal["diag_result"] = "diag_result"
     entries: list[DiagEntry] = Field(max_length=1000)
     listener_restarts: int = Field(default=0, ge=0, le=MAX_WIRE_INT)
@@ -340,6 +346,8 @@ class StageReport(_MessageBase):
 
 
 class Heartbeat(_MessageBase):
+    """The host's heartbeat reply, driver-polled (a pull verb fits per-operation-connect transports): uptime plus per-guest state."""
+
     kind: Literal["heartbeat"] = "heartbeat"
     uptime_ms: int = Field(ge=0, le=MAX_WIRE_INT)
     guests: dict[str, GuestState] = Field(default_factory=dict)
