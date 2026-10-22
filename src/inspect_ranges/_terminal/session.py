@@ -35,9 +35,12 @@ def sink_path(session: str) -> str:
     return f"{SINK_DIR}/{session}.pipe"
 
 
-def wait_channel(session: str) -> str:
-    """The per-session tmux wait channel the blocking completion signal uses."""
-    return f"ir-done-{session}"
+def wait_channel(session: str, nonce: int) -> str:
+    """The per-send tmux wait channel the blocking completion signal uses.
+
+    The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately.
+    """
+    return f"ir-done-{session}-{nonce}"
 
 
 def valid_session_name(session: str) -> bool:
@@ -45,28 +48,41 @@ def valid_session_name(session: str) -> bool:
     return bool(SESSION_NAME.match(session))
 
 
+def target(session: str) -> str:
+    """The tmux target for a session: `=` pins exact-name matching (a bare name prefix-matches other sessions) and the trailing `:` selects the active pane, which pane-target commands require alongside `=`."""
+    return f"={session}:"
+
+
 def start_session_command(session: str) -> list[str]:
-    """Argv creating the session: fixed pane size, deep history, pipe-pane into the sink."""
+    """Argv creating the session: fixed pane size, deep history, pipe-pane into the sink.
+
+    The sink truncates at open so a reopened session name never replays a previous life's output into its capture. `history-limit` applies only to windows created after it is set, so the global option is raised before `new-session` and restored after (the per-session set covers windows the agent creates later inside the session).
+    """
+    sink = sink_path(session)
     return [
         "bash",
         "-c",
         (
-            f"mkdir -p {SINK_DIR} && "
-            f"tmux new-session -x {PANE_WIDTH} -y {PANE_HEIGHT} -d -s {session} \\; "
-            f"set-option -t {session} history-limit {HISTORY_LIMIT} \\; "
-            f"pipe-pane -t {session} 'cat >> {sink_path(session)}'"
+            f"mkdir -p {SINK_DIR} && : > {sink} && "
+            f'prev="$(tmux show-options -gv history-limit 2>/dev/null)"; '
+            f"tmux set-option -g history-limit {HISTORY_LIMIT} \\; "
+            f"new-session -x {PANE_WIDTH} -y {PANE_HEIGHT} -d -s {session} \\; "
+            f"set-option -t {target(session)} history-limit {HISTORY_LIMIT} \\; "
+            f"pipe-pane -t {target(session)} 'cat >> {sink}' && "
+            f'if [ -n "$prev" ]; then tmux set-option -g history-limit "$prev"; '
+            f"else tmux set-option -gu history-limit; fi"
         ),
     ]
 
 
 def has_session_command(session: str) -> list[str]:
-    """Argv testing whether the session exists (exit 0 when it does)."""
-    return ["tmux", "has-session", "-t", session]
+    """Argv testing whether the session exists (exit 0 when it does; `=` pins exact-name matching, since a bare target prefix-matches other sessions)."""
+    return ["tmux", "has-session", "-t", target(session)]
 
 
 def kill_session_command(session: str) -> list[str]:
-    """Argv killing the session."""
-    return ["tmux", "kill-session", "-t", session]
+    """Argv killing the session (exact-name target)."""
+    return ["tmux", "kill-session", "-t", target(session)]
 
 
 def list_sessions_command() -> list[str]:
@@ -75,24 +91,36 @@ def list_sessions_command() -> list[str]:
 
 
 def send_keys_command(session: str, keys: list[str]) -> list[str]:
-    """Argv sending key arguments to the session's pane."""
-    return ["tmux", "send-keys", "-t", session, *keys]
+    """Argv sending key arguments to the session's pane (exact-name target).
+
+    `--` ends option parsing, so keystrokes starting with `-` are typed rather than read as `send-keys` flags. A lone `;` is the one argument tmux's client still consumes as a command separator even after `--`, so it is sent as its hex byte instead.
+    """
+    if keys == [";"]:
+        return ["tmux", "send-keys", "-t", target(session), "-H", "3b"]
+    return ["tmux", "send-keys", "-t", target(session), "--", *keys]
 
 
 def capture_pane_command(session: str, entire: bool = False) -> list[str]:
-    """Argv capturing the visible pane, or the whole scrollback with `entire`."""
+    """Argv capturing the visible pane, or the whole scrollback with `entire` (exact-name target)."""
     extra = ["-S", "-"] if entire else []
-    return ["tmux", "capture-pane", "-p", *extra, "-t", session]
+    return ["tmux", "capture-pane", "-p", *extra, "-t", target(session)]
 
 
 def pane_command_command(session: str) -> list[str]:
-    """Argv reporting the pane's current foreground command name."""
-    return ["tmux", "display-message", "-p", "-t", session, "#{pane_current_command}"]
+    """Argv reporting the pane's current foreground command name (exact-name target)."""
+    return [
+        "tmux",
+        "display-message",
+        "-p",
+        "-t",
+        target(session),
+        "#{pane_current_command}",
+    ]
 
 
-def wait_done_command(session: str, timeout_s: float) -> list[str]:
-    """Argv blocking on the session's wait channel under a hard timeout."""
-    return ["timeout", f"{timeout_s}s", "tmux", "wait", wait_channel(session)]
+def wait_done_command(session: str, timeout_s: float, nonce: int) -> list[str]:
+    """Argv blocking on the send's wait channel under a hard timeout."""
+    return ["timeout", f"{timeout_s}s", "tmux", "wait", wait_channel(session, nonce)]
 
 
 def is_shell(pane_current_command: str) -> bool:
@@ -109,10 +137,22 @@ def _executes(keystrokes: str) -> bool:
     return _is_enter_key(keystrokes) or bool(re.search(r"[\r\n]$", keystrokes))
 
 
-def prepare_send(session: str, keystrokes: str, block: bool) -> tuple[list[str], bool]:
+def multiline_block(keystrokes: str) -> bool:
+    """Whether a blocking send must be refused because the keystrokes span lines.
+
+    An interior newline executes its line the moment it is typed, so by the time the appended completion signal reaches the pane an earlier line may have started a program (`telnet`, a caught shell, `msfconsole`) that would receive the signal text: the shell-only guard checked the pane before any of it was sent. Blocking sends take a single command line.
+    """
+    if not _executes(keystrokes) or _is_enter_key(keystrokes):
+        return False
+    return bool(re.search(r"[\r\n]", keystrokes.rstrip(_NEWLINE_CHARS)))
+
+
+def prepare_send(
+    session: str, keystrokes: str, block: bool, nonce: int
+) -> tuple[list[str], bool]:
     """Prepare the send-keys arguments, appending the completion signal for a blocking send.
 
-    Returns `(keys, is_blocking)`. A blocking send only makes sense when the keystrokes execute a command: the trailing Enter (key name or newline) is stripped and the per-session completion signal plus `Enter` are appended, so the whole line runs as `<command>; tmux wait -S <channel>`. Keystrokes that do not execute anything fall back to non-blocking even when `block` was requested.
+    Returns `(keys, is_blocking)`. A blocking send only makes sense when the keystrokes execute a command: the trailing Enter (key name or newline) is stripped and the per-send completion signal plus `Enter` are appended, so the whole line runs as `<command>; tmux wait -S <channel>` (one argument, so no fragment of it can be the lone-`;` separator). Keystrokes that do not execute anything fall back to non-blocking even when `block` was requested; the caller refuses `multiline_block` keystrokes before calling.
     """
     if not block or not _executes(keystrokes):
         return [keystrokes], False
@@ -121,9 +161,8 @@ def prepare_send(session: str, keystrokes: str, block: bool) -> tuple[list[str],
         stripped = ""
     else:
         stripped = stripped.rstrip(_NEWLINE_CHARS)
-    keys = [stripped] if stripped else []
-    keys.extend([f"; tmux wait -S {wait_channel(session)}", "Enter"])
-    return keys, True
+    signal = f"{stripped}; tmux wait -S {wait_channel(session, nonce)}"
+    return [signal, "Enter"], True
 
 
 def find_new_content(previous_buffer: str | None, current_buffer: str) -> str | None:
@@ -167,3 +206,4 @@ class SessionState:
     markers: list[tuple[float, str]] = field(default_factory=list[tuple[float, str]])
     opened_wall: float = 0.0
     opened_monotonic: float = 0.0
+    sends: int = 0

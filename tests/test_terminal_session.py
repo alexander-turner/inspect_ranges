@@ -11,7 +11,9 @@ from inspect_ranges._terminal.session import (
     find_new_content,
     is_shell,
     label_output,
+    multiline_block,
     prepare_send,
+    send_keys_command,
     start_session_command,
     valid_session_name,
     wait_channel,
@@ -46,11 +48,12 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
         ("ls -la\n", False, ["ls -la\n"], False),
         ("C-c", False, ["C-c"], False),
         ("", False, [""], False),
-        # blocking strips the trailing newline and appends the signal
-        ("ls -la\n", True, ["ls -la", "; tmux wait -S ir-done-s", "Enter"], True),
-        ("make\r\n", True, ["make", "; tmux wait -S ir-done-s", "Enter"], True),
+        # blocking strips the trailing newline and appends the signal (one
+        # argument, so no fragment can be tmux's lone-`;` command separator)
+        ("ls -la\n", True, ["ls -la; tmux wait -S ir-done-s-7", "Enter"], True),
+        ("make\r\n", True, ["make; tmux wait -S ir-done-s-7", "Enter"], True),
         # a bare Enter key blocks on whatever was already typed
-        ("Enter", True, ["; tmux wait -S ir-done-s", "Enter"], True),
+        ("Enter", True, ["; tmux wait -S ir-done-s-7", "Enter"], True),
         # keystrokes that execute nothing fall back to non-blocking
         ("ls -la", True, ["ls -la"], False),
         ("C-c", True, ["C-c"], False),
@@ -59,9 +62,56 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
 def test_prepare_send(
     keystrokes: str, block: bool, expected_keys: list[str], expected_blocking: bool
 ) -> None:
-    keys, blocking = prepare_send("s", keystrokes, block)
+    keys, blocking = prepare_send("s", keystrokes, block, 7)
     assert keys == expected_keys
     assert blocking is expected_blocking
+
+
+def test_wait_channel_is_per_send() -> None:
+    """A timed-out send's late signal must never release a later send's wait: tmux remembers unconsumed signals, so each send gets its own channel."""
+    assert wait_channel("s", 0) != wait_channel("s", 1)
+    assert (
+        prepare_send("s", "ls\n", True, 0)[0] != prepare_send("s", "ls\n", True, 1)[0]
+    )
+
+
+@pytest.mark.parametrize(
+    ("keystrokes", "refused"),
+    [
+        # an interior newline runs its line immediately: the signal could land
+        # inside a program that line started, so block refuses it
+        ("cat\nhello\n", True),
+        ("nc host 4444\r\nls\n", True),
+        # single command lines, bare Enter, and non-executing keystrokes pass
+        ("ls -la\n", False),
+        ("make\r\n", False),
+        ("Enter", False),
+        ("C-c", False),
+        ("a\nb", False),  # no trailing newline: falls back to non-blocking anyway
+    ],
+)
+def test_multiline_block(keystrokes: str, refused: bool) -> None:
+    assert multiline_block(keystrokes) is refused
+
+
+def test_send_keys_command_shape() -> None:
+    """Targets are exact-match (`=`), `--` keeps dash keystrokes out of option parsing, and the lone `;` tmux would consume as a command separator goes as hex."""
+    assert send_keys_command("s", ["-la\n"]) == [
+        "tmux",
+        "send-keys",
+        "-t",
+        "=s:",
+        "--",
+        "-la\n",
+    ]
+    assert send_keys_command("s", [";"]) == [
+        "tmux",
+        "send-keys",
+        "-t",
+        "=s:",
+        "-H",
+        "3b",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -129,14 +179,20 @@ def test_command_builders_shape() -> None:
         and "pipe-pane" in start[2]
         and "/tmp/.ir-terminal/s.pipe" in start[2]
     )
+    # the sink truncates at open: a reopened name must not replay its last life
+    assert ": > /tmp/.ir-terminal/s.pipe" in start[2]
+    # history-limit applies only to windows created after it is set, so the
+    # global raise must precede new-session (and be restored after)
+    assert start[2].index("history-limit 50000") < start[2].index("new-session")
     assert capture_pane_command("s", entire=True)[:4] == [
         "tmux",
         "capture-pane",
         "-p",
         "-S",
     ]
-    wait = wait_done_command("s", 30.0)
-    assert wait[:2] == ["timeout", "30.0s"] and wait[-1] == wait_channel("s")
+    assert capture_pane_command("s")[-1] == "=s:"  # exact-match target
+    wait = wait_done_command("s", 30.0, 3)
+    assert wait[:2] == ["timeout", "30.0s"] and wait[-1] == wait_channel("s", 3)
 
 
 def test_assemble_cast_orders_and_offsets_events() -> None:

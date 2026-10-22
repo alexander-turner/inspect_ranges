@@ -135,6 +135,138 @@ def test_errors_are_strings(armed: tuple[Any, Store, str]) -> None:
     asyncio.run(scenario())
 
 
+def test_open_applies_history_limit(armed: tuple[Any, Store, str]) -> None:
+    """The pane's history must be deep at creation: tmux applies `history-limit` only to windows created after it is set, so a post-creation set leaves the default 2000."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        shown = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", f"={session}:", "#{history_limit}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert shown.stdout.strip() == "50000"
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_dash_keystrokes_are_typed_not_parsed(armed: tuple[Any, Store, str]) -> None:
+    """Keystrokes starting with `-` must reach the pane instead of being read as send-keys flags."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        result = await tool(action="send", session=session, keystrokes="-dash-probe\n")
+        assert "failed" not in result and "-dash-probe" in result
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_block_refused_for_multiline_keystrokes(armed: tuple[Any, Store, str]) -> None:
+    """An interior newline could start a program that would receive the completion signal, so block refuses multi-line keystrokes outright."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        refused = await tool(
+            action="send", session=session, keystrokes="cat\nhello\n", block=True
+        )
+        assert "Refusing block=True" in refused
+        # nothing was sent: the pane still shows no cat invocation
+        screen = await tool(action="read", session=session)
+        assert "hello" not in screen
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_timed_out_block_does_not_poison_next_block(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """Tmux remembers a `wait -S` signal with no waiter: a timed-out send's late signal must not release the next blocking send early."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        timed_out = await tool(
+            action="send",
+            session=session,
+            keystrokes="sleep 3 && echo first-done\n",
+            block=True,
+            timeout=1,
+        )
+        assert "did not complete" in timed_out
+        await asyncio.sleep(3)  # the first command completes and fires its signal
+        second = await tool(
+            action="send",
+            session=session,
+            keystrokes="sleep 2 && echo second-done\n",
+            block=True,
+            timeout=30,
+        )
+        assert "second-done" in second
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_reopen_of_dead_session_stops_stale_capture(
+    armed: tuple[Any, Store, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a session died outside the tool, reopening the name must stop the old recorder before starting a fresh one."""
+    tool, _, session = armed
+    calls: list[tuple[str, str]] = []
+
+    async def fake_start(
+        store_id: int, name: str, state: Any, on_finalize: Any
+    ) -> None:
+        calls.append(("start", name))
+
+    async def fake_stop(store_id: int, name: str) -> None:
+        calls.append(("stop", name))
+
+    monkeypatch.setattr(terminal_tool, "start_capture", fake_start)
+    monkeypatch.setattr(terminal_tool, "stop_capture", fake_stop)
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        subprocess.run(
+            ["tmux", "kill-session", "-t", f"={session}:"],
+            capture_output=True,
+            check=True,
+        )
+        await tool(action="open", session=session)
+        assert calls == [("start", session), ("stop", session), ("start", session)]
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_state_dropped_when_store_is_collected() -> None:
+    """A collected store's id can be reused by a later sample's store, which must never inherit this one's sessions."""
+    import gc
+
+    from inspect_ranges._terminal.session import SessionState
+    from inspect_ranges._terminal.tool import (
+        _STATES,  # pyright: ignore[reportPrivateUsage]
+        _states,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    sample_store = Store()
+    init_subtask_store(sample_store)
+    _states()["main"] = SessionState()
+    key = id(sample_store)
+    assert key in _STATES
+    init_subtask_store(Store())  # release the context's reference
+    del sample_store
+    gc.collect()
+    assert key not in _STATES
+
+
 def test_viewer_renders_stored_screen(armed: tuple[Any, Store, str]) -> None:
     tool, _, session = armed
 

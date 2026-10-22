@@ -7,13 +7,14 @@ Blocking sends append a shell completion signal, so they are refused unless the 
 
 import logging
 import time
+import weakref
 from typing import TYPE_CHECKING
 
 import anyio
 from inspect_ai.tool import Tool, ToolCall, ToolCallContent, ToolCallView, tool
 from inspect_ai.util import sandbox, store
 
-from .capture import start_capture, stop_capture
+from .capture import discard_sample_captures, start_capture, stop_capture
 from .session import (
     SessionState,
     capture_pane_command,
@@ -23,6 +24,7 @@ from .session import (
     is_shell,
     kill_session_command,
     label_output,
+    multiline_block,
     pane_command_command,
     prepare_send,
     send_keys_command,
@@ -49,8 +51,21 @@ _MAX_TIMEOUT_S = 600.0
 _STATES: dict[int, dict[str, SessionState]] = {}
 
 
+def _discard_on_gc(store_id: int) -> None:
+    """Drop a collected store's registry entries: a freed store's `id` can be reused by a later sample's store, which must never inherit this one's state."""
+    _STATES.pop(store_id, None)
+    discard_sample_captures(store_id)
+
+
 def _states() -> dict[str, SessionState]:
-    return _STATES.setdefault(id(store()), {})
+    sample_store = store()
+    store_id = id(sample_store)
+    states = _STATES.get(store_id)
+    if states is None:
+        states = {}
+        _STATES[store_id] = states
+        weakref.finalize(sample_store, _discard_on_gc, store_id)
+    return states
 
 
 def discard_terminal_state(sample_store: object) -> None:
@@ -148,7 +163,7 @@ def terminal() -> Tool:
             session: Session name (lowercase letters, digits, `-`/`_`; default `main`).
             keystrokes: What to type, verbatim (`send` only). Empty keystrokes with a `duration` just waits and reads.
             duration: Seconds to wait after sending before reading (max 60; default 1).
-            block: Wait for the sent command to complete (shell prompt only; max `timeout` seconds).
+            block: Wait for the sent command to complete (a single command line, sent at a shell prompt only; max `timeout` seconds).
             timeout: Deadline in seconds for a blocking send (default 180, max 600).
 
         Returns:
@@ -173,6 +188,9 @@ def terminal() -> Tool:
                         result = await _read_result(session, state)
                         return f"Session {session!r} is already open. {_open_sessions()}\n{result}"
                     states.pop(session, None)
+                    # the dead session's recorder is still tailing: stop it (and
+                    # write its cast) before the name starts a fresh life
+                    await stop_capture(id(store()), session)
                 started = await _exec(start_session_command(session))
                 if not started.success:
                     detail = (started.stderr or started.stdout).strip()[-500:]
@@ -209,7 +227,17 @@ def terminal() -> Tool:
                 return f"Closed session {session!r}. {_open_sessions()}\nFinal {final}"
 
             # send
-            if block:
+            if block and multiline_block(keystrokes):
+                return (
+                    "Refusing block=True: the keystrokes span multiple lines, and "
+                    "each interior newline executes immediately, so the completion "
+                    "signal could be typed into a program an earlier line started. "
+                    "Send one command per blocking send, or use duration polling."
+                )
+            nonce = state.sends
+            keys, blocking = prepare_send(session, keystrokes, block, nonce)
+            if blocking:
+                state.sends += 1
                 foreground = await _exec(pane_command_command(session))
                 if not is_shell(foreground.stdout):
                     name = foreground.stdout.strip() or "unknown"
@@ -218,7 +246,6 @@ def terminal() -> Tool:
                         f"{name!r}, not a shell, so the completion signal would be "
                         "typed into it. Use duration-based polling here."
                     )
-            keys, blocking = prepare_send(session, keystrokes, block)
             state.markers.append(
                 (time.monotonic(), f"send {session}: {keystrokes[:80]!r}")
             )
@@ -228,7 +255,7 @@ def terminal() -> Tool:
                 return f"Send to session {session!r} failed: {detail}"
             if blocking:
                 done = await _exec(
-                    wait_done_command(session, timeout), timeout_s=timeout + 15
+                    wait_done_command(session, timeout, nonce), timeout_s=timeout + 15
                 )
                 if not done.success:
                     result = await _read_result(session, state)
