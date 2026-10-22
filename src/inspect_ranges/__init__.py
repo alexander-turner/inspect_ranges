@@ -46,6 +46,7 @@ from ._challenges import (
     validate_challenges,
     verify_goal,
 )
+from ._terminal import terminal
 from .schema import (
     load_range,
     range_json_schema,
@@ -97,6 +98,7 @@ __all__ = [
     "revalidate_range",
     "semantic_issues",
     "source_bound_find",
+    "terminal",
     "validate_challenges",
     "validate_range",
     "verify_goal",

@@ -21,7 +21,9 @@ One tool with an `action` parameter (`open`, `send`, `read`, `close`); models ha
 - `read(session)`: the delta since the last read, clipped (~10 KB, truncation marked), labeled per the heuristic's confidence.
 - `close(session)`: stop capture, kill the session. Results name the open sessions so the model can track them.
 
-Every non-happy path returns a string to the agent, never raises (the `verify_goal` discipline). The `ToolCallViewer` renders the current pane as a fenced monospace block titled with the session name: the model receives deltas, the human reading the transcript sees screens.
+Every non-happy path returns a string to the agent, never raises (the `verify_goal` discipline).
+
+**Transcript views.** inspect_ai binds a tool call's view before execution and never recomputes it after the result, so a view cannot carry its own call's after-screen. The design leans into that instead of fighting it (user decision, in preference to the computer tool's `model_input` filtering): the tool result is a plain string, exactly the delta the model sees, and at the end of every execution the tool writes the post-action screen to the store (`inspect_ranges:terminal_screen`, keyed by session). The `viewer=` hook reads that store entry, so the view bound to a call renders the screen as it stood when the model issued the call: the transcript reads "screen the model saw, keystrokes it chose, delta that came back" per call, with no `model_input` hook and no content filtering. The final call's after-screen has no following view; `close` returns the final screen as its result and the cast carries the full record. Two pins: the tool declares `parallel=False` (a stateful session tool must serialize anyway, and the view's offset-by-one semantics depend on it), and the viewer's store read is wrapped so a storeless invocation context degrades to an args-only view.
 
 ## Capture and playback
 

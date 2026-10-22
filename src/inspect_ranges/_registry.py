@@ -7,6 +7,7 @@ from ._challenges.scorer import challenge_scorer
 from ._challenges.setup import challenge_setup
 from ._challenges.verify import verify_goal
 from ._provider.provider import RangeSandboxEnvironment
+from ._terminal import terminal
 from .examples import (
     cyris_basic,
     dmz_pivot,
@@ -29,6 +30,7 @@ __all__ = [
     "kypo_demo",
     "splunk_detection",
     "range_apparatus",
+    "terminal",
     "verify_goal",
     "vulhub_zabbix",
 ]
