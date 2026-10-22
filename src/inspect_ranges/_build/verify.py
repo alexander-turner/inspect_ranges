@@ -307,9 +307,19 @@ def _attribute_version(
         version = facts.packages.get(package)
         if version is not None:
             return _Attribution(version=version, detail=f"declared package {package!r}")
-        return _Attribution(
-            version=None, detail=f"declared package {package!r} is not installed"
-        )
+        # a declared package is authoritative, so a miss is terminal; the owner
+        # the listener chain would have attributed rides along as the fix
+        detail = f"declared package {package!r} is not installed"
+        if port is not None:
+            listener = facts.listening(port)
+            if listener is not None and listener.pid is not None:
+                owner = facts.pid_packages.get(listener.pid)
+                if owner is not None and owner in facts.packages:
+                    detail += (
+                        f" (the listener process {listener.process!r}"
+                        f" is owned by package {owner!r})"
+                    )
+        return _Attribution(version=None, detail=detail)
     tried.append("no package field")
     if port is not None:
         listener = facts.listening(port)

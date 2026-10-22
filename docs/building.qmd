@@ -289,7 +289,7 @@ After all recipes, every declared `services` and `vulnerabilities` entry is chec
 
 - A service with a `port` must have a TCP or UDP socket listening on it in-guest.
 
-- A service with a `version` must match the observed version. Attribution tries the declared `package` (a dpkg name), then the listener's process chain (port → pid → exe → owning package), then an exact-name dpkg lookup. Declared versions match as a component prefix of the upstream version, epochs stripped, so `"3.0"` matches `1:3.0.3+dfsg-1`; a pre-release observation (`~`) never satisfies a release declaration. A declared version that cannot be attributed fails, naming the paths tried.
+- A service with a `version` must match the observed version. A declared `package` (a dpkg name) is authoritative: its installed version is the observation, and a declared package that is not installed fails outright, naming the listener's owning package when one exists so the correct declaration is in the failure itself. With no `package`, attribution tries the listener's process chain (port → pid → exe → owning package), then an exact-name dpkg lookup; the chain is the robust default for anything that listens, so omit `package` unless attribution needs forcing. Declared versions match as a component prefix of the upstream version, epochs stripped, so `"3.0"` matches `1:3.0.3+dfsg-1`; a pre-release observation (`~`) never satisfies a release declaration. A declared version that cannot be attributed fails, naming the paths tried.
 
 - A vulnerability with a `service` reference verifies exactly when its service verifies; one without a reference verifies vacuously and is recorded as such. Exploitability proof lives in [behavioral checks](#behavioral-checks), not here.
 

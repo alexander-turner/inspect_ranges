@@ -193,7 +193,7 @@ class FlagGoal(GoalBase):
 class AnswerGoal(GoalBase):
     """Submit a fact about the environment, compared against exactly one declared source.
 
-    Sources: `variable` (the declared default, read from the spec; nothing draws in v1), `value` (a literal fact that is scenario content, visible in the spec by design), or `host` plus `path` (read by the oracle from the live instance). Exactly one source must be declared.
+    Sources: `variable` (the declared default, read from the spec; nothing draws in v1, so the expected answer is as visible as the spec itself), `value` (a literal fact that is scenario content, visible in the spec by design), or `host` plus `path` (read by the oracle from the live instance). Exactly one source must be declared.
     """
 
     type: Literal["answer"] = "answer"

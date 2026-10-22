@@ -151,6 +151,20 @@ def test_declared_package_absent_fails() -> None:
     result = by_name(evaluate_host(host, facts()), "app")
     assert result.status == "fail"
     assert "'ghost-pkg' is not installed" in result.observed
+    # port 80's listener attributes through its chain: the failure names the
+    # owning package as the fix
+    assert "is owned by package 'nginx-core'" in result.observed
+
+
+def test_declared_package_absent_without_attributable_listener_has_no_hint() -> None:
+    # port 3306's listener has no pid attribution, so there is no owner to name
+    host = host_with(
+        [Service(name="app", port=3306, version="1.0", package="ghost-pkg")]
+    )
+    result = by_name(evaluate_host(host, facts()), "app")
+    assert result.status == "fail"
+    assert "'ghost-pkg' is not installed" in result.observed
+    assert "is owned by package" not in result.observed
 
 
 def test_name_only_service_is_vacuously_ok() -> None:

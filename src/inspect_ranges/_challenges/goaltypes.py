@@ -123,7 +123,7 @@ class AnswerType(GoalType):
 class ExfiltrateType(GoalType):
     """Obtain target content: the submission carries the per-sample canary; presence never passes.
 
-    Setup plants the canary file at the declared path (`0644`, root): protection comes from placement, per the reviewer document, and embedding canaries inside build-realized content is an images-arc interaction recorded in `challenges-v1.md`.
+    Setup plants the canary file at the declared path (`0644`, root): protection comes from placement, per the reviewer document. The canary is the file's entire content; embedding it inside realistic content (content templates) is parked in `challenges-v1-parked-decisions.md`.
     """
 
     name = "exfiltrate"
