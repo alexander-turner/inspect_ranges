@@ -147,9 +147,9 @@ Until a range has a matching build, every command that consumes built content re
 
 1. **The egress build plan.** For the build only, routerless isolated networks become NAT networks with full egress and a host-derived nameserver (`--build-nameserver` overrides it; cloud deployments that force DNS through a VPC resolver typically need the override). A provisioned host attached only to networks behind routers gets a dedicated `build-uplink` NAT segment appended instead, so routed topologies build too. A provisioned foothold host (the host the attacker starts on under assumed breach; see [Networks](networks.qmd#attacker)) has the attacker's egress containment lifted for the build only; no agent runs during a build. The runtime spec is untouched: samples boot with the isolation the definition declares, and realized images keep no reference to build networking, since network config is per-boot cloud-init. A per-guest settle gate holds each guest's first recipe until in-guest name resolution works. Provisioned routers are the one exception: a router gets no build egress (scoped egress on a router-attached network is not realized), so the settle gate skips it and its recipes run offline, reconfiguring what the golden already carries; a router recipe that reaches for the network fails as an ordinary recipe error.
 
-2. **Recipes** run in declaration order per guest (see [Authoring Recipes](#authoring-recipes)).
+2. **Recipes** run in declaration order per guest (see [Authoring Recipes](#authoring-recipes)). Declared `scheduled_activity` then installs as persistent units (a systemd service and timer on Linux, a scheduled task on Windows) from scripts under the range's `activities/` directory ([Guests](guests.qmd#scheduled-activity)).
 
-3. **Verification** checks every declared `services` and `vulnerabilities` entry against the live guests, independent of what the recipes claimed (see [Verification](#verification)).
+3. **Verification** checks every declared `services`, `vulnerabilities`, and `scheduled_activity` entry against the live guests, independent of what the recipes claimed (see [Verification](#verification)).
 
 4. **Capture.** Each provisioned guest is cleanly shut down and its overlay captured into the image cache as a realized image: a qcow2 rebased onto its golden image ([Guests](guests.qmd#images)), its digest recorded, with a provenance sidecar (a companion file recording the digests of everything it was built from).
 
@@ -189,7 +189,7 @@ The `manifest` lines appear after the `behavioral` lines: a build is never recor
 
 ## Incremental Rebuilds
 
-Each guest gets a build key: a hash of its golden image digest, its own spec declarations, and its ordered recipe digests with their variables. On rebuild:
+Each guest gets a build key: a hash of its golden image digest, its own spec declarations, its ordered recipe digests with their variables, and its activity scripts' content digests. On rebuild:
 
 - A guest whose key is unchanged boots from its captured realized image with its recipes skipped; verification still covers it in full.
 
@@ -293,6 +293,8 @@ After all recipes, every declared `services` and `vulnerabilities` entry is chec
 
 - A vulnerability with a `service` reference verifies exactly when its service verifies; one without a reference verifies vacuously and is recorded as such. Exploitability proof lives in [behavioral checks](#behavioral-checks), not here.
 
+- A `scheduled_activity` entry must have its installed unit or task present and enabled (`systemctl is-enabled` on Linux, the scheduled task's state on Windows); a failure is `activity-not-verified`. The unit is verified, never run: an activity may legitimately run long, and the first run happens on the consumer boot's schedule.
+
 Failures produce coded refusals (`service-not-verified`, `vulnerability-not-verified`) with the declared-versus-observed delta and the probe log path, and the build fails. Software installed from tarballs has no dpkg identity: declare its service by port alone and record the version in the range's notes.
 
 ## Behavioral Checks {#behavioral-checks}
@@ -319,4 +321,4 @@ Each check gets fresh per-sample proof material, removed afterward; nothing a ch
 
 ## Diagnosing Failures
 
-Every failure names its stage (`recipe`, `verify`, `capture`, `manifest`, `behavioral`, `teardown`) and, where it has one, the guest. Recipe output lands in one log per run under the project state directory (`~/.local/state/inspect-ranges/projects/<project>/recipes/`); the error carries the path and a tail, and `stages.jsonl` in the same directory records every stage transition with its error field. `--keep` holds the failed range up for inspection (`inspect-ranges down <project>` when done). `inspect-ranges doctor` checks the build surface up front: cache writability, recorded manifests and cached recipe bundles still parse, and whether a build nameserver is derivable from this host.
+Every failure names its stage (`recipe`, `activity`, `verify`, `capture`, `manifest`, `behavioral`, `teardown`) and, where it has one, the guest. Recipe output lands in one log per run under the project state directory (`~/.local/state/inspect-ranges/projects/<project>/recipes/`); the error carries the path and a tail, and `stages.jsonl` in the same directory records every stage transition with its error field. `--keep` holds the failed range up for inspection (`inspect-ranges down <project>` when done). `inspect-ranges doctor` checks the build surface up front: cache writability, recorded manifests and cached recipe bundles still parse, and whether a build nameserver is derivable from this host.
