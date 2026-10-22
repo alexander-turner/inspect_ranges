@@ -48,10 +48,7 @@ guacamole:                       # the browser RDP/SSH broker is management
 # goal (the parked sketch's stealth-detection shape predates the evade type
 # and the detection signal's measured-mask qualifier).
 
-telemetry_report_goal:           # deferred on engineering grounds: judge-type
-  id: telemetry-report           # goals call a model, and the build runner has
-  type: judge                    # no model plumbing; returns when a consumer
-  rubric: >-                     # earns it
-    The report names the Splunk index and sourcetype carrying the activity
-    and identifies the fields that distinguish the credential-dumping action;
-    grade only what the telemetry shows.
+# telemetry_report_goal moved OUT (2026-10-22): realized in challenges.yaml
+# as the `telemetry-report` judge goal on execute-and-confirm-t1003-001;
+# the build trio exempts model-graded goals (judge-at-build.md), which
+# removed the engineering ground the deferral rested on.
