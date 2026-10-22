@@ -22,6 +22,7 @@ Evidence is on by default inside an eval: when a sample runs under Inspect, the 
 | `stages`, `verify` | The realization stage stream (with host emit clocks) and the readiness/verification results. |
 | `session` | Daemon session pins and re-pins: a guest daemon restart is itself evidence. |
 | `telemetry/<collector>`, `telemetry-meta/<collector>` | Exported in-guest telemetry deltas and the per-poll watermark records that make coverage decidable (below). |
+| `terminal/<session>` | The agent's terminal sessions when the task wires the [terminal](challenges.qmd#terminal-sessions) tool: the raw pane output, host-timestamped; at finalize an asciicast assembled from it (with per-call markers) lands beside the evidence as `terminal-<session>.cast`. |
 | `heartbeat`, `clock` | Capture liveness and watermarks for our own collectors, and wall-clock anomaly records. |
 
 ## Storage

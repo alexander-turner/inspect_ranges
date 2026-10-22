@@ -13,6 +13,7 @@ import anyio
 from inspect_ai.tool import Tool, ToolCall, ToolCallContent, ToolCallView, tool
 from inspect_ai.util import sandbox, store
 
+from .capture import start_capture, stop_capture
 from .session import (
     SessionState,
     capture_pane_command,
@@ -181,6 +182,12 @@ def terminal() -> Tool:
                 )
                 states[session] = state
                 state.markers.append((time.monotonic(), f"open {session}"))
+                store_id = id(store())
+
+                def cleanup(store_id: int = store_id) -> None:
+                    _STATES.pop(store_id, None)
+
+                await start_capture(store_id, session, state, cleanup)
                 result = await _read_result(session, state)
                 return f"Opened session {session!r}. {_open_sessions()}\n{result}"
 
@@ -196,6 +203,7 @@ def terminal() -> Tool:
                 state.markers.append((time.monotonic(), f"close {session}"))
                 final = await _read_result(session, state)
                 await _exec(kill_session_command(session))
+                await stop_capture(id(store()), session)
                 states.pop(session, None)
                 _drop_screen(session)
                 return f"Closed session {session!r}. {_open_sessions()}\nFinal {final}"
