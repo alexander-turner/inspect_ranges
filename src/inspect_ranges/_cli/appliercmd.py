@@ -31,7 +31,7 @@ from .._runtime.ownership import default_state_dir
     type=click.Path(path_type=Path),
     default=None,
     show_default="~/.cache/inspect-ranges/images (or INSPECT_RANGES_IMAGE_CACHE)",
-    help="Image cache realize verifies bundle image digests against.",
+    help="Image cache that realize verifies bundle image digests against.",
 )
 def applier(
     socket_path: Path, state_dir: Path | None, image_cache: Path | None
