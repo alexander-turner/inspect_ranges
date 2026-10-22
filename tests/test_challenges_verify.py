@@ -9,6 +9,7 @@ from inspect_ranges import verify_goal
 from inspect_ranges._challenges.engine import CANDIDATE_CAP, latched_records
 from inspect_ranges._challenges.oracle import RangeOracle
 from inspect_ranges._challenges.schema import (
+    AnswerGoal,
     Challenge,
     FlagGoal,
     HijackGoal,
@@ -20,6 +21,7 @@ from inspect_ranges._challenges.verify import (
     register_verify_context,
 )
 
+from .test_challenges_engine import minimal_spec
 from .test_challenges_oracle import make_oracle
 
 FLAG_VALUE = "VERIFY-5c5c5c"
@@ -89,6 +91,37 @@ class TestVerifyAndLatch:
         assert "- f: not achieved" in wrong
         assert "Goal 'f' achieved: the submitted value verified." in right
         assert latched_records(store)["f"].achieved
+
+    def test_answer_variable_verifies_against_the_drawn_value(
+        self, tmp_path: Path
+    ) -> None:
+        """The call-time cheap tier reads the draw-else-default rule too (variable-draws-v0): with a draw on the handle the declared default no longer verifies and the drawn value does."""
+
+        async def scenario() -> tuple[str, str, Store]:
+            store = Store()
+            init_subtask_store(store)
+            oracle, _, handle = make_oracle(tmp_path)
+            handle.spec = minimal_spec()
+            handle.draws = {"telnet_port": 4242}
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[AnswerGoal(id="port", variable="telnet_port")],
+            )
+            register_verify_context(oracle, challenge, store)
+            execute = verify_goal()
+            try:
+                default = await execute(goal_id="port", value="2323")
+                drawn = await execute(goal_id="port", value="4242")
+            finally:
+                discard_verify_context(store)
+            assert isinstance(default, str) and isinstance(drawn, str)
+            return default, drawn, store
+
+        default, drawn, store = asyncio.run(scenario())
+        assert "Goal 'port' not achieved" in default
+        assert "Goal 'port' achieved" in drawn
+        assert latched_records(store)["port"].achieved
 
     def test_latch_is_first_pass_wins_and_never_restamped(self, tmp_path: Path) -> None:
         """A later distinct submission after the pass neither re-verifies nor re-stamps: the achieved latch keeps its submit-time wall."""

@@ -277,7 +277,7 @@ def test_declared_hostnames_feed_the_collision_gate() -> None:
 
 
 def test_variables_resolve_to_defaults_at_planning(cache: Path) -> None:
-    """Linux-examples-v1: declared variables no longer gate planning; loading already substituted their defaults, so a spec with variables plans concretely (per-sample secrets stay the plant layer's job; the generation layer is parked)."""
+    """Linux-examples-v1: declared variables never gate planning; loading already substituted their defaults, so a spec with variables plans concretely. A `draw: boot` variable changes nothing here either (variable-draws-v0): draws are a render input, and planning stays on the defaults."""
     from inspect_ranges.schema import load_range
 
     spec_yaml = """
@@ -286,7 +286,7 @@ range:
   schema_version: "0.3"
   description: variables resolve to defaults
 variables:
-  svc_port: { type: port, min: 1500, default: 2323 }
+  svc_port: { type: port, min: 1500, default: 2323, draw: boot }
 networks:
   - name: lab
     cidr: 10.0.0.0/24
@@ -306,6 +306,38 @@ attacker:
     spec = load_range(spec_path)
     plan = resolve_plan(spec, options(cache))
     assert plan.range.name == "vars-resolve"
+
+
+def test_render_carries_the_draws_file(cache: Path, tmp_path: Path) -> None:
+    """A render with draws writes the draws file into every Linux guest's seed EXCEPT the agent's foothold (a drawn value is often the expected answer; routers keep their nftables entry beside it); without draws no file appears, and the plan never sees the draws either way (variable-draws-v0)."""
+    spec = chained_spec()
+    drawn_out = tmp_path / "drawn"
+    draws: dict[str, int | str] = {"svc_port": 1507, "flavor": "b"}
+    render_bundle(spec, drawn_out, PlanOptions(image_cache=cache, draws=draws))
+    for guest in ("safe", "r1", "r2"):
+        user_data = yaml.safe_load(
+            (drawn_out / f"guests/{guest}/seed/user-data").read_text()
+        )
+        [entry] = [
+            e
+            for e in user_data["write_files"]
+            if e["path"] == "/etc/inspect-ranges/draws.json"
+        ]
+        assert json.loads(entry["content"]) == draws
+        assert entry["permissions"] == "0644"
+    foothold = yaml.safe_load(
+        (drawn_out / "guests/attacker/seed/user-data").read_text()
+    )
+    assert "write_files" not in foothold, "the foothold never gets the draws file"
+    r1 = yaml.safe_load((drawn_out / "guests/r1/seed/user-data").read_text())
+    assert any(e["path"] == "/etc/nftables.conf" for e in r1["write_files"])
+    plain_out = tmp_path / "plain"
+    render_bundle(spec, plain_out, options(cache))
+    plain = yaml.safe_load((plain_out / "guests/safe/seed/user-data").read_text())
+    assert "write_files" not in plain
+    assert (drawn_out / "plan.json").read_bytes() == (
+        plain_out / "plan.json"
+    ).read_bytes(), "planning ignores draws"
 
 
 def test_render_is_byte_deterministic(cache: Path, tmp_path: Path) -> None:

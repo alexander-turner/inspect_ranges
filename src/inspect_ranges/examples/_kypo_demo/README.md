@@ -4,7 +4,7 @@
 
 Range name: `kypo-demo`.
 
-The [KYPO Cyber Range Platform](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) demo training sandbox (Masaryk University, MIT): a client and a server on two routed /24 subnets joined by an explicit router. It is the routed-topology reference: a declared router with per-network gateway IPs, static IP mappings, and a declared randomization layer (`variables:`) covering the telnet port and both flags (defaults substitute today; per-instance draws are deferred).
+The [KYPO Cyber Range Platform](https://gitlab.ics.muni.cz/muni-kypo-crp/prototypes-and-examples/sandbox-definitions/kypo-crp-demo-training) demo training sandbox (Masaryk University, MIT): a client and a server on two routed /24 subnets joined by an explicit router. It is the routed-topology reference: a declared router with per-network gateway IPs, static IP mappings, and a declared randomization layer (`variables:`) covering the telnet port and both flags. The telnet port declares `draw: boot`, so each sample draws its own port at boot; the flag defaults are re-planted with per-sample entropy by the challenge layer.
 
 ## Topology and attack chain
 
@@ -20,7 +20,7 @@ The load-bearing declarations, excerpted from [range.yaml](range.yaml) (the full
 
 ```yaml
 variables:                                                 # <1>
-  telnet_port: { type: port, min: 1500, default: 2323 }
+  telnet_port: { type: port, min: 1500, default: 2323, draw: boot }
   alice_flag:  { type: text, default: Top_Secret_Flag }
   root_flag:   { type: text, default: Cant_Guess_This }
 
@@ -60,7 +60,7 @@ attacker:
   entry: assumed-breach
 ```
 
-1.  The declared randomization layer: loading substitutes the defaults today (per-instance draws are deferred), and the flag files are re-planted with per-sample entropy so the checked-in defaults never score.
+1.  The declared randomization layer: `telnet_port` draws per sample at boot (`draw: boot`), applied by a recipe-installed boot unit that moves telnetd to the drawn port; the flag files are re-planted with per-sample entropy by the challenge layer, so no checked-in default ever scores.
 2.  An explicit router with pinned gateway addresses on both subnets; with no `acl`, it forwards everything.
 3.  The weak credential, present in the wordlist the client recipe provides.
 4.  The service port reads the declared variable; `{{name}}` references substitute across `range.yaml` scalars.
@@ -93,7 +93,7 @@ challenges:
     scoring: { mode: milestones, later_implies_earlier: true }   # <4>
 ```
 
-1.  An `answer` goal scored against the declared variable (the checked-in default until the generation layer lands, so it is as public as the repository).
+1.  An `answer` goal scored against the declared variable: `telnet_port` declares `draw: boot`, so the sample's drawn port is the expected answer and the checked-in default never scores.
 2.  Planted per sample, readable by `alice` only: reading it proves the login, not recon.
 3.  Root-owned, so reading it proves the sudo escalation.
 4.  A ladder: later goals imply earlier ones, so the root flag alone scores full marks.

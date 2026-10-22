@@ -4,6 +4,7 @@ The spec models live in `inspect_ranges.types` (re-exported here for compatibili
 """
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -67,10 +68,16 @@ __all__ = [
 _VARIABLE_REF = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
-def substitute_variables(data: Any) -> tuple[Any, list[Issue]]:
+def substitute_variables(
+    data: Any, overrides: Mapping[str, Any] | None = None
+) -> tuple[Any, list[Issue]]:
     """Resolve `{{name}}` references against the document's declared variables, using their defaults.
 
     Runs on the parsed YAML tree before validation. A scalar that is exactly one reference takes the variable's typed default (so `port: "{{telnet_port}}"` validates as an integer); embedded references interpolate as text. The `variables` section itself is never substituted. Unknown names collect as `undeclared-variable` issues with paths.
+
+    Args:
+        data: The parsed YAML tree.
+        overrides: Values that replace the defaults for declared names (the build's proof boot substitutes its draws this way to verify the booted state; variable-draws-v0). Names not declared in the document are ignored.
 
     Returns:
         The substituted tree and any reference issues.
@@ -84,6 +91,10 @@ def substitute_variables(data: Any) -> tuple[Any, list[Issue]]:
             for name, spec in cast(dict[Any, Any], variables).items():
                 if isinstance(spec, dict) and "default" in cast(dict[Any, Any], spec):
                     declared[str(name)] = cast(dict[Any, Any], spec)["default"]
+        if overrides:
+            for name, value in overrides.items():
+                if name in declared:
+                    declared[name] = value
 
     def walk(value: Any, path: tuple[str | int, ...]) -> Any:
         if isinstance(value, str):

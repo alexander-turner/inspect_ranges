@@ -524,17 +524,24 @@ class ScheduledActivity(_StrictModel):
         return self
 
 
-class Variable(_StrictModel):
-    """A named per-instance value: drawn fresh for each generated instance, with a required default.
+PORT_DRAW_MIN = 1024
+"""Default lower bound for `port` draws when the variable declares no `min` (unprivileged ports)."""
 
-    Definitions reference variables as `"{{name}}"` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: v1 semantics ARE defaults-resolution (linux-examples-v1), per-sample secrets are the challenge plant layer's job, and a per-instance generation layer that redraws non-secret values is deferred (see linux-examples-v1-parked-decisions.md). Python authors draw values and construct concretely instead of using references.
+PORT_DRAW_MAX = 65535
+"""Default upper bound for `port` draws when the variable declares no `max`."""
+
+
+class Variable(_StrictModel):
+    """A named per-instance value with a required default; `draw: boot` adds a per-sample value drawn at boot.
+
+    Definitions reference variables as `"{{name}}"` in YAML scalars; loading substitutes the defaults before validation, so a whole-scalar reference takes the variable's typed value (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Required defaults mean every definition always validates and realizes concretely: builds substitute defaults, and realized images never carry a draw. A variable marked `draw: boot` additionally gets a per-sample value when the sample's range boots, delivered to guests through the cloud-init draws file and applied by range-authored boot units (variable-draws-v0.md); per-sample secrets stay the challenge plant layer's job. Python authors draw values and construct concretely instead of using references.
     """
 
     default: str | int | bool
-    """The value used until generation draws one, and the fallback definition of the variable's type."""
+    """The value used wherever no draw applies (every reference at load, and `answer` scoring for undrawn variables), and the fallback definition of the variable's type."""
 
     type: Literal["text", "password", "port", "int", "choice"] | None = None
-    """What to draw, when generation lands; omitted means the default's own type."""
+    """The variable's value vocabulary; omitted means the default's own type. `draw: boot` requires `port`, `int`, or `choice`."""
 
     min: int | None = None
     """Lower bound for numeric draws."""
@@ -548,9 +555,19 @@ class Variable(_StrictModel):
     description: str | None = None
     """What the variable controls."""
 
+    draw: Literal["boot"] | None = None
+    """When a per-sample value is drawn: `boot` draws one at sample boot from the typed constraints, excluding the default; omitted means the default is the value everywhere (variable-draws-v0.md)."""
+
+    def draw_bounds(self) -> tuple[int, int]:
+        """The inclusive numeric draw range for a `port` or `int` variable: the declared `min`/`max`, with `port` falling back to `PORT_DRAW_MIN`/`PORT_DRAW_MAX`."""
+        low = self.min if self.min is not None else PORT_DRAW_MIN
+        high = self.max if self.max is not None else PORT_DRAW_MAX
+        return low, high
+
     @model_validator(mode="after")
     def _check_consistency(self) -> "Variable":
         issues: list[Issue] = []
+        issues.extend(self._draw_issues())
         if self.type in ("port", "int") and not isinstance(self.default, int):
             issues.append(
                 Issue(
@@ -587,6 +604,62 @@ class Variable(_StrictModel):
         if issues:
             raise IssueError(issues)
         return self
+
+    def _draw_issues(self) -> list[Issue]:
+        """Drawability rules for `draw: boot` (variable-draws-v0): a drawable type, bounds that define a numeric domain, and at least one candidate besides the default."""
+        if self.draw is None:
+            return []
+        if self.type == "password":
+            return [
+                Issue(
+                    code="invalid-variable",
+                    path=("draw",),
+                    message="a password variable cannot declare draw: per-sample secrets come from the challenge plant layer",
+                )
+            ]
+        if self.type not in ("port", "int", "choice"):
+            return [
+                Issue(
+                    code="invalid-variable",
+                    path=("draw",),
+                    message=f"type {self.type or 'text'!r} is not drawable; draw: boot needs type port, int, or choice",
+                )
+            ]
+        if self.type == "choice":
+            if self.choices and not any(
+                choice != self.default for choice in self.choices
+            ):
+                return [
+                    Issue(
+                        code="invalid-variable",
+                        path=("choices",),
+                        message="a drawn choice variable needs at least one choice other than the default (draws exclude the default)",
+                    )
+                ]
+            return []
+        if self.type == "int" and (self.min is None or self.max is None):
+            return [
+                Issue(
+                    code="invalid-variable",
+                    path=("draw",),
+                    message="a drawn int variable needs explicit min and max bounds",
+                )
+            ]
+        if not isinstance(self.default, int):
+            return []  # the integer-default issue already covers this
+        low, high = self.draw_bounds()
+        if low > high:
+            return []  # the min-above-max issue already covers this
+        candidates = high - low + 1 - (1 if low <= self.default <= high else 0)
+        if candidates < 1:
+            return [
+                Issue(
+                    code="invalid-variable",
+                    path=("draw",),
+                    message=f"the draw range {low}-{high} holds no value other than the default (draws exclude the default)",
+                )
+            ]
+        return []
 
 
 class AclRule(_StrictModel):

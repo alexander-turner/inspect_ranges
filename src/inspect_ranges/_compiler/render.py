@@ -25,6 +25,7 @@ from .._evidence.supervisor import (
 from ..types import Issue, IssueError, RangeSpec
 from .allocate import Allocation
 from .dnsmasq import render_dnsmasq_conf
+from .draws import DRAWS_GUEST_PATH
 from .egress import render_egress_nftables
 from .nftables import render_router_nftables
 from .plan import (
@@ -429,7 +430,14 @@ def render_bundle(
                 f"guests/{guest.name}/seed/user-data",
                 "#cloud-config\n"
                 + yaml.safe_dump(
-                    _user_data(spec, plan, guest, allocation), sort_keys=False
+                    _user_data(
+                        spec,
+                        plan,
+                        guest,
+                        allocation,
+                        options.draws if options is not None else {},
+                    ),
+                    sort_keys=False,
                 ),
             )
 
@@ -904,16 +912,35 @@ def _windows_admin_password(options: "PlanOptions | None", guest: PlannedGuest) 
 
 
 def _user_data(
-    spec: RangeSpec, plan: ResolvedPlan, guest: PlannedGuest, allocation: Allocation
+    spec: RangeSpec,
+    plan: ResolvedPlan,
+    guest: PlannedGuest,
+    allocation: Allocation,
+    draws: dict[str, int | str],
 ) -> dict[str, Any]:
     user_data: dict[str, Any] = {"hostname": guest.hostname}
+    write_files: list[dict[str, Any]] = []
     if guest.kind == "router":
         ruleset = "flush ruleset\n" + render_router_nftables(
             spec, guest.name, allocation
         )
-        user_data["write_files"] = [{"path": "/etc/nftables.conf", "content": ruleset}]
+        write_files.append({"path": "/etc/nftables.conf", "content": ruleset})
         user_data["runcmd"] = [
             ["sysctl", "-w", "net.ipv4.ip_forward=1"],
             ["systemctl", "enable", "--now", "nftables"],
         ]
+    if draws and guest.name != spec.foothold_guest:
+        # the draws file (variable-draws-v0): non-secret per-sample values,
+        # applied by range-authored boot units; every Linux guest gets it
+        # EXCEPT the agent's foothold (a drawn value is often a challenge's
+        # expected answer, and a file on the foothold would hand it over)
+        write_files.append(
+            {
+                "path": DRAWS_GUEST_PATH,
+                "content": json.dumps(draws, sort_keys=True) + "\n",
+                "permissions": "0644",
+            }
+        )
+    if write_files:
+        user_data["write_files"] = write_files
     return user_data

@@ -617,6 +617,29 @@ class TestScoreChallenge:
         right, wrong = asyncio.run(scenario())
         assert right == 1.0 and wrong == 0.0
 
+    def test_answer_variable_scores_the_drawn_value(self, tmp_path: Path) -> None:
+        """With a sample draw on the handle the `answer` goal expects the drawn value and the declared default no longer scores (variable-draws-v0); without a draw the default keeps scoring (covered by `test_answer_sources`)."""
+
+        async def scenario() -> tuple[float, float]:
+            oracle, _, handle = make_oracle(tmp_path)
+            handle.spec = minimal_spec()
+            handle.draws = {"telnet_port": 4242}
+            challenge = Challenge(
+                id="c",
+                prompt="p",
+                goals=[AnswerGoal(id="port", variable="telnet_port")],
+            )
+            drawn, _ = await score_challenge(
+                oracle, Store(), challenge, submissions(port="4242")
+            )
+            default, _ = await score_challenge(
+                oracle, Store(), challenge, submissions(port="2323")
+            )
+            return drawn, default
+
+        drawn, default = asyncio.run(scenario())
+        assert drawn == 1.0 and default == 0.0
+
     def test_unknown_answer_variable_refuses_at_setup(self, tmp_path: Path) -> None:
         """On the range_spec-omitted dataset path nothing re-checks `answer` variables before the sample runs; the setup gate must refuse an undeclared variable loudly instead of letting the full episode score an opaque indeterminate (quality review R2-8)."""
 

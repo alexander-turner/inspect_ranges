@@ -230,6 +230,27 @@ class EvidenceSession:
             ),
         )
 
+    async def record_draws(self, seed: str, draws: dict[str, int | str]) -> None:
+        """Record the sample's variable draws on the `draws` stream (driver-side, variable-draws-v0).
+
+        Draws are non-secret by construction (`password` variables refuse `draw:`), so the values ride the record verbatim beside the seed: a recorded sample's draws are reproducible post-hoc from either. Clock stamps are added here; appends are best-effort like every driver stream.
+        """
+        stamp = clock_now()
+        await self._driver_append(
+            "draws",
+            json_lines(
+                [
+                    {
+                        "event": "drawn",
+                        "seed": seed,
+                        "draws": draws,
+                        "wall": stamp.wall,
+                        "monotonic": stamp.monotonic,
+                    }
+                ]
+            ),
+        )
+
     @property
     def enabled(self) -> bool:
         """Whether this session is live: opened writers and not disabled (the evidence-sink observer exists)."""

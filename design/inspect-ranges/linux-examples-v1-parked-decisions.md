@@ -12,6 +12,8 @@
 
 **DECIDED (user, 2026-10-19): stay deferred.** Defaults-resolution is the v1 semantic; the generation layer waits for a concrete consumer of non-secret per-sample variation, and draws at boot when it comes.
 
+**BUILT (user-requested, 2026-10-22): the consumer arrived and the boot-draw slice landed.** `draw: boot` on a variable draws a per-sample value at boot (never at build; images and build keys unchanged), delivered through a cloud-init draws file and applied by range-authored boot units; kypo-demo's `telnet_port` is the first consumer, and its published build needs a rebuild and republish. See [variable-draws-v0.md](variable-draws-v0.md).
+
 
 ## 2. Router provisioning (and the firewall-pivot path it unlocks) (slice 2, 2026-10-19)
 

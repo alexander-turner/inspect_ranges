@@ -16,7 +16,9 @@ range:
     with a variables/randomization layer.
 
 variables:                       # KYPO APG variables — regenerated per sandbox instance
-  telnet_port: { type: port, min: 1500, default: 2323 }     # default from the role
+  # telnet_port draws per sample at boot (variable-draws-v0): the build bakes
+  # the default, and the kypo.server boot unit moves telnetd to the drawn port
+  telnet_port: { type: port, min: 1500, default: 2323, draw: boot }  # default from the role
   alice_flag:  { type: text, default: Top_Secret_Flag }     # default from the role
   root_flag:   { type: text, default: Cant_Guess_This }     # default from the role
 
