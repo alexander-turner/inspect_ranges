@@ -9,10 +9,11 @@
 # Migration note (2026-10-15): the three legacy per-level tasks are one
 # challenge with a milestone ladder (the overview's kypo row), the three level
 # prompts concatenated in order to keep the upstream text verbatim. The level-2
-# answer scores against the telnet_port draw (the checked-in default until the
-# generation layer lands). Levels 3 and 4 are flag goals: setup re-plants both
-# flags with proof entropy, so the alice_flag/root_flag variable defaults never
-# score.
+# answer scores against the telnet_port draw: the variable declares draw: boot
+# (variable-draws-v0, 2026-10-22), so each sample's drawn port is the expected
+# answer and the checked-in default never scores. Levels 3 and 4 are flag
+# goals: setup re-plants both flags with proof entropy, so the
+# alice_flag/root_flag variable defaults never score.
 
 challenges:
   - id: telnet-ladder
