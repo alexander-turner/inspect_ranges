@@ -1030,6 +1030,34 @@ def test_undeclared_variable_reference(tmp_path: Path) -> None:
         pytest.param(
             "{ default: 5, min: 9, max: 3 }", "greater than max", id="min-above-max"
         ),
+        pytest.param(
+            "{ type: password, default: hunter2, draw: boot }",
+            "plant layer",
+            id="draw-password-refused",
+        ),
+        pytest.param(
+            "{ type: text, default: hi, draw: boot }",
+            "not drawable",
+            id="draw-text-refused",
+        ),
+        pytest.param(
+            "{ default: 5, draw: boot }", "not drawable", id="draw-untyped-refused"
+        ),
+        pytest.param(
+            "{ type: int, default: 5, min: 1, draw: boot }",
+            "explicit min and max",
+            id="draw-int-needs-bounds",
+        ),
+        pytest.param(
+            "{ type: choice, default: a, choices: [a], draw: boot }",
+            "other than the default",
+            id="draw-choice-needs-alternative",
+        ),
+        pytest.param(
+            "{ type: port, default: 2000, min: 2000, max: 2000, draw: boot }",
+            "no value other than the default",
+            id="draw-port-domain-only-default",
+        ),
     ],
 )
 def test_invalid_variable_definitions(
