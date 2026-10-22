@@ -929,7 +929,11 @@ activity = RangeSpec(
 
 ## Variables {#variables}
 
-`variables` declares values intended to differ between generated instances of the same range: ports, passwords, flag hints. No per-instance values are drawn yet: every variable requires a `default` and loading substitutes the defaults before validation; the generation layer that would draw differing values is deferred (per-sample secrets come from the challenge plant layer instead; see [Challenges](challenges.qmd)). References are `"{{name}}"`: a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Substitution covers every scalar in `range.yaml` (ports, passwords, `provisioning` `vars`, prose fields) and only `range.yaml`: `challenges.yaml` never substitutes, and a goal reads a variable by name instead (`answer`'s `variable:` source). A reference naming no declared variable is a positioned `undeclared-variable` error. In Python there is no substitution; the pattern is a plain function whose parameters play the role of the references, with the values placed directly:
+`variables` declares values intended to differ between instances of the same range: ports, passwords, flag hints. Every variable requires a `default`, and loading substitutes the defaults before validation.
+
+A variable marked `draw: boot` also gets a per-sample value, drawn when the sample's range boots. The draw comes from the declared constraints (`port` and `int` from `min`/`max`, `choice` from `choices`) and never lands on the default. The drawn values are written to `/etc/inspect-ranges/draws.json` in every Linux guest's cloud-init seed, as a JSON mapping of variable name to value. Applying a draw is the range author's job: a recipe installs a boot unit that reads the file and reconfigures the service (the kypo_demo example moves telnetd to the drawn port this way). Everything else keeps the default: builds substitute defaults, realized images and build keys never change with a draw, and every substituted reference in `range.yaml` (a declared service port, a recipe `vars` entry) still reads the default. `draw: boot` requires type `port`, `int` (explicit `min` and `max`), or `choice`; a `password` variable refuses it (per-sample secrets come from the challenge plant layer; see [Challenges](challenges.qmd)), and `text` has no constraints to draw from. An `answer` goal naming a drawn variable scores the drawn value.
+
+References are `"{{name}}"`: a whole-scalar reference keeps the variable's type (`port: "{{telnet_port}}"` validates as an integer) and embedded references interpolate as text. Substitution covers every scalar in `range.yaml` (ports, passwords, `provisioning` `vars`, prose fields) and only `range.yaml`: `challenges.yaml` never substitutes, and a goal reads a variable by name instead (`answer`'s `variable:` source). A reference naming no declared variable is a positioned `undeclared-variable` error. In Python there is no substitution; the pattern is a plain function whose parameters play the role of the references, with the values placed directly:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -939,7 +943,7 @@ range:
   name: randomized
   description: A randomized service port and a templated credential.
 variables:
-  telnet_port: { type: port, min: 1500, default: 2323 }
+  telnet_port: { type: port, min: 1500, default: 2323, draw: boot }
   admin_password: { type: password, default: "changeme123!" }
 networks:
   - name: lab
@@ -973,7 +977,7 @@ def randomized(
         ),
         variables={
             "telnet_port": Variable(
-                type="port", min=1500, default=2323
+                type="port", min=1500, default=2323, draw="boot"
             ),
             "admin_password": Variable(
                 type="password", default="changeme123!"
