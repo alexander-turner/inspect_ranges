@@ -7,16 +7,22 @@
 -- nothing in the rendered site. This filter rewrites them to the
 -- repository: blob URLs for files, tree URLs for directories, raw URLs for
 -- images. A link that resolves to another example's README stays in-site as
--- that example's doc page.
+-- that example's doc page, and an image that exists beside the page (the
+-- topology SVGs are copied into docs/examples/ for this) stays relative,
+-- an in-site resource Quarto copies itself (GitHub raw would serve SVG as
+-- text/plain, which browsers refuse to render in an img tag).
 
 local REPO = "https://github.com/meridianlabs-ai/inspect_ranges"
 local RAW = "https://raw.githubusercontent.com/meridianlabs-ai/inspect_ranges"
 local EXAMPLES = "src/inspect_ranges/examples"
 
-local function example_name()
-  local input = (quarto and quarto.doc and quarto.doc.input_file)
+local function input_path()
+  return (quarto and quarto.doc and quarto.doc.input_file)
       or PANDOC_STATE.input_files[1]
-  return pandoc.path.filename(input):gsub("%.md$", "")
+end
+
+local function example_name()
+  return pandoc.path.filename(input_path()):gsub("%.md$", "")
 end
 
 local name = example_name()
@@ -110,6 +116,12 @@ end
 
 function Image(el)
   if is_relative(el.src) then
+    local beside = pandoc.path.join({ pandoc.path.directory(input_path()), el.src })
+    local f = io.open(beside, "r")
+    if f then
+      f:close()
+      return nil
+    end
     el.src = rewrite(el.src, true)
     return el
   end

@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import inspect_ranges.types as _types
 import pytest
+import yaml
 from inspect_ranges import validate_range
 from inspect_ranges._compiler import resolve_plan
 from inspect_ranges.schema import revalidate_range
@@ -169,3 +170,40 @@ def test_attack_image_tool_contract_matches_docs() -> None:
     page = (DOCS / "images.qmd").read_text()
     missing = [tool for tool in tools if f"`{tool}`" not in page]
     assert not missing, f"asserted attack tools absent from images.qmd: {missing}"
+
+
+EXAMPLES_SRC = Path(__file__).parent.parent / "src" / "inspect_ranges" / "examples"
+
+
+def _yaml_subset(part: Any, whole: Any) -> bool:
+    """Whether `part` is a recursive subset of `whole`: dict keys match recursively, every list item matches some item, scalars compare equal."""
+    if isinstance(part, dict):
+        whole_map = cast(dict[str, Any], whole) if isinstance(whole, dict) else {}
+        part_map = cast(dict[str, Any], part)
+        return isinstance(whole, dict) and all(
+            key in whole_map and _yaml_subset(value, whole_map[key])
+            for key, value in part_map.items()
+        )
+    if isinstance(part, list):
+        part_list = cast(list[Any], part)
+        whole_list = cast(list[Any], whole) if isinstance(whole, list) else []
+        return isinstance(whole, list) and all(
+            any(_yaml_subset(item, candidate) for candidate in whole_list)
+            for item in part_list
+        )
+    return bool(part == whole)
+
+
+@pytest.mark.parametrize(
+    "page", sorted(path.name for path in (DOCS / "examples").glob("*.md"))
+)
+def test_example_readme_yaml_matches_source(page: str) -> None:
+    """Every YAML excerpt on an example page is a subset of the example's real file, so excerpts cannot drift from the source they quote."""
+    example_dir = EXAMPLES_SRC / f"_{page.removesuffix('.md')}"
+    for _, text in _fence_blocks(f"examples/{page}", "yaml"):
+        excerpt = yaml.safe_load(text)
+        source = "challenges.yaml" if "challenges" in excerpt else "range.yaml"
+        whole = yaml.safe_load((example_dir / source).read_text())
+        assert _yaml_subset(excerpt, whole), (
+            f"{page}: a YAML excerpt drifted from {source}"
+        )
