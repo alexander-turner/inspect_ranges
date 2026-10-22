@@ -1,6 +1,6 @@
 """The `build` orchestration (build-v1 slice 2): boot the egress build plan, run recipes, tear down.
 
-A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each guest's `provisioning` steps (hosts, then routers) run in declaration order through the slice-1 executor, every `services`/`vulnerabilities` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Provisioned guests are then captured as realized images and the build manifest records the whole build (slice 5); declared behavioral checks run against the captured artifacts before the manifest lands (slice 6), so a recorded build is realized, verified, AND proven.
+A build is an ordinary realizer project: the spec's egress-enabled build variant renders to a staging bundle, `up` boots it (ownership records, stage logs, and crash cleanup all inherited), each guest's `provisioning` steps (hosts, then routers) run in declaration order through the slice-1 executor, declared `scheduled_activity` units install into their guests (scheduled-activity-v1), every `services`/`vulnerabilities`/`scheduled_activity` declaration is then verified against the live range through the slice-4 engine (whole-range, independent of recipe claims), and the range is torn down on success and on failure (`keep` preserves it for diagnosis, as `up` does). Provisioned guests are then captured as realized images and the build manifest records the whole build (slice 5); declared behavioral checks run against the captured artifacts before the manifest lands (slice 6), so a recorded build is realized, verified, AND proven.
 
 Provisioned ROUTERS build on the host path with one deliberate difference: they get no build egress (their attached networks stay untouched by the egress variant, and scoped egress on a router-attached network is itself unrealized, `egress-with-router-not-realized`), so a router's recipes run offline — account seeding and reconfiguring what the golden already carries, with the per-guest settle gate skipped and a network-reaching recipe failing as an ordinary recipe error. Routers also declare no `services`/`vulnerabilities`, so the verification engine has no router scope; a router recipe self-asserts, and behavioral checks prove whatever the chains depend on.
 
@@ -56,6 +56,11 @@ from ..types import (
     has_guest_content,
     has_router_content,
 )
+from .activities import (
+    ResolvedActivity,
+    realize_activities,
+    resolve_activities,
+)
 from .behavioral import (
     CHECKS_DIR_NAME,
     checks_declared,
@@ -79,6 +84,7 @@ from .errors import BuildError
 from .guesttool import ps_quote
 from .manifest import (
     BUILD_REALIZED_SECTIONS,
+    ActivityRecord,
     BaseImageRecord,
     BehavioralCheckRecord,
     BuildManifest,
@@ -280,6 +286,20 @@ def _capture_realized(
         realized_name=realized_name,
         meta=meta,
     )
+
+
+class ActivityFn(Protocol):
+    """The scheduled-activity seam: `realize_activities`'s callable shape."""
+
+    def __call__(
+        self,
+        activities: list[ResolvedActivity],
+        cids: dict[str, int],
+        *,
+        skip: frozenset[str] = frozenset(),
+        stage_log: StageSink | None = None,
+        hybrid_sockets: "HybridSockets | None" = None,
+    ) -> None: ...
 
 
 class VerifyFn(Protocol):
@@ -564,6 +584,7 @@ def build_range(
     recipe_fn: RecipeFn = run_recipe,
     ensure_uplink: Callable[[str], None] | None = None,
     settle_fn: SettleFn | None = None,
+    activity_fn: "ActivityFn | None" = None,
     verify_fn: VerifyFn = verify_range,
     capture_fn: CaptureFn | None = None,
     quiesce_fn: QuiesceFn | None = None,
@@ -607,6 +628,10 @@ def build_range(
     steps_by_host: dict[str, list[ResolvedStep]] = {}
     for step in steps:
         steps_by_host.setdefault(step.guest, []).append(step)
+    activities = resolve_activities(spec, range_dir)
+    activities_by_host: dict[str, list[ResolvedActivity]] = {}
+    for activity in activities:
+        activities_by_host.setdefault(activity.guest, []).append(activity)
     content_guests: list[Host | Router] = [
         *(host for host in spec.hosts if has_guest_content(host)),
         *(router for router in spec.routers if has_router_content(router)),
@@ -679,6 +704,9 @@ def build_range(
                 windows_key_facts(spec, host.name, image_cache=image_cache)
                 if isinstance(host, Host) and host.os.type == "windows"
                 else None
+            ),
+            activity_digests=tuple(
+                activity.digest for activity in activities_by_host.get(host.name, [])
             ),
         )
     if missing:
@@ -1005,6 +1033,35 @@ def build_range(
                 "recipe", f"recipe phase failed: {error} ({disposition})"
             ) from error
 
+        if activities:
+            # scheduled activities install after recipes and before
+            # verification: the captured image carries the units, verification
+            # checks them, and reused guests already carry theirs
+            realize = activity_fn if activity_fn is not None else realize_activities
+            try:
+                realize(
+                    activities,
+                    cids,
+                    skip=frozenset(reusable),
+                    stage_log=tee,
+                    hybrid_sockets=hybrid,
+                )
+            except BuildError as error:
+                tee.log(error.stage, "fail", error=_strip_stage(error))
+                disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+                raise BuildError(
+                    error.stage,
+                    f"{_strip_stage(error)} ({disposition})",
+                    guest=error.guest,
+                ) from error
+            except Exception as error:
+                tee.log("activity", "fail", error=str(error))
+                disposition, kept = _dispose(options, project, down_fn, tee, state_dir)
+                raise BuildError(
+                    "activity",
+                    f"activity realization failed: {error} ({disposition})",
+                ) from error
+
         verify_dir = project_dir(state_dir, project) / "verify"
         try:
             verifications = verify_fn(
@@ -1113,6 +1170,16 @@ def build_range(
                                     vars_hash=vars_hash(s.vars),
                                 )
                                 for s in steps_by_host.get(host.name, [])
+                            ),
+                            activities=tuple(
+                                ActivityRecord(
+                                    script=a.declaration.script,
+                                    digest=a.digest,
+                                    schedule=a.declaration.schedule or "",
+                                    user=a.declaration.user,
+                                    unit=a.unit,
+                                )
+                                for a in activities_by_host.get(host.name, [])
                             ),
                         )
                     )

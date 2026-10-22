@@ -289,7 +289,7 @@ With `host:`, the attacker declares no machine of its own (the foothold is the m
 
 Beyond identity and sizing, a definition declares what a guest contains: accounts, services, seeded weaknesses, planted files, and protections. These declarations describe the converged state of a guest (what the guest looks like once fully set up), not boot-time actions. Each declaration is realized at build time and the range ships verified; the runtime never applies guest content per sample.
 
-[`inspect-ranges build`](building.qmd) converges nothing itself: the range's recipes create the accounts, write the files, and seed the weaknesses ([Authoring Recipes](building.qmd#authoring-recipes)). The build then independently verifies every declared `services` and `vulnerabilities` entry against the live guests and captures each guest's disk as a realized image. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and behavioral checks confirm whichever the attack chains depend on. Routers carry content too (`users` realized by their `provisioning` recipes); they declare no `services` or `vulnerabilities`, so a router's verification is its recipes' own assertions plus the behavioral checks. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` has no realizer yet and refuses at planning (`guest-config-not-realized`), so nothing boots with silently missing content.
+[`inspect-ranges build`](building.qmd) converges nothing itself: the range's recipes create the accounts, write the files, and seed the weaknesses ([Authoring Recipes](building.qmd#authoring-recipes)). The build then independently verifies every declared `services` and `vulnerabilities` entry against the live guests and captures each guest's disk as a realized image. Declared `users`, `misconfigurations`, and `data` are not independently probed yet: the build trusts the recipes' success for them, and behavioral checks confirm whichever the attack chains depend on. Routers carry content too (`users` realized by their `provisioning` recipes); they declare no `services` or `vulnerabilities`, so a router's verification is its recipes' own assertions plus the behavioral checks. A range declaring content refuses planning (`range-not-built`) until a matching build exists; once one does, the range boots those captured images. `scheduled_activity` realizes at build too: each declaration installs as a persistent unit in the captured image and is verified afterward ([Scheduled Activity](#scheduled-activity)).
 
 ## Users {#users}
 
@@ -865,7 +865,9 @@ provisioned = RangeSpec(
 
 ## Scheduled Activity {#scheduled-activity}
 
-`scheduled_activity` declares recurring in-guest behavior simulation: bot scripts and scheduled tasks that create the user and defender activity real tradecraft depends on (and the token-theft surface scheduled tasks bring with them):
+`scheduled_activity` declares recurring in-guest behavior: bot scripts and scheduled tasks that create the user and defender activity real tradecraft depends on (and the token-theft surface scheduled tasks bring with them). The build realizes each declaration as a persistent unit in the captured image: a systemd service (plus a timer for interval schedules) on Linux, a scheduled task on Windows. Every boot of the captured image then runs the activity on its schedule, with no per-sample work.
+
+`script` is a relative path resolved from the `activities/` directory beside `range.yaml`. Its content digest enters the guest's build key, so an edited script rebuilds exactly the guests that declare it. A Linux script needs a shebang (the service executes the file); a Windows script runs through `powershell -NoProfile -ExecutionPolicy Bypass -File`. `schedule` accepts two forms: `@boot` (run once at each boot) and `every <N><unit>`, where `<N>` is a positive integer and `<unit>` is `s`, `m`, or `h` (for example `every 5m`); any other value refuses at validation, a declaration without one refuses at build, and a seconds interval on a Windows host refuses at build (the Windows task scheduler repeats at one-minute granularity). The activity runs as the declared `user` (on Windows with no stored credential), or as root/SYSTEM when omitted. After realization the build verifies that each unit or task exists and is enabled, and records the result in the manifest:
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
@@ -884,8 +886,9 @@ hosts:
     image: windows-2022
     interfaces: [{ network: corp }]
     scheduled_activity:
-      - { script: responder.ps1 }
+      - { script: responder.ps1, schedule: "every 1h" }
       - script: rdp_scheduler.ps1
+        schedule: every 15m
         user: admin.user
         note: creates a stealable session
 attacker:
@@ -911,9 +914,12 @@ activity = RangeSpec(
             image="windows-2022",
             interfaces=[Interface(network="corp")],
             scheduled_activity=[
-                ScheduledActivity(script="responder.ps1"),
+                ScheduledActivity(
+                    script="responder.ps1", schedule="every 1h"
+                ),
                 ScheduledActivity(
                     script="rdp_scheduler.ps1",
+                    schedule="every 15m",
                     user="admin.user",
                     note="creates a stealable session",
                 ),

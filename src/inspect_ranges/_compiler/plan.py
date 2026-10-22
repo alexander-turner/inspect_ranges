@@ -261,7 +261,12 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
         for index, guest_decl in enumerate(declared_list):
             content = any(
                 getattr(guest_decl, section_field, None)
-                for section_field in ("provisioning", "services", "vulnerabilities")
+                for section_field in (
+                    "provisioning",
+                    "services",
+                    "vulnerabilities",
+                    "scheduled_activity",
+                )
             )
             if guest_decl.vmm == "cloud-hypervisor" and content:
                 # the build captures provisioned guests through virsh domstate,

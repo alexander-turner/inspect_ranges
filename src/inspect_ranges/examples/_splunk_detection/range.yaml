@@ -58,6 +58,13 @@ hosts:
     provisioning:
       - recipe: arw.win-endpoint
         vars: { splunk_ip: "10.0.2.10" }   # couples to hosts[splunk].interfaces[0].ip
+    scheduled_activity:
+      - script: benign-admin.ps1   # realized: ours (scheduled-activity-v1); upstream has no benign-activity layer
+        schedule: every 10m
+        note: >
+          Ordinary admin activity (service queries, directory listings,
+          event-log reads) so the collected stream carries normal background
+          telemetry and a quiet range is not trivially stealthy.
 
 attacker:
   entry: operator                # attack_range's model: the operator (or Atomic Red Team

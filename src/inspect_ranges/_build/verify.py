@@ -4,6 +4,8 @@ Verification is mechanical and derived from the spec, never from recipe claims: 
 
 `credentials` and free-text fields are not mechanically checkable and are not checked. Failures carry the house codes (`service-not-verified`, `vulnerability-not-verified`) with the observed-versus-declared delta and the per-guest probe log path; the evaluation itself is pure over `GuestFacts`, so it tests without a guest.
 
+`scheduled_activity` declarations verify as installed units (scheduled-activity-v1): one probe per declaration checks that the unit or task exists and is enabled (`systemctl is-enabled` on Linux, `Get-ScheduledTask` state on Windows), with unit names derived from the spec alone, so the same check covers the build range and the proof boot. Failures carry `activity-not-verified`.
+
 Windows guests (windows-ad-v1 slice 2) probe over PowerShell into the same `GuestFacts` shape: listeners from `Get-NetTCPConnection`/`Get-NetUDPEndpoint` (pid-attributed, process names joined from `Get-Process`), packages from the registry uninstall enumeration (DisplayName to DisplayVersion), and the listener attribution chain through the owning process's executable `ProductVersion` (the dpkg-ownership analogue: the exe path stands in for the owning package name). Everything below `GuestFacts` — the evaluation, the version matcher — is shared; Windows versions are plain dotted numerics, which the component-prefix matcher handles and the dpkg-specific rules (`~`, `+really`, epochs) simply never trigger on.
 """
 
@@ -66,12 +68,12 @@ class DeclarationResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["service", "vulnerability"]
+    kind: Literal["service", "vulnerability", "activity"]
     guest: str
     name: str
     status: Literal["ok", "fail"]
     code: str
-    """`service-not-verified` / `vulnerability-not-verified` on failure, empty on ok."""
+    """`service-not-verified` / `vulnerability-not-verified` / `activity-not-verified` on failure, empty on ok."""
 
     declared: str
     observed: str
@@ -364,19 +366,39 @@ def verify_range(
     log_dir.mkdir(parents=True, exist_ok=True)
     results: list[DeclarationResult] = []
     for host in spec.hosts:
-        if not host.services and not host.vulnerabilities:
+        if (
+            not host.services
+            and not host.vulnerabilities
+            and not host.scheduled_activity
+        ):
             continue
+        windows = host.os.type == "windows"
         log_path = log_dir / f"{host.name}.log"
-        facts = asyncio.run(
-            _collect_facts(
-                cids,
-                host.name,
-                log_path,
-                hybrid_sockets,
-                windows=host.os.type == "windows",
+        activities_log = log_dir / f"{host.name}-activities.log"
+        host_results: list[DeclarationResult] = []
+        if host.services or host.vulnerabilities:
+            facts = asyncio.run(
+                _collect_facts(
+                    cids,
+                    host.name,
+                    log_path,
+                    hybrid_sockets,
+                    windows=windows,
+                )
             )
-        )
-        host_results = evaluate_host(host, facts)
+            host_results.extend(evaluate_host(host, facts))
+        if host.scheduled_activity:
+            host_results.extend(
+                asyncio.run(
+                    _check_activities(
+                        cids,
+                        host,
+                        activities_log,
+                        hybrid_sockets,
+                        windows=windows,
+                    )
+                )
+            )
         results.extend(host_results)
         if stage_log is not None:
             for result in host_results:
@@ -389,8 +411,59 @@ def verify_range(
                     code=result.code,
                     declared=result.declared,
                     observed=result.observed,
-                    log=str(log_path),
+                    log=str(activities_log if result.kind == "activity" else log_path),
                 )
+    return results
+
+
+async def _check_activities(
+    cids: dict[str, int],
+    host: Host,
+    log_path: Path,
+    hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    *,
+    windows: bool = False,
+) -> list[DeclarationResult]:
+    """Verify every declared scheduled activity's installed unit or task: `systemctl is-enabled` on Linux, `Get-ScheduledTask` state on Windows (scheduled-activity-v1).
+
+    The probe derives the unit names from the spec alone, so the same check covers the build range and the proof boot's captured artifacts.
+    """
+    from .activities import activity_check_command, activity_unit_name
+
+    channel = MessageChannel(
+        VsockTransport(cids, hybrid_sockets=hybrid_sockets), label="build-verify"
+    )
+    results: list[DeclarationResult] = []
+    records: list[str] = []
+    for index, activity in enumerate(host.scheduled_activity):
+        unit = activity_unit_name(host.name, index)
+        cmd, user = activity_check_command(activity, unit=unit, windows=windows)
+        outcome = await channel.exec(
+            host.name,
+            ExecRequest(
+                id=request_id(),
+                cmd=list(cmd),
+                user=user,
+                budget=Budget(command_ms=PROBE_BUDGET_MS),
+            ),
+        )
+        stdout = outcome.stdout.decode(errors="replace").strip()
+        stderr = outcome.stderr.decode(errors="replace").strip()
+        records.append(f"# {unit} rc={outcome.rc}\n{stdout}\n{stderr}")
+        ok = outcome.rc == 0
+        observed = stdout or stderr or "(no output)"
+        results.append(
+            DeclarationResult(
+                kind="activity",
+                guest=host.name,
+                name=unit,
+                status="ok" if ok else "fail",
+                code="" if ok else "activity-not-verified",
+                declared=f"{activity.script} {activity.schedule or '(no schedule)'}",
+                observed=(observed if ok else f"probe exited {outcome.rc}: {observed}"),
+            )
+        )
+    log_path.write_text("\n".join(records) + "\n")
     return results
 
 

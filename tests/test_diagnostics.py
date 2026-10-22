@@ -1143,3 +1143,61 @@ def test_to_json_contract(tmp_path: Path) -> None:
         "hint",
     }
     assert issue["loc"] == ["hosts", 0, "imagee"]
+
+
+@pytest.mark.parametrize(
+    ("activity", "field"),
+    [
+        pytest.param("{ script: tick.sh, schedule: hourly }", "schedule", id="word"),
+        pytest.param(
+            "{ script: tick.sh, schedule: every 5 m }", "schedule", id="spaced-unit"
+        ),
+        pytest.param(
+            "{ script: tick.sh, schedule: every 0m }", "schedule", id="zero-interval"
+        ),
+        pytest.param(
+            "{ script: tick.sh, schedule: every 5d }", "schedule", id="unknown-unit"
+        ),
+        pytest.param(
+            "{ script: /abs/tick.sh, schedule: every 5m }", "script", id="absolute"
+        ),
+        pytest.param(
+            "{ script: ../tick.sh, schedule: every 5m }", "script", id="traversal"
+        ),
+    ],
+)
+def test_invalid_scheduled_activity_definitions(
+    activity: str, field: str, tmp_path: Path
+) -> None:
+    report = report_with(
+        f"""
+        hosts:
+          - name: web
+            os: {{ type: linux }}
+            image: img
+            interfaces: [{{ network: lab }}]
+            scheduled_activity: [{activity}]
+        """,
+        tmp_path,
+    )
+    issue = next(i for i in report.issues if i.code == "invalid-scheduled-activity")
+    assert issue.path_str == f"hosts[0].scheduled_activity[0].{field}"
+
+
+@pytest.mark.parametrize(
+    "schedule", ["@boot", "every 1s", "every 30s", "every 5m", "every 12h"]
+)
+def test_valid_activity_schedules(schedule: str, tmp_path: Path) -> None:
+    report = report_with(
+        f"""
+        hosts:
+          - name: web
+            os: {{ type: linux }}
+            image: img
+            interfaces: [{{ network: lab }}]
+            scheduled_activity:
+              - {{ script: tick.sh, schedule: "{schedule}" }}
+        """,
+        tmp_path,
+    )
+    assert report.valid, codes(report)

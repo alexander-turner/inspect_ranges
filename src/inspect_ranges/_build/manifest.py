@@ -67,8 +67,9 @@ BUILD_REALIZED_SECTIONS: tuple[str, ...] = (
     "roles",
     "defense",
     "active_directory",
+    "scheduled_activity",
 )
-"""The guest sections a build claims as realized: recipes implement them, the build's behavioral checks prove the chain-load-bearing facts, and declared secret `data` is (re)planted per sample by the challenge layer, so baked defaults never score (linux-examples-v1). Windows-ad-v1 slice 4 adds `roles` (the recipe-selection tags the AD recipes install), `defense` (per-host Defender/update toggles, verifiable in one query), and `active_directory` (identity data reaching recipes via `IR_ACTIVE_DIRECTORY`, hashed into every content guest's build key). `scheduled_activity` stays gated: nothing realizes it. The runtime path without a manifest keeps every gate."""
+"""The guest sections a build claims as realized: recipes implement them, the build's behavioral checks prove the chain-load-bearing facts, and declared secret `data` is (re)planted per sample by the challenge layer, so baked defaults never score (linux-examples-v1). Windows-ad-v1 slice 4 adds `roles` (the recipe-selection tags the AD recipes install), `defense` (per-host Defender/update toggles, verifiable in one query), and `active_directory` (identity data reaching recipes via `IR_ACTIVE_DIRECTORY`, hashed into every content guest's build key). Scheduled-activity-v1 adds `scheduled_activity`: the build installs each declaration as a persistent unit in the captured image and verifies it. The runtime path without a manifest keeps every gate."""
 
 
 class BaseImageRecord(BaseModel):
@@ -94,6 +95,19 @@ class RecipeRecord(BaseModel):
     vars_hash: str
 
 
+class ActivityRecord(BaseModel):
+    """One scheduled activity as the manifest records it: the script's content digest plus the declaration the installed unit realizes (scheduled-activity-v1)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    script: str
+    digest: str
+    schedule: str
+    user: str | None = None
+    unit: str
+    """The in-guest systemd unit / scheduled task base name (`ir-activity-<guest>-<index>`)."""
+
+
 class GuestRecord(BaseModel):
     """One host's build inputs and captured output."""
 
@@ -108,6 +122,8 @@ class GuestRecord(BaseModel):
     realized_sha256: str
     build_key: str
     recipes: tuple[RecipeRecord, ...]
+    activities: tuple[ActivityRecord, ...] = ()
+    """Scheduled activities installed into the captured image; empty for pre-scheduled-activity manifests."""
 
 
 class BehavioralCheckRecord(BaseModel):
@@ -243,6 +259,10 @@ def spec_projection(
         projected["roles"] = list(host.roles)
     if host.defense is not None:
         projected["defense"] = host.defense.model_dump(mode="json")
+    if host.scheduled_activity:
+        projected["scheduled_activity"] = [
+            activity.model_dump(mode="json") for activity in host.scheduled_activity
+        ]
     if host.os.type == "windows":
         if network_state is None:
             raise ValueError(
@@ -271,10 +291,11 @@ def guest_build_key(
     range_name: str,
     active_directory_hash: str | None = None,
     network_state: dict[str, object] | None = None,
+    activity_digests: tuple[str, ...] = (),
 ) -> str:
-    """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars, and the range's Active Directory hash when one is declared.
+    """The guest's build key: identity (range and guest names), golden digest, realized-spec projection, ordered recipe digests and vars, the range's Active Directory hash when one is declared, and the ordered content digests of the guest's scheduled-activity scripts.
 
-    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes. Identity participates so two ranges (or guests) with byte-identical content never share a key or a realized file name, whose collisions caused last-writer-wins captures and digest-refusal ping-pong (round-1 review); a rename rebuilds, which is correct, names are identity. The AD data is range-scoped and enters EVERY content guest's key (windows-ad-v1 slice 4): a user or ACL edit changes what the domain recipes realize on each member, so no guest may reuse across it.
+    The spine's rebuild rule in one value: the key changes exactly when an input that lives inside the realized guest changes. Identity participates so two ranges (or guests) with byte-identical content never share a key or a realized file name, whose collisions caused last-writer-wins captures and digest-refusal ping-pong (round-1 review); a rename rebuilds, which is correct, names are identity. The AD data is range-scoped and enters EVERY content guest's key (windows-ad-v1 slice 4): a user or ACL edit changes what the domain recipes realize on each member, so no guest may reuse across it. Activity script digests enter the key (declarations already ride the projection) because the script's content bakes into the captured image: an edited script re-keys exactly the guests that declare it (scheduled-activity-v1).
     """
     parts = [
         f"identity:{range_name}/{host.name}",
@@ -285,6 +306,7 @@ def guest_build_key(
         parts.append(f"ad:{active_directory_hash}")
     for recipe, step_vars in recipes:
         parts.append(f"recipe:{recipe.digest}+vars:{vars_hash(step_vars)}")
+    parts.extend(f"activity:{digest}" for digest in activity_digests)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
