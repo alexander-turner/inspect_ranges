@@ -27,6 +27,12 @@ Notes:
 - `examples/vulhub-zabbix/upstream/README.txt` and `../../examples/goad-light/upstream/cochise/scenario.txt` are upstream Markdown files renamed to `.txt` (kept byte-identical).
 - Our own files in this folder (every `range.yaml`, `challenges.yaml`, `notes.md`, and the documents at the folder root) carry this repository's license.
 
+## Adapted code
+
+| Where | Upstream project | Copyright | License | What was adapted |
+|---|---|---|---|---|
+| `src/inspect_ranges/_terminal/session.py` | [terminal-bench](https://github.com/laude-institute/terminal-bench) (`terminal_bench/terminal/tmux_session.py`) | Laude Institute contributors | Apache-2.0 | The Terminus tmux session mechanics: the `tmux wait -S done` blocking completion signal, the previous-buffer delta heuristic and its output labeling, pane/history/pipe-pane session setup, and the keystrokes/duration grammar (see [terminal-tool-v1](terminal-tool-v1.md)) |
+
 ## Pinned upstream sources
 
 Every vendored file was matched to its upstream repository by git blob hash (checked 2026-09-30): each is byte-identical to the file at the path below in the pinned commit, which was that repository's HEAD at the time. These pins let the `upstream/` copies be replaced by references once a range's translation has been verified and the copies are no longer needed; files a range needs at runtime (e.g. cochise's username list) move into that range's assets instead.

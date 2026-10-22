@@ -39,6 +39,8 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 * [Decision: RangeChannel wire contract](range-channel.md) - what every channel transport must satisfy at the message level: request IDs, idempotent retry, durable replies, bulk data out of band, errno-tagged errors, layered budgets; every reply strict-validated as untrusted input; hostile and latency-injecting mock channels in conformance
 * [Guest exec/file edge cases](guest-exec-lessons.md) - lessons mined from the Proxmox provider's qemu-ga handling (single-shot exec-status, flock-guarded launches, ~5–7% Windows channel flake, tamper validation) and the contract they impose on the vsock daemon
 * [Image distribution](image-distribution.md) - qcow2 backing chains as content-addressed OCI layers (Docker's distribution model transplanted), EBS/FSR as the fleet cold-start path, curl+copy-on-read lazy pull, CDC held for base-rebuild churn
+* [Decision: the terminal tool](terminal-tool-v1.md) - the `terminal()` agent tool: named tmux sessions on the foothold over the public sandbox surface (exec for control, streaming exec_remote for capture), the Terminus port inventory (blocking completion signal, delta heuristic, keystrokes/duration grammar), the shell-only guard on blocking sends, per-call viewer snapshots plus asciicast assembly at finalize with a `terminal/<session>` evidence stream, and the opt-in measurement posture
+
 * [Upstream licenses and attribution](LICENSES.md) - what is vendored under each `upstream/` directory, from where, and under which license
 
 ## Example ranges (development/testing baseline)
