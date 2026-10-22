@@ -167,7 +167,10 @@ async def stop_all_captures(store_id: int) -> None:
 
 
 def _write_cast(capture: _Capture) -> None:
-    """Assemble the asciicast beside the sample's evidence; local locations only."""
+    """Assemble the asciicast beside the sample's evidence; local locations only.
+
+    A session name can record more than one life (close then reopen, or reopen after dying), each with its own cast: later lives get a numbered suffix rather than overwriting the earlier record.
+    """
     location = capture.evidence.location
     if "://" in location:
         logger.info(
@@ -185,7 +188,12 @@ def _write_cast(capture: _Capture) -> None:
         )
         directory = Path(location)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / f"terminal-{capture.session}.cast").write_text(cast)
+        path = directory / f"terminal-{capture.session}.cast"
+        serial = 2
+        while path.exists():
+            path = directory / f"terminal-{capture.session}-{serial}.cast"
+            serial += 1
+        path.write_text(cast)
     except Exception as error:  # noqa: BLE001
         logger.info("terminal cast for %r not written: %s", capture.session, error)
 

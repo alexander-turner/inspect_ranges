@@ -155,6 +155,57 @@ def test_stop_drains_pending_output_before_the_cast(
     asyncio.run(scenario())
 
 
+def test_second_life_cast_does_not_overwrite_the_first(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+) -> None:
+    """A session name can record more than one life (close then reopen): the later life's cast must land beside the first, not clobber it."""
+    evidence, _, state, store_id = arm
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        await asyncio.sleep(0.05)
+        await stop_capture(store_id, "s")
+        await start_capture(store_id, "s", SessionState(), lambda: None)
+        await stop_capture(store_id, "s")
+        directory = Path(evidence.location)
+        first = directory / "terminal-s.cast"
+        second = directory / "terminal-s-2.cast"
+        assert first.exists() and second.exists()
+        # the first life's output is still in the first file
+        kinds = [
+            json.loads(line)[1] for line in first.read_text().strip().split("\n")[1:]
+        ]
+        assert kinds.count("o") == 2
+
+    asyncio.run(scenario())
+
+
+class CancellingProcess(FakeProcess):
+    """A recorder handle whose stream is cancelled mid-iteration (a dying sample cancels background tasks)."""
+
+    async def __anext__(self) -> ExecStdout:
+        raise asyncio.CancelledError()
+
+
+def test_stop_tolerates_cancelled_consumer(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dying sample cancels background tasks: finalize must still stop the recorder and write the cast when the consume task was cancelled mid-stream."""
+    evidence, _, state, store_id = arm
+    process = CancellingProcess([])
+    monkeypatch.setattr(capture_module, "sandbox", lambda: FakeSandbox(process))
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        await asyncio.sleep(0.05)  # the consumer runs and is cancelled
+        await stop_all_captures(store_id)
+        assert process.killed
+        assert (Path(evidence.location) / "terminal-s.cast").exists()
+
+    asyncio.run(scenario())
+
+
 def test_discard_sample_captures_drops_the_registry_entry(
     arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
 ) -> None:

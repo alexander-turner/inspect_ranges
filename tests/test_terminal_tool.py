@@ -90,11 +90,13 @@ def test_blocking_send_waits_for_completion(armed: tuple[Any, Store, str]) -> No
         result = await tool(
             action="send",
             session=session,
-            keystrokes="sleep 1 && echo done-marker\n",
+            # the marker is computed so it can only come from the command's
+            # output, never from the keystrokes echoed in the pane
+            keystrokes="sleep 1 && echo done-$((40+2))\n",
             block=True,
             timeout=30,
         )
-        assert "done-marker" in result
+        assert "done-42" in result
         await tool(action="close", session=session)
 
     asyncio.run(scenario())
@@ -187,7 +189,7 @@ def test_block_refused_for_multiline_keystrokes(armed: tuple[Any, Store, str]) -
 def test_timed_out_block_does_not_poison_next_block(
     armed: tuple[Any, Store, str],
 ) -> None:
-    """Tmux remembers a `wait -S` signal with no waiter: a timed-out send's late signal must not release the next blocking send early."""
+    """A timed-out blocking send's late signal must not release the next blocking send early: whether the dead waiter consumes the late signal or the server remembers it is a tmux version detail, so each send waits on its own channel."""
     tool, _, session = armed
 
     async def scenario() -> None:
@@ -201,17 +203,64 @@ def test_timed_out_block_does_not_poison_next_block(
         )
         assert "did not complete" in timed_out
         await asyncio.sleep(3)  # the first command completes and fires its signal
+        # the marker is computed so only the command's real output (after its
+        # sleep) can satisfy the assert, never the keystrokes echoed in the pane
         second = await tool(
             action="send",
             session=session,
-            keystrokes="sleep 2 && echo second-done\n",
+            keystrokes="sleep 2 && echo second-$((40+2))\n",
             block=True,
             timeout=30,
         )
-        assert "second-done" in second
+        assert "second-42" in second
         await tool(action="close", session=session)
 
     asyncio.run(scenario())
+
+
+def test_reopened_session_ignores_previous_life_signal(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """Blocking sends must keep working across a close and reopen of the same name: wait channels are server-wide and outlive sessions (other sessions keep the server alive), and the send counter restarts at zero, so the reopened life must not collide with the closed life's channels, remembered signals, or dead waiter entries."""
+    tool, _, session = armed
+    keeper = f"{session}-k"  # keeps the server (and its remembered signals) alive
+
+    async def scenario() -> None:
+        await tool(action="open", session=keeper)
+        try:
+            await tool(action="open", session=session)
+            timed_out = await tool(
+                action="send",
+                session=session,
+                keystrokes="sleep 2 && echo life1-done\n",
+                block=True,
+                timeout=1,
+            )
+            assert "did not complete" in timed_out
+            await asyncio.sleep(2.5)  # life 1 completes and fires its signal
+            await tool(action="close", session=session)
+            await tool(action="open", session=session)
+            second = await tool(
+                action="send",
+                session=session,
+                # computed marker, so the echoed keystrokes cannot satisfy the assert
+                keystrokes="sleep 1 && echo life2-$((40+2))\n",
+                block=True,
+                timeout=30,
+            )
+            assert "life2-42" in second
+            await tool(action="close", session=session)
+        finally:
+            await tool(action="close", session=keeper)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", f"={keeper}:"],
+            capture_output=True,
+            check=False,
+        )
 
 
 def test_reopen_of_dead_session_stops_stale_capture(

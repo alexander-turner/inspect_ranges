@@ -6,6 +6,7 @@ import pytest
 from inspect_ranges._terminal.cast import assemble_cast
 from inspect_ranges._terminal.session import (
     OUTPUT_CLIP_BYTES,
+    SessionState,
     capture_pane_command,
     clip_output,
     find_new_content,
@@ -50,10 +51,10 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
         ("", False, [""], False),
         # blocking strips the trailing newline and appends the signal (one
         # argument, so no fragment can be tmux's lone-`;` command separator)
-        ("ls -la\n", True, ["ls -la; tmux wait -S ir-done-s-7", "Enter"], True),
-        ("make\r\n", True, ["make; tmux wait -S ir-done-s-7", "Enter"], True),
+        ("ls -la\n", True, ["ls -la; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        ("make\r\n", True, ["make; tmux wait -S ir-done-s-ab-7", "Enter"], True),
         # a bare Enter key blocks on whatever was already typed
-        ("Enter", True, ["; tmux wait -S ir-done-s-7", "Enter"], True),
+        ("Enter", True, ["; tmux wait -S ir-done-s-ab-7", "Enter"], True),
         # keystrokes that execute nothing fall back to non-blocking
         ("ls -la", True, ["ls -la"], False),
         ("C-c", True, ["C-c"], False),
@@ -62,17 +63,23 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
 def test_prepare_send(
     keystrokes: str, block: bool, expected_keys: list[str], expected_blocking: bool
 ) -> None:
-    keys, blocking = prepare_send("s", keystrokes, block, 7)
+    keys, blocking = prepare_send("s", keystrokes, block, "ab-7")
     assert keys == expected_keys
     assert blocking is expected_blocking
 
 
 def test_wait_channel_is_per_send() -> None:
     """A timed-out send's late signal must never release a later send's wait: tmux remembers unconsumed signals, so each send gets its own channel."""
-    assert wait_channel("s", 0) != wait_channel("s", 1)
+    assert wait_channel("s", "ab-0") != wait_channel("s", "ab-1")
     assert (
-        prepare_send("s", "ls\n", True, 0)[0] != prepare_send("s", "ls\n", True, 1)[0]
+        prepare_send("s", "ls\n", True, "ab-0")[0]
+        != prepare_send("s", "ls\n", True, "ab-1")[0]
     )
+
+
+def test_wait_token_is_per_life() -> None:
+    """Tmux signals are server-wide and outlive sessions, and the send counter restarts at zero on reopen, so each session life must carry a fresh channel token."""
+    assert SessionState().token != SessionState().token
 
 
 @pytest.mark.parametrize(
@@ -191,8 +198,8 @@ def test_command_builders_shape() -> None:
         "-S",
     ]
     assert capture_pane_command("s")[-1] == "=s:"  # exact-match target
-    wait = wait_done_command("s", 30.0, 3)
-    assert wait[:2] == ["timeout", "30.0s"] and wait[-1] == wait_channel("s", 3)
+    wait = wait_done_command("s", 30.0, "ab-3")
+    assert wait[:2] == ["timeout", "30.0s"] and wait[-1] == wait_channel("s", "ab-3")
 
 
 def test_assemble_cast_orders_and_offsets_events() -> None:

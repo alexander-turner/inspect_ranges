@@ -234,7 +234,9 @@ def terminal() -> Tool:
                     "signal could be typed into a program an earlier line started. "
                     "Send one command per blocking send, or use duration polling."
                 )
-            nonce = state.sends
+            # the token keeps the channel unique across lives of the name: tmux
+            # remembers signals server-wide, and the counter restarts at zero
+            nonce = f"{state.token}-{state.sends}"
             keys, blocking = prepare_send(session, keystrokes, block, nonce)
             if blocking:
                 state.sends += 1

@@ -1,6 +1,6 @@
 """tmux session mechanics for the `terminal` tool: command builders, send preparation, and the delta heuristic.
 
-Adapted from terminal-bench's `TmuxSession` (`terminal_bench/terminal/tmux_session.py`, github.com/laude-institute/terminal-bench, Apache-2.0; see `design/inspect-ranges/LICENSES.md`): the `tmux wait -S` blocking completion signal, the previous-buffer delta heuristic with its two-label output, and the pane/history/pipe-pane session setup. Changes from the original: per-session wait channels (multiple named sessions), a shell-only guard input for blocking sends, and everything expressed as pure argv builders so the tool layer owns execution.
+Adapted from terminal-bench's `TmuxSession` (`terminal_bench/terminal/tmux_session.py`, github.com/laude-institute/terminal-bench, Apache-2.0; see `design/inspect-ranges/LICENSES.md`): the `tmux wait -S` blocking completion signal, the previous-buffer delta heuristic with its two-label output, and the pane/history/pipe-pane session setup. Changes from the original: per-send wait channels scoped to named sessions (multiple sessions, and a channel never reused across sends or session lives), a shell-only guard input for blocking sends, and everything expressed as pure argv builders so the tool layer owns execution.
 
 Everything here is pure: builders return argv lists, the heuristic maps strings to strings. The tool layer (`tool.py`) runs the argv through `sandbox().exec` and owns all state.
 """
@@ -8,6 +8,7 @@ Everything here is pure: builders return argv lists, the heuristic maps strings 
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
 
 PANE_WIDTH = 160
@@ -35,10 +36,10 @@ def sink_path(session: str) -> str:
     return f"{SINK_DIR}/{session}.pipe"
 
 
-def wait_channel(session: str, nonce: int) -> str:
+def wait_channel(session: str, nonce: str) -> str:
     """The per-send tmux wait channel the blocking completion signal uses.
 
-    The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately.
+    The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately. Signals are server-wide and outlive sessions, and the send counter restarts at zero when a name is reopened, so the nonce the tool passes is the session life's `SessionState.token` plus the send counter, never the counter alone.
     """
     return f"ir-done-{session}-{nonce}"
 
@@ -118,7 +119,7 @@ def pane_command_command(session: str) -> list[str]:
     ]
 
 
-def wait_done_command(session: str, timeout_s: float, nonce: int) -> list[str]:
+def wait_done_command(session: str, timeout_s: float, nonce: str) -> list[str]:
     """Argv blocking on the send's wait channel under a hard timeout."""
     return ["timeout", f"{timeout_s}s", "tmux", "wait", wait_channel(session, nonce)]
 
@@ -148,7 +149,7 @@ def multiline_block(keystrokes: str) -> bool:
 
 
 def prepare_send(
-    session: str, keystrokes: str, block: bool, nonce: int
+    session: str, keystrokes: str, block: bool, nonce: str
 ) -> tuple[list[str], bool]:
     """Prepare the send-keys arguments, appending the completion signal for a blocking send.
 
@@ -207,3 +208,4 @@ class SessionState:
     opened_wall: float = 0.0
     opened_monotonic: float = 0.0
     sends: int = 0
+    token: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
