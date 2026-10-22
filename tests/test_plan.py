@@ -1198,3 +1198,22 @@ def test_empty_rendered_hostname_refuses_at_planning(cache: Path) -> None:
     with pytest.raises(IssueError) as excinfo2:
         resolve_plan(win, options(cache))
     assert any(issue.code == "hostname-empty" for issue in excinfo2.value.issues)
+
+
+def test_scheduled_activity_gates_and_lifts() -> None:
+    """`scheduled_activity` gates like every build-claimed section: refused on the runtime path, lifted by the build's realized sections (scheduled-activity-v1)."""
+    from inspect_ranges.types import ScheduledActivity
+
+    spec = two_segment_spec()
+    spec.hosts[0].scheduled_activity = [
+        ScheduledActivity(script="tick.sh", schedule="every 5m")
+    ]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_plan(spec)
+    issue = excinfo.value.issues[0]
+    assert issue.code == "guest-config-not-realized"
+    assert issue.path == ("hosts", 0, "scheduled_activity")
+    plan = resolve_plan(
+        spec, PlanOptions(realized_sections=frozenset({"scheduled_activity"}))
+    )
+    assert plan.range.name == spec.meta.name

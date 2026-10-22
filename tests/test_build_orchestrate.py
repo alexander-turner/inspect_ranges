@@ -16,6 +16,7 @@ from inspect_ranges._build import (
     default_build_nameserver,
     egress_build_spec,
 )
+from inspect_ranges._build.activities import ResolvedActivity
 from inspect_ranges._build.recipes import RecipeTarget, ResolvedRecipe, StageSink
 from inspect_ranges._runtime.up import GuestState, UpOptions, UpResult
 from inspect_ranges.types import (
@@ -28,6 +29,7 @@ from inspect_ranges.types import (
     ProvisioningStep,
     RangeMeta,
     RangeSpec,
+    ScheduledActivity,
     Service,
 )
 
@@ -1964,3 +1966,167 @@ def test_build_refuses_router_content_without_image(
         ("router-image-required", ("routers", 0, "image"))
     ]
     assert fakes.up_calls == []
+
+
+# -- scheduled activities (scheduled-activity-v1) ----------------------------
+
+
+def activity_build_fixture(tmp_path: Path) -> tuple[RangeSpec, Path]:
+    """The orchestration fixture plus a scheduled activity on web."""
+    spec, range_dir = build_spec_fixture(tmp_path)
+    activities = range_dir / "activities"
+    activities.mkdir(exist_ok=True)
+    if not (activities / "tick.sh").exists():
+        (activities / "tick.sh").write_text("#!/bin/sh\necho tick\n")
+    spec.hosts[0].scheduled_activity = [
+        ScheduledActivity(script="tick.sh", schedule="every 5m")
+    ]
+    return spec, range_dir
+
+
+class ActivityRecorder:
+    """Recording activity seam."""
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+        self._order = order
+
+    def __call__(
+        self,
+        activities: list[ResolvedActivity],
+        cids: dict[str, int],
+        *,
+        skip: frozenset[str] = frozenset(),
+        stage_log: Any = None,
+        hybrid_sockets: Any = None,
+    ) -> None:
+        if self._order is not None:
+            self._order.append("activity")
+        for activity in activities:
+            self.calls.append((activity.guest, activity.unit, activity.guest in skip))
+
+
+def activity_build(
+    spec: RangeSpec,
+    range_dir: Path,
+    tmp_path: Path,
+    cache: Path,
+    fakes: Fakes,
+    recorder: Any,
+    **kwargs: Any,
+) -> Any:
+    def green_verify(*args: Any, **kw: Any) -> list[Any]:
+        return []
+
+    # activity-declaring hosts are verified over the channel; these tests
+    # exercise the orchestration seams, so verification is stubbed green
+    kwargs.setdefault("verify_fn", green_verify)
+    kwargs.setdefault("recipe_fn", fakes.recipe_fn)
+    return build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+        activity_fn=recorder,
+        **kwargs,
+    )
+
+
+def test_build_realizes_activities_between_recipes_and_verify(
+    tmp_path: Path, cache: Path
+) -> None:
+    from inspect_ranges._build import ActivityRecord, load_manifest
+
+    spec, range_dir = activity_build_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    order: list[str] = []
+    recorder = ActivityRecorder(order)
+
+    def tracking_recipe(recipe: ResolvedRecipe, **kwargs: Any) -> RecipeRun:
+        order.append("recipe")
+        return fakes.recipe_fn(recipe, **kwargs)
+
+    def tracking_verify(*args: Any, **kwargs: Any) -> list[Any]:
+        order.append("verify")
+        return []
+
+    result = activity_build(
+        spec,
+        range_dir,
+        tmp_path,
+        cache,
+        fakes,
+        recorder,
+        recipe_fn=tracking_recipe,
+        verify_fn=tracking_verify,
+    )
+    assert order == ["recipe"] * 3 + ["activity", "verify"]
+    assert recorder.calls == [("web", "ir-activity-web-0", False)]
+    assert not result.cached
+    manifest = load_manifest(tmp_path / "builds", "buildme")
+    assert manifest is not None
+    web = manifest.guest("web")
+    assert web is not None
+    script_digest = hashlib.sha256(
+        (range_dir / "activities" / "tick.sh").read_bytes()
+    ).hexdigest()
+    assert web.activities == (
+        ActivityRecord(
+            script="tick.sh",
+            digest=script_digest,
+            schedule="every 5m",
+            user=None,
+            unit="ir-activity-web-0",
+        ),
+    )
+    db = manifest.guest("db")
+    assert db is not None and db.activities == ()
+
+
+def test_activity_script_edit_rebuilds_exactly_that_guest(
+    tmp_path: Path, cache: Path
+) -> None:
+    spec, range_dir = activity_build_fixture(tmp_path)
+    (range_dir / "activities" / "tock.sh").write_text("#!/bin/sh\necho tock\n")
+    spec.hosts[1].scheduled_activity = [
+        ScheduledActivity(script="tock.sh", schedule="@boot")
+    ]
+    activity_build(
+        spec,
+        range_dir,
+        tmp_path,
+        cache,
+        Fakes(["web", "db", "attacker"]),
+        ActivityRecorder(),
+    )
+    # change web's activity script content: its digest, so its key, moves
+    (range_dir / "activities" / "tick.sh").write_text("#!/bin/sh\necho edited\n")
+    again = Fakes(["web", "db", "attacker"])
+    recorder = ActivityRecorder()
+    result = activity_build(spec, range_dir, tmp_path, cache, again, recorder)
+    assert not result.cached
+    assert [guest for guest, _, _ in again.captures] == ["web"]
+    # db is reused, so its activity is skipped: the realized image carries it
+    assert recorder.calls == [
+        ("web", "ir-activity-web-0", False),
+        ("db", "ir-activity-db-0", True),
+    ]
+
+
+def test_activity_failure_disposes_and_names_the_stage(
+    tmp_path: Path, cache: Path
+) -> None:
+    spec, range_dir = activity_build_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+
+    def failing(*args: Any, **kwargs: Any) -> None:
+        raise BuildError("activity", "install exited 1", guest="web")
+
+    with pytest.raises(BuildError) as excinfo:
+        activity_build(spec, range_dir, tmp_path, cache, fakes, failing)
+    assert excinfo.value.stage == "activity" and excinfo.value.guest == "web"
+    assert "range torn down" in str(excinfo.value)
+    assert len(fakes.down_calls) == 1

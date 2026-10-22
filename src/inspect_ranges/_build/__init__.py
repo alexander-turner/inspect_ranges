@@ -3,9 +3,17 @@
 Import boundaries: `_build` may import `_compiler`, `_runtime`, and `_channel`; nothing imports `_build` except `_cli` and `_provider` (the build-aware gate's manifest consumption). The build is a consumer of `up`/`down`, never a reimplementation.
 """
 
+from .activities import (
+    ACTIVITIES_DIR_NAME,
+    ResolvedActivity,
+    activity_unit_name,
+    realize_activities,
+    resolve_activities,
+)
 from .capture import RealizedImageMeta, capture_guest, shutdown_guest, wait_shutoff
 from .errors import BuildError
 from .manifest import (
+    ActivityRecord,
     BuildManifest,
     GuestRecord,
     RecipeRecord,
@@ -57,11 +65,13 @@ from .verify import (
 )
 
 __all__ = [
+    "ACTIVITIES_DIR_NAME",
     "DEFAULT_EXEC_BUDGET_MS",
     "DEFAULT_RECIPE_BUDGET_S",
     "DEFAULT_UPLINK_NETWORK",
     "FALLBACK_BUILD_NAMESERVER",
     "RECIPES_DIR_NAME",
+    "ActivityRecord",
     "BuildError",
     "BuildManifest",
     "BuildOptions",
@@ -78,9 +88,11 @@ __all__ = [
     "RecipeTarget",
     "ResolvedRecipe",
     "RealizedImageMeta",
+    "ResolvedActivity",
     "ResolvedStep",
     "StageSink",
     "VerificationRecord",
+    "activity_unit_name",
     "build_range",
     "capture_guest",
     "default_build_cache",
@@ -91,8 +103,10 @@ __all__ = [
     "evaluate_host",
     "load_manifest",
     "load_recipe",
+    "realize_activities",
     "realized_file_name",
     "recipe_digest",
+    "resolve_activities",
     "resolve_provisioning",
     "resolve_recipe",
     "run_recipe",

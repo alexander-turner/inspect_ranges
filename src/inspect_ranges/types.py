@@ -12,6 +12,7 @@ v0.1 deliberately covers only the five sections the runtime consumes — `range`
 import json
 import re
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_network
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -476,20 +477,51 @@ class ProvisioningStep(_StrictModel):
     """Inputs passed to the recipe."""
 
 
+ACTIVITY_SCHEDULE = re.compile(r"^(?:@boot|every ([1-9][0-9]*)([smh]))$")
+"""The v0 `ScheduledActivity.schedule` grammar: `@boot`, or `every <N><unit>` with a positive integer and a unit of `s`/`m`/`h` (scheduled-activity-v1)."""
+
+
 class ScheduledActivity(_StrictModel):
-    """Recurring in-guest behavior, simulating users or defenders (bot scripts, scheduled tasks)."""
+    """Recurring in-guest behavior, simulating users or defenders (bot scripts, scheduled tasks).
+
+    The build realizes each declaration as a persistent unit in the captured image (a systemd service plus timer on Linux, a scheduled task on Windows), installed from `activities/<script>` beside `range.yaml` and verified after realization (scheduled-activity-v1).
+    """
 
     script: str
-    """Behavior reference, e.g. `asrep_roasting.ps1` or a recipe-style name."""
+    """Script reference, a relative path resolved from the range's `activities/` directory, e.g. `benign-admin.ps1`."""
 
     schedule: str | None = None
-    """When it runs, when the scenario fixes it (e.g. a cron expression or an interval)."""
+    """When it runs: `@boot`, or `every <N><unit>` with a unit of `s`, `m`, or `h` (e.g. `every 5m`). The build refuses a declaration without one (`activity-schedule-required`); the schema keeps it optional so a scenario can record the activity before fixing its cadence."""
 
     user: str | None = None
-    """The account the activity runs as, when scenario-relevant (e.g. for token-theft surface)."""
+    """The account the activity runs as, when scenario-relevant (e.g. for token-theft surface); omitted means root on Linux and SYSTEM on Windows."""
 
     note: str | None = None
     """Free-text intent."""
+
+    @model_validator(mode="after")
+    def _check_activity(self) -> "ScheduledActivity":
+        issues: list[Issue] = []
+        script = PurePosixPath(self.script.replace("\\", "/"))
+        if not self.script or script.is_absolute() or ".." in script.parts:
+            issues.append(
+                Issue(
+                    code="invalid-scheduled-activity",
+                    path=("script",),
+                    message=f"activity script {self.script!r} must be a relative path inside the range's activities/ directory",
+                )
+            )
+        if self.schedule is not None and ACTIVITY_SCHEDULE.match(self.schedule) is None:
+            issues.append(
+                Issue(
+                    code="invalid-scheduled-activity",
+                    path=("schedule",),
+                    message=f"activity schedule {self.schedule!r} is not `@boot` or `every <N>s|m|h` (e.g. `every 5m`)",
+                )
+            )
+        if issues:
+            raise IssueError(issues)
+        return self
 
 
 class Variable(_StrictModel):
@@ -641,8 +673,13 @@ class Route(_StrictModel):
 
 
 def has_guest_content(host: "Host") -> bool:
-    """Whether a host declares buildable guest content (provisioning, services, or vulnerabilities): the one predicate the build gate, the push closure, and the provider's fetch tiers share."""
-    return bool(host.provisioning or host.services or host.vulnerabilities)
+    """Whether a host declares buildable guest content (provisioning, services, vulnerabilities, or scheduled activity): the one predicate the build gate, the push closure, and the provider's fetch tiers share."""
+    return bool(
+        host.provisioning
+        or host.services
+        or host.vulnerabilities
+        or host.scheduled_activity
+    )
 
 
 def has_router_content(router: "Router") -> bool:
@@ -739,7 +776,7 @@ class Host(_StrictModel):
     """Functional role tags the build realizes (e.g. `domain-controller`, `dns`, `adcs`)."""
 
     scheduled_activity: list[ScheduledActivity] = []
-    """Recurring in-guest behavior simulation."""
+    """Recurring in-guest behavior simulation, realized at build as persistent units in the captured image."""
 
 
 class Attacker(_StrictModel):

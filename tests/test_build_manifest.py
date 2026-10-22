@@ -777,3 +777,65 @@ def test_active_directory_hash_moves_every_content_guest_key() -> None:
         )
         != without
     )
+
+
+def test_activities_move_the_projection_and_the_key() -> None:
+    """A scheduled-activity declaration joins the projection only when declared (existing hashes stay put), and the script's content digest moves the key on its own (scheduled-activity-v1)."""
+    from inspect_ranges.types import ScheduledActivity
+
+    steps: Steps = [(resolved("d1"), {"marker": "x"})]
+    plain = make_host()
+    declared = make_host(
+        scheduled_activity=[ScheduledActivity(script="tick.sh", schedule="every 5m")]
+    )
+    assert spec_projection(plain) != spec_projection(declared)
+    rescheduled = make_host(
+        scheduled_activity=[ScheduledActivity(script="tick.sh", schedule="@boot")]
+    )
+    assert spec_projection(declared) != spec_projection(rescheduled)
+    key = guest_build_key(
+        "sha-golden", declared, steps, range_name="keyed", activity_digests=("s1",)
+    )
+    assert (
+        guest_build_key(
+            "sha-golden", declared, steps, range_name="keyed", activity_digests=("s2",)
+        )
+        != key
+    )
+    assert guest_build_key("sha-golden", declared, steps, range_name="keyed") != key
+
+
+def test_activity_only_host_is_content_and_requires_a_build(tmp_path: Path) -> None:
+    """A host declaring only `scheduled_activity` is a content guest: the gate refuses `range-not-built` until a manifest matches (scheduled-activity-v1)."""
+    from inspect_ranges._build.manifest import apply_build_manifest
+    from inspect_ranges.types import (
+        Attacker,
+        IssueError,
+        Network,
+        RangeMeta,
+        RangeSpec,
+        ScheduledActivity,
+    )
+
+    host = make_host(
+        provisioning=[],
+        services=[],
+        vulnerabilities=[],
+        scheduled_activity=[ScheduledActivity(script="tick.sh", schedule="every 5m")],
+    )
+    spec = RangeSpec(
+        meta=RangeMeta(name="acts-only", description="x"),
+        networks=[Network(name="lab", cidr="10.0.0.0/24", mode="isolated")],
+        hosts=[host],
+        attacker=Attacker(
+            image="focal-guest",
+            interfaces=[Interface(network="lab")],
+            entry="external",
+        ),
+    )
+    image_cache = tmp_path / "images"
+    image_cache.mkdir()
+    builds = tmp_path / "builds"
+    with pytest.raises(IssueError) as excinfo:
+        apply_build_manifest(spec, image_cache=image_cache, build_cache=builds)
+    assert excinfo.value.issues[0].code == "range-not-built"
