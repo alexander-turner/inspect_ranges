@@ -391,8 +391,12 @@ async def run_behavioral_checks(
     evidence_dir: Path,
     stage_log: StageSink | None = None,
     hybrid_sockets: "Mapping[str, HybridEndpoint] | None" = None,
+    draws: "dict[str, int | str] | None" = None,
+    draw_seed: str | None = None,
 ) -> tuple[BehavioralCheckRecord, ...]:
     """Run every declared check against the live (realized-image) range; a failing check ENDS the run and is returned as its record (the caller saves a refused manifest), while infra and authoring failures raise.
+
+    `draws` carries the proof boot's drawn variable values (variable-draws-v0), so each check's oracle scores `answer` goals against the values the rendered seeds delivered; they are recorded with `draw_seed` on the proof boot's evidence record like a sample's.
 
     Raises:
         BuildError: stage `behavioral`, for malformed check trees (`_validate_checks`) or a missing attacker; infra failures (evidence, channel) propagate as their own exceptions.
@@ -417,6 +421,8 @@ async def run_behavioral_checks(
         str(evidence_dir), sample_id=f"build-{project}", capture_local=True
     )
     await session.open(lease_id=None, project=project, bundle=bundle, plan=plan)
+    if draws and draw_seed is not None:
+        await session.record_draws(draw_seed, draws)
     channel = MessageChannel(
         VsockTransport(cids, hybrid_sockets=hybrid_sockets),
         label="build-behavioral",
@@ -433,6 +439,8 @@ async def run_behavioral_checks(
         evidence=session,
         plan=plan,
         spec=spec,
+        draws=draws or {},
+        draw_seed=draw_seed,
     )
     records: list[BehavioralCheckRecord] = []
     try:

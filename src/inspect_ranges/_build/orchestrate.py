@@ -10,6 +10,7 @@ The egress build plan is a plan transformation, never a spec change (build-v1, d
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
+from .._compiler.draws import draw_variables
 from .._compiler.plan import (
     ImageRef,
     PlanOptions,
@@ -1379,6 +1381,11 @@ def _run_behavioral_phase(
     from .manifest import realized_backings, swap_realized_spec
 
     swapped, sections = swap_realized_spec(spec, manifest, image_cache=image_cache)
+    # the proof boot draws (variable-draws-v0): a sample boot renders drawn
+    # values into the seeds, so the proof must too, or the boot-apply units
+    # and the chains' value discovery would ship unproven
+    draw_seed = secrets.token_hex(8)
+    draws = draw_variables(spec.variables, draw_seed)
     staging_root = state_dir.parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(dir=staging_root, prefix=f"{project}-bx-"))
@@ -1413,6 +1420,7 @@ def _run_behavioral_phase(
                     if checks_declared(range_dir)
                     else ()
                 ),
+                draws=draws,
             ),
         )
         result = up_fn(
@@ -1447,6 +1455,9 @@ def _run_behavioral_phase(
                 state_dir=state_dir,
                 options=options,
                 stage_log=stage_log,
+                settle_spec=_drawn_spec(range_dir, draws) if draws else spec,
+                draws=draws,
+                draw_seed=draw_seed,
             )
         finally:
             try:
@@ -1470,6 +1481,25 @@ def _run_behavioral_phase(
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def _drawn_spec(range_dir: Path, draws: dict[str, int | str]) -> RangeSpec:
+    """The spec as the proof boot runs it: raw `range.yaml` re-substituted with the drawn values over the defaults (variable-draws-v0).
+
+    The validated `spec` carries the defaults everywhere a reference stood, but the boot-apply units move drawn services to their drawn values, so the settle gate must verify against this view or it would wait on default ports that no longer answer. Only the settle gate consumes it; the build itself realizes defaults.
+    """
+    import yaml as _yaml
+
+    from ..schema import substitute_variables
+
+    data: Any = _yaml.safe_load((range_dir / "range.yaml").read_text())
+    substituted, issues = substitute_variables(data, overrides=draws)
+    if issues:  # the build already loaded this file; a new issue is a race
+        raise BuildError(
+            "behavioral",
+            f"range.yaml no longer substitutes cleanly: {issues[0].message}",
+        )
+    return RangeSpec.model_validate(substituted)
+
+
 def _prove_realized_boot(
     spec: RangeSpec,
     plan: ResolvedPlan,
@@ -1482,8 +1512,14 @@ def _prove_realized_boot(
     state_dir: Path,
     options: "BuildOptions",
     stage_log: StageSink,
+    settle_spec: RangeSpec,
+    draws: dict[str, int | str],
+    draw_seed: str | None,
 ) -> tuple[BehavioralCheckRecord, ...]:
-    """Convergence, conformance, and the behavioral checks against the booted bx range (the caller owns the teardown finally)."""
+    """Convergence, conformance, and the behavioral checks against the booted bx range (the caller owns the teardown finally).
+
+    `settle_spec` is the drawn view of the spec (`_drawn_spec`): the settle gate verifies declared services where the boot-apply units put them, while scoring and conformance read the unchanged `spec` plus `draws`.
+    """
     from .behavioral import run_behavioral_checks, run_conformance_checks
 
     # the realized boot must CONVERGE before the proof runs: readiness
@@ -1499,7 +1535,7 @@ def _prove_realized_boot(
         failing = [
             result_
             for result_ in verify_range(
-                spec, cids, log_dir=settle_dir, hybrid_sockets=bx_hybrid
+                settle_spec, cids, log_dir=settle_dir, hybrid_sockets=bx_hybrid
             )
             if result_.status != "ok"
         ]
@@ -1539,6 +1575,8 @@ def _prove_realized_boot(
             evidence_dir=project_dir(state_dir, bx_project) / "evidence",
             stage_log=stage_log,
             hybrid_sockets=bx_hybrid,
+            draws=draws,
+            draw_seed=draw_seed,
         )
     )
 
