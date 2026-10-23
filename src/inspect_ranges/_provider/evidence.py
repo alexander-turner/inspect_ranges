@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from .._attackbox.backend import attack_box_origin
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._compiler.plan import ResolvedPlan
 from .._evidence.capture import (
     CAPTURE_HARVEST_TIMEOUT_S,
@@ -138,6 +138,7 @@ class EvidenceSession:
         project: str,
         bundle: Path,
         plan: ResolvedPlan,
+        state_dir: Path | None = None,
     ) -> None:
         """Open the writers after a successful boot; start capture when this process owns it.
 
@@ -165,13 +166,21 @@ class EvidenceSession:
                     buffer_cap_bytes=evidence_buffer_bytes(),
                     max_total_bytes=evidence_max_bytes(),
                 )
-                # co-resident: the driver's env selected the attack-box
-                # provider (if any), so it declares the console drop here
-                external = (
-                    next((g.name for g in plan.guests if g.kind == "attacker"), None)
-                    if attack_box_origin() is not None
-                    else None
-                )
+                # the attack-box record up() wrote is the single source of
+                # truth for which guest an external provider realized (never
+                # re-derive from the ambient env, which can drift)
+                external: str | None = None
+                if state_dir is not None:
+                    try:
+                        record = read_attack_box_record(state_dir, project)
+                    except AttackBoxRecordError as error:
+                        logger.warning(
+                            "attack-box record unreadable; console polling "
+                            "proceeds as if local (%s)",
+                            error,
+                        )
+                    else:
+                        external = record.guest_name if record else None
                 self._streamer = CaptureStreamer(
                     self._host,
                     ComposeTap(project, bundle),

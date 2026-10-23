@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .._attackbox.record import read_attack_box_record
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .ownership import (
     PROJECT_PREFIX,
     ch_vsock_dir,
@@ -76,7 +76,12 @@ def down(
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
 
-    record = read_attack_box_record(state, project)
+    try:
+        record = read_attack_box_record(state, project)
+    except AttackBoxRecordError as error:
+        # present-but-unreadable must refuse, not read as "no external box":
+        # proceeding would skip the reclaim and strand a live foreign VMM
+        raise DownError(str(error)) from error
     if record is not None:
         # deny-first, the reaper's origin rule: resolve the external attack-box
         # backend before touching ANY compose resource. Tearing the netns down

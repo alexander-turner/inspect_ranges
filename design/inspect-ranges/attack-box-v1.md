@@ -55,6 +55,10 @@ A range with an external attack box carries the weaker of the two containment st
 - `FootholdAttachment` omits the spec's attacker image reference: the provider brings its own box and the battery is the equivalence claim.
 - The driver on the uds path no longer fabricates `GuestState(ready=True)`: readiness folds from the host's terminal report (behavioral no-op today; honest provenance for a guest the host never reported).
 
+## Review rounds (2026-10-23)
+
+Two adversarial rounds ran per house discipline (one camped on the netns/fd plumbing, one general-correctness across the branch); the netns invariant, injection surface, handoff theft/forgery coupling, MAC rule, and lifecycle ordering were verified sound. Fixed from the findings: the handoff `recvmsg` is now deadline-bounded with a peer-credential accept loop (the 0666 socket is reachable by every in-container uid during the window; a hostile connector could previously wedge `up` forever or at least steal the one accept slot) plus `MSG_CTRUNC` refusal and non-inheritable fds; the attack-box record writes atomically and parses leniently, and present-but-unreadable now REFUSES teardown instead of reading as "no external box" (a torn write would otherwise strand the live foreign VMM, the exact deny-first bypass); `console_stream=True` refuses on the boot path, not only in doctor and the battery; the applier reads the env var inside its error-folding path (a malformed value previously killed the realize task and leaked the admission charge); the separated path's post-`boot` gap allowance covers the attach window plus the provider's boot, which `up` now bounds at its readiness timeout; the evidence call sites read the external guest from the record instead of re-deriving from the ambient env; and the battery's second-`down` probe and custom-state-dir staging were corrected.
+
 ## Deferred
 
 - The execve witness (PR #15's one natively-adoptable piece) stays deferred per [glovebox-unification](glovebox-unification.md): its own slice, re-keys every golden, wants a shared rebake; whether it joins the battery's obligations is settled when it lands.

@@ -1323,6 +1323,38 @@ def test_down_refuses_when_the_attack_box_origin_does_not_resolve(
     assert read_attack_box_record(state, "ir-abox") is not None, "a retry can reclaim"
 
 
+def test_down_refuses_an_unreadable_attack_box_record(tmp_path: Path) -> None:
+    """A torn or corrupt record must not read as 'no external box': down refuses with the path named, so a retry can reclaim after repair."""
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    path = state / "ir-abox" / "attackbox.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"origin": "pkg.mod.f", "proj')  # torn mid-write
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="does not parse"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == []
+
+
+def test_up_refuses_a_console_claiming_backend(
+    bundle: Path, cache: Path, tmp_path: Path
+) -> None:
+    """console_stream=True has no ingest path: the boot path refuses it, not only doctor and the battery."""
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(
+                cache,
+                tmp_path,
+                attack_box="tests.test_attackbox_backend.console_claiming_factory",
+            ),
+            runner=FakeDocker(),
+        )
+    assert error.value.stage == "attack-box"
+    assert "console_stream" in str(error.value)
+
+
 def test_down_refuses_when_the_attack_box_reclaim_fails(tmp_path: Path) -> None:
     from inspect_ranges._runtime.down import DownError
 

@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .._attackbox.backend import attack_box_origin
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._channel.channel import HOST_APPLIER, ByteStream
 from .._channel.codec import (
     ChannelClosed,
@@ -639,16 +640,18 @@ class Applier:
                     emit(translated.stage, translated.detail), loop
                 )
 
-        options = UpOptions(
-            project=lease.project,
-            image_cache=self._image_cache,
-            state_dir=self._state_dir,
-            # the applier's own environment, per the deployment-knowledge rule:
-            # the host that boots the box is the host that selects its provider
-            attack_box=attack_box_origin(),
-        )
         failed = False
         try:
+            options = UpOptions(
+                project=lease.project,
+                image_cache=self._image_cache,
+                state_dir=self._state_dir,
+                # the applier's own environment, per the deployment-knowledge
+                # rule: the host that boots the box selects its provider. Read
+                # INSIDE the folding path: a malformed value must land as a
+                # failed report, never kill the task over an unfinished run
+                attack_box=attack_box_origin(),
+            )
             result = await asyncio.to_thread(self._up_fn, bundle, options, on_stage)
         except UpError as error:
             # failures raised before the stage log exists never reach
@@ -699,13 +702,19 @@ class Applier:
                 max_total_bytes=evidence_max_bytes(),
             )
             segments = [network.name for network in plan.networks]
-            # the applier's env selected the attack-box provider (if any), so
-            # the applier declares the console drop for the guest it never boots
-            external = (
-                next((g.name for g in plan.guests if g.kind == "attacker"), None)
-                if attack_box_origin() is not None
-                else None
-            )
+            # the attack-box record up() wrote is the single source of truth
+            # for which guest an external provider realized (never re-derive
+            # from the ambient env, which can drift)
+            try:
+                record = read_attack_box_record(self._state_dir, lease.project)
+            except AttackBoxRecordError as error:
+                logger.warning(
+                    "attack-box record unreadable; console polling proceeds "
+                    "as if local (%s)",
+                    error,
+                )
+                record = None
+            external = record.guest_name if record is not None else None
             streamer = CaptureStreamer(
                 writer,
                 ComposeTap(lease.project, Path(lease.bundle_path)),

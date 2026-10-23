@@ -223,11 +223,17 @@ def _teardown_rows(
     except DownError as error:
         return [BatteryRow("teardown", False, str(error))]
     problems: list[str] = []
-    if read_attack_box_record(state_dir, project) is not None:
-        problems.append("the attack-box record survived teardown")
-    second = down(project, state_dir=state_dir)
-    if (second.containers, second.volumes, second.networks) != (0, 0, 0):
-        problems.append("a second down removed resources (teardown left some)")
+    try:
+        if read_attack_box_record(state_dir, project) is not None:
+            problems.append("the attack-box record survived teardown")
+    except Exception as error:  # noqa: BLE001 - every obligation is a row
+        problems.append(f"the attack-box record is unreadable after teardown: {error}")
+    try:
+        second = down(project, state_dir=state_dir)
+        if (second.containers, second.volumes, second.networks) != (0, 0, 0):
+            problems.append("a second down removed resources (teardown left some)")
+    except DownError as error:
+        problems.append(f"a second down failed instead of no-opping: {error}")
 
     async def probe() -> None:
         channel = MessageChannel(
@@ -296,7 +302,7 @@ def run_attack_box_battery(
     cache = image_cache if image_cache is not None else default_image_cache()
 
     report = BatteryReport(rows=[_capabilities_row(backend)])
-    staging_root = default_state_dir().parent / "staging"
+    staging_root = state.parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     # a well-behaved tenant: the battery leases its CID block from the shared
     # registry like the provider does, so it coexists with live ranges on the
@@ -371,7 +377,9 @@ def run_attack_box_battery(
                             "teardown",
                             True,
                             f"skipped (--keep); tear down with: inspect-ranges "
-                            f"down {result.project}",
+                            f"down {result.project} (the CID lease is held "
+                            "while the range lives; the reaper's prune "
+                            "releases it after the down)",
                         )
                     )
                 else:

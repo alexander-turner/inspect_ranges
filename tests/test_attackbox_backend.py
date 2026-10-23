@@ -202,20 +202,24 @@ def test_record_absent_reads_none(tmp_path: Path) -> None:
     assert read_attack_box_record(tmp_path, "ir-abox-000000") is None
 
 
-def test_record_unreadable_reads_none(tmp_path: Path) -> None:
-    """A garbage or wrong-shape record reads as None (the caller treats the project as having no external box; the strict doctor row is where corruption lands loudly)."""
+def test_record_present_but_unreadable_raises(tmp_path: Path) -> None:
+    """Absent and unreadable are different answers: reading corruption as 'no external box' would skip the deny-first reclaim and strand a live foreign VMM."""
+    from inspect_ranges._attackbox.record import AttackBoxRecordError
+
     record = _record()
     path = tmp_path / record.project / "attackbox.json"
     path.parent.mkdir(parents=True)
     path.write_text("{not json")
-    assert read_attack_box_record(tmp_path, record.project) is None
+    with pytest.raises(AttackBoxRecordError, match="does not parse"):
+        read_attack_box_record(tmp_path, record.project)
 
 
-def test_record_forbids_unknown_fields() -> None:
-    with pytest.raises(ValueError, match="surprise"):
-        AttackBoxRecord.model_validate(
-            {**_record().model_dump(), "surprise": True},
-        )
+def test_record_tolerates_unknown_fields() -> None:
+    """Forward compatibility: an older process must still reclaim a record a newer one wrote."""
+    parsed = AttackBoxRecord.model_validate(
+        {**_record().model_dump(), "surprise": True},
+    )
+    assert parsed.reclaim_token == "cell-7"
 
 
 def test_handle_defaults_and_endpoint_shape(tmp_path: Path) -> None:

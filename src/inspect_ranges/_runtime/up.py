@@ -27,9 +27,14 @@ from .._attackbox.attach import (
     run_attacher,
     utc_now,
 )
-from .._attackbox.backend import AttackBoxBackend, resolve_attack_box
+from .._attackbox.backend import (
+    AttackBoxBackend,
+    AttackBoxHandle,
+    resolve_attack_box,
+)
 from .._attackbox.record import (
     AttackBoxRecord,
+    AttackBoxRecordError,
     read_attack_box_record,
     write_attack_box_record,
 )
@@ -567,6 +572,13 @@ def _external_attack_box(
         backend = resolve_attack_box(options.attack_box, options.state_dir)
     except ValueError as error:
         raise UpError("attack-box", str(error)) from error
+    if backend.capabilities.console_stream:
+        raise UpError(
+            "attack-box",
+            "the backend declares console_stream=True, which is not supported "
+            "(no ingest path exists for a provider console stream); declare "
+            "False and let the drop land as a declared evidence gap",
+        )
     external = next((g for g in boot.guests if g.kind == "attacker"), None)
     if external is None:
         raw = json.loads((bundle / "boot.json").read_text())
@@ -894,18 +906,34 @@ def up(
         log.log("attach", "ok", guest=external.name, taps=len(fds))
 
         seed_dir = bundle / "guests" / external.name / "seed"
-        attachment = attachment_from_boot(
-            external,
-            project=project,
-            fds=fds,
-            seed_dir=seed_dir if seed_dir.is_dir() else None,
-        )
+        try:
+            attachment = attachment_from_boot(
+                external,
+                project=project,
+                fds=fds,
+                seed_dir=seed_dir if seed_dir.is_dir() else None,
+            )
+        except ValueError as error:
+            # unreachable while _external_attack_box pre-checks the facts, but
+            # a raw escape here would skip the stage log and the teardown
+            for fd in fds:
+                os.close(fd)
+            raise fail("attach", str(error), guest=external.name) from error
         log.log("attack-box", "start", guest=external.name)
+
+        async def boot_box() -> "AttackBoxHandle":
+            # bounded like every other boot phase (B21): a provider that never
+            # returns must fail the stage, not wedge the sample
+            return await asyncio.wait_for(
+                attack_backend.provider.boot(attachment),
+                timeout=options.readiness_timeout,
+            )
+
         try:
             # the provider owns the fds from this call on (it may already have
             # handed them to a VMM process), so no close here on failure; a
             # failed up tears the project down, and the taps die with the netns
-            handle = asyncio.run(attack_backend.provider.boot(attachment))
+            handle = asyncio.run(boot_box())
         except Exception as error:
             try:
                 # best-effort reclaim of a half-boot; teardown is idempotent
@@ -921,7 +949,17 @@ def up(
             ) from error
         log.log("attack-box", "ok", guest=external.name)
         ch_sockets[external.name] = handle.exec_endpoint
-        record = read_attack_box_record(options.state_dir, project)
+        try:
+            record = read_attack_box_record(options.state_dir, project)
+        except AttackBoxRecordError as error:
+            # the record this very up wrote does not read back: nothing about
+            # this project's teardown can be trusted, so fail while the
+            # in-process backend can still reclaim directly
+            try:
+                asyncio.run(attack_backend.provider.teardown(project, ""))
+            except Exception:
+                logger.exception("attack-box teardown after a record fault failed")
+            raise fail("attack-box", str(error), guest=external.name) from error
         if record is not None:
             write_attack_box_record(
                 options.state_dir,

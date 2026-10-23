@@ -66,17 +66,21 @@ class _BoxServer:
             while not line.endswith(b"\n") and len(line) < 64:
                 byte = await loop.sock_recv(connection, 1)
                 if not byte:
-                    connection.close()
                     return
                 line += byte
-            if not line.startswith(b"CONNECT "):
-                connection.close()
+            if not (line.startswith(b"CONNECT ") and line.endswith(b"\n")):
                 return
             port = line.decode().strip().split(" ", 1)[1]
             await loop.sock_sendall(connection, f"OK {port}\n".encode())
             await serve_guest(self._endpoint, VsockStream(connection))
 
-        asyncio.run(run())
+        try:
+            asyncio.run(run())
+        finally:
+            try:
+                connection.close()
+            except OSError:
+                pass
 
     def stop(self) -> None:
         if self._listener is not None:

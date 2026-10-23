@@ -9,6 +9,7 @@ import array
 import os
 import socket
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .._channel.vsock import peer_uid
 from .backend import AttachedInterface, FootholdAttachment
 
 if TYPE_CHECKING:
@@ -121,35 +123,62 @@ Attacher = Callable[[AttachInvocation], list[int]]
 
 
 def receive_fds(listener: socket.socket, expected: int, timeout: float) -> list[int]:
-    """Accept the helper's one connection and receive `expected` fds via `SCM_RIGHTS`, acking so the sender may exit.
+    """Accept the helper's connection and receive `expected` fds via `SCM_RIGHTS`, acking so the sender may exit.
+
+    The handoff socket sits in the shared vsock directory, which the range container mounts, so every in-container uid (the unprivileged VMMs foremost) can connect to it during the window: the accept loop therefore requires the peer to be the compose-exec root helper (`SO_PEERCRED`, the same check discipline as every exec dial: host uid 0 under rootful docker, the invoking user's uid under rootless, and never a VMM's per-guest uid) and keeps accepting until a credentialed peer or the deadline, so a hostile connector can neither hand over fds nor starve the real helper of its slot. Every blocking step is deadline-bounded (B21: the failure path is as bounded as the boot path), truncated ancillary data (`MSG_CTRUNC`) refuses, and received fds are marked non-inheritable (a provider passing them to its VMM does so explicitly, e.g. `pass_fds`).
 
     Raises:
-        AttachError: Nothing connected within `timeout`, or the handoff carried the wrong fd count (any received fds are closed before raising; half an attachment is worse than none).
+        AttachError: No credentialed helper connected within `timeout`, the handoff was truncated, or it carried the wrong fd count (any received fds are closed before raising; half an attachment is worse than none).
     """
-    listener.settimeout(timeout)
-    try:
-        connection, _ = listener.accept()
-    except TimeoutError as error:
-        raise AttachError(
-            f"helper never connected to the handoff socket within {timeout:.0f}s"
-        ) from error
-    with connection:
-        space = socket.CMSG_SPACE(expected * array.array("i").itemsize)
-        payload, ancillary, _, _ = connection.recvmsg(4096, space)
-        fds: list[int] = []
-        for level, kind, data in ancillary:
-            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
-                received = array.array("i")
-                received.frombytes(data[: len(data) - (len(data) % received.itemsize)])
-                fds.extend(received.tolist())
-        if len(fds) != expected:
-            for fd in fds:
-                os.close(fd)
+    deadline = time.monotonic() + timeout
+
+    def remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
             raise AttachError(
-                f"handoff carried {len(fds)} fds for {expected} interfaces: {payload!r}"
+                f"helper never completed the handoff within {timeout:.0f}s"
             )
-        connection.sendall(b"1")
-    return fds
+        return left
+
+    while True:
+        listener.settimeout(remaining())
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError as error:
+            raise AttachError(
+                f"helper never connected to the handoff socket within {timeout:.0f}s"
+            ) from error
+        with connection:
+            if peer_uid(connection) not in (0, os.getuid()):
+                continue  # not the root helper; keep the slot open for it
+            connection.settimeout(remaining())
+            try:
+                space = socket.CMSG_SPACE(expected * array.array("i").itemsize)
+                payload, ancillary, flags, _ = connection.recvmsg(4096, space)
+            except TimeoutError as error:
+                raise AttachError(
+                    f"helper connected but sent nothing within {timeout:.0f}s"
+                ) from error
+            fds: list[int] = []
+            for level, kind, data in ancillary:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                    received = array.array("i")
+                    received.frombytes(
+                        data[: len(data) - (len(data) % received.itemsize)]
+                    )
+                    fds.extend(received.tolist())
+            if flags & socket.MSG_CTRUNC or len(fds) != expected:
+                for fd in fds:
+                    os.close(fd)
+                raise AttachError(
+                    f"handoff carried {len(fds)} fds for {expected} interfaces"
+                    f"{' (ancillary truncated)' if flags & socket.MSG_CTRUNC else ''}:"
+                    f" {payload!r}"
+                )
+            for fd in fds:
+                os.set_inheritable(fd, False)
+            connection.sendall(b"1")
+        return fds
 
 
 def run_attacher(invocation: AttachInvocation) -> list[int]:
@@ -164,7 +193,7 @@ def run_attacher(invocation: AttachInvocation) -> list[int]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(invocation.host_socket))
         os.chmod(invocation.host_socket, 0o666)
-        listener.listen(1)
+        listener.listen(4)
         process = subprocess.Popen(
             invocation.argv,
             stdin=subprocess.PIPE,
@@ -172,6 +201,7 @@ def run_attacher(invocation: AttachInvocation) -> list[int]:
             stderr=subprocess.PIPE,
             env=invocation.env,
         )
+        delivered = False
         try:
             assert process.stdin is not None  # Popen with stdin=PIPE guarantees it
             # the helper reads its program to EOF before executing, so stdin
@@ -200,8 +230,17 @@ def run_attacher(invocation: AttachInvocation) -> list[int]:
                     "helper exited "
                     f"{process.returncode}: {stderr.decode('utf-8', 'replace').strip()[-800:]}"
                 )
+            delivered = True
         finally:
             invocation.host_socket.unlink(missing_ok=True)
+            if not delivered and process.poll() is None:
+                # an unexpected escape (connection reset, interrupt) must not
+                # orphan the root helper un-reaped
+                process.kill()
+                try:
+                    process.communicate(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    pass
     return fds
 
 

@@ -472,6 +472,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                         project=project,
                         bundle=staging / "bundle",
                         plan=rendered_plan,
+                        state_dir=runtime.state_dir,
                     )
                     handle.evidence = session
             except BaseException as failure:
