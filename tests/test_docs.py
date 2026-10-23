@@ -158,7 +158,7 @@ def test_yaml_and_python_tabs_agree(page: str, tmp_path: Path) -> None:
 
 
 def test_attack_image_tool_contract_matches_docs() -> None:
-    """Every tool the attack recipe asserts at build is named on the Images page, so the documented contract cannot drift from the recipe."""
+    """Every tool the attack recipe asserts at build is named on the Attack Box page (the contract's documented home), so the documented contract cannot drift from the recipe."""
     run_sh = (
         Path(__file__).parent.parent
         / "catalog/attack/recipes/catalog.attack-tools/run.sh"
@@ -167,9 +167,9 @@ def test_attack_image_tool_contract_matches_docs() -> None:
     for match in re.finditer(r"for t in ([^;]+); do", run_sh.read_text()):
         tools.extend(t for t in match.group(1).split() if t != "\\")
     assert len(tools) >= 20, "the recipe's assertion loops did not parse"
-    page = (DOCS / "images.qmd").read_text()
+    page = (DOCS / "attackbox.qmd").read_text()
     missing = [tool for tool in tools if f"`{tool}`" not in page]
-    assert not missing, f"asserted attack tools absent from images.qmd: {missing}"
+    assert not missing, f"asserted attack tools absent from attackbox.qmd: {missing}"
 
 
 EXAMPLES_SRC = Path(__file__).parent.parent / "src" / "inspect_ranges" / "examples"

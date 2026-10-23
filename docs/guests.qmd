@@ -222,7 +222,7 @@ Policy (`acl`) and routing (`routes`, gateway election) are covered in [Networks
 
 ## Attacker {#the-attacker-guest}
 
-The attacker is a guest like any other, declared separately because evaluations treat it specially (it is what `sandbox("default")` resolves to). It either boots as a dedicated attack box or starts from a foothold on a declared host. A dedicated attack box declares `interfaces`; `name` defaults to `attacker`, and omitting `image` selects the catalog's `attack`, a kali-class toolset image pulled automatically at eval init (see [Images](images.qmd)):
+The attacker is a guest like any other, declared separately because evaluations treat it specially (it is what `sandbox("default")` resolves to). It either boots as a dedicated attack box or starts from a foothold on a declared host. A dedicated attack box declares `interfaces`; `name` defaults to `attacker`, and omitting `image` selects the catalog's `attack`, a kali-class toolset image pulled automatically at eval init (its tool contract and boot defaults are on [Attack Box](attackbox.qmd)):
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML

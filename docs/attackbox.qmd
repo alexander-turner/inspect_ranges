@@ -1,12 +1,38 @@
 ---
-title: "Attack Box Provider"
-description: "Supplying the attack box from outside the realizer: the provider seam, its contract, and the conformance battery an implementation must pass."
-llms-description: "The external attack-box seam: INSPECT_RANGES_ATTACK_BOX=<module>.<factory>[:<config>] registers an AttackBoxProvider (protocols public in inspect_ranges.attackbox); the realizer builds taps inside the range netns and hands the provider open fds plus the allocated MAC/IP facts (FootholdAttachment), the provider returns a hybrid-vsock exec surface (AttackBoxHandle) and owns the box's lifecycle; teardown-by-origin through the attack-box record; the declared console evidence gap; doctor rows; and the attack-box conformance battery (inspect-ranges attackbox verify), the gate a provider must pass."
+title: "Attack Box"
+description: "The machine the agent attacks from: the default image and its tool contract, boot defaults, custom images, and the provider seam for supplying the box externally."
+llms-description: "The attack box: the catalog `attack` image a dedicated attack box boots by default (Ubuntu 24.04 noble golden plus a kali-class toolset recipe, the build-asserted tool contract, /etc/attack-image.manifest, the zero-listener invariant), boot defaults (name `attacker`, Cloud Hypervisor VMM, 1 cpu / 1024 MB, the `agent` execution identity), custom images via `image:`; and the external provider seam: INSPECT_RANGES_ATTACK_BOX=<module>.<factory>[:<config>] registers an AttackBoxProvider (protocols public in inspect_ranges.attackbox), tap fds in / hybrid-vsock exec surface out, teardown-by-origin, the declared console evidence gap, doctor rows, and the attack-box conformance battery (inspect-ranges attackbox verify)."
 ---
 
 ## Overview
 
-A dedicated attack box is normally rendered and booted by the realizer like any guest. The attack-box seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an L2 attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine behind both and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
+The attack box is the machine the agent works from: in a range with a dedicated attacker it is the sample's sandbox, every `sandbox().exec()` lands in it, and targets are reachable only over the range network (the agent/target wall; see [Range Sandbox](provider.qmd#foothold-sandbox)). Declaring one is part of the range definition and covered in [Guests](guests.qmd#the-attacker-guest); an assumed-breach range has no attack box (the agent starts on a declared target host instead), so nothing on this page applies to it.
+
+This page covers what the box actually runs: the default image and its tool contract, the boot defaults, substituting your own image, and, for deployments that want to bring the entire machine from outside the realizer, the external provider seam.
+
+## Default Image
+
+A dedicated attack box with no `image:` boots the catalog's `attack` image, pulled automatically at eval init like any catalog name (see [Images](images.qmd)). It is a kali-class toolset built by a pinned recipe over the `ubuntu-noble` golden, so the operating system is Ubuntu 24.04 with the guest control daemon baked in, and the build refuses if anything beyond loopback is left listening (the attacker-surface sweep in [Security](security.qmd#proving-containment) expects a silent box, and the image guarantees it from birth).
+
+The tool contract is asserted at image build, so [behavioral checks](building.qmd#behavioral-checks), which run with no egress, may rely on every name here: `nmap`, `ncat`, `socat`, `curl`, `wget`, `tcpdump`, `sqlmap`, `hydra`, `john`, `gobuster`, `ffuf`, `smbclient`, `ldapsearch`, `dig`, `nc`, `tmux`, `msfconsole`, `msfvenom`, the impacket scripts `psexec.py`, `wmiexec.py`, `secretsdump.py`, `GetUserSPNs.py`, `raiseChild.py`, `lookupsid.py`, `atexec.py`, `smbexec.py`, and `mssqlclient.py`, plus `impacket` and `requests` importable from python3 and metasploit at major version 6. A missing tool fails the image build, never an eval.
+
+Beyond the contract, `/etc/attack-image.manifest` inside the image records every package and version the feeds actually delivered; read it from a pulled copy without booting anything by finding the cached file with `inspect-ranges images list` and running `virt-cat -a <file> /etc/attack-image.manifest` (`virt-cat` installs with libguestfs-tools, which `doctor` already requires).
+
+## Boot Defaults
+
+- **Name**: `attacker` unless the definition declares one; this is the guest name exec targets and ACL endpoints use.
+- **VMM**: Cloud Hypervisor, so the most adversarial guest gets the smaller device model (unprivileged per-guest uid, seccomp, credential-checked hybrid vsock; see [Security](security.qmd#virtual-machine-monitors)). Declare `vmm: qemu` to opt out.
+- **Sizing**: 1 cpu and 1024 MB unless `resources:` declares otherwise.
+- **Execution identity**: commands run as the unprivileged `agent` user (home `/home/agent`); `user=` switches, with the environment semantics described in [Range Sandbox](provider.qmd#execution-identity).
+- **Egress**: whatever the definition declares, `none` being the shipped examples' posture; see [Networks](networks.qmd#egress).
+
+## Custom Images
+
+Declare `image:` on the attacker to boot any image instead: another catalog name, or your own golden. The one hard requirement is the guest control daemon (exec, files, and readiness all ride it); derive your image over a published golden, or bake the daemon in with the `daemon-bundle` artifact (see [Images](images.qmd#catalog)). The tool contract above is a property of the `attack` image, not of attack boxes generally: behavioral checks that rely on it should keep the default image or assert their own tooling.
+
+## External Providers
+
+Everything above has the realizer render and boot the attack box like any guest. The provider seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an L2 attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine behind both and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
 
 Selection is deployment knowledge, never part of the range: `range.yaml` has no provider field, and the same published bundle realizes identically with or without one. The seam covers dedicated attack boxes only; an assumed-breach range's foothold is a built, verified content guest, so it is excluded by construction and realizes normally.
 
@@ -36,7 +62,7 @@ def factory(ctx: AttackBoxContext) -> AttackBoxBackend:
     )
 ```
 
-## The Contract
+## Provider Contract
 
 `boot(attachment)` receives a `FootholdAttachment` and returns an `AttackBoxHandle`; `teardown(project, reclaim_token)` must be idempotent and tolerate a token from a half-completed boot.
 
@@ -63,6 +89,7 @@ INSPECT_RANGES_ATTACK_BOX=their.pkg.factory:cfg \
 
 - **capabilities**: the bundle declares honestly (`console_stream=False`).
 - **realize**: attach, boot, and strict readiness through the real `up`.
+- **foothold-reach**: the box holds its reserved address, probed from the shared-segment defender before the sweep.
 - **attacker-surface**: the agent-containment negative checks against the foreign box: a shared-segment defender sweeping the attacker finds zero answers, hypervisor endpoints answer exactly their declared service, reserved segment addresses stay silent.
 - **session-stability**: the exec surface pins one daemon session across dials.
 - **exec-parity**: inspect-ai's full sandbox `self_check` suite over the surface, with an empty xfail pin; exit codes, truncation, budgets, `user=`, and timeout kills must all behave.
