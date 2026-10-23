@@ -11,6 +11,7 @@ Verification needs the sample's oracle and challenge, which `challenge_setup()` 
 
 import logging
 import time
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -44,19 +45,27 @@ class _VerifyContext:
 _CONTEXTS: dict[int, _VerifyContext] = {}
 
 
+def _discard_on_gc(store_id: int) -> None:
+    """Drop a collected store's context: a freed store's `id` can be reused by a later sample's store, which must never inherit this one's oracle and challenge (the scorer-driven discard never runs for a sample that errors before scoring)."""
+    _CONTEXTS.pop(store_id, None)
+
+
 def register_verify_context(
     oracle: "RangeOracle", challenge: Challenge, store: "Store"
 ) -> None:
     """Register the sample's verification context so `verify_goal` can verify at call time.
 
-    `challenge_setup()` calls this after a successful plant; contexts key by the store object (stable for the sample's lifetime, the poller-registry pattern) and are discarded by the scorer.
+    `challenge_setup()` calls this after a successful plant; contexts key by the store object (stable for the sample's lifetime, the poller-registry pattern) and are discarded by the scorer, with a GC finalizer as the backstop for samples that never reach scoring.
 
     Args:
         oracle: The sample's oracle.
         challenge: The sample's challenge.
         store: The sample store.
     """
-    _CONTEXTS[id(store)] = _VerifyContext(oracle=oracle, challenge=challenge)
+    store_id = id(store)
+    if store_id not in _CONTEXTS:
+        weakref.finalize(store, _discard_on_gc, store_id)
+    _CONTEXTS[store_id] = _VerifyContext(oracle=oracle, challenge=challenge)
 
 
 def discard_verify_context(store: "Store") -> None:

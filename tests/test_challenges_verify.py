@@ -308,3 +308,24 @@ class TestOracleBound:
 
         repeat = asyncio.run(scenario())
         assert "Goal 'f': this value was already submitted; not re-verified." in repeat
+
+
+def test_context_dropped_when_store_is_collected(tmp_path: Path) -> None:
+    """A collected store's id can be reused by a later sample's store, which must never inherit this one's oracle and challenge (the scorer-driven discard never runs for an errored sample)."""
+    import gc
+
+    from inspect_ranges._challenges.verify import (
+        _CONTEXTS,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    async def scenario() -> Store:
+        store = Store()
+        await armed_tool(tmp_path, mixed_challenge(), store)
+        return store
+
+    store = asyncio.run(scenario())
+    key = id(store)
+    assert key in _CONTEXTS
+    del store
+    gc.collect()
+    assert key not in _CONTEXTS
