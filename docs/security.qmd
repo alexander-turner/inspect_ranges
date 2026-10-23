@@ -62,6 +62,10 @@ A range that carries [behavioral checks](building.qmd#behavioral-checks) proves 
 
 The stage's scope limits: the sweep is TCP only (ports 1-1024 plus a high-port sample), foothold ranges skip it (the agent lands on a declared host whose services legitimately answer), and a range without behavioral checks has no proof boot, so it gets no conformance stage either.
 
+## External Attack Boxes
+
+A deployment may substitute an externally-managed VM for the dedicated attack box ([Attack Box Provider](attackbox.qmd)). The substitution preserves the structural pieces here by construction: the attachment is a tap built inside the range container's network namespace with its fd handed to the external VMM, so the host netns still carries zero range state, and bridge-side evidence capture still sees every frame the box sends. What changes is whose containment stack holds the agent's seat: the range then carries the weaker of the two stories, with the [conformance battery](attackbox.qmd#attackbox-verify) as the proven floor (surface sweep, exec parity, lifecycle) rather than this page's architecture. The box's missing console stream is recorded as a declared evidence gap, and `inspect-ranges doctor` carries a standing warning while the provider is configured.
+
 ## Score Integrity
 
 Streaming preserves the evidence record but does not by itself detect an escape, so each goal type is scored against proof the agent cannot fabricate, and detection-type goals consume coverage watermarks (the per-poll records that make telemetry coverage decidable; see [Evidence](evidence.qmd#telemetry-export)) rather than trusting exported content (see [Challenges](challenges.qmd) and [Evidence](evidence.qmd)). An escaped agent can invalidate its sample; it cannot silently falsify it. Score integrity rests on that detection, not on the boundaries being unbreakable.

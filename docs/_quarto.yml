@@ -45,6 +45,8 @@ inspect-docs:
           href: security.qmd
         - text: Range Host
           href: topology.qmd
+        - text: Attack Box Provider
+          href: attackbox.qmd
         - text: Range Sandbox
           href: provider.qmd
         - text: Operations

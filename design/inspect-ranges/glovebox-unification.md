@@ -1,6 +1,6 @@
 # Position note: glovebox unification requests (PR #15)
 
-Status: analysis for the pre-launch meeting, 2026-10-23. Not a decision record; decisions here are the maintainer's.
+Status: analysis for the pre-launch meeting, 2026-10-23. Not a decision record; decisions here are the maintainer's. The seam sketched in "The seam, named" is designed and built as [attack-box-v1](attack-box-v1.md).
 
 ## The ask
 
