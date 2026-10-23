@@ -161,3 +161,25 @@ def test_attach_endpoints_rebuild_cid_map_and_hybrid_sockets() -> None:
     assert set(hybrid) == {"attack"}
     assert hybrid["attack"].path == ch_vsock_dir(PROJECT) / "attack.sock"
     assert hybrid["attack"].peer_uid == ch_uid(3001)
+
+
+def test_attach_endpoints_prefer_the_attack_box_record(state_dir: Path) -> None:
+    """A guest realized by an external attack-box provider has no CID-derived socket: its endpoint comes from the record `up` wrote."""
+    from inspect_ranges._attackbox import AttackBoxRecord, write_attack_box_record
+
+    write_attack_box_record(
+        state_dir,
+        AttackBoxRecord(
+            origin="pkg.mod.factory",
+            project=PROJECT,
+            guest_name="attack",
+            cid=3001,
+            exec_socket="/run/box/attack.sock",
+            exec_uid=4242,
+            created="2026-10-23T00:00:00+00:00",
+        ),
+    )
+    cids, hybrid = attach_endpoints(boot_plan(), PROJECT, state_dir=state_dir)
+    assert cids == {"web": 3000, "attack": 3001}
+    assert hybrid["attack"].path == Path("/run/box/attack.sock")
+    assert hybrid["attack"].peer_uid == 4242

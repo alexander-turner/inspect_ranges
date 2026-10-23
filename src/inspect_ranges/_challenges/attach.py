@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from .._attackbox.record import read_attack_box_record
 from .._channel.channel import MessageChannel
 from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.plan import Totals
@@ -66,11 +67,11 @@ class _AttachedTransport:
 
 
 def attach_endpoints(
-    boot: BootPlan, project: str
+    boot: BootPlan, project: str, *, state_dir: Path | None = None
 ) -> tuple[dict[str, int], dict[str, HybridEndpoint]]:
     """The transport inputs a recorded boot plan yields: every guest's CID, and the hybrid-vsock endpoint of each Cloud Hypervisor guest.
 
-    The hybrid endpoints are reconstructed the way `up` created them: the socket under `ch_vsock_dir(project)` named after the guest, served by the VMM's CID-derived uid.
+    The hybrid endpoints are reconstructed the way `up` created them: the socket under `ch_vsock_dir(project)` named after the guest, served by the VMM's CID-derived uid. A guest realized by an external attack-box provider has no CID-derived socket; its endpoint comes from the attack-box record `up` wrote (`exec_socket`/`exec_uid`), when `state_dir` is given and the record carries one.
     """
     cids = {guest.name: guest.cid for guest in boot.guests}
     sockets_dir = ch_vsock_dir(project)
@@ -81,6 +82,16 @@ def attach_endpoints(
         for guest in boot.guests
         if guest.vmm == "cloud-hypervisor"
     }
+    if state_dir is not None:
+        record = read_attack_box_record(state_dir, project)
+        if (
+            record is not None
+            and record.exec_socket is not None
+            and record.exec_uid is not None
+        ):
+            hybrid[record.guest_name] = HybridEndpoint(
+                Path(record.exec_socket), record.exec_uid
+            )
     return cids, hybrid
 
 
@@ -152,7 +163,7 @@ def attach_oracle(
             "the range is down or crashed, so boot it again with "
             "'inspect-ranges up' before attaching"
         )
-    cids, hybrid = attach_endpoints(boot, project)
+    cids, hybrid = attach_endpoints(boot, project, state_dir=state)
     transport = _AttachedTransport(VsockTransport(cids, hybrid_sockets=hybrid), project)
     handle = SampleHandle(
         project=project,

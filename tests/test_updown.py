@@ -11,8 +11,10 @@ from inspect_ranges._attackbox import (
     AttackBoxBackend,
     AttackBoxContext,
     AttackBoxHandle,
+    AttackBoxRecord,
     FootholdAttachment,
     read_attack_box_record,
+    write_attack_box_record,
 )
 from inspect_ranges._attackbox.attach import AttachInvocation
 from inspect_ranges._channel.vsock import HybridEndpoint
@@ -1254,6 +1256,85 @@ def test_up_attack_box_refuses_a_qemu_attacker(
         )
     assert error.value.stage == "verify-bundle"
     assert "cloud-hypervisor" in str(error.value)
+
+
+def exploding_teardown_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    provider = RecordingAttackBoxProvider(ctx.state_dir)
+
+    async def explode(project: str, reclaim_token: str) -> None:
+        raise RuntimeError("cell manager unreachable")
+
+    provider.teardown = explode  # type: ignore[method-assign]
+    return AttackBoxBackend(provider=provider)
+
+
+def _attack_box_record(project: str, origin: str) -> AttackBoxRecord:
+    return AttackBoxRecord(
+        origin=origin,
+        project=project,
+        guest_name="attacker",
+        cid=3001,
+        reclaim_token="tok-9",
+        created="2026-10-23T00:00:00+00:00",
+    )
+
+
+def test_down_reclaims_the_external_attack_box_before_any_docker_call(
+    tmp_path: Path,
+) -> None:
+    """The provider's box dies before its NIC: reclaim runs before the first docker query, and the record clears so a second down is a no-op."""
+    state = tmp_path / "state"
+    write_attack_box_record(state, _attack_box_record("ir-abox", RECORDING_ORIGIN))
+    docker = FakeDocker()
+
+    def ordered(
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        input: str | None = None,
+        timeout: float | None = None,
+    ) -> "subprocess.CompletedProcess[str]":
+        assert any(p.teardowns for p in RecordingAttackBoxProvider.instances), (
+            "docker was touched before the provider reclaim"
+        )
+        return docker(argv, env=env, input=input, timeout=timeout)
+
+    down("ir-abox", state_dir=state, runner=ordered)
+    provider = RecordingAttackBoxProvider.instances[-1]
+    assert provider.teardowns == [("ir-abox", "tok-9")]
+    assert read_attack_box_record(state, "ir-abox") is None
+    down("ir-abox", state_dir=state, runner=docker)
+    assert len(provider.teardowns) == 1, "a second down reclaims nothing"
+
+
+def test_down_refuses_when_the_attack_box_origin_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    """Deny-first: an unresolvable origin refuses before any compose resource is touched (killing the netns would strand a live foreign VMM)."""
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    write_attack_box_record(
+        state, _attack_box_record("ir-abox", "no_such_pkg_xyz.boxes.cell")
+    )
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="does not resolve here"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == [], "nothing was torn down"
+    assert read_attack_box_record(state, "ir-abox") is not None, "a retry can reclaim"
+
+
+def test_down_refuses_when_the_attack_box_reclaim_fails(tmp_path: Path) -> None:
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    write_attack_box_record(
+        state, _attack_box_record("ir-abox", f"{__name__}.exploding_teardown_factory")
+    )
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="attack-box teardown failed"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == []
+    assert read_attack_box_record(state, "ir-abox") is not None
 
 
 def test_boot_script_skip_leaves_other_guests_identical(bundle: Path) -> None:

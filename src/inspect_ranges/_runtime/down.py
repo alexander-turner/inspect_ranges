@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from .._attackbox.record import read_attack_box_record
 from .ownership import (
     PROJECT_PREFIX,
     ch_vsock_dir,
@@ -74,6 +75,33 @@ def down(
     """
     run: Runner = runner or run_command
     state = state_dir if state_dir is not None else default_state_dir()
+
+    record = read_attack_box_record(state, project)
+    if record is not None:
+        # deny-first, the reaper's origin rule: resolve the external attack-box
+        # backend before touching ANY compose resource. Tearing the netns down
+        # kills the box's taps and strands a live foreign VMM; refusing leaves
+        # a retry able to reclaim both.
+        from .._attackbox.backend import resolve_attack_box
+        from .._attackbox.record import attack_box_record_path
+
+        try:
+            backend = resolve_attack_box(record.origin, state)
+        except ValueError as error:
+            raise DownError(
+                f"project {project} has an external attack box whose origin "
+                f"does not resolve here ({error}); install the provider "
+                "package where down runs, then retry"
+            ) from error
+        try:
+            backend.reclaimer()(record, state)
+        except Exception as error:
+            raise DownError(
+                f"external attack-box teardown failed for {project}: {error}; "
+                "the range is untouched so a retry can reclaim both"
+            ) from error
+        # the VMM is gone before its NIC: the taps die with the netns below
+        attack_box_record_path(state, project).unlink(missing_ok=True)
 
     label_filter = ["--filter", f"label=com.docker.compose.project={project}"]
     container_query = ["docker", "ps", "-a", "-q", *label_filter]

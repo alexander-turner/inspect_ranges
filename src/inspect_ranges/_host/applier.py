@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .._attackbox.backend import attack_box_origin
 from .._channel.channel import HOST_APPLIER, ByteStream
 from .._channel.codec import (
     ChannelClosed,
@@ -642,6 +643,9 @@ class Applier:
             project=lease.project,
             image_cache=self._image_cache,
             state_dir=self._state_dir,
+            # the applier's own environment, per the deployment-knowledge rule:
+            # the host that boots the box is the host that selects its provider
+            attack_box=attack_box_origin(),
         )
         failed = False
         try:

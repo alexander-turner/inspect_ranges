@@ -20,6 +20,7 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
+from .._attackbox.backend import attack_box_origin
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -385,6 +386,11 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 project=project,
                                 image_cache=runtime.image_cache,
                                 state_dir=runtime.state_dir,
+                                # consulted only where up() itself runs: the
+                                # co-resident path boots here, so the driver's
+                                # environment selects; a separated backend's
+                                # applier reads its own environment instead
+                                attack_box=attack_box_origin(),
                             ),
                             on_stage,
                         )
