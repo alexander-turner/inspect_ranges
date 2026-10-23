@@ -699,11 +699,19 @@ class Applier:
                 max_total_bytes=evidence_max_bytes(),
             )
             segments = [network.name for network in plan.networks]
+            # the applier's env selected the attack-box provider (if any), so
+            # the applier declares the console drop for the guest it never boots
+            external = (
+                next((g.name for g in plan.guests if g.kind == "attacker"), None)
+                if attack_box_origin() is not None
+                else None
+            )
             streamer = CaptureStreamer(
                 writer,
                 ComposeTap(lease.project, Path(lease.bundle_path)),
                 segments=segments,
                 console_guests=[guest.name for guest in plan.guests],
+                external_consoles=[external] if external is not None else [],
                 stage_recorder=recorder,
             )
             await streamer.start()

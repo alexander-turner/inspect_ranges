@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from .._attackbox.backend import attack_box_origin
 from .._compiler.plan import ResolvedPlan
 from .._evidence.capture import (
     CAPTURE_HARVEST_TIMEOUT_S,
@@ -164,11 +165,19 @@ class EvidenceSession:
                     buffer_cap_bytes=evidence_buffer_bytes(),
                     max_total_bytes=evidence_max_bytes(),
                 )
+                # co-resident: the driver's env selected the attack-box
+                # provider (if any), so it declares the console drop here
+                external = (
+                    next((g.name for g in plan.guests if g.kind == "attacker"), None)
+                    if attack_box_origin() is not None
+                    else None
+                )
                 self._streamer = CaptureStreamer(
                     self._host,
                     ComposeTap(project, bundle),
                     segments=[network.name for network in plan.networks],
                     console_guests=[guest.name for guest in plan.guests],
+                    external_consoles=[external] if external is not None else [],
                     stage_recorder=self.recorder,
                 )
                 await self._streamer.start()

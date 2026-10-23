@@ -103,6 +103,41 @@ def test_streamer_ships_completed_chunks_and_skips_active(tmp_path: Path) -> Non
     asyncio.run(scenario())
 
 
+def test_streamer_declares_the_external_console_drop(tmp_path: Path) -> None:
+    """A guest an external attack-box provider realizes has no console: one declared gap lands at start, the guest is never polled, and other consoles ship normally."""
+
+    async def scenario() -> None:
+        location, capture, writer, tap = harness(tmp_path)
+        write_status(capture, {})
+        (tmp_path / "consoles" / "web.log").write_bytes(b"boot line\n")
+        streamer = CaptureStreamer(
+            writer,
+            tap,
+            segments=[],
+            console_guests=["web", "attacker"],
+            external_consoles=["attacker"],
+        )
+        await streamer.start()
+        await streamer.stop(stop_timeout_s=2.0)
+        await writer.seal()
+        report = await verify_location(LocalDirStore(location), location=str(location))
+        assert report.ok
+        declared = [
+            g
+            for g in report.writers["host"].gaps
+            if g.cause == "console-external-attack-box"
+        ]
+        assert len(declared) == 1 and declared[0].stream == "console/attacker"
+        assert "console/attacker" not in {
+            name
+            for name, stream in report.writers["host"].streams.items()
+            if stream.chunks
+        }
+        assert report.writers["host"].streams["console/web"].chunks >= 1
+
+    asyncio.run(scenario())
+
+
 def test_streamer_turns_status_losses_into_gaps(tmp_path: Path) -> None:
     async def scenario() -> None:
         location, capture, writer, tap = harness(tmp_path)
