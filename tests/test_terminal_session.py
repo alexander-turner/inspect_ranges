@@ -15,6 +15,7 @@ from inspect_ranges._terminal.session import (
     label_output,
     multiline_block,
     prepare_send,
+    scrub_harness_echo,
     send_keys_command,
     send_keys_commands,
     start_session_command,
@@ -176,7 +177,8 @@ def test_find_new_content(
 @pytest.mark.parametrize(
     ("new_content", "screen", "expected_head"),
     [
-        ("\nfile-a", "ignored", "New Terminal Output:"),
+        # a determinable delta returns raw, no header (viewer UX review 2026-10-23)
+        ("\nfile-a", "ignored", "\nfile-a"),
         (None, "the screen", "Current Terminal Screen:"),
         # a whitespace-only delta reports the screen, not a blank delta
         ("   \n", "the screen", "Current Terminal Screen:"),
@@ -250,3 +252,10 @@ def test_assemble_cast_orders_and_offsets_events() -> None:
     assert events[1] == [0.5, "m", "send: ls"]
     assert events[2] == [0.5, "o", "out-early"]
     assert events[3] == [2.0, "o", "out-late"]
+
+
+def test_scrub_harness_echo_removes_wait_suffix() -> None:
+    echoed = "$ ls /opt; tmux wait -S ir-done-main-b7f168f4-1\ninspect-ranges\n$"
+    scrubbed = scrub_harness_echo(echoed)
+    assert "tmux wait" not in scrubbed
+    assert scrubbed.startswith("$ ls /opt\n")

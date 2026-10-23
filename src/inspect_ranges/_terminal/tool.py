@@ -28,6 +28,7 @@ from .session import (
     pane_command_command,
     prepare_send,
     remove_sink_command,
+    scrub_harness_echo,
     send_keys_commands,
     start_session_command,
     valid_session_name,
@@ -39,9 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("inspect_ranges.terminal")
 
-__all__ = ["TERMINAL_SCREEN_STORE_KEY", "terminal"]
-
-TERMINAL_SCREEN_STORE_KEY = "inspect_ranges:terminal_screen"
+__all__ = ["terminal"]
 
 _ACTIONS = ("open", "send", "read", "close")
 _MAX_DURATION_S = 60.0
@@ -75,27 +74,18 @@ def discard_terminal_state(sample_store: object) -> None:
 
 
 def _terminal_viewer(call: ToolCall) -> ToolCallView:
-    """Render the call against the screen the model saw when it issued it.
+    """Render the call compactly: everything load-bearing in the title, keystrokes fenced below.
 
-    The view binds before execution, so the store snapshot here is the previous execution's after-screen: exactly the terminal state this call's keystrokes were chosen against. A storeless invocation context degrades to the arguments alone.
+    The viewer UX review (2026-10-23) dropped the earlier screen-at-call-time snapshot and the action/session content line as duplicative: the full session record is the asciicast, and results already show what came back.
     """
     arguments = call.arguments
     action = str(arguments.get("action", ""))
     session = str(arguments.get("session", "main"))
     keystrokes = str(arguments.get("keystrokes", ""))
-    lines = [f"**{action}** · session `{session}`"]
-    if keystrokes:
-        lines.append(f"```text\n{keystrokes}\n```")
-    try:
-        screens: dict[str, str] = dict(store().get(TERMINAL_SCREEN_STORE_KEY, {}))
-        screen = screens.get(session)
-        if screen is not None:
-            lines.append(f"screen at call time:\n```text\n{screen}\n```")
-    except Exception:  # noqa: BLE001  (storeless context: args-only view)
-        pass
+    content = f"```text\n{keystrokes}\n```" if keystrokes else ""
     return ToolCallView(
         call=ToolCallContent(
-            title=f"terminal · {session}", format="markdown", content="\n\n".join(lines)
+            title=f"terminal {action} · {session}", format="markdown", content=content
         )
     )
 
@@ -104,33 +94,22 @@ async def _exec(cmd: list[str], timeout_s: float = 30.0) -> "ExecResult[str]":
     return await sandbox().exec(cmd, timeout=int(timeout_s))
 
 
-def _record_screen(session: str, screen: str) -> None:
-    screens: dict[str, str] = dict(store().get(TERMINAL_SCREEN_STORE_KEY, {}))
-    screens[session] = screen
-    store().set(TERMINAL_SCREEN_STORE_KEY, screens)
-
-
-def _drop_screen(session: str) -> None:
-    screens: dict[str, str] = dict(store().get(TERMINAL_SCREEN_STORE_KEY, {}))
-    screens.pop(session, None)
-    store().set(TERMINAL_SCREEN_STORE_KEY, screens)
-
-
 def _open_sessions() -> str:
     names = ", ".join(sorted(_states())) or "none"
     return f"Open sessions: {names}."
 
 
 async def _read_result(session: str, state: SessionState) -> str:
-    """Capture, compute the delta, refresh the stored screen, label and clip."""
+    """Capture, compute the delta, and clip; the visible screen is fetched only for the fallback."""
     entire = await _exec(capture_pane_command(session, entire=True))
     current = entire.stdout if entire.success else ""
     delta = find_new_content(state.previous_buffer, current)
     state.previous_buffer = current
+    if delta is not None and delta.strip():
+        return clip_output(scrub_harness_echo(label_output(delta, "")))
     visible = await _exec(capture_pane_command(session))
     screen = visible.stdout if visible.success else current[-3000:]
-    _record_screen(session, screen)
-    return clip_output(label_output(delta, screen))
+    return clip_output(scrub_harness_echo(label_output(delta, screen)))
 
 
 @tool(viewer=_terminal_viewer, parallel=False)
@@ -227,7 +206,6 @@ def terminal() -> Tool:
                 # leave its pipe file behind
                 await _exec(remove_sink_command(session))
                 states.pop(session, None)
-                _drop_screen(session)
                 return f"Closed session {session!r}. {_open_sessions()}\nFinal {final}"
 
             # send

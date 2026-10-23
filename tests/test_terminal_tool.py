@@ -19,7 +19,6 @@ from inspect_ai.util._store import Store, init_subtask_store
 from inspect_ranges import terminal
 from inspect_ranges._terminal.session import sink_path
 from inspect_ranges._terminal.tool import (
-    TERMINAL_SCREEN_STORE_KEY,
     _terminal_viewer,  # pyright: ignore[reportPrivateUsage]
     discard_terminal_state,
 )
@@ -66,7 +65,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Any, Store, str]]:
 
 
 def test_open_send_read_close_flow(armed: tuple[Any, Store, str]) -> None:
-    tool, store, session = armed
+    tool, _, session = armed
 
     async def scenario() -> None:
         opened = await tool(action="open", session=session)
@@ -75,13 +74,10 @@ def test_open_send_read_close_flow(armed: tuple[Any, Store, str]) -> None:
             action="send", session=session, keystrokes="echo marker-$((40+2))\n"
         )
         assert "marker-42" in result
-        # the store carries the after-screen the next call's view renders
-        screens = store.get(TERMINAL_SCREEN_STORE_KEY, dict[str, str]())
-        assert "marker-42" in screens[session]
+        # the raw delta carries no header (viewer UX review, 2026-10-23)
+        assert "New Terminal Output" not in result
         closed = await tool(action="close", session=session)
         assert f"Closed session '{session}'" in closed
-        remaining = store.get(TERMINAL_SCREEN_STORE_KEY, dict[str, str]())
-        assert remaining.get(session) is None
 
     asyncio.run(scenario())
 
@@ -384,21 +380,29 @@ def test_state_dropped_when_store_is_collected() -> None:
     assert key not in _STATES
 
 
-def test_viewer_renders_stored_screen(armed: tuple[Any, Store, str]) -> None:
-    tool, _, session = armed
-
-    async def scenario() -> None:
-        await tool(action="open", session=session)
-        await tool(action="send", session=session, keystrokes="echo view-marker\n")
-        call = ToolCall(
-            id="1",
+def test_viewer_is_compact(armed: tuple[Any, Store, str]) -> None:
+    """Everything load-bearing in the title, keystrokes fenced below, no screen and no duplicated action line (viewer UX review, 2026-10-23)."""
+    _, _, session = armed
+    call = ToolCall(
+        id="1",
+        function="terminal",
+        arguments={
+            "action": "send",
+            "session": session,
+            "keystrokes": "nc -lvnp 4444\n",
+        },
+    )
+    view = _terminal_viewer(call)
+    assert view.call is not None
+    assert view.call.title == f"terminal send · {session}"
+    assert view.call.content == "```text\nnc -lvnp 4444\n\n```"
+    bare = _terminal_viewer(
+        ToolCall(
+            id="2",
             function="terminal",
-            arguments={"action": "send", "session": session, "keystrokes": "next"},
+            arguments={"action": "read", "session": session},
         )
-        view = _terminal_viewer(call)
-        assert view.call is not None
-        assert "view-marker" in view.call.content
-        assert session in (view.call.title or "")
-        await tool(action="close", session=session)
-
-    asyncio.run(scenario())
+    )
+    assert bare.call is not None
+    assert bare.call.title == f"terminal read · {session}"
+    assert bare.call.content == ""

@@ -227,10 +227,24 @@ def find_new_content(previous_buffer: str | None, current_buffer: str) -> str | 
     return None
 
 
+_WAIT_ECHO = re.compile(r"; tmux wait -S ir-done-\S+")
+
+
+def scrub_harness_echo(text: str) -> str:
+    """Remove the blocking signal's pane echo from model-facing output.
+
+    A blocking send appends `; tmux wait -S <channel>` to the command line, and the pane echoes it back; the model should read its own command, not the harness suffix. Casts keep the raw pane: only tool results are scrubbed.
+    """
+    return _WAIT_ECHO.sub("", text)
+
+
 def label_output(new_content: str | None, visible_screen: str) -> str:
-    """The model-facing read result: the delta when determinable, the screen otherwise."""
+    """The model-facing read result: the raw delta when determinable; the screen, labeled, otherwise.
+
+    The delta carries no header (viewer UX review, 2026-10-23); the fallback keeps its label because a re-rendered screen presented as new output would invite re-acting on old lines.
+    """
     if new_content is not None and new_content.strip():
-        return f"New Terminal Output:\n{new_content}"
+        return new_content
     return f"Current Terminal Screen:\n{visible_screen}"
 
 
