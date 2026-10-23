@@ -211,6 +211,9 @@ class DiagRequest(_MessageBase):
 EXEC_ARGV_BYTES = 2048
 """Per-event argv byte cap for the exec witness (execve-witness-v1): bounds both the ring's memory and the reply geometry."""
 
+EXEC_ARGV_ITEMS = 256
+"""Per-event argv ITEM cap (review round 1, findings 1-2): bytes alone do not bound an argv of empty strings, whose JSON overhead is what actually inflates the encoded event, and the three validators must agree on the item bound or a legal many-arg exec wedges the host's poll loop on a tamper verdict."""
+
 EXEC_EVENTS_MAX = 256
 """Hard cap on events per `exec_events` reply; the reply byte budget usually packs fewer."""
 
@@ -332,7 +335,7 @@ class ExecEvent(_WireModel):
     comm: Annotated[str, Field(max_length=64), utf8_capped(64)] = ""
     argv: list[
         Annotated[str, Field(max_length=EXEC_ARGV_BYTES), utf8_capped(EXEC_ARGV_BYTES)]
-    ] = Field(default_factory=list[str], max_length=EXEC_EVENTS_MAX)
+    ] = Field(default_factory=list[str], max_length=EXEC_ARGV_ITEMS)
     truncated: bool = False
     """The argv byte cap was hit, or cmdline was unreadable mid-exit."""
 
@@ -363,7 +366,7 @@ def pack_exec_events(
 ) -> tuple[list[ExecEvent], int]:
     """Pack retained events with `seq >= since_seq` under `EXEC_REPLY_BUDGET` and `max_events`; returns `(events, next_seq)`.
 
-    The reference packing geometry every endpoint shares (the Go daemon implements the same rule; `FakeGuest` calls this one, so host tests cannot pass against packing the real daemon lacks): events pack in seq order until either cap, the first qualifying event always packs, and `next_seq` is the cursor the next poll resumes from (one past the last packed event, else the write head or `since_seq`, whichever is further).
+    The reference packing geometry every endpoint shares (the Go daemon implements the same rule; `FakeGuest` calls this one, so host tests cannot pass against packing the real daemon lacks): events pack in seq order until either cap, the first qualifying event always packs, and `next_seq` is the cursor the next poll resumes from: one past the last packed event, else the WRITE HEAD. Deliberately never clamped up to `since_seq` (review round 1, finding 4): a daemon restart resets the seq space, so a head BELOW the caller's cursor is the restart signal the poller consumes; clamping would disguise it as a quiet guest forever.
     """
     import json
 
@@ -388,7 +391,7 @@ def pack_exec_events(
             break
         events.append(event)
         total += encoded
-    next_seq = events[-1].seq + 1 if events else max(since_seq, head)
+    next_seq = events[-1].seq + 1 if events else head
     return events, next_seq
 
 

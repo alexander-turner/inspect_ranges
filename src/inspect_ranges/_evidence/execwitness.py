@@ -173,6 +173,29 @@ class ExecWitnessPoller:
             if state.failing:
                 state.failing = False
                 self._meta(name, {"outcome": "recovered"})
+            if reply.next_seq < state.cursor:
+                # the daemon restarted: the seq space reset under us (the
+                # packer reports its true head, never clamped up to the
+                # cursor), so an unknown number of post-restart events are
+                # gone and "quiet guest" must not be the record's story
+                await self._writer.gap(
+                    f"exec/{name}",
+                    span=self._span(start),
+                    cause="exec-witness-restart",
+                )
+                self._meta(
+                    name,
+                    {
+                        "outcome": "restarted",
+                        "host_ts": time.time(),
+                        "cursor": state.cursor,
+                        "next_seq": reply.next_seq,
+                    },
+                )
+                state.cursor = reply.next_seq
+                state.drops_seen = 0
+                await self._flush_meta(name, force=True)
+                continue
             if reply.events:
                 lost = reply.events[0].seq - state.cursor
                 if lost > 0:
@@ -198,7 +221,12 @@ class ExecWitnessPoller:
                     dropped=drops_delta,
                 )
             state.drops_seen = reply.drops
-            packed_full = len(reply.events) >= 256
+            # the daemon clips replies on its BYTE budget long before the
+            # 256-event cap (typical argv packs ~10-160 events per page), so
+            # "any events at all" is the only honest more-may-remain signal;
+            # the cost is one trailing empty poll per active cycle (review
+            # round 1, finding 3)
+            maybe_more = len(reply.events) > 0
             state.cursor = reply.next_seq
             self._meta(
                 name,
@@ -211,7 +239,7 @@ class ExecWitnessPoller:
                     "restarts": reply.restarts,
                 },
             )
-            if not packed_full:
+            if not maybe_more:
                 break
         await self._flush_meta(name)
 

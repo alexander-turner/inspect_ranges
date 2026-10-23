@@ -48,6 +48,7 @@ namespace VsockD
         // execve-witness-v1 (Linux-only verb; this codec still validates it)
         public const int MaxExecEvents = 256;
         public const int MaxExecArgvBytes = 2048;
+        public const int MaxExecArgvItems = 256;
         public const int MaxExecCommLen = 64;
 
         static readonly HashSet<string> StageLiterals =
@@ -831,6 +832,8 @@ namespace VsockD
                 {
                     List<object> argv = argvObj as List<object>;
                     if (argv == null) throw new DecodeException("exec_events_result: argv must be a list");
+                    if (argv.Count > MaxExecArgvItems)
+                        throw new DecodeException("exec_events_result: too many argv items");
                     int total = 0;
                     foreach (object arg in argv)
                     {

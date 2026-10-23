@@ -730,6 +730,7 @@ const (
 	// control frame and validation caps alone do not guarantee it
 	MaxExecEvents    = 256
 	MaxExecArgvBytes = 2048
+	MaxExecArgvItems = 256
 	MaxExecComm      = 64
 	ExecReplyBudget  = 24 * 1024
 	maxPidValue      = int64(1)<<31 - 1
@@ -940,6 +941,9 @@ func (m *Message) validate() error {
 			}
 			if len(event.Comm) > MaxExecComm {
 				return decodeErrf("exec_events_result: comm too long")
+			}
+			if len(event.Argv) > MaxExecArgvItems {
+				return decodeErrf("exec_events_result: too many argv items")
 			}
 			total := 0
 			for _, arg := range event.Argv {

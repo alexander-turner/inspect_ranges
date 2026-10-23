@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeSource feeds scripted datagrams; an exhausted script blocks until stop.
@@ -49,20 +51,28 @@ func (s *fakeSource) Close() {
 	s.mu.Unlock()
 }
 
-// execDatagram builds one connector PROC_EVENT_EXEC datagram for tgid.
+// execDatagram builds one connector PROC_EVENT_EXEC datagram for tgid, with
+// the nlmsg type and connector id the ingest filter requires.
 func execDatagram(tgid uint32) []byte {
 	buf := make([]byte, 60)
 	binary.LittleEndian.PutUint32(buf[0:], 60)
+	binary.LittleEndian.PutUint16(buf[4:], uint16(unix.NLMSG_DONE))
+	binary.LittleEndian.PutUint32(buf[16:], cnIdxProc)
+	binary.LittleEndian.PutUint32(buf[20:], cnValProc)
 	binary.LittleEndian.PutUint32(buf[36:], procEventExec)
 	binary.LittleEndian.PutUint32(buf[52:], tgid) // process_pid
 	binary.LittleEndian.PutUint32(buf[56:], tgid) // process_tgid
 	return buf
 }
 
-func testWitness(source eventSource, facts procFacts) *execWitness {
+func testWitness(t *testing.T, source eventSource, facts procFacts) *execWitness {
+	t.Helper()
 	w := newExecWitness()
 	w.newSource = func() eventSource { return source }
 	w.readProc = facts
+	// end the supervised loop at test exit so run() never outlives the test
+	// spinning restarts (review round 1, finding 8)
+	t.Cleanup(func() { close(w.stop) })
 	return w
 }
 
@@ -96,7 +106,7 @@ func pollWitness(w *execWitness, since int64) *Message {
 
 func TestLazyArmAndEventFlow(t *testing.T) {
 	source := &fakeSource{stop: make(chan struct{}), datagrams: [][]byte{execDatagram(42)}}
-	w := testWitness(source, staticFacts("nmap", "-sV"))
+	w := testWitness(t, source, staticFacts("nmap", "-sV"))
 	defer close(source.stop)
 	if w.armed {
 		t.Fatal("witness armed before any poll")
@@ -119,7 +129,7 @@ func TestLazyArmAndEventFlow(t *testing.T) {
 
 func TestArmFailureIsCachedTerminal(t *testing.T) {
 	source := &fakeSource{stop: make(chan struct{}), subscribeErr: errors.New("EINVAL: no connector")}
-	w := testWitness(source, staticFacts())
+	w := testWitness(t, source, staticFacts())
 	for i := 0; i < 3; i++ {
 		reply := pollWitness(w, 0)
 		if reply.Kind != "error" || reply.Errno != "ENOSYS" {
@@ -133,7 +143,7 @@ func TestArmFailureIsCachedTerminal(t *testing.T) {
 
 func TestConcurrentFirstPollsArmOnce(t *testing.T) {
 	source := &fakeSource{stop: make(chan struct{})}
-	w := testWitness(source, staticFacts())
+	w := testWitness(t, source, staticFacts())
 	defer close(source.stop)
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -155,7 +165,7 @@ func TestRingOverflowShowsAsSeqDiscontinuity(t *testing.T) {
 		datagrams[i] = execDatagram(uint32(i + 2))
 	}
 	source := &fakeSource{stop: make(chan struct{}), datagrams: datagrams}
-	w := testWitness(source, staticFacts("x"))
+	w := testWitness(t, source, staticFacts("x"))
 	defer close(source.stop)
 	pollWitness(w, 0)
 	waitFor(t, "ring to fill past capacity", func() bool {
@@ -176,7 +186,7 @@ func TestPackingStaysUnderTheReplyBudget(t *testing.T) {
 		datagrams[i] = execDatagram(uint32(i + 2))
 	}
 	source := &fakeSource{stop: make(chan struct{}), datagrams: datagrams}
-	w := testWitness(source, staticFacts(big))
+	w := testWitness(t, source, staticFacts(big))
 	defer close(source.stop)
 	pollWitness(w, 0)
 	waitFor(t, "all events ingested", func() bool {
@@ -210,7 +220,7 @@ func TestPackingStaysUnderTheReplyBudget(t *testing.T) {
 
 func TestReadErrorResubscribesAndCounts(t *testing.T) {
 	source := &fakeSource{stop: make(chan struct{}), errs: []error{errors.New("read torn down")}, datagrams: nil}
-	w := testWitness(source, staticFacts())
+	w := testWitness(t, source, staticFacts())
 	defer close(source.stop)
 	pollWitness(w, 0)
 	waitFor(t, "the restart counter", func() bool { return w.restarts.Load() == 1 })
@@ -225,7 +235,7 @@ func TestRaceFactsStillRecord(t *testing.T) {
 		return nil, nil, "", []string{}, true // /proc gone mid-exit
 	}
 	source := &fakeSource{stop: make(chan struct{}), datagrams: [][]byte{execDatagram(99)}}
-	w := testWitness(source, raceFacts)
+	w := testWitness(t, source, raceFacts)
 	defer close(source.stop)
 	pollWitness(w, 0)
 	waitFor(t, "the race event", func() bool {
@@ -236,6 +246,78 @@ func TestRaceFactsStillRecord(t *testing.T) {
 	event := pollWitness(w, 0).Events[0]
 	if event.Pid != 99 || event.Ppid != nil || event.Uid != nil || !event.Truncated {
 		t.Fatalf("race event must keep connector facts: %+v", event)
+	}
+}
+
+func TestIngestFiltersNonConnectorShapes(t *testing.T) {
+	source := &fakeSource{stop: make(chan struct{})}
+	w := testWitness(t, source, staticFacts("x"))
+	w.ring = make([]ExecEvent, ExecRingSize) // ingest directly, no loop
+	spoofWrongType := execDatagram(50)
+	binary.LittleEndian.PutUint16(spoofWrongType[4:], 2) // NLMSG_ERROR
+	spoofWrongID := execDatagram(51)
+	binary.LittleEndian.PutUint32(spoofWrongID[16:], 7) // not CN_IDX_PROC
+	w.ingest(spoofWrongType)
+	w.ingest(spoofWrongID)
+	w.ingest(execDatagram(52))
+	if w.nextSeq != 1 {
+		t.Fatalf("filter admitted %d events, want exactly the real one", w.nextSeq)
+	}
+	if w.ring[0].Pid != 52 {
+		t.Fatalf("wrong event admitted: %+v", w.ring[0])
+	}
+}
+
+func TestArgvItemCapBoundsEmptyArgStorms(t *testing.T) {
+	// finding 1/2's trigger shape: thousands of zero-byte args cost no byte
+	// budget but unbounded encoded overhead; the item cap bounds them and the
+	// capped event must validate AND encode inside the frame
+	argv := []string{}
+	truncated := false
+	parts := append([]string{"x"}, make([]string, 15000)...)
+	total := 0
+	for _, part := range parts {
+		if len(argv) >= MaxExecArgvItems {
+			truncated = true
+			break
+		}
+		remaining := MaxExecArgvBytes - total
+		if remaining <= 0 {
+			truncated = true
+			break
+		}
+		arg := sanitizeWireString(part, remaining)
+		argv = append(argv, arg)
+		total += len(arg)
+	}
+	if len(argv) != MaxExecArgvItems || !truncated {
+		t.Fatalf("item cap not enforced: %d items, truncated=%v", len(argv), truncated)
+	}
+	event := ExecEvent{Seq: 0, TsMs: 1, Pid: 1, Comm: "x", Argv: argv, Truncated: truncated}
+	msg := &Message{V: ProtocolVersion, ID: strings.Repeat("a", 32), Kind: "exec_events_result",
+		Events: []ExecEvent{event}, NextSeq: i64(1), Drops: i64(0), Restarts: i64(0)}
+	if err := msg.validate(); err != nil {
+		t.Fatalf("capped event must validate: %v", err)
+	}
+	if _, err := EncodeMessage(msg, nil); err != nil {
+		t.Fatalf("capped event must encode inside the frame: %v", err)
+	}
+}
+
+func TestPackReportsTheTrueHeadOnStaleCursors(t *testing.T) {
+	source := &fakeSource{stop: make(chan struct{}), datagrams: [][]byte{execDatagram(42)}}
+	w := testWitness(t, source, staticFacts("x"))
+	pollWitness(w, 0)
+	waitFor(t, "one event", func() bool {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		return w.nextSeq == 1
+	})
+	// a cursor from a previous daemon life: the reply must expose the true
+	// head (the restart signal), never clamp up to the stale cursor
+	reply := pollWitness(w, 500)
+	if len(reply.Events) != 0 || *reply.NextSeq != 1 {
+		t.Fatalf("stale cursor must see the true head: %+v next=%d", reply.Events, *reply.NextSeq)
 	}
 }
 

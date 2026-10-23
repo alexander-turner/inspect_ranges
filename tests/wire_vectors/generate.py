@@ -407,6 +407,15 @@ def _rejects() -> list[dict[str, str]]:
             ),
         ),
         (
+            "exec-event-argv-over-items",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=1,
+                events=[_event(argv=[""] * 257)],
+            ),
+        ),
+        (
             "exec-event-argv-nonlist",
             d(
                 **base,

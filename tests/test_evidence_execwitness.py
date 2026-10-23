@@ -111,8 +111,9 @@ def test_events_land_on_the_sealed_stream(tmp_path: Path) -> None:
         records = [line for chunk in chunks for line in exec_event_lines(chunk)]
         assert [r["seq"] for r in records] == [0, 1]
         assert records[1]["argv"] == ["nmap", "-sV"]
-        # the cursor advanced: the second poll asked from next_seq
-        assert channel.calls == [("web", 0), ("web", 2)]
+        # the cursor advanced: the drain confirmed with an empty read at
+        # next_seq, and the second cycle polled from there
+        assert channel.calls == [("web", 0), ("web", 2), ("web", 2)]
         # coverage records on the meta stream
         meta_chunks = await stream_chunks(store, "driver", "exec-meta/web")
         outcomes = [
@@ -120,7 +121,7 @@ def test_events_land_on_the_sealed_stream(tmp_path: Path) -> None:
             for chunk in meta_chunks
             for line in chunk.decode().splitlines()
         ]
-        assert outcomes.count("ok") == 2
+        assert outcomes.count("ok") == 3  # page, confirming empty, second cycle
 
     asyncio.run(run())
 
@@ -226,6 +227,66 @@ def test_drain_burst_is_capped(tmp_path: Path) -> None:
         assert len(channel.calls) == 8  # EXEC_WITNESS_DRAIN_BURST
         await poller.stop()
         await writer.seal()
+
+    asyncio.run(run())
+
+
+def test_daemon_restart_is_detected_not_silenced(tmp_path: Path) -> None:
+    """A reply whose `next_seq` sits below the cursor is a reset seq space (the packers report the true head, never clamped up): the poller writes an `exec-witness-restart` gap, resets, and post-restart events ship — a restarted guest must never read as quiet (review round 1, finding 4)."""
+
+    async def run() -> None:
+        channel = WitnessFakeChannel()
+        channel.script = [
+            reply([event(0), event(1)], 2),
+            reply([], 0),  # the restarted daemon's true head
+            reply([event(0, pid=777)], 1),
+            reply([], 1),
+        ]
+        poller, writer, store = make_poller(tmp_path, channel)
+        await poller.poll_once("web")
+        await poller.poll_once("web")  # restart detected, cursor resets
+        await poller.poll_once("web")  # post-restart event ships
+        await poller.stop()
+        await writer.seal()
+        assert (await verify_location(store)).ok
+        assert ("exec-witness-restart", 0) in await gap_causes(store, "exec/web")
+        chunks = await stream_chunks(store, "driver", "exec/web")
+        pids = [r["pid"] for chunk in chunks for r in exec_event_lines(chunk)]
+        assert pids == [100, 100, 777]
+        meta = b"".join(await stream_chunks(store, "driver", "exec-meta/web"))
+        outcomes = [json.loads(line)["outcome"] for line in meta.decode().splitlines()]
+        assert "restarted" in outcomes
+
+    asyncio.run(run())
+
+
+def test_pack_reports_the_true_head_on_stale_cursors() -> None:
+    """The shared packer's restart contract: a since_seq past the head returns the HEAD, never the clamped cursor."""
+    from inspect_ranges._channel.protocol import pack_exec_events
+
+    ring = [event(i) for i in range(5)]
+    events, next_seq = pack_exec_events(ring, 500, 256)
+    assert events == [] and next_seq == 5
+
+
+def test_drain_engages_on_budget_sized_pages(tmp_path: Path) -> None:
+    """The daemon clips on its byte budget far below 256 events, so any non-empty reply means more may remain: a backlog of budget-sized pages drains in ONE poll cycle (review round 1, finding 3)."""
+
+    async def run() -> None:
+        channel = WitnessFakeChannel()
+        channel.script = [
+            reply([event(i) for i in range(0, 11)], 11),
+            reply([event(i) for i in range(11, 22)], 22),
+            reply([event(i) for i in range(22, 30)], 30),
+            reply([], 30),
+        ]
+        poller, writer, store = make_poller(tmp_path, channel)
+        await poller.poll_once("web")
+        assert len(channel.calls) == 4  # three pages + the confirming empty
+        await poller.stop()
+        await writer.seal()
+        chunks = await stream_chunks(store, "driver", "exec/web")
+        assert sum(len(exec_event_lines(c)) for c in chunks) == 30
 
     asyncio.run(run())
 

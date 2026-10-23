@@ -188,9 +188,7 @@ func (w *execWitness) run(source eventSource) {
 			w.restarts.Add(1)
 			for {
 				time.Sleep(backoff)
-				if backoff < 5*time.Second {
-					backoff *= 2
-				}
+				backoff = min(backoff*2, 5*time.Second)
 				source = w.newSource()
 				if err := source.Subscribe(); err == nil {
 					break
@@ -227,6 +225,16 @@ func (w *execWitness) ingestOne(msg []byte) {
 	// exec{process_pid@52, process_tgid@56}}; the kernel packs proc_event
 	// unaligned after cn_msg, so offsets are explicit
 	if len(msg) < 60 {
+		return
+	}
+	// only connector data messages on the proc channel qualify: an in-guest
+	// unicast spoofer aliasing procEventExec at offset 36 inside some other
+	// netlink shape is cheap to exclude (review round 1, finding 7)
+	if binary.LittleEndian.Uint16(msg[4:]) != uint16(unix.NLMSG_DONE) {
+		return
+	}
+	if binary.LittleEndian.Uint32(msg[16:]) != cnIdxProc ||
+		binary.LittleEndian.Uint32(msg[20:]) != cnValProc {
 		return
 	}
 	if binary.LittleEndian.Uint32(msg[36:]) != procEventExec {
@@ -285,11 +293,12 @@ func (w *execWitness) pack(since int64, limit int) ([]ExecEvent, int64) {
 		events = append(events, event)
 		budget += len(encoded)
 	}
+	// never clamped up to `since`: a daemon restart resets the seq space,
+	// and a head below the caller's cursor is the restart signal the host
+	// consumes (review round 1, finding 4)
 	nextSeq := w.nextSeq
 	if len(events) > 0 {
 		nextSeq = events[len(events)-1].Seq + 1
-	} else if since > nextSeq {
-		nextSeq = since
 	}
 	return events, nextSeq
 }
@@ -326,6 +335,13 @@ func readProcFacts(pid uint32) (ppid *int64, uid *int64, comm string, argv []str
 	}
 	total := 0
 	for _, part := range strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00") {
+		// the ITEM cap matters independently of bytes (review round 1):
+		// empty args cost zero budget but real encoded overhead, and the
+		// host validator refuses events past the item bound
+		if len(argv) >= MaxExecArgvItems {
+			truncated = true
+			break
+		}
 		remaining := MaxExecArgvBytes - total
 		if remaining <= 0 {
 			truncated = true
