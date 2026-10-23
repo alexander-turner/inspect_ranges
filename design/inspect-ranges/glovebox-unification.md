@@ -23,6 +23,26 @@ The meeting position: **a generic per-attacker seam, implemented out of tree.** 
 - Readiness semantics and teardown ownership defined; the reaper story intact.
 - Evidence honesty: segment pcap and beacon corroboration survive (bridge-side), the console stream for a guest we do not run is lost and must be recorded as a declared capability drop, never silently absent.
 
+## The seam, named
+
+**`AttackBoxProvider`**, registered as `INSPECT_RANGES_ATTACK_BOX=<module>.<factory>[:<config>]`, mirroring `INSPECT_RANGES_HOST` exactly: the value is the registration, persisted as the boot's origin so the reaper re-resolves teardown from disk. A factory bundle (`AttackBoxBackend`) carries the provider plus the optional doctor probe and reaper connector, the HostBackend shape. The compiled plan hands the provider a `FootholdAttachment` (the tap handle in the range netns, the allocated MAC and IP, the segment); the provider returns the one guest's exec surface and owns its lifecycle. "Attack box" is the right scope word: assumed-breach ranges have no attack box (their foothold is a content guest this project builds and captures), so the seam excludes them by construction; `FootholdProvider` would wrongly imply it covers them.
+
+Two decisions attach to the name. First, provider selection is deployment knowledge, never `range.yaml` (the collectors.yaml precedent: poll mechanics stay out of the schema), so the same published spec hash runs on the default realizer or on glovebox with no semantic edit; PR #15's schema field is the wrong layer. Second, the published acceptance suite is the **attack-box conformance battery**: the foothold wall holds, the attacker-surface sweep is clean, the exec surface passes the existing `self_check` suite (the 44-check battery already ships and is the parity bar), readiness and teardown behave, and evidence drops are declared. A provider boots when it passes; that sentence is the whole governance story.
+
+## Cost and risk
+
+**Our-side work, roughly a one-to-two-week slice** (narrower than range-host-v1, with most machinery reusable): the boot plan marks a dedicated attack box external and skips booting it; attachment construction on the segment bridge; the provider's exec surface routed behind the sandbox for that one guest; readiness delegation; origin persistence and reaper reclaim (the generic machinery extracted for host backends reuses directly); a declared-capability-drop record in evidence for the missing console stream; the conformance battery assembled mostly from existing pieces (`self_check`, the attacker-surface sweep, wall probes); tests over the LocalEndpoint harness; docs and the decision record. Two adversarial review rounds per house discipline on top. The glovebox side seeds from their PR's own 674-line connector, moved into their package.
+
+**Technical risk, ranked:**
+1. **The netns invariant is the one genuinely tricky piece.** Today the host netns carries zero range state while a range runs; a glovebox cell is a foreign VMM process on the host needing a NIC inside the range container's netns. The attachment must be built so the invariant survives (tap created inside the range netns with the fd passed to the external VMM, never a bridge leg in the host netns). Cloud Hypervisor accepts tap fds, so this is feasible, but it is load-bearing security plumbing and the place a review round should camp.
+2. **Exec-surface semantic parity.** Subtle differences (budgets, `user=`, truncation, signal exits) break checks and scorers quietly; mitigated by making `self_check` part of the battery, which is exactly what it was built for.
+3. **Containment becomes a two-stack property.** The battery proves point-in-time behavior, not architecture; the honest posture is that a range with an external attack box carries the weaker of the two containment stories, stated in docs, with the battery as the floor.
+4. **Lifecycle races across two owners** (interrupt mid-boot, reaper vs provider teardown); the origin-persistence pattern plus deny-first classification already encode the house answers.
+5. **Seam stability pre-1.0.** Keep the protocol minimal (attachment in, exec surface and lifecycle out); every method added is API someone freezes against.
+6. **Scope creep.** Pressure will arrive to extend the seam to content guests and routers; refuse by construction, since those carry built, verified content the external substrate cannot reproduce.
+
+Implementation risk is low to moderate; the real risk budget is items 1 and 3, and both are policy-plus-review problems more than code volume.
+
 ## Recommended outcomes
 
 1. Take the meeting before launch; he is a proven contributor and the timing point is right, aimed at the right API.
