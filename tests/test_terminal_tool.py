@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import inspect_ranges._terminal.tool as terminal_tool
@@ -16,6 +17,7 @@ from inspect_ai.tool import ToolCall
 from inspect_ai.util import ExecResult
 from inspect_ai.util._store import Store, init_subtask_store
 from inspect_ranges import terminal
+from inspect_ranges._terminal.session import sink_path
 from inspect_ranges._terminal.tool import (
     TERMINAL_SCREEN_STORE_KEY,
     _terminal_viewer,  # pyright: ignore[reportPrivateUsage]
@@ -59,6 +61,8 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Any, Store, str]]:
             capture_output=True,
             check=False,
         )
+        # host hygiene even when a test fails before its close
+        Path(sink_path(session)).unlink(missing_ok=True)
 
 
 def test_open_send_read_close_flow(armed: tuple[Any, Store, str]) -> None:
@@ -102,6 +106,29 @@ def test_blocking_send_waits_for_completion(armed: tuple[Any, Store, str]) -> No
     asyncio.run(scenario())
 
 
+def test_blocking_send_tolerates_trailing_semicolon(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """A blocking command line ending in `;` must run and complete: splicing the signal after it would make `cmd;;`, a shell syntax error that runs nothing and stalls the send to its full timeout."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        result = await tool(
+            action="send",
+            session=session,
+            # computed marker, so the echoed keystrokes cannot satisfy the assert
+            keystrokes="echo semi-$((40+2));\n",
+            block=True,
+            timeout=5,
+        )
+        assert "semi-42" in result
+        assert "did not complete" not in result
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
 def test_block_refused_off_shell(armed: tuple[Any, Store, str]) -> None:
     tool, _, session = armed
 
@@ -120,6 +147,19 @@ def test_block_refused_off_shell(armed: tuple[Any, Store, str]) -> None:
         )
         assert "42" in result
         await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_close_removes_the_sink_file(armed: tuple[Any, Store, str]) -> None:
+    """A closed session must not leave its pipe-pane sink behind: on a long-lived guest (or the test host) leaked sinks accumulate one per session name."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        assert Path(sink_path(session)).exists()
+        await tool(action="close", session=session)
+        assert not Path(sink_path(session)).exists()
 
     asyncio.run(scenario())
 
@@ -150,6 +190,29 @@ def test_open_applies_history_limit(armed: tuple[Any, Store, str]) -> None:
             check=True,
         )
         assert shown.stdout.strip() == "50000"
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_oversized_send_chunks_through(armed: tuple[Any, Store, str]) -> None:
+    """A send larger than tmux's ~16 KB client command limit must type through in chunks rather than fail with "command too long" (payload delivery through a session is a core workflow)."""
+    tool, _, session = armed
+    filler = "y" * 20_000
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        result = await tool(
+            action="send",
+            session=session,
+            # computed marker after the filler: only the executed command's
+            # output can satisfy the assert
+            keystrokes=f"echo {filler} big-$((40+2))\n",
+            block=True,
+            timeout=30,
+        )
+        assert "command too long" not in result
+        assert "big-42" in result
         await tool(action="close", session=session)
 
     asyncio.run(scenario())
@@ -261,6 +324,7 @@ def test_reopened_session_ignores_previous_life_signal(
             capture_output=True,
             check=False,
         )
+        Path(sink_path(keeper)).unlink(missing_ok=True)
 
 
 def test_reopen_of_dead_session_stops_stale_capture(

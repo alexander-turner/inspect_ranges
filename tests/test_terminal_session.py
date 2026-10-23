@@ -6,6 +6,7 @@ import pytest
 from inspect_ranges._terminal.cast import assemble_cast
 from inspect_ranges._terminal.session import (
     OUTPUT_CLIP_BYTES,
+    SEND_CHUNK_CHARS,
     SessionState,
     capture_pane_command,
     clip_output,
@@ -15,6 +16,7 @@ from inspect_ranges._terminal.session import (
     multiline_block,
     prepare_send,
     send_keys_command,
+    send_keys_commands,
     start_session_command,
     valid_session_name,
     wait_channel,
@@ -55,6 +57,17 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
         ("make\r\n", True, ["make; tmux wait -S ir-done-s-ab-7", "Enter"], True),
         # a bare Enter key blocks on whatever was already typed
         ("Enter", True, ["; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        # unescaped trailing semicolons are trimmed: `cmd;; tmux wait` is a
+        # shell syntax error that runs nothing and stalls to the timeout
+        ("echo hi;\n", True, ["echo hi; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        ("ls ; ;\n", True, ["ls; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        # an escaped `\;` is a literal shell argument, not a separator: it stays
+        (
+            "echo a\\;\n",
+            True,
+            ["echo a\\;; tmux wait -S ir-done-s-ab-7", "Enter"],
+            True,
+        ),
         # keystrokes that execute nothing fall back to non-blocking
         ("ls -la", True, ["ls -la"], False),
         ("C-c", True, ["C-c"], False),
@@ -119,6 +132,24 @@ def test_send_keys_command_shape() -> None:
         "-H",
         "3b",
     ]
+
+
+def test_send_keys_commands_chunks_oversized_keys() -> None:
+    """A tmux client command over ~16 KB fails ("command too long"), so an oversized key argument splits into literal `-l` chunks while small sends keep today's single-command path exactly."""
+    assert send_keys_commands("s", ["ls\n"]) == [send_keys_command("s", ["ls\n"])]
+    assert send_keys_commands("s", [";"]) == [send_keys_command("s", [";"])]
+    big = "x" * (SEND_CHUNK_CHARS * 2 + 5)
+    commands = send_keys_commands("s", [big, "Enter"])
+    assert len(commands) == 4
+    # the chunks are literal (`-l`: a chunk equal to a key name is typed, not
+    # pressed) and reassemble to the original key argument
+    assert all("-l" in command for command in commands[:3])
+    assert "".join(command[-1] for command in commands[:3]) == big
+    # the Enter key stays a key press, never a literal chunk
+    assert commands[3] == send_keys_command("s", ["Enter"])
+    # a chunk boundary landing on a lone `;` still goes as the hex byte
+    semi = "y" * SEND_CHUNK_CHARS + ";"
+    assert send_keys_commands("s", [semi])[-1][-2:] == ["-H", "3b"]
 
 
 @pytest.mark.parametrize(

@@ -27,7 +27,8 @@ from .session import (
     multiline_block,
     pane_command_command,
     prepare_send,
-    send_keys_command,
+    remove_sink_command,
+    send_keys_commands,
     start_session_command,
     valid_session_name,
     wait_done_command,
@@ -222,6 +223,9 @@ def terminal() -> Tool:
                 final = await _read_result(session, state)
                 await _exec(kill_session_command(session))
                 await stop_capture(id(store()), session)
+                # the recorder has drained the sink; a closed session must not
+                # leave its pipe file behind
+                await _exec(remove_sink_command(session))
                 states.pop(session, None)
                 _drop_screen(session)
                 return f"Closed session {session!r}. {_open_sessions()}\nFinal {final}"
@@ -251,10 +255,11 @@ def terminal() -> Tool:
             state.markers.append(
                 (time.monotonic(), f"send {session}: {keystrokes[:80]!r}")
             )
-            sent = await _exec(send_keys_command(session, keys))
-            if not sent.success:
-                detail = (sent.stderr or sent.stdout).strip()[-500:]
-                return f"Send to session {session!r} failed: {detail}"
+            for send_command in send_keys_commands(session, keys):
+                sent = await _exec(send_command)
+                if not sent.success:
+                    detail = (sent.stderr or sent.stdout).strip()[-500:]
+                    return f"Send to session {session!r} failed: {detail}"
             if blocking:
                 done = await _exec(
                     wait_done_command(session, timeout, nonce), timeout_s=timeout + 15
@@ -263,7 +268,7 @@ def terminal() -> Tool:
                     result = await _read_result(session, state)
                     return (
                         f"The command did not complete within {timeout:.0f}s "
-                        f"(it is still running; poll with read).\n{result}"
+                        f"(it may still be running; poll with read).\n{result}"
                     )
             elif duration > 0:
                 await anyio.sleep(duration)

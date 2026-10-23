@@ -86,6 +86,11 @@ def kill_session_command(session: str) -> list[str]:
     return ["tmux", "kill-session", "-t", target(session)]
 
 
+def remove_sink_command(session: str) -> list[str]:
+    """Argv removing the session's pipe-pane sink after close: a closed session must not leave its sink file behind (sessions still open at finalize keep theirs; the guest is torn down with the sample)."""
+    return ["rm", "-f", sink_path(session)]
+
+
 def list_sessions_command() -> list[str]:
     """Argv listing session names, one per line."""
     return ["tmux", "list-sessions", "-F", "#{session_name}"]
@@ -99,6 +104,38 @@ def send_keys_command(session: str, keys: list[str]) -> list[str]:
     if keys == [";"]:
         return ["tmux", "send-keys", "-t", target(session), "-H", "3b"]
     return ["tmux", "send-keys", "-t", target(session), "--", *keys]
+
+
+# tmux rejects a client command over ~16 KB ("command too long"), so larger
+# key arguments split into literal chunks well under the limit (chars, so a
+# fully multibyte chunk stays under 8 KB encoded)
+SEND_CHUNK_CHARS = 2000
+
+
+def _send_literal_command(session: str, chunk: str) -> list[str]:
+    """Argv typing one chunk verbatim: `-l` disables key-name lookup, so a chunk that happens to equal a key name (`Enter`) is typed, not pressed; the lone-`;` separator still needs its hex form."""
+    if chunk == ";":
+        return ["tmux", "send-keys", "-t", target(session), "-H", "3b"]
+    return ["tmux", "send-keys", "-t", target(session), "-l", "--", chunk]
+
+
+def send_keys_commands(session: str, keys: list[str]) -> list[list[str]]:
+    """The argv sequence sending the prepared key arguments, splitting oversized ones.
+
+    Keys at most `SEND_CHUNK_CHARS` long go through `send_keys_command` exactly as before (one command, key names honored). A longer key is never a tmux key name, so it splits into literal (`-l`) chunks that each fit tmux's client command limit; a 100 KB paste types through where a single `send-keys` would fail with "command too long".
+    """
+    if all(len(key) <= SEND_CHUNK_CHARS for key in keys):
+        return [send_keys_command(session, keys)]
+    commands: list[list[str]] = []
+    for key in keys:
+        if len(key) <= SEND_CHUNK_CHARS:
+            commands.append(send_keys_command(session, [key]))
+        else:
+            commands.extend(
+                _send_literal_command(session, key[i : i + SEND_CHUNK_CHARS])
+                for i in range(0, len(key), SEND_CHUNK_CHARS)
+            )
+    return commands
 
 
 def capture_pane_command(session: str, entire: bool = False) -> list[str]:
@@ -148,12 +185,20 @@ def multiline_block(keystrokes: str) -> bool:
     return bool(re.search(r"[\r\n]", keystrokes.rstrip(_NEWLINE_CHARS)))
 
 
+def _trim_trailing_semicolons(command: str) -> str:
+    r"""Drop unescaped trailing semicolons (and surrounding whitespace) from a blocking command line: appending the `; tmux wait` signal after one would make `cmd;;`, a shell syntax error that never runs the command and stalls the send to its full timeout. A `\;` stays, since the shell reads it as a literal argument, not a separator."""
+    trimmed = command.rstrip()
+    while trimmed.endswith(";") and not trimmed.endswith("\\;"):
+        trimmed = trimmed[:-1].rstrip()
+    return trimmed
+
+
 def prepare_send(
     session: str, keystrokes: str, block: bool, nonce: str
 ) -> tuple[list[str], bool]:
     """Prepare the send-keys arguments, appending the completion signal for a blocking send.
 
-    Returns `(keys, is_blocking)`. A blocking send only makes sense when the keystrokes execute a command: the trailing Enter (key name or newline) is stripped and the per-send completion signal plus `Enter` are appended, so the whole line runs as `<command>; tmux wait -S <channel>` (one argument, so no fragment of it can be the lone-`;` separator). Keystrokes that do not execute anything fall back to non-blocking even when `block` was requested; the caller refuses `multiline_block` keystrokes before calling.
+    Returns `(keys, is_blocking)`. A blocking send only makes sense when the keystrokes execute a command: the trailing Enter (key name or newline) is stripped, unescaped trailing semicolons are trimmed (they would make the signal splice a syntax error), and the per-send completion signal plus `Enter` are appended, so the whole line runs as `<command>; tmux wait -S <channel>` (one argument, so no fragment of it can be the lone-`;` separator). Keystrokes that do not execute anything fall back to non-blocking even when `block` was requested; the caller refuses `multiline_block` keystrokes before calling.
     """
     if not block or not _executes(keystrokes):
         return [keystrokes], False
@@ -161,7 +206,7 @@ def prepare_send(
     if _is_enter_key(stripped):
         stripped = ""
     else:
-        stripped = stripped.rstrip(_NEWLINE_CHARS)
+        stripped = _trim_trailing_semicolons(stripped.rstrip(_NEWLINE_CHARS))
     signal = f"{stripped}; tmux wait -S {wait_channel(session, nonce)}"
     return [signal, "Enter"], True
 
