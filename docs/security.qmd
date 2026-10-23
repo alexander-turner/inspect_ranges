@@ -45,6 +45,7 @@ Guest control rides virtio-vsock, not a management network. The rules:
 - The plane is strictly connect-from-host: the in-guest daemon accepts connections only from the host, and no host-side `AF_VSOCK` listeners exist for a compromised guest to dial.
 - Cloud Hypervisor guests are reached over the VMM's hybrid-vsock Unix socket with the peer-credential check described in [Virtual Machine Monitors](#virtual-machine-monitors).
 - Everything received over the channel comes from guests the agent may have compromised and is treated as untrusted input: strict schema validation, reader-side byte caps, and tamper verdicts for protocol violations an honest endpoint cannot produce (see [the retry contract](provider.qmd#the-retry-contract)).
+- The [exec witness](evidence.qmd#the-exec-witness) is guest-tier evidence under the same rule: the pre-compromise exec timeline is immutable once streamed, a root attacker can forge or starve it from the moment the guest falls (visibly, never silently), and nothing scores over it.
 
 In the other direction, in-range defenders can detect everything the agent transmits (that is realism, not a leak), but they cannot observe the agent's interior, connect to it (standard images ship zero network listeners), or reach the channel controlling it.
 

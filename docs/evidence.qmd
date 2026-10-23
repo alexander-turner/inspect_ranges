@@ -1,7 +1,7 @@
 ---
 title: "Evidence"
 description: "What the range records outside every VM and where it streams. Covers the tamper-evidence guarantee and how to verify a record."
-llms-description: "The evidence layer: per-segment pcap, consoles, stage and verification streams, and in-guest telemetry export captured outside every VM; the per-sample location beside the eval log; the hash-chained write-once format with its seal and the sample-store binding; gap and seal semantics; dual-clock records; inspect-ranges evidence verify including --expect-seal; deployment guidance for store-side prevention; the environment knob table."
+llms-description: "The evidence layer: per-segment pcap, consoles, stage and verification streams, in-guest telemetry export, and the exec witness (per-guest execve timelines from a lazy-armed daemon subscriber, record-only, with declared drops on Windows) captured outside every VM; the per-sample location beside the eval log; the hash-chained write-once format with its seal and the sample-store binding; gap and seal semantics; dual-clock records; inspect-ranges evidence verify including --expect-seal; deployment guidance for store-side prevention; the environment knob table including the INSPECT_RANGES_EXEC_WITNESS kill switch."
 ---
 
 ## Overview
@@ -22,6 +22,10 @@ Evidence is on by default inside an eval: when a sample runs under Inspect, the 
 | `stages`, `verify` | The realization stage stream (with host emit clocks) and the readiness/verification results. |
 | `session` | Daemon session pins and re-pins: a guest daemon restart is itself evidence. |
 | `telemetry/<collector>`, `telemetry-meta/<collector>` | Exported in-guest telemetry deltas and the per-poll watermark records that make coverage decidable (below). |
+| `exec/<guest>`, `exec-meta/<guest>` | The exec witness: every `execve` on a Linux guest (pid, ppid, uid, argv, guest timestamp), from a daemon subscriber armed by the host's first poll, with per-poll coverage records so "no events" vs "witness dead" is decidable; a Windows guest or a connector-less kernel gets one declared `unsupported` record instead. Record-only: no goal or corroboration reads it. |
+| `draws` | The per-sample variable draw seed and values (non-secret by construction), so recorded samples re-derive post-hoc. |
+| `plants` | What challenge setup planted where (tokens, flags), timestamped: the scorer's proof-contract record. |
+| `probe/<goal id>` | The nonce-bound active prober's transcript for goals that use it. |
 | `terminal/<session>` | The agent's terminal sessions when the task wires the [terminal](challenges.qmd#terminal-sessions) tool: the raw pane output, host-timestamped; at close (or sample finalize for a session still open) an asciicast assembled from it (with per-call markers) lands beside the evidence as `terminal-<session>.cast`, with numbered suffixes when a reopened name records more than one life. |
 | `heartbeat`, `clock` | Capture liveness and watermarks for our own collectors, and wall-clock anomaly records. |
 
@@ -45,7 +49,7 @@ The format's own guarantee has an exact scope. Everything **at or below the seal
 
 Two bounded windows are part of the design and visible in the record rather than silent:
 
-- **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with a named cause (for example `buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, or `applier-shutdown`; the verifier inventories every gap in the record). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
+- **Backpressure is never silent.** When the local buffer cap is hit (a flooded segment, a slow uplink), the oldest unstreamed chunk is dropped and an explicit gap record joins the chain in sequence, with a named cause (for example `buffer-cap`, `capture-restart`, `capture-dead`, `poll-failed`, `watermark-regression`, `evidence-cap`, `exec-ring-overflow`, `exec-subscriber-loss`, or `applier-shutdown`; the verifier inventories every gap in the record). Scoring's completeness checks see gaps; nothing pretends to coverage it does not have.
 - **Manifest batching has a crash window.** Chunks deliver on every flush, but manifest parts are cut on a bounded cadence (15 seconds or 256 records, and always at seal). A crash can leave up to one interval of records whose chunks survive as listed, unreferenced residue rather than chain-committed records; the record never claims the missing window.
 
 ## Telemetry Export
@@ -55,6 +59,10 @@ Scenario telemetry (journald, application logs, EDR event files) lives inside gu
 The assurance claim: **export upgrades the timeline, not the source.** Pre-compromise telemetry becomes immutable once streamed. Producer silencing shows as a watermark stall (polls keep succeeding while the watermark stays flat); an unreachable guest shows as poll-gap records; log truncation or rewrite shows as a watermark regression record. All three are decidable from the sealed record alone, and all three are distinct from "no events". The read itself remains a guest read: a compromised host can forge what it exports from the moment it falls, which is why detection-type goals consume the watermarks as a completeness precondition rather than treating exported content as proof.
 
 Operational note: the guest daemon reaps each command's process group when the command returns, so an in-guest background producer started over the channel must detach with `setsid` to outlive its starting exec.
+
+## The Exec Witness
+
+The guest daemon can witness every `execve` on a Linux guest (kernel process connector) and the host ships the events to `exec/<guest>`: pid, parent, uid, argv (sanitized, byte-capped), and the guest timestamp. The subscriber is lazy-armed by the host's first poll, so builds never activate it, and `INSPECT_RANGES_EXEC_WITNESS=0` disables it completely with no image rebuild. The stream is record-only (no goal or corroboration reads it) and carries the same guest-tier assurance as telemetry export: the pre-compromise timeline is immutable once streamed, loss is always a counted gap (`exec-ring-overflow`, `exec-subscriber-loss`), coverage is decidable from the per-poll records on `exec-meta/<guest>`, and a Windows guest or a kernel without the connector gets one declared `unsupported` record instead of silence. Design: `execve-witness-v1.md` (adopted from glovebox PR #15's execve witness).
 
 ## Verifying a Record
 
@@ -84,6 +92,7 @@ Local evidence (a local log dir, no override) is fine for development and does n
 | `INSPECT_RANGES_EVIDENCE_SINK` | unset | Override base for evidence locations; unset derives from the eval log location (the default and the recommendation). Also enables evidence outside an eval context. |
 | `INSPECT_RANGES_EVIDENCE_BUFFER_MB` | 64 | Per-writer in-memory buffer cap; past it the oldest unstreamed chunk drops with an in-chain gap record. Joins the sample's admission memory charge. |
 | `INSPECT_RANGES_EVIDENCE_MAX_MB` | 4096 | Per-writer volume cap (a sample has at most two writers: `driver` and `host`). Breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never a failed sample. |
+| `INSPECT_RANGES_EXEC_WITNESS` | unset (on) | Set `0` to disable the exec witness: the per-guest poller is never constructed, so the in-guest subscriber never arms (lazy-arm makes this the complete kill switch, no image rebuild involved). |
 | `CAPTURE_CHUNK_MB`, `CAPTURE_CAP_MB`, `CAPTURE_MAX_RESTARTS`, `CAPTURE_POLL_S` | 10 / 2048 / 5 / 0.5 | Capture sidecar tuning, read from the environment at `up`: rotation chunk size, per-segment disk cap, tcpdump restart budget, supervisor poll cadence. |
 
 The finalize flush budget (30 seconds) and the manifest batching cadence (15 seconds / 256 records) are constants: teardown is never hostage to a slow uplink, and what cannot flush inside the budget is recorded in the seal rather than silently dropped.
