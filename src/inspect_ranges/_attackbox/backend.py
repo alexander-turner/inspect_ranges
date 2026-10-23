@@ -72,7 +72,7 @@ class AttackBoxHandle:
     """What a provider's `boot` returns: the exec surface plus a reclaim token, nothing else."""
 
     exec_endpoint: HybridEndpoint
-    """A unix socket serving the daemon wire protocol, one request per connection (the Cloud Hypervisor hybrid-vsock shape); the peer uid is enforced at every dial."""
+    """A unix socket serving the Cloud Hypervisor hybrid-vsock shape: the `CONNECT <port>` / `OK <port>` preamble, then the daemon wire protocol, one request per connection; the peer uid is enforced at every dial."""
     reclaim_token: str = ""
     """Opaque provider state persisted in the attack-box record, handed back verbatim at `teardown`."""
 
