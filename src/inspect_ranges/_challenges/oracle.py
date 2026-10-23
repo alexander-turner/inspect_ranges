@@ -5,6 +5,7 @@ The oracle is the surface goal types run against (`challenges-v1.md`): it binds 
 Residue rule, enforced here by construction: plant VALUES never ride argv, env, stdin of oracle execs, any log line, or evidence in the clear. File content travels only as `write_file` bulk; the owner flow is write-0600-then-chown so only the path appears in argv.
 """
 
+import logging
 import secrets
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast, overload
@@ -25,6 +26,8 @@ from .evidenceread import (
     stream_json_records,
 )
 from .plants import PlantStore
+
+logger = logging.getLogger("inspect_ranges.challenges")
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Generator
@@ -118,6 +121,23 @@ class RangeOracle:
     def evidence_session(self) -> "EvidenceSession | None":
         """The sample's evidence session (producer registration, driver stream appends); `None` when evidence is unavailable."""
         return self._handle.evidence
+
+    async def flush_capture(self) -> int:
+        """Snapshot-ship the active capture chunks so scoring reads current traffic; never raises.
+
+        Size-based rotation means a quiet segment's beacon usually sits in the still-active tcpdump file at scoring time; the scorer calls this once before any pcap read (the 2026-10-23 fleet-pass finding). Returns the snapshot chunks shipped: `0` with no evidence session, under separated capture (the applier owns the streamer; a flush verb there is a recorded follow-up), or on any failure.
+        """
+        session = self.evidence_session()
+        # fixtures substitute lean session stubs; a missing flush is a no-op
+        flush = getattr(session, "flush_capture", None)
+        if session is None or flush is None:
+            return 0
+        try:
+            flushed = await flush()
+            return int(flushed)
+        except Exception as error:  # noqa: BLE001  (observability, never load-bearing)
+            logger.info("capture flush skipped: %s", error)
+            return 0
 
     def nonce(self) -> str:
         """A fresh per-call secret from independent entropy, never derived from any recorded seed."""

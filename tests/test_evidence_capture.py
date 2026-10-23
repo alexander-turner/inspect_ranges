@@ -23,6 +23,7 @@ from inspect_ranges._evidence import (
     StageRecorder,
     verify_location,
 )
+from inspect_ranges._evidence.reader import stream_chunks
 from inspect_ranges._evidence.supervisor import SUPERVISOR_SOURCE
 
 # ---------------------------------------------------------------------------
@@ -852,3 +853,62 @@ def test_supervisor_cap_excludes_claimed_files(tmp_path: Path) -> None:
         assert claimed.exists()
     finally:
         supervisor.finish()
+
+
+# -- scoring-time flush (corroboration in live evals, 2026-10-23) --------------
+
+
+def test_flush_snapshots_the_active_chunk_without_claiming(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        location, capture, writer, tap = harness(tmp_path)
+        (capture / "dmz").mkdir()
+        active = b"P" * 24 + b"beacon-bytes-in-the-active-chunk"
+        (capture / "dmz" / "g0.pcap").write_bytes(active)
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap"}})
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        await one_cycle(streamer)  # ships nothing: the only chunk is active
+        shipped = await streamer.flush()
+        assert shipped == 1
+        # the snapshot shipped a copy: the file is neither claimed nor removed
+        assert (capture / "dmz" / "g0.pcap").exists()
+        # rotation then ships the full file as usual
+        (capture / "dmz" / "g0.pcap1").write_bytes(b"P" * 24 + b"next")
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap1"}})
+        await one_cycle(streamer)
+        write_status(
+            capture, {"dmz": {"active": None, "state": "stopped"}}, stopped=True
+        )
+        await streamer.stop(stop_timeout_s=2.0)
+        seal, _ = await writer.seal()
+        assert seal.status == "complete"
+        store = LocalDirStore(location)
+        report = await verify_location(store, location=str(location))
+        assert report.ok
+        chunks = await stream_chunks(store, "host", "pcap/dmz")
+        assert chunks[0] == active  # the flush snapshot
+        assert any(b"beacon-bytes" in chunk for chunk in chunks)
+
+    asyncio.run(scenario())
+
+
+def test_flush_skips_empty_missing_and_stopped(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        _, capture, writer, tap = harness(tmp_path)
+        (capture / "dmz").mkdir()
+        streamer = CaptureStreamer(writer, tap, segments=["dmz"], console_guests=[])
+        # header-only active chunk: nothing worth shipping
+        (capture / "dmz" / "g0.pcap").write_bytes(b"P" * 24)
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap"}})
+        assert await streamer.flush() == 0
+        # a sidecar that is not running never flushes (its files ship whole)
+        write_status(capture, {"dmz": {"active": "dmz/g0.pcap", "state": "exhausted"}})
+        assert await streamer.flush() == 0
+        # a declared active that is gone: skipped, never raises
+        write_status(capture, {"dmz": {"active": "dmz/missing.pcap"}})
+        assert await streamer.flush() == 0
+        # no active declared: nothing to snapshot
+        write_status(capture, {"dmz": {}})
+        assert await streamer.flush() == 0
+        await writer.seal()
+
+    asyncio.run(scenario())

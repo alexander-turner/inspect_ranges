@@ -30,6 +30,9 @@ STDERR_NAME = "stderr.log"
 _PCAP_NAME = re.compile(r"^g(\d+)\.pcap(\d*)$")
 
 CLAIMED_SUFFIX = ".shipped"
+
+PCAP_GLOBAL_HEADER_LEN = 24
+"""A classic pcap file's global header size: an active chunk at or under this carries no packets, so a flush snapshot of it ships nothing."""
 """Appended by `claim_file` before a chunk ships (B13): the supervisor's chunk regex anchors at `.pcap<N>$`, so a claimed file vanishes from its cap accounting and `enforce_cap` can never unlink shipped bytes and report them as `capture-cap` loss. Claimed files are the streamer's to remove; their claim window is one cycle (removal retried on failure)."""
 
 _CLAIMED_NAME = re.compile(r"^g(\d+)\.pcap(\d*)\.shipped$")
@@ -573,6 +576,46 @@ class CaptureStreamer:
         if match is None:
             return None
         return (int(match.group(1)), int(match.group(2) or 0))
+
+    async def flush(self) -> int:
+        """Copy-ship a snapshot of every segment's active pcap chunk; returns chunks shipped.
+
+        Scoring reads only delivered evidence chunks, and size-based rotation means a quiet segment's beacon usually sits in the still-active tcpdump file at scoring time (the 2026-10-23 fleet-pass finding: every live sample corroborated over zero bytes). The snapshot is a plain read of the active file (`tcpdump -U` keeps it packet-buffered; a torn trailing record is tolerated by the pcap readers), appended to the segment's stream like any chunk: no claim, no removal, so the file still ships complete at its eventual rotation or the final harvest. Duplicate packet bytes across the snapshot and the later full chunk are accepted; the scanners match within chunks independently. Never raises; failures log and skip the segment.
+        """
+        shipped = 0
+        now = self._clock()
+        span = ClockSpan(start=self._last_cycle or now, end=now)
+        status = await self._read_status()
+        segments = _status_segments(status)
+        for segment in self._segments:
+            entry = segments.get(segment)
+            active = entry.get("active") if entry is not None else None
+            if not isinstance(active, str) or entry is None:
+                continue
+            if entry.get("state") not in (None, "running"):
+                continue
+            name = active.rsplit("/", 1)[-1]
+            try:
+                data = await asyncio.to_thread(self._tap.read_file, f"{segment}/{name}")
+            except Exception as error:  # noqa: BLE001
+                self._tap_errors += 1
+                logger.debug(
+                    "pcap flush read failed for %s/%s: %s", segment, name, error
+                )
+                continue
+            if len(data) <= PCAP_GLOBAL_HEADER_LEN:
+                continue
+            await self._writer.append(f"pcap/{segment}", data, span=span)
+            shipped += 1
+            logger.info(
+                "capture flush: snapshot of %s/%s shipped (%d bytes)",
+                segment,
+                name,
+                len(data),
+            )
+        if shipped:
+            await self._writer.flush()
+        return shipped
 
     async def _ship_stderr(self, span: ClockSpan) -> None:
         for segment, view in self._segments.items():

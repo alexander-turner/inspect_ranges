@@ -454,6 +454,19 @@ class EvidenceSession:
         """
         self._producers.append(stop)
 
+    async def flush_capture(self) -> int:
+        """Snapshot-ship the active capture chunks (`CaptureStreamer.flush`); never raises.
+
+        Local capture only: under the separated topology the applier owns the streamer and this returns `0` (a flush verb on the applier is a recorded follow-up). Returns the snapshot chunks shipped.
+        """
+        if not self.enabled or self._streamer is None:
+            return 0
+        try:
+            return await self._streamer.flush()
+        except Exception as error:  # noqa: BLE001  (never load-bearing)
+            logger.info("capture flush skipped: %s", error)
+            return 0
+
     async def append_driver(self, stream: str, data: bytes) -> None:
         """Append to a driver-side evidence stream (guarded: disabled sessions and backend trouble no-op, never raise)."""
         await self._driver_append(stream, data)

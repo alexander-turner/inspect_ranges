@@ -185,6 +185,10 @@ async def score_challenge(
             "or inspect_swe bridged_tools=[verify_goal()])",
             challenge.id,
         )
+    # snapshot the active capture chunks before any goal reads pcap: a quiet
+    # segment's beacon is otherwise unrotated and invisible at scoring time
+    # (the oracle's pcap memo is first populated below, so ordering suffices)
+    await oracle.flush_capture()
     assurances: dict[str, Assurance] = {}
     candidates_dropped: dict[str, int] = {}
     fallback_records: dict[str, LatchRecord] = {}
