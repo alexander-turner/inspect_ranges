@@ -17,9 +17,12 @@ import (
 type vectorDoc struct {
 	Protocol int `json:"protocol"`
 	Daemon   struct {
-		KillGraceMs    int64 `json:"kill_grace_ms"`
-		WaitDelayMs    int64 `json:"wait_delay_ms"`
-		InboundBulkCap int64 `json:"inbound_bulk_cap"`
+		KillGraceMs      int64 `json:"kill_grace_ms"`
+		WaitDelayMs      int64 `json:"wait_delay_ms"`
+		InboundBulkCap   int64 `json:"inbound_bulk_cap"`
+		ExecReplyBudget  int64 `json:"exec_reply_budget"`
+		MaxExecEvents    int64 `json:"max_exec_events"`
+		MaxExecArgvBytes int64 `json:"max_exec_argv_bytes"`
 	} `json:"daemon"`
 	Vectors []struct {
 		Name      string          `json:"name"`
@@ -177,6 +180,15 @@ func TestDaemonConstantsPinnedByVectors(t *testing.T) {
 	}
 	if doc.Daemon.InboundBulkCap != ReceiveBulkCap {
 		t.Fatalf("inbound bulk cap %d != pinned %d", ReceiveBulkCap, doc.Daemon.InboundBulkCap)
+	}
+	if doc.Daemon.ExecReplyBudget != ExecReplyBudget {
+		t.Fatalf("exec reply budget %d != pinned %d", ExecReplyBudget, doc.Daemon.ExecReplyBudget)
+	}
+	if doc.Daemon.MaxExecEvents != MaxExecEvents {
+		t.Fatalf("max exec events %d != pinned %d", MaxExecEvents, doc.Daemon.MaxExecEvents)
+	}
+	if doc.Daemon.MaxExecArgvBytes != MaxExecArgvBytes {
+		t.Fatalf("max exec argv bytes %d != pinned %d", MaxExecArgvBytes, doc.Daemon.MaxExecArgvBytes)
 	}
 }
 

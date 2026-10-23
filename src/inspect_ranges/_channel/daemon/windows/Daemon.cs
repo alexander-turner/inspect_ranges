@@ -228,7 +228,7 @@ namespace VsockD
         // supervised listener recoveries since start; surfaced in diag_result
         // so the storm battery can assert the accept loop never wedged
         static long _listenerRestarts;
-        public static string Version = "vsockd 3.2.0 (windows)";
+        public static string Version = "vsockd 3.3.0 (windows)";
         // minted once per daemon process ("N" = 32 lowercase hex): a restart,
         // which empties the dedupe store, surfaces to the host as a session
         // change rather than a silent loss of exactly-once (provider-v1
