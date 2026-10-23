@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from .._brand import GUEST_BRAND, GUEST_OPT_LINUX
 from .protocol import PROTOCOL_VERSION
 
-DAEMON_VERSION = "3.2.0"
+DAEMON_VERSION = "3.3.0"
 
 GO_PIN = "go1.23.6"
 PINNED_GO = Path.home() / ".local/go-toolchains" / GO_PIN / "bin/go"

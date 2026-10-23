@@ -47,6 +47,9 @@ from .protocol import (
     DiagReply,
     DiagRequest,
     ErrorReply,
+    ExecEvent,
+    ExecEventsReply,
+    ExecEventsRequest,
     ExecRequest,
     ExecResult,
     FileData,
@@ -65,6 +68,7 @@ from .protocol import (
     StageReport,
     TeardownRequest,
     WriteFileRequest,
+    pack_exec_events,
 )
 
 logger = logging.getLogger("inspect_ranges.channel")
@@ -217,6 +221,9 @@ class RangeChannel(Protocol):
     async def ping(self, guest: str) -> PongReply: ...
     async def session(self, guest: str) -> str: ...
     async def diag(self, guest: str, *, max_entries: int = 100) -> DiagReply: ...
+    async def exec_events(
+        self, guest: str, *, since_seq: int = 0, max_events: int = 128
+    ) -> ExecEventsReply: ...
     async def heartbeat(self) -> Heartbeat: ...
     async def teardown(self) -> None: ...
 
@@ -877,6 +884,19 @@ class MessageChannel:
         reply, _, attempts = await self._exchange(guest, request)
         return self._expect(reply, DiagReply, request, guest, attempts=attempts)
 
+    async def exec_events(
+        self, guest: str, *, since_seq: int = 0, max_events: int = 128
+    ) -> ExecEventsReply:
+        """Read the daemon's exec-witness ring from `since_seq` (execve-witness-v1); the FIRST call arms the in-guest subscriber (lazy-arm).
+
+        A daemon without the witness answers a typed error that surfaces as `GuestError` (`ENOSYS` from a Linux daemon whose kernel lacks the process connector; `EPROTO` from the Windows daemon's unknown-kind fallback): the caller records a declared capability drop, never a failure.
+        """
+        request = ExecEventsRequest(
+            id=request_id(), since_seq=since_seq, max_events=max_events
+        )
+        reply, _, attempts = await self._exchange(guest, request)
+        return self._expect(reply, ExecEventsReply, request, guest, attempts=attempts)
+
     # -- host lifecycle plane -----------------------------------------------
 
     async def heartbeat(self) -> Heartbeat:
@@ -1321,6 +1341,14 @@ class FakeGuest:
         self._running_started: dict[str, float] = {}
         self._handlers: dict[str, ExecHandler] = {}
         self.diag_entries: list[DiagEntry] = []
+        self.exec_events_ring: list[ExecEvent] = []
+        """Scripted witness ring; replies pack through the shared `pack_exec_events` geometry so host tests cannot pass against packing the real daemon lacks."""
+        self.exec_events_error: str | None = None
+        """Scripted terminal refusal (`ENOSYS` for a connector-less kernel, `EPROTO` for a daemon without the verb)."""
+        self.exec_events_drops = 0
+        self.exec_events_restarts = 0
+        self.exec_events_armed = False
+        """Set on the first successful `exec_events` dispatch: pins lazy-arm (a host that never polls leaves this False)."""
 
     def register(self, command: str, handler: ExecHandler) -> None:
         self._handlers[command] = handler
@@ -1373,9 +1401,9 @@ class FakeGuest:
                 ErrorReply(id=message.id, errno="ENOENT", message="no stored result"),
                 None,
             )
-        if isinstance(message, (PingRequest, DiagRequest)):
+        if isinstance(message, (PingRequest, DiagRequest, ExecEventsRequest)):
             # answered fresh, never charged to the durable store: both daemons
-            # dispatch ack/poll/ping/diag before the store acquire
+            # dispatch ack/poll/ping/diag/exec_events before the store acquire
             return self._handle_fresh(message, bulk)
         if (stored := self._stored.get(message.id)) is not None:
             return stored
@@ -1417,6 +1445,30 @@ class FakeGuest:
         if isinstance(message, DiagRequest):
             entries = self.diag_entries[-message.max_entries :]
             return _StoredReply(DiagReply(id=message.id, entries=entries), None)
+        if isinstance(message, ExecEventsRequest):
+            if self.exec_events_error is not None:
+                return _StoredReply(
+                    ErrorReply(
+                        id=message.id,
+                        errno=self.exec_events_error,
+                        message="exec witness unavailable",
+                    ),
+                    None,
+                )
+            self.exec_events_armed = True
+            events, next_seq = pack_exec_events(
+                self.exec_events_ring, message.since_seq, message.max_events
+            )
+            return _StoredReply(
+                ExecEventsReply(
+                    id=message.id,
+                    events=events,
+                    next_seq=next_seq,
+                    drops=self.exec_events_drops,
+                    restarts=self.exec_events_restarts,
+                ),
+                None,
+            )
         if isinstance(message, ReadFileRequest):
             return self._read(message)
         if isinstance(message, WriteFileRequest):

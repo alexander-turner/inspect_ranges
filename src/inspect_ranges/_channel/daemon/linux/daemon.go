@@ -40,7 +40,7 @@ const (
 	KillGrace      = 5 * time.Second // SIGTERM, then SIGKILL after grace
 	WaitDelay      = 5 * time.Second // bound on reaping pipe copiers after exit (cmd.WaitDelay)
 	MaxConnActive  = 512             // resource bound against floods; polls must outlive held exec slots
-	DaemonVersion  = "vsockd 3.2.0 (go)"
+	DaemonVersion  = "vsockd 3.3.0 (go)"
 	// exec must not PATH-resolve a privilege boundary: a range-writable PATH
 	// entry could shadow runuser, so the daemon invokes it absolutely
 	RunuserPath    = "/usr/sbin/runuser"
@@ -269,10 +269,18 @@ type Daemon struct {
 	// supervised listener recoveries since start; surfaced in diag_result
 	// so batteries can assert the storm never wedged the accept loop
 	listenerRestarts atomic.Int64
+	// the lazy-armed exec witness (execve-witness-v1); fully dormant until
+	// the first exec_events poll
+	witness *execWitness
 }
 
 func NewDaemon() *Daemon {
-	daemon := &Daemon{store: NewStore(), diag: NewDiag(), session: newSessionID()}
+	daemon := &Daemon{
+		store:   NewStore(),
+		diag:    NewDiag(),
+		session: newSessionID(),
+		witness: newExecWitness(),
+	}
 	daemon.agent = resolveAgent(daemon.diag)
 	return daemon
 }
@@ -462,6 +470,10 @@ func (d *Daemon) dispatch(request *Message, bulk []byte) *storedReply {
 			Entries:          d.diag.Tail(limit),
 			ListenerRestarts: i64(d.listenerRestarts.Load()),
 		}}
+	case "exec_events":
+		// pre-store like diag: polling the witness ring is a read, never
+		// charged to the durable store; the first poll arms the subscriber
+		return d.witness.handle(request)
 	}
 	// durable kinds: dedupe, tombstones, and attach-to-in-flight in ONE
 	// atomic acquire (exactly-once per id, immune to the completion race)

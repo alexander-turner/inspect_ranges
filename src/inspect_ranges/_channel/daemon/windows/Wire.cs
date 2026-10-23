@@ -45,6 +45,11 @@ namespace VsockD
         public const int MaxRequestIdLen = 64;
         public const int MaxGrants = 64;
         public const int MaxDiagEntries = 1000;
+        // execve-witness-v1 (Linux-only verb; this codec still validates it)
+        public const int MaxExecEvents = 256;
+        public const int MaxExecArgvBytes = 2048;
+        public const int MaxExecArgvItems = 256;
+        public const int MaxExecCommLen = 64;
 
         static readonly HashSet<string> StageLiterals =
             new HashSet<string> { "fetch", "construct", "boot", "verify", "ready", "failed" };
@@ -495,12 +500,14 @@ namespace VsockD
             { "poll", new[] { "target_id" } },
             { "ack", new[] { "target_id" } },
             { "diag", new string[0] },
+            { "exec_events", new string[0] },
             { "exec_result", new[] { "rc", "stdout_size", "stderr_size" } },
             { "file_data", new[] { "size" } },
             { "ok", new string[0] },
             { "pending", new[] { "target_id", "elapsed_ms" } },
             { "forward_ok", new[] { "handle" } },
             { "diag_result", new string[0] },
+            { "exec_events_result", new[] { "next_seq" } },
             { "error", new[] { "errno", "message" } },
             { "realize", new[] { "bundle_digest" } },
             { "teardown", new string[0] },
@@ -519,12 +526,14 @@ namespace VsockD
             { "poll", new string[0] },
             { "ack", new string[0] },
             { "diag", new[] { "max_entries" } },
+            { "exec_events", new[] { "since_seq", "max_events" } },
             { "exec_result", new[] { "stdout_truncated", "stderr_truncated" } },
             { "file_data", new[] { "truncated" } },
             { "ok", new string[0] },
             { "pending", new string[0] },
             { "forward_ok", new string[0] },
             { "diag_result", new[] { "entries", "listener_restarts" } },
+            { "exec_events_result", new[] { "events", "drops", "restarts" } },
             { "error", new[] { "layer", "partial" } },
             { "realize", new[] { "grants" } },
             { "teardown", new string[0] },
@@ -594,7 +603,7 @@ namespace VsockD
             if (dataSize.HasValue && (dataSize.Value < 0 || dataSize.Value > MaxBulkDeclarable))
                 throw new DecodeException(kind + ": data_size out of bounds");
 
-            foreach (string f in new[] { "elapsed_ms", "uptime_ms", "listener_restarts" })
+            foreach (string f in new[] { "elapsed_ms", "uptime_ms", "listener_restarts", "since_seq", "next_seq", "drops", "restarts" })
             {
                 long? v = GetLong(m, f);
                 if (v.HasValue && (v.Value < 0 || v.Value > MaxWireInt))
@@ -741,6 +750,16 @@ namespace VsockD
                     if (maxEntries.HasValue && (maxEntries.Value < 1 || maxEntries.Value > 1000))
                         throw new DecodeException("diag: max_entries out of bounds");
                     break;
+                case "exec_events":
+                    long? maxEvents = GetLong(m, "max_events");
+                    if (maxEvents.HasValue && (maxEvents.Value < 1 || maxEvents.Value > MaxExecEvents))
+                        throw new DecodeException("exec_events: max_events out of bounds");
+                    break;
+                case "exec_events_result":
+                    if (!m.ContainsKey("next_seq"))
+                        throw new DecodeException("exec_events_result: missing next_seq");
+                    ValidateExecEvents(m);
+                    break;
                 case "realize":
                     if (!Sha256Re.IsMatch(GetString(m, "bundle_digest")))
                         throw new DecodeException("realize: bad bundle digest");
@@ -769,6 +788,65 @@ namespace VsockD
                 string name = state as string;
                 if (name == null || !GuestStateLiterals.Contains(name))
                     throw new DecodeException("unknown guest state");
+            }
+        }
+
+        static readonly HashSet<string> ExecEventFields =
+            new HashSet<string> { "seq", "ts_ms", "pid", "ppid", "uid", "comm", "argv", "truncated" };
+
+        static void ValidateExecEvents(Dictionary<string, object> m)
+        {
+            object eventsObj;
+            if (!m.TryGetValue("events", out eventsObj)) return;
+            List<object> events = eventsObj as List<object>;
+            if (events == null) throw new DecodeException("exec_events_result: events must be a list");
+            if (events.Count > MaxExecEvents) throw new DecodeException("exec_events_result: too many events");
+            foreach (object eventObj in events)
+            {
+                Dictionary<string, object> ev = eventObj as Dictionary<string, object>;
+                if (ev == null) throw new DecodeException("exec_events_result: events must be objects");
+                foreach (string key in ev.Keys)
+                    if (!ExecEventFields.Contains(key))
+                        throw new DecodeException("exec_events_result: field \"" + key + "\" does not belong to an event");
+                long seq = RequireLong(ev, "seq");
+                if (seq < 0 || seq > MaxWireInt)
+                    throw new DecodeException("exec_events_result: seq out of bounds");
+                long ts = RequireLong(ev, "ts_ms");
+                if (ts < 0 || ts > MaxWireInt)
+                    throw new DecodeException("exec_events_result: ts_ms out of bounds");
+                long pid = RequireLong(ev, "pid");
+                if (pid < 1 || pid > int.MaxValue)
+                    throw new DecodeException("exec_events_result: pid out of bounds");
+                foreach (string f in new[] { "ppid", "uid" })
+                {
+                    long? v = GetLong(ev, f);
+                    long cap = f == "uid" ? 4294967295L : int.MaxValue;
+                    if (v.HasValue && (v.Value < 0 || v.Value > cap))
+                        throw new DecodeException("exec_events_result: " + f + " out of bounds");
+                }
+                string comm = GetString(ev, "comm");
+                if (comm != null && Encoding.UTF8.GetByteCount(comm) > MaxExecCommLen)
+                    throw new DecodeException("exec_events_result: comm too long");
+                object argvObj;
+                if (ev.TryGetValue("argv", out argvObj))
+                {
+                    List<object> argv = argvObj as List<object>;
+                    if (argv == null) throw new DecodeException("exec_events_result: argv must be a list");
+                    if (argv.Count > MaxExecArgvItems)
+                        throw new DecodeException("exec_events_result: too many argv items");
+                    int total = 0;
+                    foreach (object arg in argv)
+                    {
+                        string part = arg as string;
+                        if (part == null) throw new DecodeException("exec_events_result: argv items must be strings");
+                        total += Encoding.UTF8.GetByteCount(part);
+                    }
+                    if (total > MaxExecArgvBytes)
+                        throw new DecodeException("exec_events_result: argv too long");
+                }
+                object trunc;
+                if (ev.TryGetValue("truncated", out trunc) && !(trunc is bool))
+                    throw new DecodeException("exec_events_result: truncated must be a bool");
             }
         }
 

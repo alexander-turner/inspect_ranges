@@ -58,6 +58,8 @@ The one piece of PR #15 worth adopting natively is deliberately not scheduled ye
 
 Why deferred rather than batched into current work: it is its own slice, not a rider. It changes the daemon (a new subscription loop, a new wire record type, backpressure under exec storms), which re-digests the daemon bundle and therefore re-keys and re-derives every golden; a change of that cost wants to share a rebake with other golden-touching work and carry its own conformance additions (mock-channel records, Windows posture stated, the evade interaction considered, since a process witness on a target is exactly what a stealth goal's agent is trying not to trip). Revisit at or after the glovebox meeting, where the seam discussion settles whether the witness also needs to be part of the attack-box conformance bar.
 
+Scheduled: the slice is designed and under construction as [execve-witness-v1.md](execve-witness-v1.md), which supersedes the parameter list below (kept as the decision trail).
+
 Slice parameters settled 2026-10-23 (user discussion, ahead of the design record):
 
 - **Record-only v1.** No goal type and no `corroborate()` path reads the stream, so no existing range's score can move; wiring it into `execute`-goal corroboration or evade semantics is a separate, score-changing decision with its own amendment.

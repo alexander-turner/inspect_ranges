@@ -157,6 +157,28 @@ class PortableChannelSuite:
 
         self.run(scenario)
 
+    def test_exec_events_round_trips_or_refuses_typed(
+        self, channel: MessageChannel
+    ) -> None:
+        """The exec-witness verb's portable contract (execve-witness-v1): an endpoint either serves the ring (a well-formed reply with a sane cursor) or refuses TYPED (`ENOSYS` for a connector-less kernel, `EPROTO` for a daemon without the verb — the Windows daemon's unknown-kind fallback); it never fails untyped and never wedges the channel."""
+
+        async def scenario() -> None:
+            try:
+                reply = await channel.exec_events(self.guest, since_seq=0)
+            except GuestError as error:
+                assert error.errno in ("ENOSYS", "EPROTO")
+            else:
+                assert reply.next_seq >= 0
+                assert len(reply.events) <= 256
+                # the cursor resumes idempotently
+                again = await channel.exec_events(self.guest, since_seq=reply.next_seq)
+                assert again.next_seq >= reply.next_seq
+            # the channel is still healthy either way
+            pong = await channel.ping(self.guest)
+            assert pong.protocol == 3
+
+        self.run(scenario)
+
     def test_read_missing_file_is_enoent(self, channel: MessageChannel) -> None:
         async def scenario() -> None:
             with pytest.raises(GuestError) as failure:
