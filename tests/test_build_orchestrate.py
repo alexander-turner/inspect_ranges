@@ -552,6 +552,79 @@ def test_resolution_fails_fast_before_boot(tmp_path: Path, cache: Path) -> None:
     assert fakes.up_calls == [] and fakes.recipe_calls == []
 
 
+@pytest.mark.parametrize(
+    ("pinned_root", "record_root", "expect_warning"),
+    [
+        ("sha256:" + "a" * 64, "sha256:" + "a" * 64, False),  # pin matches
+        ("sha256:" + "a" * 64, "sha256:" + "b" * 64, True),  # cache diverged
+        ("sha256:" + "a" * 64, None, False),  # no pull record: nothing to compare
+        (None, "sha256:" + "b" * 64, False),  # no pin file at all
+    ],
+)
+def test_cache_vs_pin_check_is_advisory(
+    tmp_path: Path,
+    cache: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned_root: str | None,
+    record_root: str | None,
+    expect_warning: bool,
+) -> None:
+    """A pinned catalog image whose pull record diverges from the fleet pin warns on the resolve stage and the build proceeds; a matching pin, a missing record, and an absent pin file stay silent."""
+    import json
+
+    from inspect_ranges._dist.resolve import (
+        PIN_FILE_ENV,
+        ImagePullRecord,
+        image_pull_record_path,
+    )
+
+    if pinned_root is None:
+        monkeypatch.delenv(PIN_FILE_ENV, raising=False)
+    else:
+        pin_file = tmp_path / "pins.json"
+        pin_file.write_text(json.dumps({"pins": {"tiny-golden": pinned_root}}))
+        monkeypatch.setenv(PIN_FILE_ENV, str(pin_file))
+    record_path = image_pull_record_path(cache, "tiny-golden")
+    record_path.unlink(missing_ok=True)
+    if record_root is not None:
+        record_path.write_text(
+            ImagePullRecord(
+                name="tiny-golden",
+                root=record_root,
+                location="dir:somewhere",
+                pulled="2026-10-23T00:00:00+00:00",
+            ).model_dump_json()
+        )
+
+    spec, range_dir = build_spec_fixture(tmp_path)
+    fakes = Fakes(["web", "db", "attacker"])
+    warnings: list[str] = []
+
+    def on_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
+        if status == "warn":
+            warnings.append(f"{stage}: {fields.get('warning', '')}")
+
+    result = build_range(
+        spec,
+        range_dir,
+        options_for(tmp_path, cache),
+        on_stage=on_stage,
+        up_fn=fakes.up_fn,
+        down_fn=fakes.down_fn,
+        recipe_fn=fakes.recipe_fn,
+        ensure_uplink=fakes.ensure_uplink,
+        capture_fn=fakes.capture_fn,
+    )
+    assert result.cached is False  # the warning never became a refusal
+    if expect_warning:
+        assert len(warnings) == 1
+        assert warnings[0].startswith("resolve: ")
+        assert "'tiny-golden'" in warnings[0]
+        assert "images refresh tiny-golden" in warnings[0]
+    else:
+        assert warnings == []
+
+
 def full_build(tmp_path: Path, cache: Path, fakes: Fakes, **opt: Any) -> Any:
     spec, range_dir = build_spec_fixture(tmp_path)
     return build_range(

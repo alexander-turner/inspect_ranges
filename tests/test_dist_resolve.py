@@ -18,6 +18,7 @@ from inspect_ranges._dist import (
     registry_locations,
 )
 from inspect_ranges._dist.location import DEFAULT_REGISTRY, REGISTRY_ENV
+from inspect_ranges._dist.resolve import read_image_pull_record
 from inspect_ranges._runtime.images import ImageMetadata
 from inspect_ranges.schema import load_range
 
@@ -221,6 +222,11 @@ def test_image_pull_sticky_then_explicit_refresh(tmp_path: Path) -> None:
     assert (consumer_cache / "focal-guest.qcow2").read_bytes() == GOLDEN
     assert (consumer_cache / "noble.img").read_bytes() == VENDOR
     assert (consumer_cache / "focal-guest.json").is_file()
+    # the pull records the published root it landed from (the build's
+    # cache-vs-pin check reads this)
+    record = read_image_pull_record(consumer_cache, "focal-guest")
+    assert record is not None and record.name == "focal-guest"
+    first_root = record.root
 
     # the publisher moves the name forward (new golden content + sidecar)
     new_golden = b"golden-image-bytes-v2"
@@ -246,6 +252,8 @@ def test_image_pull_sticky_then_explicit_refresh(tmp_path: Path) -> None:
     assert (consumer_cache / "focal-guest.qcow2").read_bytes() == new_golden
     sidecar = json.loads((consumer_cache / "focal-guest.json").read_text())
     assert sidecar["golden_sha256"] == hashlib.sha256(new_golden).hexdigest()
+    moved = read_image_pull_record(consumer_cache, "focal-guest")
+    assert moved is not None and moved.root != first_root
 
     # unpublished names refuse with the coded cause
     with pytest.raises(DistError, match="image-not-published"):

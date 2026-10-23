@@ -6,6 +6,7 @@ Resolution order is the spine's Q1 made operational: an explicit `name@sha256:` 
 """
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -23,11 +24,19 @@ from .encode import (
 from .errors import DistError
 from .location import Location, registry_locations
 from .materialize import MaterializeResult, materialize_closure
-from .oci import MEDIA_TYPE_INDEX, ContentStore, Descriptor, OciIndex, ProgressFn
+from .oci import (
+    MEDIA_TYPE_INDEX,
+    ContentStore,
+    Descriptor,
+    OciIndex,
+    ProgressFn,
+    atomic_write,
+)
 
 __all__ = [
     "NEVER_PULL_ENV",
     "PIN_FILE_ENV",
+    "ImagePullRecord",
     "PullReport",
     "ensure_build_available",
     "pull_image",
@@ -35,6 +44,7 @@ __all__ = [
     "pull_range",
     "push_image_artifact",
     "push_range",
+    "read_image_pull_record",
     "refresh_image",
 ]
 
@@ -217,7 +227,12 @@ PIN_FILE_ENV = "INSPECT_RANGES_PIN_FILE"
 """Path to a fleet pin file ({"pins": {name: root digest}}): a catalog name resolving to a different root than its pin refuses `pin-mismatch` (Q11)."""
 
 
-def _pins() -> dict[str, str]:
+def fleet_pins() -> dict[str, str]:
+    """The fleet pin map from `INSPECT_RANGES_PIN_FILE` (empty when unset).
+
+    Raises:
+        DistError: `pin-file-invalid` when the named file does not parse as a pin file.
+    """
     path = os.environ.get(PIN_FILE_ENV)
     if not path:
         return {}
@@ -382,6 +397,34 @@ def push_image_artifact(
     return store.put_index(location.latest_ref(name), index)
 
 
+class ImagePullRecord(BaseModel):
+    """Cache-local provenance for a catalog image `pull_image` landed: the published root its chain came from.
+
+    Never a traveling sidecar (those ride verbatim from the publisher): this record is written beside the cache file at pull time so the build's advisory cache-vs-pin check can tell a frozen cache from a pinned one. An image with no record (derived locally, landed inside a range closure, or pulled before the record existed) has no root to compare and the check skips it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    root: str
+    location: str
+    pulled: str
+
+
+def image_pull_record_path(image_cache: Path, name: str) -> Path:
+    """Where a catalog name's pull record lives (the shared cache file-name rule with a `.pull.json` suffix)."""
+    return image_cache / (image_file_name(name).removesuffix(".qcow2") + ".pull.json")
+
+
+def read_image_pull_record(image_cache: Path, name: str) -> ImagePullRecord | None:
+    """The recorded published root for a cached catalog image, or `None` when no readable record exists."""
+    path = image_pull_record_path(image_cache, name)
+    try:
+        return ImagePullRecord.model_validate_json(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def pull_image(
     name: str,
     locations: list[Location],
@@ -394,7 +437,7 @@ def pull_image(
 
     With `replace` (the refresh act), a cache name holding different content moves forward to the published chain; without it, divergence refuses `cache-name-conflict` (shadow deliberately or prune first).
     """
-    pins = _pins()
+    pins = fleet_pins()
     for location in locations:
         store = location.store_for(name)
         root = _try_ref(store, location.latest_ref(name))
@@ -440,6 +483,19 @@ def pull_image(
             image_cache=image_cache,
             replace_images=replace,
             progress=progress,
+        )
+        # record the root this name landed from (converged pulls refresh the
+        # record too: it states what the name resolves to NOW, which is what
+        # the build's cache-vs-pin check compares against the fleet pin)
+        record = ImagePullRecord(
+            name=name,
+            root=root.digest,
+            location=location.describe(),
+            pulled=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+        atomic_write(
+            image_pull_record_path(image_cache, name),
+            record.model_dump_json(indent=2).encode(),
         )
         return location.describe(), result
     return None

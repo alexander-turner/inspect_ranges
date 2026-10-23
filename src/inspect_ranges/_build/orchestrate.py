@@ -27,6 +27,7 @@ from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.draws import draw_variables
 from .._compiler.plan import (
+    DEFAULT_ATTACKER_IMAGE,
     ImageRef,
     PlanOptions,
     ResolvedPlan,
@@ -714,6 +715,8 @@ def build_range(
     if missing:
         raise IssueError(missing)
 
+    pin_warnings = _pin_divergences(spec, image_cache)
+
     spec_hash = spec_sha256(spec)
     if (range_dir / CHECKS_DIR_NAME).is_dir() and not (
         range_dir / "challenges.yaml"
@@ -811,6 +814,8 @@ def build_range(
         # the stage record lands in the project that produced the verification
         project = prior.project
         tee = _BuildTee(StageLog(state_dir, project), on_stage)
+        for note in pin_warnings:
+            tee.log("resolve", "warn", warning=note)
         tee.log(
             "build",
             "ok",
@@ -838,6 +843,8 @@ def build_range(
     project = f"{PROJECT_PREFIX}{spec.meta.name}-{spec_sha256(build_spec)[:12]}"
     tee = _BuildTee(StageLog(state_dir, project), on_stage)
     run_steps = [step for step in steps if step.guest not in reusable]
+    for note in pin_warnings:
+        tee.log("resolve", "warn", warning=note)
     if tee_note is not None:
         tee.log("resolve", "ok", converged=tee_note)
     tee.log(
@@ -1683,6 +1690,39 @@ def _fetch_image_tier(name: str, image_cache: Path) -> "ImageRef | None":
     if pulled is None:
         return None
     return resolve_image_reference(name, image_cache)
+
+
+def _pin_divergences(spec: RangeSpec, image_cache: Path) -> list[str]:
+    """The advisory cache-vs-pin check (fleet-pass finding: a stale cached catalog image booted silently against a moved pin and broke a chain downstream): for every image the spec names that the fleet pin file (`INSPECT_RANGES_PIN_FILE`) pins, compare the pin against the published root the image's pull record carries; each divergence returns a warning naming the refresh verb.
+
+    Advisory by design, never a refusal: freezing a bare name is the cache's documented contract and the build must stay runnable on a deliberately frozen cache. Pins live in published-root digest space and the cache digest is a qcow2 sha (different spaces, never compared); an image with no pull record (derived locally, landed inside a range closure, or pulled before records existed) has no root to compare and skips silently.
+    """
+    from .._dist.errors import DistError
+    from .._dist.resolve import fleet_pins, read_image_pull_record
+
+    try:
+        pins = fleet_pins()
+    except DistError as error:
+        return [f"fleet pin file unreadable, cache-vs-pin check skipped: {error}"]
+    if not pins:
+        return []
+    names: list[str | None] = [host.image for host in spec.hosts]
+    names += [router.image for router in spec.routers]
+    if spec.attacker.host is None:
+        names.append(spec.attacker.image or DEFAULT_ATTACKER_IMAGE)
+    warnings: list[str] = []
+    for name in dict.fromkeys(names):
+        if name is None or name not in pins:
+            continue
+        record = read_image_pull_record(image_cache, name)
+        if record is None or record.root == pins[name]:
+            continue
+        warnings.append(
+            f"cached image {name!r} came from root {record.root[:19]}... but the "
+            f"fleet pin names {pins[name][:19]}...; this build realizes on the "
+            f"frozen cache ('inspect-ranges images refresh {name}' moves it forward)"
+        )
+    return warnings
 
 
 def _base_images(spec: RangeSpec, image_cache: Path) -> tuple[BaseImageRecord, ...]:

@@ -37,6 +37,9 @@ def _echo_stage(stage: str, status: str, fields: dict[str, Any]) -> None:
     if status == "fail":
         click.echo(f"{stage:<9} FAILED  {fields.get('error', '')}")
         return
+    if status == "warn":
+        click.echo(f"{stage:<9} WARNING {fields.get('warning', '')}")
+        return
     detail = "  ".join(f"{key}={value}" for key, value in sorted(fields.items()))
     click.echo(f"{stage:<9} {detail}")
 

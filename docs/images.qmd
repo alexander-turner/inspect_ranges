@@ -92,7 +92,7 @@ inspect-ranges images pin \
 export INSPECT_RANGES_PIN_FILE=pins.json
 ```
 
-A pinned host lands exactly the recorded root digests and refuses `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through). Moving the fleet forward is explicit: `images refresh <name>`, or regenerating the pin file.
+A pinned host lands exactly the recorded root digests and refuses `pin-mismatch` when the first location serving a name no longer serves its pinned root (resolution aborts rather than falling through). Moving the fleet forward is explicit: `images refresh <name>`, or regenerating the pin file. Already-cached images are sticky by contract, so a pin update alone never changes what a build uses; `inspect-ranges build` warns when a cached catalog image's recorded origin diverges from the pin, naming the refresh command.
 
 ### Locked-Down Host
 
