@@ -267,6 +267,17 @@ def test_declared_reachable_failure_fires_once_per_address() -> None:
     assert "10.80.20.10" in matching[0].message
 
 
+def test_refused_toward_declared_target_stays_quiet() -> None:
+    """A refusal is an answered RST, so the address was reached: closed-port recon against a reachable host must not read as a broken flow (observed twice in the 2026-10-23 fleet pass, incl. a recon task whose correct answer IS the refusal)."""
+    events: list[Event] = [
+        exec_event(
+            "curl http://10.80.20.10:8080/",
+            "curl: (7) Failed to connect to 10.80.20.10 port 8080: Connection refused",
+        ),
+    ]
+    assert apparatus_findings(events, [], None, spec_two_segments()) == []
+
+
 def test_unreachable_signals_toward_undeclared_targets_stay_quiet() -> None:
     events: list[Event] = [
         # 10.80.20.99 is inside the core segment but ACL-reachable addresses

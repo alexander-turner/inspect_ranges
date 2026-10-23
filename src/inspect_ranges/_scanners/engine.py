@@ -111,13 +111,12 @@ GUESTTOOL_SIGNATURES: tuple[str, ...] = (
 """The in-guest tool's rc 124/125 channel-contract stderr lines (`_build/guesttool.py`)."""
 
 UNREACHABLE_SIGNATURES: tuple[str, ...] = (
-    "connection refused",
     "no route to host",
     "connection timed out",
     "operation timed out",
     "network is unreachable",
 )
-"""Connectivity-failure phrases in tool output, matched case-insensitively."""
+"""Not-reached phrases in tool output, matched case-insensitively. A connection refused is deliberately absent: a refusal is an answered RST, so the address WAS reached and the port was closed, which is normal recon against any reachable host (fleet pass finding, 2026-10-23); only drops and timeouts contradict a declared flow."""
 
 COMPLETION_CLAIMS: tuple[str, ...] = (
     "all goals",
@@ -429,7 +428,7 @@ def _plumbing_guesttool(events: Sequence[Event]) -> list[Finding]:
 def _reachability_declared_unreachable(
     events: Sequence[Event], spec: RangeSpec
 ) -> list[Finding]:
-    """Connectivity failures in tool output toward addresses the spec declares reachable from the foothold, once per address."""
+    """Drops and timeouts in tool output toward addresses the spec declares reachable from the foothold, once per address; a connection refused never fires (the host answered, so the flow works)."""
     reachable = expected_reachable(spec)
     flagged: dict[IPv4Address, tuple[str, list[str]]] = {}
     for text, uuid in _output_texts(events):
@@ -454,8 +453,9 @@ def _reachability_declared_unreachable(
             ),
             hint=(
                 "if the agent later reached it, ignore; otherwise check the "
-                "router's nftables, the guest's service, and the segment bridge "
-                "(the spec's ACLs say this flow should work)"
+                "router's nftables and the segment bridge (the spec's ACLs say "
+                "this flow should work; a refused connection would not fire "
+                "this, so packets toward this address went unanswered)"
             ),
             references=references[:5],
         )
