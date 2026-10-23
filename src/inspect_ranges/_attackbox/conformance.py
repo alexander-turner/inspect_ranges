@@ -19,7 +19,7 @@ from .._build.manifest import (
 )
 from .._channel.channel import MessageChannel
 from .._channel.vsock import HybridEndpoint, VsockTransport
-from .._compiler import PlanOptions, render_bundle
+from .._compiler import PlanOptions, render_bundle, resolve_plan
 from .._compiler.plan import ResolvedPlan, Totals
 from .._provider.naming import CidAllocator
 from .._runtime.down import DownError, down
@@ -114,9 +114,18 @@ async def _witness_row(
                 "witness",
             )
         reread = await channel.exec_events(attacker, since_seq=marker_seq)
-        if not any(
+        marker_again = any(
             any(marker in part for part in event.argv) for event in reread.events
-        ):
+        )
+        # a busy ring may legitimately evict the marker between the find and
+        # the re-read; the documented overwrite signal (first returned seq
+        # above the cursor, or an advanced cursor over no events) is honest,
+        # only a re-read CLAIMING the marker's slot without it is dishonest
+        evicted = not marker_again and (
+            (reread.events and reread.events[0].seq > marker_seq)
+            or (not reread.events and reread.next_seq > marker_seq)
+        )
+        if not marker_again and not evicted:
             return BatteryRow(
                 "exec-witness",
                 False,
@@ -126,7 +135,8 @@ async def _witness_row(
         return BatteryRow(
             "exec-witness",
             True,
-            f"marker exec witnessed at seq {marker_seq}; cursor re-read honest",
+            f"marker exec witnessed at seq {marker_seq}; cursor re-read "
+            + ("honest" if marker_again else "honest (marker evicted by ring churn)"),
         )
     except GuestError as error:
         if error.errno in ("ENOSYS", "EPROTO"):
@@ -380,30 +390,32 @@ def run_attack_box_battery(
     report = BatteryReport(rows=[_capabilities_row(backend)])
     staging_root = state.parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
+    spec, realized_sections, consumed = apply_build_manifest(
+        spec, image_cache=cache, build_cache=default_build_cache()
+    )
+    plan_options = PlanOptions(
+        image_cache=cache,
+        realized_sections=realized_sections,
+        realized_backings=realized_backings(consumed) if consumed else {},
+    )
     # a well-behaved tenant: the battery leases its CID block from the shared
     # registry like the provider does, so it coexists with live ranges on the
-    # host (a fixed base collided with a running eval, measured)
+    # host (a fixed base collided with a running eval, measured). The size is
+    # the resolved plan's own guest total, the provider's rule, never a hand
+    # count over the spec (a synthesized guest would shortfall the lease)
+    probe = resolve_plan(spec, plan_options)
     allocator = CidAllocator(state)
     project = f"ir-abox-battery-{uuid.uuid4().hex[:8]}"
-    guest_count = len(spec.hosts) + len(spec.routers) + 1  # + the attack box
-    cid_lease = allocator.lease(project, guest_count)
+    cid_lease = allocator.lease(project, probe.totals.guests)
     try:
         with tempfile.TemporaryDirectory(
             prefix="ir-abox-battery-", dir=staging_root
         ) as temp:
-            spec, realized_sections, consumed = apply_build_manifest(
-                spec, image_cache=cache, build_cache=default_build_cache()
-            )
             bundle = Path(temp) / "bundle"
             render_bundle(
                 spec,
                 bundle,
-                PlanOptions(
-                    image_cache=cache,
-                    cid_base=cid_lease.base,
-                    realized_sections=realized_sections,
-                    realized_backings=realized_backings(consumed) if consumed else {},
-                ),
+                plan_options.model_copy(update={"cid_base": cid_lease.base}),
             )
             plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
             attacker = next(g.name for g in plan.guests if g.kind == "attacker")

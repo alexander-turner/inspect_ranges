@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
-from .._attackbox.record import read_attack_box_record
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._channel.channel import MessageChannel
 from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler.plan import Totals
@@ -83,12 +83,23 @@ def attach_endpoints(
         if guest.vmm == "cloud-hypervisor"
     }
     if state_dir is not None:
-        record = read_attack_box_record(state_dir, project)
-        if (
-            record is not None
-            and record.exec_socket is not None
-            and record.exec_uid is not None
-        ):
+        try:
+            record = read_attack_box_record(state_dir, project)
+        except AttackBoxRecordError as error:
+            raise OracleSetupError(
+                f"project {project!r} has an external attack box whose record "
+                f"does not read ({error}); repair or tear the project down "
+                "before attaching"
+            ) from error
+        if record is not None:
+            if record.exec_socket is None or record.exec_uid is None:
+                # the CID-derived socket never existed for this guest: dialing
+                # it would report a confusing refusal instead of the cause
+                raise OracleSetupError(
+                    f"project {project!r} has an external attack box with no "
+                    "recorded exec socket (its boot never completed); tear it "
+                    "down and boot again before attaching"
+                )
             hybrid[record.guest_name] = HybridEndpoint(
                 Path(record.exec_socket), record.exec_uid
             )

@@ -173,14 +173,20 @@ class EvidenceSession:
                 if state_dir is not None:
                     try:
                         record = read_attack_box_record(state_dir, project)
+                        external = record.guest_name if record else None
                     except AttackBoxRecordError as error:
+                        # an unreadable record still proves an external box
+                        # exists: declare the plan's attacker so its console
+                        # stays a DECLARED gap, never a silently-failing poll
                         logger.warning(
-                            "attack-box record unreadable; console polling "
-                            "proceeds as if local (%s)",
+                            "attack-box record unreadable; declaring the "
+                            "plan's attacker console external (%s)",
                             error,
                         )
-                    else:
-                        external = record.guest_name if record else None
+                        external = next(
+                            (g.name for g in plan.guests if g.kind == "attacker"),
+                            None,
+                        )
                 self._streamer = CaptureStreamer(
                     self._host,
                     ComposeTap(project, bundle),

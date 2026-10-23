@@ -25,7 +25,6 @@ from .._attackbox.attach import (
     attachment_from_boot,
     helper_config,
     run_attacher,
-    utc_now,
 )
 from .._attackbox.backend import (
     AttackBoxBackend,
@@ -36,6 +35,7 @@ from .._attackbox.record import (
     AttackBoxRecord,
     AttackBoxRecordError,
     read_attack_box_record,
+    record_timestamp,
     write_attack_box_record,
 )
 from .._channel.channel import MessageChannel, request_id
@@ -752,6 +752,22 @@ def up(
         (bundle / "boot.json").read_bytes()
     )
     if external is not None:
+        # a surviving record may hold a LIVE box's reclaim token (a prior run
+        # whose containers vanished without a down); overwriting it with an
+        # empty token would strand that box forever, the exact failure the
+        # record discipline exists to prevent, so refuse like the
+        # duplicate-project guard and let down reclaim deny-first
+        try:
+            stale = read_attack_box_record(options.state_dir, project)
+        except AttackBoxRecordError as error:
+            raise UpError("attack-box", str(error)) from error
+        if stale is not None:
+            raise UpError(
+                "attack-box",
+                f"project {project!r} already has an attack-box record (a "
+                "prior run's external box may still be live); tear it down "
+                f"first: inspect-ranges down {project}",
+            )
         # before the provider boots anything (the owner-record discipline): a
         # crash in the window reclaims a provider no-op, which teardown
         # idempotency absorbs
@@ -762,12 +778,12 @@ def up(
                 project=project,
                 guest_name=external.name,
                 cid=external.cid,
-                created=utc_now(),
+                created=record_timestamp(),
             ),
         )
     log = _StageTee(StageLog(options.state_dir, project), on_stage)
     log.log("verify-bundle", "ok", files=len(cast(dict[str, Any], manifest["files"])))
-    log.log("verify-images", "ok", guests=len(guests))
+    log.log("verify-images", "ok", guests=len(booted))
     log.log("range-image", "ok", tag=range_image)
 
     env = dict(os.environ)
@@ -951,26 +967,32 @@ def up(
         ch_sockets[external.name] = handle.exec_endpoint
         try:
             record = read_attack_box_record(options.state_dir, project)
+            if record is None:
+                # absent is exactly as untrustworthy as unreadable here: the
+                # record this very up wrote is gone (a concurrent sweep), so
+                # a success would leave a live box with no teardown trail
+                raise AttackBoxRecordError(
+                    f"the attack-box record for {project} vanished during the "
+                    "provider boot (a concurrent down or sweep?)"
+                )
         except AttackBoxRecordError as error:
-            # the record this very up wrote does not read back: nothing about
-            # this project's teardown can be trusted, so fail while the
-            # in-process backend can still reclaim directly
+            # nothing about this project's teardown can be trusted, so fail
+            # while the in-process backend can still reclaim directly
             try:
                 asyncio.run(attack_backend.provider.teardown(project, ""))
             except Exception:
                 logger.exception("attack-box teardown after a record fault failed")
             raise fail("attack-box", str(error), guest=external.name) from error
-        if record is not None:
-            write_attack_box_record(
-                options.state_dir,
-                record.model_copy(
-                    update={
-                        "reclaim_token": handle.reclaim_token,
-                        "exec_socket": str(handle.exec_endpoint.path),
-                        "exec_uid": handle.exec_endpoint.peer_uid,
-                    }
-                ),
-            )
+        write_attack_box_record(
+            options.state_dir,
+            record.model_copy(
+                update={
+                    "reclaim_token": handle.reclaim_token,
+                    "exec_socket": str(handle.exec_endpoint.path),
+                    "exec_uid": handle.exec_endpoint.peer_uid,
+                }
+            ),
+        )
 
     async def _readiness() -> list[GuestState]:
         channel = make_channel({g.name: g.cid for g in guests}, ch_sockets)

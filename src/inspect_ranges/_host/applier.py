@@ -707,14 +707,19 @@ class Applier:
             # from the ambient env, which can drift)
             try:
                 record = read_attack_box_record(self._state_dir, lease.project)
+                external = record.guest_name if record is not None else None
             except AttackBoxRecordError as error:
+                # an unreadable record still proves an external box exists:
+                # fall back to the plan's attacker so its console stays a
+                # DECLARED gap rather than a silently-failing poll
                 logger.warning(
-                    "attack-box record unreadable; console polling proceeds "
-                    "as if local (%s)",
+                    "attack-box record unreadable; declaring the plan's "
+                    "attacker console external (%s)",
                     error,
                 )
-                record = None
-            external = record.guest_name if record is not None else None
+                external = next(
+                    (g.name for g in plan.guests if g.kind == "attacker"), None
+                )
             streamer = CaptureStreamer(
                 writer,
                 ComposeTap(lease.project, Path(lease.bundle_path)),

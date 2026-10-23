@@ -77,6 +77,14 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
     raise ValueError("range requires a config: a range.yaml path or a RangeSpec object")
 
 
+def _attack_box_origin_or_up_error() -> str | None:
+    """The configured attack-box origin, with a malformed value folded to the typed stage failure every other boot refusal uses."""
+    try:
+        return attack_box_origin()
+    except ValueError as error:
+        raise UpError("attack-box", str(error)) from error
+
+
 def _default_guest(spec: RangeSpec) -> str:
     """The default sandbox: the attacker's foothold host, or the attacker box itself.
 
@@ -392,8 +400,10 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 # consulted only where up() itself runs: the
                                 # co-resident path boots here, so the driver's
                                 # environment selects; a separated backend's
-                                # applier reads its own environment instead
-                                attack_box=attack_box_origin(),
+                                # applier reads its own environment instead.
+                                # A malformed value refuses as a typed stage
+                                # failure, never a raw ValueError
+                                attack_box=_attack_box_origin_or_up_error(),
                             ),
                             on_stage,
                         )

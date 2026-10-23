@@ -1258,6 +1258,80 @@ def test_up_attack_box_refuses_a_qemu_attacker(
     assert "cloud-hypervisor" in str(error.value)
 
 
+class VanishingRecordProvider(RecordingAttackBoxProvider):
+    """Simulates a concurrent sweep unlinking the record during the provider boot."""
+
+    async def boot(self, attachment: FootholdAttachment) -> AttackBoxHandle:
+        handle = await super().boot(attachment)
+        from inspect_ranges._attackbox.record import attack_box_record_path
+
+        attack_box_record_path(self.state_dir, attachment.project).unlink()
+        return handle
+
+
+def vanishing_record_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    return AttackBoxBackend(provider=VanishingRecordProvider(ctx.state_dir))
+
+
+def test_up_refuses_a_stale_attack_box_record(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surviving record may hold a LIVE box's reclaim token; overwriting it with an empty one would strand that box, so up refuses like the duplicate-project guard."""
+    ready_probes(monkeypatch)
+    state = tmp_path / "state"
+    stale = _attack_box_record("ir-stale-abox", RECORDING_ORIGIN)
+    write_attack_box_record(state, stale)
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(
+                cache, tmp_path, attack_box=RECORDING_ORIGIN, project="ir-stale-abox"
+            ),
+            runner=FakeDocker(),
+            attacher=fake_attacher,
+        )
+    assert error.value.stage == "attack-box"
+    assert "already has an attack-box record" in str(error.value)
+    survivor = read_attack_box_record(state, "ir-stale-abox")
+    assert survivor is not None and survivor.reclaim_token == "tok-9", (
+        "the live token must survive the refusal"
+    )
+
+
+def test_up_fails_when_the_record_vanishes_during_boot(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent is as untrustworthy as unreadable after the boot: up fails the stage and reclaims in-process rather than succeeding with no teardown trail."""
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path, attack_box=f"{__name__}.vanishing_record_factory"),
+            runner=docker,
+            attacher=fake_attacher,
+        )
+    assert error.value.stage == "attack-box"
+    assert "vanished" in str(error.value)
+    provider = RecordingAttackBoxProvider.instances[-1]
+    assert provider.teardowns, "the in-process backend reclaimed the box"
+
+
+def test_up_cli_refuses_a_malformed_attack_box_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed INSPECT_RANGES_ATTACK_BOX prints the one-line remedy every other refusal gets, never a traceback."""
+    from click.testing import CliRunner
+    from inspect_ranges._cli.upcmd import up as up_command
+
+    monkeypatch.setenv("INSPECT_RANGES_ATTACK_BOX", "not-a-dotted-path")
+    result = CliRunner().invoke(up_command, [str(tmp_path)])
+    assert result.exit_code != 0
+    assert "INSPECT_RANGES_ATTACK_BOX" in result.output
+    assert "Traceback" not in result.output
+
+
 def exploding_teardown_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
     provider = RecordingAttackBoxProvider(ctx.state_dir)
 

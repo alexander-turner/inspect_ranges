@@ -12,7 +12,6 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -131,12 +130,14 @@ def receive_fds(listener: socket.socket, expected: int, timeout: float) -> list[
         AttachError: No credentialed helper connected within `timeout`, the handoff was truncated, or it carried the wrong fd count (any received fds are closed before raising; half an attachment is worse than none).
     """
     deadline = time.monotonic() + timeout
+    anomaly: str | None = None
 
     def remaining() -> float:
         left = deadline - time.monotonic()
         if left <= 0:
             raise AttachError(
                 f"helper never completed the handoff within {timeout:.0f}s"
+                + (f" (last anomaly: {anomaly})" if anomaly else "")
             )
         return left
 
@@ -147,18 +148,21 @@ def receive_fds(listener: socket.socket, expected: int, timeout: float) -> list[
         except TimeoutError as error:
             raise AttachError(
                 f"helper never connected to the handoff socket within {timeout:.0f}s"
+                + (f" (last anomaly: {anomaly})" if anomaly else "")
             ) from error
         with connection:
             if peer_uid(connection) not in (0, os.getuid()):
                 continue  # not the root helper; keep the slot open for it
-            connection.settimeout(remaining())
+            # a credentialed stray (another same-uid process probing sockets)
+            # must not abort the attach either: bound its recv so it cannot
+            # eat the window, note the anomaly, and keep awaiting the helper
+            connection.settimeout(min(remaining(), 10.0))
             try:
                 space = socket.CMSG_SPACE(expected * array.array("i").itemsize)
                 payload, ancillary, flags, _ = connection.recvmsg(4096, space)
-            except TimeoutError as error:
-                raise AttachError(
-                    f"helper connected but sent nothing within {timeout:.0f}s"
-                ) from error
+            except TimeoutError:
+                anomaly = "a credentialed peer connected but sent nothing"
+                continue
             fds: list[int] = []
             for level, kind, data in ancillary:
                 if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
@@ -170,11 +174,13 @@ def receive_fds(listener: socket.socket, expected: int, timeout: float) -> list[
             if flags & socket.MSG_CTRUNC or len(fds) != expected:
                 for fd in fds:
                     os.close(fd)
-                raise AttachError(
-                    f"handoff carried {len(fds)} fds for {expected} interfaces"
+                anomaly = (
+                    f"a credentialed peer sent {len(fds)} fds for {expected} "
+                    f"interfaces"
                     f"{' (ancillary truncated)' if flags & socket.MSG_CTRUNC else ''}:"
                     f" {payload!r}"
                 )
+                continue
             for fd in fds:
                 os.set_inheritable(fd, False)
             connection.sendall(b"1")
@@ -285,8 +291,3 @@ def attachment_from_boot(
         interfaces=tuple(interfaces),
         seed_dir=seed_dir,
     )
-
-
-def utc_now() -> str:
-    """The record timestamp convention (`ownership.py`'s shape)."""
-    return datetime.now(timezone.utc).isoformat()

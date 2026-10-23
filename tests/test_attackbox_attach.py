@@ -140,22 +140,59 @@ def test_receive_fds_times_out_as_attach_error(tmp_path: Path) -> None:
             receive_fds(listener, expected=1, timeout=0.1)
 
 
-def test_receive_fds_refuses_a_short_handoff(tmp_path: Path) -> None:
+def test_receive_fds_tolerates_a_stray_and_still_serves_the_helper(
+    tmp_path: Path,
+) -> None:
+    """A credentialed stray sending a short handoff must not abort the attach: the loop notes the anomaly and the real helper still completes."""
     socket_path = tmp_path / "handoff.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(socket_path))
-        listener.listen(1)
+        listener.listen(4)
+        read_end, write_end = os.pipe()
 
-        def send_nothing() -> None:
+        def stray_then_helper() -> None:
+            import array
+
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stray:
+                stray.connect(str(socket_path))
+                stray.sendall(b"{}")  # short: no fds
+                stray.recv(1)  # the refused side closes without acking
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as helper:
+                helper.connect(str(socket_path))
+                rights = array.array("i", [read_end]).tobytes()
+                helper.sendmsg(
+                    [b'{"taps": ["ab1n0"]}'],
+                    [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)],
+                )
+                assert helper.recv(1) == b"1"
+
+        sender = threading.Thread(target=stray_then_helper)
+        sender.start()
+        fds = receive_fds(listener, expected=1, timeout=10.0)
+        sender.join()
+    os.close(write_end)
+    os.close(read_end)
+    assert len(fds) == 1
+    os.fstat(fds[0])
+    os.close(fds[0])
+
+
+def test_receive_fds_names_the_last_anomaly_at_timeout(tmp_path: Path) -> None:
+    socket_path = tmp_path / "handoff.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(socket_path))
+        listener.listen(4)
+
+        def send_short() -> None:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.connect(str(socket_path))
                 client.sendall(b"{}")
-                client.recv(1)  # the refused side closes without acking
+                client.recv(1)
 
-        sender = threading.Thread(target=send_nothing)
+        sender = threading.Thread(target=send_short)
         sender.start()
         with pytest.raises(AttachError, match="0 fds for 1"):
-            receive_fds(listener, expected=1, timeout=5.0)
+            receive_fds(listener, expected=1, timeout=2.0)
         sender.join()
 
 

@@ -119,6 +119,60 @@ def test_witness_row_fails_a_typed_refusal() -> None:
     assert "typed refusal (ENOSYS)" in row.detail
 
 
+def test_witness_row_tolerates_marker_eviction_on_a_busy_ring() -> None:
+    """A busy ring may evict the marker between the find and the re-read; the documented overwrite signal is honest, not a cursor failure."""
+    from typing import Any, cast
+
+    from inspect_ranges._channel.protocol import ExecEventsReply
+
+    class EvictingWitnessChannel:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        async def exec_events(
+            self, guest: str, *, since_seq: int = 0, max_events: int = 128
+        ) -> ExecEventsReply:
+            self.polls += 1
+            if self.polls == 1:
+                return ExecEventsReply(id="ab" * 16, next_seq=1)
+            if self.polls == 2:
+                return ExecEventsReply(
+                    id="ab" * 16,
+                    events=[
+                        ExecEvent(
+                            seq=1,
+                            ts_ms=1,
+                            pid=1,
+                            comm="true",
+                            argv=["true", "m-feed"],
+                            truncated=False,
+                        )
+                    ],
+                    next_seq=2,
+                )
+            # the re-read from the marker's seq: evicted, true head above it
+            return ExecEventsReply(
+                id="ab" * 16,
+                events=[
+                    ExecEvent(
+                        seq=5, ts_ms=2, pid=2, comm="x", argv=["x"], truncated=False
+                    )
+                ],
+                next_seq=6,
+            )
+
+        async def exec(self, guest: str, request: Any, **kwargs: Any) -> object:
+            return object()
+
+    row = asyncio.run(
+        _witness_row(
+            cast(MessageChannel, EvictingWitnessChannel()), "attacker", marker="m-feed"
+        )
+    )
+    assert row.ok, row.detail
+    assert "evicted" in row.detail
+
+
 def test_witness_row_fails_a_surface_that_serves_but_never_witnesses() -> None:
     """A shim can answer the verb with an empty ring forever; the marker requirement catches it."""
     guest = FakeGuest("attacker")  # default `true` handler, ring stays empty

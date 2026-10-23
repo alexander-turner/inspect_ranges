@@ -7,6 +7,7 @@ The write is atomic (temp file + rename: the record is rewritten in place after 
 
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -14,6 +15,11 @@ from pydantic import BaseModel
 from .._runtime.ownership import project_dir
 
 RECORD_FILENAME = "attackbox.json"
+
+
+def record_timestamp() -> str:
+    """The record `created` convention, matching the owner record's exactly (`ownership.py`: UTC, second precision)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class AttackBoxRecordError(ValueError):
