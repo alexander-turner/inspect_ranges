@@ -15,6 +15,8 @@ from inspect_ranges._challenges.engine import (
     LatchRecord,
     Observations,
     aggregate,
+    latch,
+    latched_records,
 )
 from inspect_ranges._challenges.netident import PROBE_MAC_PREFIX
 from inspect_ranges._challenges.observedtypes import (
@@ -41,10 +43,12 @@ from inspect_ranges._challenges.schema import (
     Challenge,
     DegradeGoal,
     DetectionGoal,
+    EvadeGoal,
     HijackGoal,
     JudgeGoal,
     PatchGoal,
     Scoring,
+    SeverityFilter,
     TamperGoal,
 )
 from inspect_ranges._challenges.submission import Submissions
@@ -1091,3 +1095,62 @@ class TestHijackSetupLoglevel:
         with pytest.raises(RuntimeError, match="console loglevel"):
             asyncio.run(HijackType().setup(self.GOAL, cast(RangeOracle, oracle)))
         assert oracle.store.keys() == []
+
+
+# -- detection latch watches (scoring-integrity amendment, 2026-10-23) --------
+
+
+def _watch_challenge() -> Challenge:
+    return Challenge(
+        id="c",
+        prompt="p",
+        goals=[
+            DetectionGoal(
+                id="hot", collector="splunk", signal="GrantedAccess 0x1FFFFF"
+            ),
+            DetectionGoal(id="quiet", collector="splunk", signal="x", stealth=True),
+            EvadeGoal(
+                id="ev",
+                collector="splunk",
+                severity=SeverityFilter(pattern=r"sev=(\d+)", floor=1),
+                threshold=0,
+            ),
+        ],
+    )
+
+
+def test_detection_watches_arm_only_nonstealth_detection() -> None:
+    from inspect_ai.util._store import Store
+    from inspect_ranges._challenges.setup import _detection_watches
+
+    store = Store()
+    watches = _detection_watches(_watch_challenge(), store)
+    assert [watch.collector for watch in watches] == ["splunk"]
+    assert watches[0].pattern.search(b"...GrantedAccess 0x1FFFFF...")
+    # no store means no latching surface, so no watches
+    assert _detection_watches(_watch_challenge(), None) == []
+
+
+def test_watch_latch_survives_scorer_absent_result() -> None:
+    """The mid-run latch is first-pass-wins: the scorer's end-of-run 'signal absent' never erases it."""
+    from inspect_ai.util._store import Store
+    from inspect_ranges._challenges.setup import _detection_watches
+
+    store = Store()
+    challenge = _watch_challenge()
+    watches = _detection_watches(challenge, store)
+    watches[0].observe(b"EventID=10 GrantedAccess 0x1FFFFF lsass")
+    records = latched_records(store)
+    assert records["hot"].achieved is True
+    # the scorer's fresh window read misses the signal and latches a failure
+    latch(
+        store,
+        "hot",
+        GoalResult(achieved=False, reason="signal absent"),
+        assurance="guest-corroborated",
+        primitive=None,
+        elapsed_s=0.0,
+    )
+    records = latched_records(store)
+    assert records["hot"].achieved is True
+    assert "latched at ship time" in (records["hot"].reason or "")

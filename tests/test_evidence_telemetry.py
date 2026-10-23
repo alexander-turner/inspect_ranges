@@ -6,6 +6,7 @@ The poller's contract (evidence-v1.md, slice 4): existing channel verbs only and
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from inspect_ranges._evidence.telemetry import (
     CollectorSpec,
     CommandSource,
     FileSource,
+    SignalWatch,
     TelemetryPoller,
 )
 
@@ -797,5 +799,121 @@ def test_truncated_poll_prefix_precedes_its_gap_in_the_chain(tmp_path: Path) -> 
             if record.stream == "telemetry/journal"
         ]
         assert kinds == [(0, "chunk"), (1, "gap")], kinds
+
+    asyncio.run(run())
+
+
+# -- signal watches (detection latch, scoring-integrity amendment 2026-10-23) --
+
+
+def test_signal_watch_fires_once_on_shipped_data(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"evt-1\n-- cursor: c1\n"),
+            exec_ok(b"GrantedAccess 0x1FFFFF lsass hit\n-- cursor: c2\n"),
+            exec_ok(b"GrantedAccess 0x1FFFFF again\n-- cursor: c3\n"),
+        ]
+        fired: list[float] = []
+        watch = SignalWatch(
+            collector="journal",
+            pattern=re.compile(rb"GrantedAccess\W{1,5}0x1FFFFF"),
+            on_match=lambda: fired.append(time.time()),
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="driver",
+            sample_id="telemetry-test",
+        )
+        poller = TelemetryPoller(
+            channel,  # type: ignore[arg-type]
+            writer,
+            [journal_spec()],
+            meta_flush_s=0,
+            watches=[watch],
+        )
+        await poller.poll_once("journal")
+        assert fired == []
+        await poller.poll_once("journal")
+        assert len(fired) == 1
+        await poller.poll_once("journal")
+        assert len(fired) == 1  # first match only, never re-fires
+        await writer.seal()
+
+    asyncio.run(run())
+
+
+def test_signal_watch_matches_across_poll_boundary(tmp_path: Path) -> None:
+    """A signal split across two shipped deltas still matches via the carryover tail."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"prefix GrantedAcc\n-- cursor: c1\n"),
+            exec_ok(b"ess 0x1FFFFF suffix\n-- cursor: c2\n"),
+        ]
+        fired: list[bool] = []
+        watch = SignalWatch(
+            collector="journal",
+            pattern=re.compile(rb"GrantedAcc\s?ess 0x1FFFFF"),
+            on_match=lambda: fired.append(True),
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="driver",
+            sample_id="telemetry-test",
+        )
+        poller = TelemetryPoller(
+            channel,  # type: ignore[arg-type]
+            writer,
+            [journal_spec()],
+            meta_flush_s=0,
+            watches=[watch],
+        )
+        await poller.poll_once("journal")
+        await poller.poll_once("journal")
+        assert fired == [True]
+        await writer.seal()
+
+    asyncio.run(run())
+
+
+def test_signal_watch_callback_failure_never_disturbs_shipping(tmp_path: Path) -> None:
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            exec_ok(b"the-signal\n-- cursor: c1\n"),
+            exec_ok(b"evt-after\n-- cursor: c2\n"),
+        ]
+
+        def explode() -> None:
+            raise RuntimeError("callback boom")
+
+        watch = SignalWatch(
+            collector="journal",
+            pattern=re.compile(rb"the-signal"),
+            on_match=explode,
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="driver",
+            sample_id="telemetry-test",
+        )
+        poller = TelemetryPoller(
+            channel,  # type: ignore[arg-type]
+            writer,
+            [journal_spec()],
+            meta_flush_s=0,
+            watches=[watch],
+        )
+        await poller.poll_once("journal")  # must not raise
+        await poller.poll_once("journal")
+        await writer.seal()
+        store = LocalDirStore(tmp_path)
+        data = await data_bytes(store, "journal")
+        assert b"the-signal" in data and b"evt-after" in data
 
     asyncio.run(run())

@@ -179,10 +179,52 @@ def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
     return None, data
 
 
+class SignalWatch:
+    """A caller-injected byte-pattern watch over one collector's shipped data.
+
+    The poller runs the pattern over every shipped delta (with a carryover tail so a match spanning two polls is still seen) and invokes `on_match` once, on the first match. The poller stays records-only: what a match means belongs to the caller (the challenges layer latches a detection goal through it; see the 2026-10-23 amendment in `challenges-scoring-integrity.md`). A failing callback is logged and never disturbs shipping.
+    """
+
+    def __init__(
+        self,
+        collector: str,
+        pattern: "re.Pattern[bytes]",
+        on_match: Callable[[], None],
+        tail_bytes: int = 4096,
+    ) -> None:
+        self.collector = collector
+        self.pattern = pattern
+        self.on_match = on_match
+        self.tail_bytes = tail_bytes
+        self.matched = False
+        self._tail = b""
+
+    def observe(self, data: bytes) -> None:
+        """Run the pattern over the carryover tail plus `data`; fire once on first match."""
+        if self.matched or not data:
+            return
+        buffer = self._tail + data
+        if self.pattern.search(buffer):
+            self.matched = True
+            self._tail = b""
+            try:
+                self.on_match()
+            except Exception as error:  # noqa: BLE001  (never disturbs shipping)
+                logger.warning(
+                    "signal watch callback failed: collector=%s: %s",
+                    self.collector,
+                    error,
+                )
+            return
+        self._tail = buffer[-self.tail_bytes :]
+
+
 class TelemetryPoller:
     """Polls declared collectors and ships deltas plus per-poll watermark records.
 
     One asyncio task per collector; `stop()` ends the loops and flushes, and never raises (it is teardown-bound, like `CaptureStreamer.stop`). Nothing in a poll cycle raises either: channel failures become poll-gap records, watermark anomalies become in-chain gaps plus meta records, and the writer's own discipline keeps backend trouble out of this path. The caller seals the writer afterwards; sealing is the sample lifecycle's job.
+
+    Optional `watches` observe shipped data as it ships (`SignalWatch`); the poller itself still evaluates nothing.
     """
 
     def __init__(
@@ -193,6 +235,7 @@ class TelemetryPoller:
         *,
         meta_flush_s: float = DEFAULT_META_FLUSH_S,
         clock: Callable[[], ClockStamp] = clock_now,
+        watches: list[SignalWatch] | None = None,
     ) -> None:
         names = [spec.name for spec in collectors]
         if len(set(names)) != len(names):
@@ -207,6 +250,13 @@ class TelemetryPoller:
         self._clock = clock
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stopping = asyncio.Event()
+        self._watches: dict[str, list[SignalWatch]] = {}
+        for watch in watches or []:
+            self._watches.setdefault(watch.collector, []).append(watch)
+
+    def _observe(self, collector: str, data: bytes) -> None:
+        for watch in self._watches.get(collector, []):
+            watch.observe(data)
 
     async def start(self) -> None:
         """Begin polling every collector; idempotent while running.
@@ -446,6 +496,7 @@ class TelemetryPoller:
             # record the loss explicitly, and re-bootstrap rather than
             # livelocking on the same window
             await self._writer.append(f"telemetry/{spec.name}", data, span=self._span())
+            self._observe(spec.name, data)
             if replaying:
                 meta["replay"] = True  # the shipped prefix may duplicate entries
             meta["bytes"] = len(data)
@@ -474,6 +525,7 @@ class TelemetryPoller:
                 await self._writer.append(
                     f"telemetry/{spec.name}", payload, span=self._span()
                 )
+                self._observe(spec.name, payload)
                 if replaying:
                     meta["replay"] = True  # shipped entries may duplicate
             meta["outcome"] = "cursor-missing"
@@ -500,6 +552,7 @@ class TelemetryPoller:
             state.cursor = cursor
             return
         await self._writer.append(f"telemetry/{spec.name}", payload, span=self._span())
+        self._observe(spec.name, payload)
         if replaying:
             meta["replay"] = True
             state.replay_next = False
