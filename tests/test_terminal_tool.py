@@ -209,7 +209,11 @@ def test_oversized_send_chunks_through(armed: tuple[Any, Store, str]) -> None:
             # output can satisfy the assert
             keystrokes=f"echo {filler} big-$((40+2))\n",
             block=True,
-            timeout=30,
+            # typing 20KB through chunked send-keys plus executing it exceeds
+            # 30s on slow 2-core CI runners (observed: filler fully typed,
+            # prompt back, wait expired); the contract under test is chunking
+            # correctness, not speed
+            timeout=120,
         )
         assert "command too long" not in result
         assert "big-42" in result
