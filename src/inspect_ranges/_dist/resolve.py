@@ -224,22 +224,42 @@ def pull_pinned(
 
 
 PIN_FILE_ENV = "INSPECT_RANGES_PIN_FILE"
-"""Path to a fleet pin file ({"pins": {name: root digest}}): a catalog name resolving to a different root than its pin refuses `pin-mismatch` (Q11)."""
+"""Path to the fleet pin file ({"pins": {name: root digest}}): a catalog name resolving to a different root than its pin refuses `pin-mismatch` (Q11). Unset, a `pins.json` at or above the working directory applies automatically (the lockfile pattern: a repo tracking one pairs its source with the catalog state it expects, with no per-host setup); set the variable to point elsewhere, or to the empty string to disable pinning and discovery both."""
+
+PIN_FILE_NAME = "pins.json"
+"""The discovered pin file's name (what `images pin` writes by convention)."""
+
+
+def _discover_pin_file() -> Path | None:
+    """The nearest `pins.json` at or above the working directory, or `None`."""
+    cwd = Path.cwd()
+    for directory in (cwd, *cwd.parents):
+        candidate = directory / PIN_FILE_NAME
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def fleet_pins() -> dict[str, str]:
-    """The fleet pin map from `INSPECT_RANGES_PIN_FILE` (empty when unset).
+    """The fleet pin map: `INSPECT_RANGES_PIN_FILE` when set (empty string disables pinning entirely), else a discovered `pins.json` at or above the working directory, else empty.
 
     Raises:
-        DistError: `pin-file-invalid` when the named file does not parse as a pin file.
+        DistError: `pin-file-invalid` when the named or discovered file does not parse as a pin file. A discovered file that does not conform refuses rather than silently unpinning: a typo'd real pin file must never read as "no pins".
     """
-    path = os.environ.get(PIN_FILE_ENV)
-    if not path:
-        return {}
+    env = os.environ.get(PIN_FILE_ENV)
+    if env is not None:
+        if not env:
+            return {}
+        path = Path(env)
+    else:
+        discovered = _discover_pin_file()
+        if discovered is None:
+            return {}
+        path = discovered
     import json as json_module
 
     try:
-        data = json_module.loads(Path(path).read_text())
+        data = json_module.loads(path.read_text())
     except (OSError, ValueError) as error:
         raise DistError(
             "pin-file-invalid", f"{path} did not parse as a pin file: {error}"

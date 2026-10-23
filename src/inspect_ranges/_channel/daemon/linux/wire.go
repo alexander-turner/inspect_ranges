@@ -88,6 +88,14 @@ type Message struct {
 	Entries          []DiagEntry `json:"entries,omitempty"`
 	ListenerRestarts *int64      `json:"listener_restarts,omitempty"`
 
+	// exec_events / exec_events_result (execve-witness-v1)
+	SinceSeq  *int64      `json:"since_seq,omitempty"`
+	MaxEvents *int64      `json:"max_events,omitempty"`
+	Events    []ExecEvent `json:"events,omitempty"`
+	NextSeq   *int64      `json:"next_seq,omitempty"`
+	Drops     *int64      `json:"drops,omitempty"`
+	Restarts  *int64      `json:"restarts,omitempty"`
+
 	// pong
 	Daemon   string `json:"daemon,omitempty"`
 	Protocol *int64 `json:"protocol,omitempty"`
@@ -131,6 +139,20 @@ type DiagEntry struct {
 	Event     string  `json:"event"`
 	RequestID *string `json:"request_id,omitempty"`
 	Detail    string  `json:"detail"`
+}
+
+// ExecEvent mirrors protocol.ExecEvent. Always-present fields carry no
+// omitempty (the Python encoder emits their defaults); a nil Argv would
+// marshal as null, so builders and controlMap keep it a non-nil slice.
+type ExecEvent struct {
+	Seq       int64    `json:"seq"`
+	TsMs      int64    `json:"ts_ms"`
+	Pid       int64    `json:"pid"`
+	Ppid      *int64   `json:"ppid,omitempty"`
+	Uid       *int64   `json:"uid,omitempty"`
+	Comm      string   `json:"comm"`
+	Argv      []string `json:"argv"`
+	Truncated bool     `json:"truncated"`
 }
 
 func i64(v int64) *int64    { return &v }
@@ -220,6 +242,30 @@ func (m *Message) controlMap() (map[string]any, error) {
 		}
 		if _, ok := out["listener_restarts"]; !ok {
 			out["listener_restarts"] = 0
+		}
+	case "exec_events":
+		if _, ok := out["since_seq"]; !ok {
+			out["since_seq"] = 0
+		}
+		if _, ok := out["max_events"]; !ok {
+			out["max_events"] = 128
+		}
+	case "exec_events_result":
+		if _, ok := out["events"]; !ok {
+			out["events"] = []any{}
+		}
+		if _, ok := out["drops"]; !ok {
+			out["drops"] = 0
+		}
+		if _, ok := out["restarts"]; !ok {
+			out["restarts"] = 0
+		}
+		if events, ok := out["events"].([]any); ok {
+			for _, raw := range events {
+				if event, ok := raw.(map[string]any); ok && event["argv"] == nil {
+					event["argv"] = []any{}
+				}
+			}
 		}
 	}
 	if budget, ok := out["budget"].(map[string]any); ok {
@@ -456,17 +502,22 @@ var kindFields = map[string]kindSpec{
 	"poll":        {required: []string{"target_id"}},
 	"ack":         {required: []string{"target_id"}},
 	"diag":        {optional: []string{"max_entries"}},
+	"exec_events": {optional: []string{"since_seq", "max_events"}},
 	"exec_result": {required: []string{"rc", "stdout_size", "stderr_size"}, optional: []string{"stdout_truncated", "stderr_truncated"}},
 	"file_data":   {required: []string{"size"}, optional: []string{"truncated"}},
 	"ok":          {},
 	"pending":     {required: []string{"target_id", "elapsed_ms"}},
 	"forward_ok":  {required: []string{"handle"}},
 	"diag_result": {optional: []string{"entries", "listener_restarts"}},
-	"error":       {required: []string{"errno", "message"}, optional: []string{"layer", "partial"}},
-	"realize":     {required: []string{"bundle_digest"}, optional: []string{"grants"}},
-	"teardown":    {},
-	"stage":       {required: []string{"stage"}, optional: []string{"detail", "guests"}},
-	"heartbeat":   {required: []string{"uptime_ms"}, optional: []string{"guests"}},
+	"exec_events_result": {
+		required: []string{"next_seq"},
+		optional: []string{"events", "drops", "restarts"},
+	},
+	"error":     {required: []string{"errno", "message"}, optional: []string{"layer", "partial"}},
+	"realize":   {required: []string{"bundle_digest"}, optional: []string{"grants"}},
+	"teardown":  {},
+	"stage":     {required: []string{"stage"}, optional: []string{"detail", "guests"}},
+	"heartbeat": {required: []string{"uptime_ms"}, optional: []string{"guests"}},
 }
 
 func validateFields(kind string, keys map[string]bool) error {
@@ -672,6 +723,18 @@ const (
 	maxDiagDetail = 2048
 	maxReqIDLen   = 64
 	maxCommandMs  = DefaultUntimedMs
+
+	// execve-witness-v1: mirrors protocol.EXEC_EVENTS_MAX / EXEC_ARGV_BYTES /
+	// EXEC_REPLY_BUDGET; the budget is a PACKING bound (the reply builder
+	// stops early), because 256 events x 2 KiB argv cannot fit the 32 KiB
+	// control frame and validation caps alone do not guarantee it
+	MaxExecEvents    = 256
+	MaxExecArgvBytes = 2048
+	MaxExecArgvItems = 256
+	MaxExecComm      = 64
+	ExecReplyBudget  = 24 * 1024
+	maxPidValue      = int64(1)<<31 - 1
+	maxUIDValue      = int64(1)<<32 - 1
 )
 
 var bulkKinds = map[string]bool{
@@ -681,8 +744,10 @@ var bulkKinds = map[string]bool{
 var allKinds = map[string]bool{
 	"ping": true, "exec": true, "read_file": true, "write_file": true,
 	"forward": true, "poll": true, "ack": true, "diag": true,
-	"pong": true, "exec_result": true, "file_data": true, "ok": true,
-	"pending": true, "forward_ok": true, "diag_result": true, "error": true,
+	"exec_events": true,
+	"pong":        true, "exec_result": true, "file_data": true, "ok": true,
+	"pending": true, "forward_ok": true, "diag_result": true,
+	"exec_events_result": true, "error": true,
 	"realize": true, "teardown": true, "stage": true, "heartbeat": true,
 }
 
@@ -735,6 +800,13 @@ func (m *Message) validate() error {
 	case "diag":
 		if m.MaxEntries != nil && (*m.MaxEntries < 1 || *m.MaxEntries > 1000) {
 			return decodeErrf("diag: max_entries out of bounds")
+		}
+	case "exec_events":
+		if m.SinceSeq != nil && (*m.SinceSeq < 0 || *m.SinceSeq > MaxWireInt) {
+			return decodeErrf("exec_events: since_seq out of bounds")
+		}
+		if m.MaxEvents != nil && (*m.MaxEvents < 1 || *m.MaxEvents > MaxExecEvents) {
+			return decodeErrf("exec_events: max_events out of bounds")
 		}
 	case "poll", "ack", "pending":
 		if !requestIDRe.MatchString(m.TargetID) {
@@ -837,6 +909,48 @@ func (m *Message) validate() error {
 			}
 			if entry.RequestID != nil && len(*entry.RequestID) > maxReqIDLen {
 				return decodeErrf("diag_result: request_id too long")
+			}
+		}
+	case "exec_events_result":
+		if m.NextSeq == nil || *m.NextSeq < 0 || *m.NextSeq > MaxWireInt {
+			return decodeErrf("exec_events_result: next_seq out of bounds")
+		}
+		for _, bounded := range []*int64{m.Drops, m.Restarts} {
+			if bounded != nil && (*bounded < 0 || *bounded > MaxWireInt) {
+				return decodeErrf("exec_events_result: counter out of bounds")
+			}
+		}
+		if len(m.Events) > MaxExecEvents {
+			return decodeErrf("exec_events_result: too many events")
+		}
+		for _, event := range m.Events {
+			if event.Seq < 0 || event.Seq > MaxWireInt {
+				return decodeErrf("exec_events_result: seq out of bounds")
+			}
+			if event.TsMs < 0 || event.TsMs > MaxWireInt {
+				return decodeErrf("exec_events_result: ts_ms out of bounds")
+			}
+			if event.Pid < 1 || event.Pid > maxPidValue {
+				return decodeErrf("exec_events_result: pid out of bounds")
+			}
+			if event.Ppid != nil && (*event.Ppid < 0 || *event.Ppid > maxPidValue) {
+				return decodeErrf("exec_events_result: ppid out of bounds")
+			}
+			if event.Uid != nil && (*event.Uid < 0 || *event.Uid > maxUIDValue) {
+				return decodeErrf("exec_events_result: uid out of bounds")
+			}
+			if len(event.Comm) > MaxExecComm {
+				return decodeErrf("exec_events_result: comm too long")
+			}
+			if len(event.Argv) > MaxExecArgvItems {
+				return decodeErrf("exec_events_result: too many argv items")
+			}
+			total := 0
+			for _, arg := range event.Argv {
+				total += len(arg)
+			}
+			if total > MaxExecArgvBytes {
+				return decodeErrf("exec_events_result: argv too long")
 			}
 		}
 	}

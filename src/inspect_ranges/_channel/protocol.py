@@ -5,6 +5,7 @@ Two planes ride one message contract (`range-channel.md`): guest control (`exec`
 Wire conventions, chosen so the Go and C# codecs cannot drift: every numeric field is an integer (milliseconds, bytes, counts; never floats), control payloads are canonical JSON (sorted keys, compact separators, UTF-8), and schemas are strict (unknown keys are errors, no cross-type coercion) because every reply originates on an attackable guest.
 """
 
+from collections.abc import Sequence
 from typing import Annotated, Literal, get_args
 
 from pydantic import (
@@ -207,6 +208,30 @@ class DiagRequest(_MessageBase):
     max_entries: int = Field(default=100, ge=1, le=1000)
 
 
+EXEC_ARGV_BYTES = 2048
+"""Per-event argv byte cap for the exec witness (execve-witness-v1): bounds both the ring's memory and the reply geometry."""
+
+EXEC_ARGV_ITEMS = 256
+"""Per-event argv ITEM cap (review round 1, findings 1-2): bytes alone do not bound an argv of empty strings, whose JSON overhead is what actually inflates the encoded event, and the three validators must agree on the item bound or a legal many-arg exec wedges the host's poll loop on a tamper verdict."""
+
+EXEC_EVENTS_MAX = 256
+"""Hard cap on events per `exec_events` reply; the reply byte budget usually packs fewer."""
+
+EXEC_REPLY_BUDGET = 24 * 1024
+"""The exec-events reply packing budget: the daemon stops packing events at this encoded size and `next_seq` carries the remainder, because validation caps alone (256 events x 2 KiB argv) cannot guarantee the 32 KiB control frame."""
+
+
+class ExecEventsRequest(_MessageBase):
+    """Read the daemon's exec-witness ring (execve-witness-v1): retained events with `seq >= since_seq`.
+
+    Non-durable like `diag` (answered before the durable store). The FIRST poll arms the in-guest subscriber (lazy-arm): a host that never polls leaves the witness fully dormant, which is how builds never pay for it and how the host-side kill switch needs no rebake.
+    """
+
+    kind: Literal["exec_events"] = "exec_events"
+    since_seq: int = Field(default=0, ge=0, le=MAX_WIRE_INT)
+    max_events: int = Field(default=128, ge=1, le=EXEC_EVENTS_MAX)
+
+
 # ---------------------------------------------------------------------------
 # Guest control plane: replies
 # ---------------------------------------------------------------------------
@@ -296,6 +321,80 @@ class DiagReply(_MessageBase):
     """Supervised listener recreations since daemon start: the storm battery asserts it stays 0."""
 
 
+class ExecEvent(_WireModel):
+    """One witnessed `execve` (execve-witness-v1).
+
+    `seq`/`ts_ms`/`pid` come from the ring and the connector and are always present; `ppid`/`uid`/`comm`/`argv` come from `/proc/<pid>` reads that can race process exit and go null or empty rather than dropping the event (a short-lived process still leaves a timestamped pid record). `argv` is lossy-UTF-8 sanitized (cmdline is arbitrary bytes; wire strings must be valid UTF-8 in three codecs), so byte-exact argv is not a claim this record makes.
+    """
+
+    seq: int = Field(ge=0, le=MAX_WIRE_INT)
+    ts_ms: int = Field(ge=0, le=MAX_WIRE_INT)
+    pid: int = Field(ge=1, le=2**31 - 1)
+    ppid: int | None = Field(default=None, ge=0, le=2**31 - 1)
+    uid: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    comm: Annotated[str, Field(max_length=64), utf8_capped(64)] = ""
+    argv: list[
+        Annotated[str, Field(max_length=EXEC_ARGV_BYTES), utf8_capped(EXEC_ARGV_BYTES)]
+    ] = Field(default_factory=list[str], max_length=EXEC_ARGV_ITEMS)
+    truncated: bool = False
+    """The argv byte cap was hit, or cmdline was unreadable mid-exit."""
+
+    @model_validator(mode="after")
+    def _argv_total_capped(self) -> "ExecEvent":
+        if sum(len(arg.encode()) for arg in self.argv) > EXEC_ARGV_BYTES:
+            raise ValueError(f"argv exceeds {EXEC_ARGV_BYTES} bytes total")
+        return self
+
+
+class ExecEventsReply(_MessageBase):
+    """Reply to `exec_events`: retained events from `since_seq` on, packed under `EXEC_REPLY_BUDGET` (the daemon stops early and `next_seq` carries the remainder).
+
+    Loss is never silent: a first event with `seq > since_seq` means the ring overwrote (the difference is the lost count), and `drops` is the cumulative kernel-side loss count (ENOBUFS) since arm. `restarts` counts subscriber resubscriptions, the `listener_restarts` idiom.
+    """
+
+    kind: Literal["exec_events_result"] = "exec_events_result"
+    events: list[ExecEvent] = Field(
+        default_factory=list[ExecEvent], max_length=EXEC_EVENTS_MAX
+    )
+    next_seq: int = Field(ge=0, le=MAX_WIRE_INT)
+    drops: int = Field(default=0, ge=0, le=MAX_WIRE_INT)
+    restarts: int = Field(default=0, ge=0, le=MAX_WIRE_INT)
+
+
+def pack_exec_events(
+    retained: Sequence[ExecEvent], since_seq: int, max_events: int
+) -> tuple[list[ExecEvent], int]:
+    """Pack retained events with `seq >= since_seq` under `EXEC_REPLY_BUDGET` and `max_events`; returns `(events, next_seq)`.
+
+    The reference packing geometry every endpoint shares (the Go daemon implements the same rule; `FakeGuest` calls this one, so host tests cannot pass against packing the real daemon lacks): events pack in seq order until either cap, the first qualifying event always packs, and `next_seq` is the cursor the next poll resumes from: one past the last packed event, else the WRITE HEAD. Deliberately never clamped up to `since_seq` (review round 1, finding 4): a daemon restart resets the seq space, so a head BELOW the caller's cursor is the restart signal the poller consumes; clamping would disguise it as a quiet guest forever.
+    """
+    import json
+
+    events: list[ExecEvent] = []
+    total = 0
+    head = max((event.seq for event in retained), default=-1) + 1
+    for event in sorted(
+        (event for event in retained if event.seq >= since_seq),
+        key=lambda event: event.seq,
+    ):
+        if len(events) >= max_events:
+            break
+        encoded = len(
+            json.dumps(
+                event.model_dump(mode="json", exclude_none=True),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        )
+        if events and total + encoded > EXEC_REPLY_BUDGET:
+            break
+        events.append(event)
+        total += encoded
+    next_seq = events[-1].seq + 1 if events else head
+    return events, next_seq
+
+
 class ErrorReply(_MessageBase):
     """Errno-tagged failure. Budget expiries set `errno` `ETIME` and must name the layer that fired.
 
@@ -362,6 +461,7 @@ GuestRequest = (
     | PollRequest
     | AckRequest
     | DiagRequest
+    | ExecEventsRequest
 )
 
 GuestReply = (
@@ -372,6 +472,7 @@ GuestReply = (
     | PendingReply
     | ForwardReply
     | DiagReply
+    | ExecEventsReply
     | ErrorReply
 )
 

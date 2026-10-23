@@ -1,7 +1,7 @@
 {
   "pins": {
-    "attack": "sha256:dab4b6e15907bd3e65a9c39dcd23dca79ff4000ba6444fc6496b40b14205eb7a",
-    "ubuntu-focal": "sha256:de3f863e109aeef24b0d261add0c0bf2bfadd9ef4e49e7cd47c4946b3898587f",
-    "ubuntu-noble": "sha256:f66e784b13f5e1e2fb29a6b846359cc918fbb3810c077a0457fd0184c95707bb"
+    "attack": "sha256:b7a21cc0f11cb799fc7435aff77ee90a010b220609705db27f2f4a59e2eb3de3",
+    "ubuntu-focal": "sha256:424a2f9bfb0f7e86e54152b023e59a77829feda66b067ea519c0543b70045a60",
+    "ubuntu-noble": "sha256:cf8779959de94f4fe862a26c1ff3fdfc4cf12bba6aef82e072e8b1bc2666b4a8"
   }
 }

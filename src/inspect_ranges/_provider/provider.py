@@ -5,6 +5,7 @@ Lifecycle per provider-v1.md: boot per sample (per-sample render with a leased C
 
 import asyncio
 import logging
+import os
 import secrets
 import shutil
 from pathlib import Path
@@ -29,6 +30,7 @@ from .._build.manifest import (
 from .._channel.channel import TamperError
 from .._compiler.draws import draw_variables
 from .._compiler.plan import ResolvedPlan, Totals, resolve_plan
+from .._evidence.execwitness import ExecWitnessPoller
 from .._evidence.sealer import seal_abandoned
 from .._host.host import LeasePlacement, SampleSpec
 from .._host.leases import LeaseStore
@@ -264,6 +266,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                 await handle.evidence.record_session_pins(handle.sessions)
                 if handle.draws and handle.draw_seed is not None:
                     await handle.evidence.record_draws(handle.draw_seed, handle.draws)
+                await cls._start_exec_witness(handle)
         except BaseException as failure:
             # the ping diagnosis stays primary; a teardown failure chains
             # underneath it, never substitutes
@@ -577,6 +580,30 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         await cls._release_host(runtime, handle)
         shutil.rmtree(handle.staging, ignore_errors=True)
         runtime.registry.pop(handle.project, None)
+
+    @classmethod
+    async def _start_exec_witness(cls, handle: SampleHandle) -> None:
+        """Start the exec-witness poller for every Linux guest (execve-witness-v1): default on whenever the evidence session exists; `INSPECT_RANGES_EXEC_WITNESS=0` is the kill switch (the poller is never built, so the in-guest subscriber never arms — no rebake involved). Never raises: evidence producers degrade, they do not fail samples."""
+        if os.environ.get("INSPECT_RANGES_EXEC_WITNESS", "1") == "0":
+            return
+        session = handle.evidence
+        plan = handle.plan
+        if session is None or plan is None or handle.channel is None:
+            return
+        writer = session.driver_writer
+        if writer is None:
+            return
+        try:
+            poller = ExecWitnessPoller(
+                handle.channel,
+                writer,
+                [g.name for g in plan.guests if g.os == "linux"],
+                [g.name for g in plan.guests if g.os == "windows"],
+            )
+            await poller.start()
+            session.register_producer(poller.stop)
+        except Exception:
+            logger.exception("exec witness failed to start (sample continues)")
 
     @classmethod
     async def _destroy(cls, runtime: ProviderRuntime, handle: SampleHandle) -> None:

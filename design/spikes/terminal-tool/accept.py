@@ -149,8 +149,12 @@ def main() -> int:
         "msfconsole ran in its own session and reported its version",
     )
     check(
-        any("screen at call time" in view for view in views),
-        "tool views carry the decision-time screen snapshot",
+        any(view.startswith("```text") for view in views),
+        "send views carry the compact fenced-keystrokes block",
+    )
+    check(
+        not any("screen at call time" in view.lower() for view in views),
+        "no view carries the retired screen snapshot",
     )
 
     # casts and evidence
