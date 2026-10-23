@@ -7,6 +7,7 @@ The battery runs the REAL paths end to end (render, up, the provider, docker); i
 
 import asyncio
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from .._channel.channel import MessageChannel
 from .._channel.vsock import HybridEndpoint, VsockTransport
 from .._compiler import PlanOptions, render_bundle
 from .._compiler.plan import ResolvedPlan, Totals
+from .._provider.naming import CidAllocator
 from .._runtime.down import DownError, down
 from .._runtime.images import default_image_cache
 from .._runtime.ownership import default_state_dir
@@ -86,28 +88,82 @@ async def _live_rows(
     staging: Path,
 ) -> list[BatteryRow]:
     """The obligations that hold against the running range: surface sweep, session stability, exec parity."""
-    from .._build.behavioral import run_conformance_checks
+    from .._build.behavioral import conformance_plan, run_conformance_checks
     from .._build.errors import BuildError
+    from .._channel.channel import request_id
+    from .._channel.protocol import Budget, ExecRequest
     from .._provider.provider import RangeSandboxEnvironment
     from .._provider.state import SampleHandle
 
     rows: list[BatteryRow] = []
-    try:
-        await run_conformance_checks(spec, plan, cids, hybrid_sockets=hybrid)
-        rows.append(
-            BatteryRow(
-                "attacker-surface",
-                True,
-                "defender sweep clean; hypervisor endpoints and reserved "
-                "addresses as declared",
-            )
-        )
-    except BuildError as error:
-        rows.append(BatteryRow("attacker-surface", False, str(error)))
-
     channel = MessageChannel(
         VsockTransport(cids, hybrid_sockets=hybrid), label="attackbox-battery"
     )
+
+    # the box must HOLD its reserved addresses before the sweep means anything:
+    # an L2-absent box answers the sweep with silence too, but by ARP timeout,
+    # which both lies about the obligation and burns the whole exec budget
+    defender, attacker_ips, _, _ = conformance_plan(spec, plan)
+    reachable = False
+    if defender is None:
+        rows.append(
+            BatteryRow(
+                "foothold-reach",
+                False,
+                "no shared-segment linux defender in the spec; use a battery "
+                "spec with one (dmz_pivot is the canonical shape)",
+            )
+        )
+    else:
+        try:
+            probe = " && ".join(f"ping -c1 -W2 {ip} >/dev/null" for ip in attacker_ips)
+            outcome = await channel.exec(
+                defender,
+                ExecRequest(
+                    id=request_id(),
+                    cmd=["sh", "-c", probe],
+                    budget=Budget(command_ms=30_000),
+                ),
+            )
+            reachable = outcome.rc == 0
+            rows.append(
+                BatteryRow(
+                    "foothold-reach",
+                    reachable,
+                    f"the box answers on {', '.join(attacker_ips)} from {defender}"
+                    if reachable
+                    else f"the box does not hold its reserved address "
+                    f"({', '.join(attacker_ips)}): nothing answered the "
+                    f"defender's ping",
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - every obligation is a row
+            rows.append(
+                BatteryRow("foothold-reach", False, f"reach probe failed: {error}")
+            )
+    if reachable:
+        try:
+            await run_conformance_checks(spec, plan, cids, hybrid_sockets=hybrid)
+            rows.append(
+                BatteryRow(
+                    "attacker-surface",
+                    True,
+                    "defender sweep clean; hypervisor endpoints and reserved "
+                    "addresses as declared",
+                )
+            )
+        except BuildError as error:
+            rows.append(BatteryRow("attacker-surface", False, str(error)))
+        except Exception as error:  # noqa: BLE001 - every obligation is a row
+            rows.append(BatteryRow("attacker-surface", False, f"sweep failed: {error}"))
+    else:
+        rows.append(
+            BatteryRow(
+                "attacker-surface",
+                False,
+                "skipped: the box is not reachable on its segment",
+            )
+        )
     try:
         first = await channel.ping(attacker)
         second = await channel.ping(attacker)
@@ -242,68 +298,87 @@ def run_attack_box_battery(
     report = BatteryReport(rows=[_capabilities_row(backend)])
     staging_root = default_state_dir().parent / "staging"
     staging_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix="ir-abox-battery-", dir=staging_root
-    ) as temp:
-        spec, realized_sections, consumed = apply_build_manifest(
-            spec, image_cache=cache, build_cache=default_build_cache()
-        )
-        bundle = Path(temp) / "bundle"
-        render_bundle(
-            spec,
-            bundle,
-            PlanOptions(
-                image_cache=cache,
-                realized_sections=realized_sections,
-                realized_backings=realized_backings(consumed) if consumed else {},
-            ),
-        )
-        plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
-        attacker = next(g.name for g in plan.guests if g.kind == "attacker")
-        try:
-            result = up(
+    # a well-behaved tenant: the battery leases its CID block from the shared
+    # registry like the provider does, so it coexists with live ranges on the
+    # host (a fixed base collided with a running eval, measured)
+    allocator = CidAllocator(state)
+    project = f"ir-abox-battery-{uuid.uuid4().hex[:8]}"
+    guest_count = len(spec.hosts) + len(spec.routers) + 1  # + the attack box
+    cid_lease = allocator.lease(project, guest_count)
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="ir-abox-battery-", dir=staging_root
+        ) as temp:
+            spec, realized_sections, consumed = apply_build_manifest(
+                spec, image_cache=cache, build_cache=default_build_cache()
+            )
+            bundle = Path(temp) / "bundle"
+            render_bundle(
+                spec,
                 bundle,
-                UpOptions(
+                PlanOptions(
                     image_cache=cache,
-                    state_dir=state,
-                    readiness_timeout=readiness_timeout,
-                    attack_box=origin,
+                    cid_base=cid_lease.base,
+                    realized_sections=realized_sections,
+                    realized_backings=realized_backings(consumed) if consumed else {},
                 ),
             )
-        except UpError as error:
-            report.rows.append(BatteryRow("realize", False, str(error)))
-            return report
-        report.project = result.project
-        report.rows.append(
-            BatteryRow(
-                "realize",
-                True,
-                f"project {result.project}: every guest ready, the attack box "
-                "through the provider",
+            plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
+            attacker = next(g.name for g in plan.guests if g.kind == "attacker")
+            try:
+                result = up(
+                    bundle,
+                    UpOptions(
+                        project=project,
+                        image_cache=cache,
+                        state_dir=state,
+                        readiness_timeout=readiness_timeout,
+                        attack_box=origin,
+                    ),
+                )
+            except UpError as error:
+                report.rows.append(BatteryRow("realize", False, str(error)))
+                return report
+            report.project = result.project
+            report.rows.append(
+                BatteryRow(
+                    "realize",
+                    True,
+                    f"project {result.project}: every guest ready, the attack "
+                    "box through the provider",
+                )
             )
-        )
-        cids = {guest.name: guest.cid for guest in result.guests}
-        hybrid = {
-            guest.name: guest.hybrid_vsock
-            for guest in result.guests
-            if guest.hybrid_vsock is not None
-        }
-        try:
-            report.rows.extend(
-                asyncio.run(_live_rows(spec, plan, cids, hybrid, attacker, Path(temp)))
-            )
-        finally:
-            if keep:
-                report.rows.append(
-                    BatteryRow(
-                        "teardown",
-                        True,
-                        f"skipped (--keep); tear down with: inspect-ranges "
-                        f"down {result.project}",
+            cids = {guest.name: guest.cid for guest in result.guests}
+            hybrid = {
+                guest.name: guest.hybrid_vsock
+                for guest in result.guests
+                if guest.hybrid_vsock is not None
+            }
+            try:
+                report.rows.extend(
+                    asyncio.run(
+                        _live_rows(spec, plan, cids, hybrid, attacker, Path(temp))
                     )
                 )
-            else:
-                report.rows.extend(
-                    _teardown_rows(result.project, state, cids, hybrid, attacker)
+            except Exception as error:  # noqa: BLE001 - teardown still owed
+                report.rows.append(
+                    BatteryRow("live-obligations", False, f"aborted: {error}")
                 )
+            finally:
+                if keep:
+                    report.rows.append(
+                        BatteryRow(
+                            "teardown",
+                            True,
+                            f"skipped (--keep); tear down with: inspect-ranges "
+                            f"down {result.project}",
+                        )
+                    )
+                else:
+                    report.rows.extend(
+                        _teardown_rows(result.project, state, cids, hybrid, attacker)
+                    )
+    finally:
+        if not keep:
+            allocator.release(project)
     return report
