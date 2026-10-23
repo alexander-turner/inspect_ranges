@@ -81,10 +81,12 @@ async def _drive_realize(
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
     started = time.monotonic()
+    reported: dict[str, str] = {}
     try:
         async for report in channel.realize(
             digest, [], gap_allowances=realize_gap_allowances(plan, options)
         ):
+            reported = dict(report.guests)
             if on_stage is not None:
                 # never let an observer failure alter the realize outcome
                 try:
@@ -102,8 +104,16 @@ async def _drive_realize(
             # provider's layer-3 respin classifies it
             raise UpError("admission", str(refusal)) from refusal
         raise  # ENOSPC/EINVAL/ENOTSUP are permanent and stay typed
+    # readiness folds from the host's terminal report, never fabricated: a
+    # ready stream always carries per-guest states (the applier marks every
+    # guest it realized), so a guest the host never reported is not ready
     guests = [
-        GuestState(name=guest.name, cid=guest.cid, ready=True) for guest in plan.guests
+        GuestState(
+            name=guest.name,
+            cid=guest.cid,
+            ready=reported.get(guest.name) == "ready",
+        )
+        for guest in plan.guests
     ]
     return UpResult(
         project=project,

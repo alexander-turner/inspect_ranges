@@ -246,7 +246,12 @@ def test_uds_up_fn_gap_allowances_cover_the_silent_up_phases(
         # a 0.1 s per-report budget makes any uncovered gap trip instantly;
         # the 0.4 s delay stands in for the gap's legitimate slow occupant
         return MessageChannel(
-            SlowGapApplierTransport(before_stage=before_stage, delay_s=0.4),
+            SlowGapApplierTransport(
+                before_stage=before_stage,
+                delay_s=0.4,
+                guests=("web", "attacker"),  # the fixture plan's guests: the
+                # honest ready report names them, like the real applier
+            ),
             label=label,
             channel_budget_s=0.1,
         )
