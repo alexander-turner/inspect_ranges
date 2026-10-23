@@ -1,6 +1,6 @@
 """The attack-box conformance battery: a provider boots when it passes (attack-box-v1).
 
-The governance story of the seam as one runnable command (`inspect-ranges attackbox verify --spec <range.yaml>`): against a live range realized through the registered provider, the battery holds the proof obligations the design attaches to a foreign attack box. The obligations, as report rows: `capabilities` (the bundle declares honestly; `console_stream=True` has no ingest path and refuses), `realize` (attach, boot, strict readiness through the real `up`), `attacker-surface` (the agent-containment negative checks against the foreign box: a shared-segment defender sweeping the attacker finds zero answers, hypervisor endpoints answer exactly their declared service, reserved segment addresses stay silent), `session-stability` (the exec surface pins one daemon session across dials), `exec-parity` (inspect-ai's full sandbox `self_check` suite over the surface, with an EMPTY xfail pin: the live box is where CI pins must evaporate), and `teardown` (`down` reclaims the box before the netns, clears the record, re-dial refuses, and a second `down` is a no-op).
+The governance story of the seam as one runnable command (`inspect-ranges attackbox verify --spec <range.yaml>`): against a live range realized through the registered provider, the battery holds the proof obligations the design attaches to a foreign attack box. The obligations, as report rows: `capabilities` (the bundle declares honestly; `console_stream=True` has no ingest path and refuses), `realize` (attach, boot, strict readiness through the real `up`), `foothold-reach` (the box holds its reserved address), `attacker-surface` (the agent-containment negative checks against the foreign box: a shared-segment defender sweeping the attacker finds zero answers, hypervisor endpoints answer exactly their declared service, reserved segment addresses stay silent), `session-stability` (the exec surface pins one daemon session across dials), `exec-parity` (inspect-ai's full sandbox `self_check` suite over the surface, with an EMPTY xfail pin: the live box is where CI pins must evaporate), `exec-witness` (the exec witness is part of the bar: a marker exec must appear in the box's `exec/<guest>` stream with honest cursors; a typed refusal fails), and `teardown` (`down` reclaims the box before the netns, clears the record, re-dial refuses, and a second `down` is a no-op).
 
 The battery runs the REAL paths end to end (render, up, the provider, docker); it is the acceptance gate a provider author runs on a KVM host, not a CI unit. Refusals that prevent the battery from running at all (no registered backend, a foothold spec with no dedicated attack box) raise `BatteryError`; obligation outcomes land as rows, most-severe first-failure semantics left to the caller's exit code.
 """
@@ -64,6 +64,81 @@ class BatteryReport:
                 for row in self.rows
             ],
         }
+
+
+async def _witness_row(
+    channel: MessageChannel,
+    attacker: str,
+    *,
+    marker: str | None = None,
+    deadline_s: float = 20.0,
+) -> BatteryRow:
+    """The exec-witness obligation (attack-box-v1 settles execve-witness-v1's parked question): the box must actually witness, not merely refuse typed.
+
+    The check is behavioral: arm the subscriber (the first `exec_events` poll), run a marker command through the exec surface, and require the marker's exec to appear in the stream with a sane cursor, then re-read from the marker's sequence to pin cursor idempotency. A typed `ENOSYS`/`EPROTO` refusal stays the declared-drop path for ordinary guests, but on the attack box it fails the bar: every native dedicated attack box is a Linux guest serving the witness, and the box's own process timeline is the highest-value corroboration stream the sample has.
+    """
+    import time as time_module
+
+    from .._channel.channel import GuestError, request_id
+    from .._channel.protocol import Budget, ExecRequest
+
+    marker = marker if marker is not None else f"abox-witness-{uuid.uuid4().hex[:12]}"
+    try:
+        first = await channel.exec_events(attacker)
+        await channel.exec(
+            attacker,
+            ExecRequest(
+                id=request_id(),
+                cmd=["true", marker],
+                budget=Budget(command_ms=30_000),
+            ),
+        )
+        cursor = first.next_seq
+        marker_seq: int | None = None
+        deadline = time_module.monotonic() + deadline_s
+        while marker_seq is None and time_module.monotonic() < deadline:
+            reply = await channel.exec_events(attacker, since_seq=cursor)
+            for event in reply.events:
+                if any(marker in part for part in event.argv):
+                    marker_seq = event.seq
+                    break
+            cursor = reply.next_seq
+            if marker_seq is None:
+                await asyncio.sleep(0.5)
+        if marker_seq is None:
+            return BatteryRow(
+                "exec-witness",
+                False,
+                f"the marker exec never appeared in exec/{attacker} within "
+                f"{deadline_s:.0f}s: the surface serves the verb but does not "
+                "witness",
+            )
+        reread = await channel.exec_events(attacker, since_seq=marker_seq)
+        if not any(
+            any(marker in part for part in event.argv) for event in reread.events
+        ):
+            return BatteryRow(
+                "exec-witness",
+                False,
+                "cursor re-read from the marker's sequence did not return it: "
+                "the ring's cursor semantics are dishonest",
+            )
+        return BatteryRow(
+            "exec-witness",
+            True,
+            f"marker exec witnessed at seq {marker_seq}; cursor re-read honest",
+        )
+    except GuestError as error:
+        if error.errno in ("ENOSYS", "EPROTO"):
+            return BatteryRow(
+                "exec-witness",
+                False,
+                f"typed refusal ({error.errno}): the witness is part of the "
+                "attack-box bar; run the standard daemon or serve exec_events",
+            )
+        return BatteryRow("exec-witness", False, f"witness probe failed: {error}")
+    except Exception as error:  # noqa: BLE001 - every obligation is a row
+        return BatteryRow("exec-witness", False, f"witness probe failed: {error}")
 
 
 def _capabilities_row(backend: AttackBoxBackend) -> BatteryRow:
@@ -208,6 +283,7 @@ async def _live_rows(
             else "; ".join(failures),
         )
     )
+    rows.append(await _witness_row(channel, attacker))
     return rows
 
 

@@ -3,6 +3,7 @@
 The battery's live obligations run real render/up/docker and are the devbox acceptance gate (`INSPECT_RANGES_ATTACK_BOX=tests.fake_attackbox.factory inspect-ranges attackbox verify --spec <canonical range>`); CI holds the refusal surface, the report contract, and the CLI rendering.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -12,8 +13,16 @@ from inspect_ranges._attackbox.conformance import (
     BatteryError,
     BatteryReport,
     BatteryRow,
+    _witness_row,
     run_attack_box_battery,
 )
+from inspect_ranges._channel.channel import (
+    ExecContext,
+    FakeGuest,
+    LoopbackTransport,
+    MessageChannel,
+)
+from inspect_ranges._channel.protocol import ExecEvent
 from inspect_ranges._cli.attackboxcmd import attackbox
 
 FOOTHOLD_SPEC = """\
@@ -60,6 +69,66 @@ def test_battery_refuses_a_foothold_spec(
     monkeypatch.setenv("INSPECT_RANGES_ATTACK_BOX", "tests.fake_attackbox.factory")
     with pytest.raises(BatteryError, match="dedicated attack box"):
         run_attack_box_battery(write_spec(tmp_path), state_dir=tmp_path / "state")
+
+
+# -- the exec-witness obligation --------------------------------------------------
+
+
+def _witness_channel(guest: FakeGuest) -> MessageChannel:
+    transport = LoopbackTransport(guests=())
+    transport.guests["attacker"] = guest
+    return MessageChannel(transport, label="witness-row-test")
+
+
+def test_witness_row_passes_when_the_marker_is_witnessed() -> None:
+    """The behavioral bar: the marker exec appears in the stream after arming, and a re-read from its sequence returns it again (honest cursors)."""
+    guest = FakeGuest("attacker")
+
+    async def witnessing_true(context: ExecContext) -> tuple[int, bytes, bytes]:
+        guest.exec_events_ring.append(
+            ExecEvent(
+                seq=len(guest.exec_events_ring) + 1,
+                ts_ms=1,
+                pid=4242,
+                comm="true",
+                argv=list(context.argv),
+                truncated=False,
+            )
+        )
+        return 0, b"", b""
+
+    guest.register("true", witnessing_true)
+    row = asyncio.run(
+        _witness_row(_witness_channel(guest), "attacker", marker="m-feed")
+    )
+    assert row.ok, row.detail
+    assert guest.exec_events_armed, "the first poll must arm the subscriber"
+
+
+def test_witness_row_fails_a_typed_refusal() -> None:
+    """ENOSYS/EPROTO stays the declared-drop path for ordinary guests, but the attack box must serve the witness."""
+    guest = FakeGuest("attacker")
+    guest.exec_events_error = "ENOSYS"
+    row = asyncio.run(
+        asyncio.wait_for(
+            _witness_row(_witness_channel(guest), "attacker", marker="m-feed"),
+            timeout=30,
+        )
+    )
+    assert not row.ok
+    assert "typed refusal (ENOSYS)" in row.detail
+
+
+def test_witness_row_fails_a_surface_that_serves_but_never_witnesses() -> None:
+    """A shim can answer the verb with an empty ring forever; the marker requirement catches it."""
+    guest = FakeGuest("attacker")  # default `true` handler, ring stays empty
+    row = asyncio.run(
+        _witness_row(
+            _witness_channel(guest), "attacker", marker="m-feed", deadline_s=1.0
+        )
+    )
+    assert not row.ok
+    assert "never appeared" in row.detail
 
 
 def test_report_passes_only_when_every_row_does() -> None:

@@ -67,3 +67,5 @@ Slice parameters settled 2026-10-23 (user discussion, ahead of the design record
 - **Lazy-arm is the containment spine**: the subscriber starts only when the host first polls the new verb, so builds (the worst fork-storm case) never activate it and the field kill switch is a host-side setting, never a golden rebake.
 - **The fork-storm battery gates on numbers, not completion**: ping/exec round-trips inside existing budgets during a sustained storm, zero listener restarts, floods absorbed by the bounded ring's drop counter (recorded as gaps) rather than memory.
 - Mixed-version host/daemon handling deliberately out of scope (pre-release, no deployed consumers).
+
+The remaining parked question (does the witness join the attack-box conformance bar) is settled 2026-10-23: it does, as must-serve; the decision and its reasons live in [attack-box-v1](attack-box-v1.md).
