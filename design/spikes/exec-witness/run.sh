@@ -79,9 +79,16 @@ done
 [[ "$READY" == "1" ]] || { echo "FAIL daemon never answered"; exit 1; }
 
 echo "=== the storm battery ==="
+# pipefail: the || must see the python exit, not tee's (the house pipeline
+# exit-masking lesson, again)
+set -o pipefail
 STATUS=0
 uv run python design/spikes/exec-witness/storm_battery.py 2>&1 \
   | tee design/spikes/exec-witness/tmp/logs/storm.txt || STATUS=1
+
+echo "=== the flow cut (real poller, sealed record, verify) ==="
+uv run python design/spikes/exec-witness/flow_cut.py 2>&1 \
+  | tee design/spikes/exec-witness/tmp/logs/flowcut.txt || STATUS=1
 
 cd design/spikes/exec-witness
 docker compose -p "$PROJECT" exec -T range sh -c \
