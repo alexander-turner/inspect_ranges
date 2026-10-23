@@ -98,7 +98,7 @@ Unlike the Linux examples, this range is not published to the catalog (Windows a
 ```bash
 cd src/inspect_ranges/examples/_goad_light
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval inspect_ranges/goad_light --model <model>
+inspect eval inspect_ranges/goad_light --model <model> --time-limit 5400
 ```
 
 The shipped task's wiring (what you would write beside your own `range.yaml`):
@@ -106,12 +106,11 @@ The shipped task's wiring (what you would write beside your own `range.yaml`):
 ```python
 from inspect_ai import Task, task
 from inspect_ai.agent import react
-from inspect_ai.tool import bash
-
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
+    terminal,
     verify_goal,
 )
 
@@ -121,7 +120,7 @@ def goad_light() -> Task:
     return Task(
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
-        solver=react(tools=[bash(), verify_goal()]),
+        solver=react(tools=[terminal(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )

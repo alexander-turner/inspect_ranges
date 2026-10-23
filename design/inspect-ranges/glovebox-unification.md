@@ -48,6 +48,12 @@ Implementation risk is low to moderate; the real risk budget is items 1 and 3, a
 1. Take the meeting before launch; he is a proven contributor and the timing point is right, aimed at the right API.
 2. Decline the in-tree connector; offer the per-attacker seam design (out-of-tree registration, proof obligations attached) with his PR as the demand evidence and sketch.
 3. Pre-launch API-stability pass on the published seams (HostBackend/Transport now, the attacker seam if designed), with him as the first external consumer.
-4. Adopt the execve-witness concept natively in vsockd as an evidence stream, with attribution.
+4. Adopt the execve-witness concept natively in vsockd as an evidence stream, with attribution (deferred work, below).
 5. L7 egress stays parked behind `egress-fqdn-not-realized` with the named reopening condition.
 6. Any PR response from an agent goes as a Comment, flagged as AI and not a maintainer, per the house rule.
+
+## Deferred work: the execve witness (added 2026-10-23)
+
+The one piece of PR #15 worth adopting natively is deliberately not scheduled yet. The concept: vsockd subscribes to the kernel process connector (or an equivalent in-guest source) and ships an exec-event stream (`exec/<guest>`: pid, ppid, uid, argv, timestamp) as an ordinary evidence stream, giving scorers and reviewers a per-guest process timeline that corroborates what the pcap and consoles can only imply. Attribution to the glovebox PR travels with the implementation.
+
+Why deferred rather than batched into current work: it is its own slice, not a rider. It changes the daemon (a new subscription loop, a new wire record type, backpressure under exec storms), which re-digests the daemon bundle and therefore re-keys and re-derives every golden; a change of that cost wants to share a rebake with other golden-touching work and carry its own conformance additions (mock-channel records, Windows posture stated, the evade interaction considered, since a process witness on a target is exactly what a stealth goal's agent is trying not to trip). Revisit at or after the glovebox meeting, where the seam discussion settles whether the witness also needs to be part of the attack-box conformance bar.

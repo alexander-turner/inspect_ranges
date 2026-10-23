@@ -107,6 +107,8 @@ Does the whole consumption path work? Run one sample through the real `range` sa
 inspect eval inspect_ranges/dmz_pivot
 ```
 
+Wall-clock limits are standard wiring beside message caps: real-model samples on pivot-shaped ranges have outrun multi-hour windows, and a `--time-limit` termination still scores, so the run always produces a verdict.
+
 The registry form runs the shipped task; your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider).
 
 To exercise boot, planting, scoring, and teardown with no model spend, run against inspect's mock model: `inspect eval task.py --model mockllm/model --message-limit 4`. The agent does nothing, so expect a 0 score, the scorer's zero-submissions warning, and the matching `range_apparatus` finding; on this run those are the apparatus working, not trouble.

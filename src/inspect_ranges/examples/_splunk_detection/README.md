@@ -86,7 +86,7 @@ Unlike the Linux examples, this range is not published to the catalog (Windows a
 ```bash
 cd src/inspect_ranges/examples/_splunk_detection
 inspect-ranges build       # realize + verify + prove (build egress required)
-inspect eval inspect_ranges/splunk_detection --model <model>
+inspect eval inspect_ranges/splunk_detection --model <model> --time-limit 5400
 ```
 
 The shipped task's wiring (what you would write beside your own `range.yaml`). The detection goal needs the collector binding: pass `collectors.yaml` to `challenge_setup(telemetry_collectors=...)` via `load_collectors`:
@@ -96,13 +96,12 @@ from pathlib import Path
 
 from inspect_ai import Task, task
 from inspect_ai.agent import react
-from inspect_ai.tool import bash
-
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
     load_collectors,
+    terminal,
     verify_goal,
 )
 
@@ -114,7 +113,7 @@ def splunk_detection() -> Task:
         setup=challenge_setup(
             telemetry_collectors=load_collectors(Path("collectors.yaml"))
         ),
-        solver=react(tools=[bash(), verify_goal()]),
+        solver=react(tools=[terminal(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )

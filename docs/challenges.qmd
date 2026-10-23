@@ -11,12 +11,11 @@ A *challenge* is what an agent is asked to do on a range; a *goal* is how succes
 ``` {.python .fragment}
 from inspect_ai import Task, task
 from inspect_ai.agent import react
-from inspect_ai.tool import bash
-
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
+    terminal,
     verify_goal,
 )
 from inspect_ranges.scanners import range_apparatus
@@ -28,7 +27,7 @@ def zabbix() -> Task:
             "challenges.yaml", range_spec="range.yaml"
         ),
         setup=challenge_setup(),
-        solver=react(tools=[bash(), verify_goal()]),
+        solver=react(tools=[terminal(), verify_goal()]),
         scorer=[challenge_scorer(), range_apparatus()],
         sandbox=("range", "range.yaml"),
     )
@@ -163,7 +162,7 @@ At most 8 distinct values per goal are ever verified, earliest first, with overf
 
 ## Terminal Sessions
 
-The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell. It is opt-in task wiring, because adding it changes measured difficulty:
+The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell. It is the recommended default for react-style range tasks (every shipped example wires it; tool surface changes measured difficulty, so compare like with like):
 
 ``` python
 solver=react(tools=[bash(), terminal(), verify_goal()])

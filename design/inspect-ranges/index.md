@@ -43,6 +43,8 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 
 * [Decision: the terminal tool](terminal-tool-v1.md) - the `terminal()` agent tool: named tmux sessions on the foothold over the public sandbox surface (exec for control, streaming exec_remote for capture), the Terminus port inventory (blocking completion signal, delta heuristic, keystrokes/duration grammar), the shell-only guard on blocking sends, per-call viewer snapshots plus asciicast assembly at finalize with a `terminal/<session>` evidence stream, and the opt-in measurement posture
 
+* [Record: the first real-model fleet pass (2026-10)](fleet-pass-2026-10.md) - two full Opus passes over every example (bash arm, then terminal arm): both arms' score-and-message tables with the honest economy reading (no message win on easy tasks, decisive outcome wins on session-shaped ones), the per-session mechanism evidence behind the terminal-by-default decision, the eight findings with dispositions, and the operational lessons
+
 * [Upstream licenses and attribution](LICENSES.md) - what is vendored under each `upstream/` directory, from where, and under which license
 
 ## Example ranges (development/testing baseline)

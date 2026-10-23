@@ -89,7 +89,7 @@ challenges:
 The built range is published to the project catalog, so no build is needed to consume it: at eval init the provider pulls the published build matching this `range.yaml`. Rebuilding is only needed if you modify the range: `inspect-ranges build` (realize + verify + prove; build egress required).
 
 ```bash
-inspect eval inspect_ranges/vulhub_zabbix --model <model>
+inspect eval inspect_ranges/vulhub_zabbix --model <model> --time-limit 5400
 ```
 
 The shipped task's wiring (what you would write beside your own `range.yaml`):
@@ -97,12 +97,11 @@ The shipped task's wiring (what you would write beside your own `range.yaml`):
 ```python
 from inspect_ai import Task, task
 from inspect_ai.agent import react
-from inspect_ai.tool import bash
-
 from inspect_ranges import (
     challenge_dataset,
     challenge_scorer,
     challenge_setup,
+    terminal,
     verify_goal,
 )
 
@@ -112,7 +111,7 @@ def vulhub_zabbix() -> Task:
     return Task(
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
-        solver=react(tools=[bash(), verify_goal()]),
+        solver=react(tools=[terminal(), verify_goal()]),
         scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
