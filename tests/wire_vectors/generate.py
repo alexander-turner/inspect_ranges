@@ -118,6 +118,40 @@ def _cases() -> list[tuple[str, p.Message, bytes | None]]:
             None,
         ),
         (
+            "exec-events",
+            p.ExecEventsRequest(id=_rid(17), since_seq=42, max_events=64),
+            None,
+        ),
+        (
+            "exec-events-result-empty",
+            p.ExecEventsReply(id=_rid(17), events=[], next_seq=0),
+            None,
+        ),
+        (
+            "exec-events-result-full",
+            p.ExecEventsReply(
+                id=_rid(17),
+                events=[
+                    p.ExecEvent(
+                        seq=42,
+                        ts_ms=1700000000000,
+                        pid=4242,
+                        ppid=1,
+                        uid=1000,
+                        comm="nmap",
+                        argv=["nmap", "-sV", "10.10.10.0/24"],
+                        truncated=False,
+                    ),
+                    # the race-path shape: connector facts only, /proc gone
+                    p.ExecEvent(seq=43, ts_ms=1700000000050, pid=4243, truncated=True),
+                ],
+                next_seq=44,
+                drops=2,
+                restarts=1,
+            ),
+            None,
+        ),
+        (
             "error-budget-command",
             p.ErrorReply(
                 id=_rid(2),
@@ -188,6 +222,18 @@ def _rejects() -> list[dict[str, str]]:
 
     def d(**kw: object) -> str:
         return j.dumps(kw, ensure_ascii=False)
+
+    def _event(**overrides: object) -> dict[str, object]:
+        base_event: dict[str, object] = {
+            "seq": 0,
+            "ts_ms": 1,
+            "pid": 1,
+            "comm": "",
+            "argv": [],
+            "truncated": False,
+        }
+        base_event.update(overrides)
+        return base_event
 
     base = {"v": 3, "id": RID}
     cases: list[tuple[str, str]] = [
@@ -316,6 +362,58 @@ def _rejects() -> list[dict[str, str]]:
         (
             "diag-restarts-negative",
             d(**base, kind="diag_result", entries=[], listener_restarts=-1),
+        ),
+        ("exec-events-negative-since", d(**base, kind="exec_events", since_seq=-1)),
+        ("exec-events-max-zero", d(**base, kind="exec_events", max_events=0)),
+        ("exec-events-max-over", d(**base, kind="exec_events", max_events=500)),
+        (
+            "exec-events-result-missing-next-seq",
+            d(**base, kind="exec_events_result", events=[]),
+        ),
+        (
+            "exec-events-result-too-many",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=300,
+                events=[_event(seq=i) for i in range(257)],
+            ),
+        ),
+        (
+            "exec-event-argv-over-total",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=1,
+                events=[_event(comm="x", argv=["a" * 1200, "b" * 1200])],
+            ),
+        ),
+        (
+            "exec-event-bad-pid",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=1,
+                events=[_event(pid=0)],
+            ),
+        ),
+        (
+            "exec-event-extra-member",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=1,
+                events=[_event(zz=1)],
+            ),
+        ),
+        (
+            "exec-event-argv-nonlist",
+            d(
+                **base,
+                kind="exec_events_result",
+                next_seq=1,
+                events=[_event(argv={})],
+            ),
         ),
         ("bad-bundle-digest", d(**base, kind="realize", bundle_digest="nope")),
         (
@@ -524,6 +622,9 @@ def main() -> None:
             "kill_grace_ms": p.DAEMON_KILL_GRACE_MS,
             "wait_delay_ms": p.DAEMON_WAIT_DELAY_MS,
             "inbound_bulk_cap": p.DAEMON_INBOUND_BULK_CAP,
+            "exec_reply_budget": p.EXEC_REPLY_BUDGET,
+            "max_exec_events": p.EXEC_EVENTS_MAX,
+            "max_exec_argv_bytes": p.EXEC_ARGV_BYTES,
         },
         "note": "Every codec implementation (Python, Go, C#) must encode message+bulk to exactly frames_hex and decode frames_hex back to message+bulk. Control payloads are canonical JSON: sorted keys, separators ',' ':', raw UTF-8 (frames_hex carries the wire bytes; this file's message copies are ASCII-escaped), null optional fields omitted (explicit nulls rejected on decode), v required. rc convention: signed int32, killed-by-signal negative.",
         "vectors": vectors,
