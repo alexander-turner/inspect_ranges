@@ -107,6 +107,61 @@ def test_render_gives_cloud_hypervisor_guests_boot_parameters_not_domain_xml(
     assert "${CH_VSOCK_DIR:?" in compose and ":/run/ch-vsock" in compose
 
 
+def test_boot_json_carries_kind_and_attacker_address_facts(
+    cache: Path, tmp_path: Path
+) -> None:
+    """Every entry carries its plan `kind`, and the attacker carries sizing plus full interface facts (ip, prefixlen, gateway): descriptive plan facts a deployment-selected external attack-box provider consumes at realize time. Other guests are unchanged."""
+    out = tmp_path / "bundle"
+    guests = render(two_segment_spec(), cache, out)
+    assert {name: guest["kind"] for name, guest in guests.items()} == {
+        "web": "host",
+        "db": "host",
+        "router": "router",
+        "attacker": "attacker",
+    }
+    attacker = guests["attacker"]
+    nic = attacker["interfaces"][0]
+    assert nic["bridge"] == "br-dmz"
+    assert nic["ip"].startswith("10.80.10.")
+    assert nic["prefixlen"] == 24
+    assert nic["gateway"] == "10.80.10.1", "dmz's elected gateway is the router"
+    assert attacker["cpus"] >= 1 and attacker["memory_mb"] >= 64
+    assert "interfaces" not in guests["web"], "a qemu host carries no address facts"
+
+
+def test_qemu_attacker_still_carries_the_address_facts(
+    cache: Path, tmp_path: Path
+) -> None:
+    """The attacker facts are kind-driven, not VMM-driven: an explicit qemu attack box carries them too."""
+    spec = two_segment_spec()
+    spec.attacker.vmm = "qemu"
+    guests = render(spec, cache, tmp_path / "bundle")
+    attacker = guests["attacker"]
+    assert attacker["vmm"] == "qemu"
+    assert attacker["interfaces"][0]["prefixlen"] == 24
+    assert attacker["cpus"] >= 1
+
+
+def test_old_boot_json_entries_parse_with_defaults() -> None:
+    """A pre-attack-box bundle (no `kind`, bare bridge+mac interfaces) parses under the new models, so old bundles stay realizable."""
+    guest = BootGuest.model_validate(
+        {
+            "name": "web",
+            "cid": 3000,
+            "image_file": "img.qcow2",
+            "overlay_gb": 10,
+            "readiness": "cloud-init",
+            "vmm": "cloud-hypervisor",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "interfaces": [{"bridge": "br-dmz", "mac": "52:54:00:00:00:01"}],
+        }
+    )
+    assert guest.kind == "host"
+    nic = guest.interfaces[0]
+    assert (nic.ip, nic.prefixlen, nic.gateway) == (None, None, None)
+
+
 def test_render_without_cloud_hypervisor_guests_mounts_no_vsock_dir(
     cache: Path, tmp_path: Path
 ) -> None:

@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -231,12 +232,18 @@ _SAFE_NAME = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 
 
 class BootInterface(BaseModel):
-    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches."""
+    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches.
+
+    An attacker entry additionally carries the allocated address facts (ip, prefixlen, gateway): descriptive plan facts a deployment-selected external attack-box provider consumes at realize time, absent for every other guest.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     bridge: str = Field(pattern=_SAFE_NAME, max_length=15)
     mac: str = Field(pattern=r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+    ip: IPv4Address | None = None
+    prefixlen: int | None = Field(default=None, ge=0, le=32)
+    gateway: IPv4Address | None = None
 
 
 class BootGuest(BaseModel):
@@ -245,6 +252,7 @@ class BootGuest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_SAFE_NAME)
+    kind: Literal["host", "router", "attacker"] = "host"
     cid: int = Field(ge=3, le=99_999_999)
     image_file: str = Field(pattern=_SAFE_NAME)
     image_digest: str | None = None

@@ -512,9 +512,13 @@ def _boot_guest(
     backings: dict[str, tuple[str, str]],
     image_cache: Path | None,
 ) -> dict[str, Any]:
-    """One guest's `boot.json` entry; a Cloud Hypervisor guest also carries what its command line needs (it has no domain XML), and a realized guest carries its backing golden (verified by `up`: the overlay digest cannot see its backing)."""
+    """One guest's `boot.json` entry; a Cloud Hypervisor guest also carries what its command line needs (it has no domain XML), and a realized guest carries its backing golden (verified by `up`: the overlay digest cannot see its backing).
+
+    Every entry carries its plan `kind`, and an attacker entry carries its sizing and full interface facts (address, prefix, gateway) regardless of VMM: descriptive plan facts a deployment-selected external attack-box provider needs at realize time, emitted unconditionally so the same bundle realizes identically with or without one.
+    """
     entry: dict[str, Any] = {
         "name": guest.name,
+        "kind": guest.kind,
         "cid": guest.cid,
         "image_file": guest.image.file,
         "image_digest": guest.image.digest,
@@ -525,13 +529,21 @@ def _boot_guest(
         "injector": guest.injector,
         "vmm": guest.vmm,
     }
-    if guest.vmm == "cloud-hypervisor":
-        entry["cpus"] = guest.cpus
-        entry["memory_mb"] = guest.memory_mb
-        entry["interfaces"] = [
+    if guest.vmm == "cloud-hypervisor" or guest.kind == "attacker":
+        interfaces: list[dict[str, Any]] = [
             {"bridge": networks[interface.network].bridge, "mac": interface.mac}
             for interface in guest.interfaces
         ]
+        if guest.kind == "attacker":
+            for nic, interface in zip(interfaces, guest.interfaces, strict=True):
+                network = networks[interface.network]
+                nic["ip"] = str(interface.ip)
+                nic["prefixlen"] = network.cidr.prefixlen
+                if network.gateway is not None:
+                    nic["gateway"] = str(network.gateway)
+        entry["cpus"] = guest.cpus
+        entry["memory_mb"] = guest.memory_mb
+        entry["interfaces"] = interfaces
     return entry
 
 
