@@ -880,6 +880,82 @@ def test_signal_watch_matches_across_poll_boundary(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_signal_watch_observes_file_source_deltas(tmp_path: Path) -> None:
+    """A `file` collector's shipped deltas feed watches exactly like command-source ships (review finding: the file path never called `_observe`, silently reproducing the fleet-pass miss for file-sourced detection goals)."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.read_script = [
+            b"evt-1\n",
+            b"evt-1\nGrantedAccess 0x1FFFFF lsass hit\n",
+        ]
+        fired: list[bool] = []
+        watch = SignalWatch(
+            collector="applog",
+            pattern=re.compile(rb"GrantedAccess\W{1,5}0x1FFFFF"),
+            on_match=lambda: fired.append(True),
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="driver",
+            sample_id="telemetry-test",
+        )
+        poller = TelemetryPoller(
+            channel,  # type: ignore[arg-type]
+            writer,
+            [file_spec()],
+            meta_flush_s=0,
+            watches=[watch],
+        )
+        await poller.poll_once("applog")
+        assert fired == []
+        await poller.poll_once("applog")
+        assert fired == [True]
+        await writer.seal()
+
+    asyncio.run(run())
+
+
+def test_signal_watch_tail_resets_at_discontinuity(tmp_path: Path) -> None:
+    """A recorded discontinuity (truncation gap, re-bootstrap) drops the carryover tail, so a pattern can never match across bytes that were not adjacent in the collector: a cross-gap latch would claim a signal present in NO shipped chunk."""
+
+    async def run() -> None:
+        channel = FakeChannel()
+        channel.exec_script = [
+            # bootstrap poll, truncated: ships the partial signal, records a
+            # gap, and re-bootstraps
+            exec_ok(b"prefix GrantedAcc", truncated=True),
+            # the post-gap bootstrap happens to START with the remainder
+            exec_ok(b"ess 0x1FFFFF suffix\n-- cursor: c2\n"),
+        ]
+        fired: list[bool] = []
+        watch = SignalWatch(
+            collector="journal",
+            pattern=re.compile(rb"GrantedAccess 0x1FFFFF"),
+            on_match=lambda: fired.append(True),
+        )
+        writer = EvidenceWriter(
+            LocalDirSink(tmp_path),
+            part_interval_s=0,
+            writer="driver",
+            sample_id="telemetry-test",
+        )
+        poller = TelemetryPoller(
+            channel,  # type: ignore[arg-type]
+            writer,
+            [journal_spec()],
+            meta_flush_s=0,
+            watches=[watch],
+        )
+        await poller.poll_once("journal")
+        await poller.poll_once("journal")
+        assert fired == []  # neither shipped chunk contains the signal
+        await writer.seal()
+
+    asyncio.run(run())
+
+
 def test_signal_watch_callback_failure_never_disturbs_shipping(tmp_path: Path) -> None:
     async def run() -> None:
         channel = FakeChannel()

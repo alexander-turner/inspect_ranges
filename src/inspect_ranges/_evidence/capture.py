@@ -30,10 +30,10 @@ STDERR_NAME = "stderr.log"
 _PCAP_NAME = re.compile(r"^g(\d+)\.pcap(\d*)$")
 
 CLAIMED_SUFFIX = ".shipped"
+"""Appended by `claim_file` before a chunk ships (B13): the supervisor's chunk regex anchors at `.pcap<N>$`, so a claimed file vanishes from its cap accounting and `enforce_cap` can never unlink shipped bytes and report them as `capture-cap` loss. Claimed files are the streamer's to remove; their claim window is one cycle (removal retried on failure)."""
 
 PCAP_GLOBAL_HEADER_LEN = 24
 """A classic pcap file's global header size: an active chunk at or under this carries no packets, so a flush snapshot of it ships nothing."""
-"""Appended by `claim_file` before a chunk ships (B13): the supervisor's chunk regex anchors at `.pcap<N>$`, so a claimed file vanishes from its cap accounting and `enforce_cap` can never unlink shipped bytes and report them as `capture-cap` loss. Claimed files are the streamer's to remove; their claim window is one cycle (removal retried on failure)."""
 
 _CLAIMED_NAME = re.compile(r"^g(\d+)\.pcap(\d*)\.shipped$")
 

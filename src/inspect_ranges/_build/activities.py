@@ -103,17 +103,21 @@ def resolve_activities(spec: RangeSpec, range_dir: Path) -> list[ResolvedActivit
         for index, activity in enumerate(host.scheduled_activity):
             path_prefix = ("hosts", host_index, "scheduled_activity", index)
             unit = activity_unit_name(activity.script)
-            if unit in unit_names:
+            # Windows task names are case-insensitive: a case-variant stem
+            # would silently Register-ScheduledTask -Force over its sibling,
+            # and verification (equally case-insensitive) would pass for both
+            key = unit.casefold() if windows else unit
+            if key in unit_names:
                 issues.append(
                     Issue(
                         code="activity-name-conflict",
                         path=(*path_prefix, "script"),
-                        message=f"host {host.name!r} declares activities {unit_names[unit]!r} and {activity.script!r}, which both realize the unit name {unit!r}",
-                        hint="give the scripts distinct file stems (unit and task names derive from the stem)",
+                        message=f"host {host.name!r} declares activities {unit_names[key]!r} and {activity.script!r}, which both realize the unit name {unit!r}",
+                        hint="give the scripts distinct file stems (unit and task names derive from the stem; Windows task names compare case-insensitively)",
                     )
                 )
                 continue
-            unit_names[unit] = activity.script
+            unit_names[key] = activity.script
             if activity.schedule is None:
                 issues.append(
                     Issue(

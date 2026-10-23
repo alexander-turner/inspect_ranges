@@ -209,6 +209,20 @@ def test_pin_form_pulls_without_spec_match(tmp_path: Path) -> None:
     assert report.root == root.digest
 
 
+@pytest.mark.parametrize("payload", ["[]", "null", '"x"', "3", '{"pins": []}'])
+def test_pin_file_that_is_not_a_pins_object_refuses_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    """Valid JSON that is not a pins object must refuse `pin-file-invalid`, never raise bare (the build's advisory check catches DistError only)."""
+    from inspect_ranges._dist.resolve import PIN_FILE_ENV, fleet_pins
+
+    pin_file = tmp_path / "pins.json"
+    pin_file.write_text(payload)
+    monkeypatch.setenv(PIN_FILE_ENV, str(pin_file))
+    with pytest.raises(DistError, match="pin-file-invalid"):
+        fleet_pins()
+
+
 def test_image_pull_sticky_then_explicit_refresh(tmp_path: Path) -> None:
     """Freezing is automatic (the cache answers, even when the registry moved on); moving forward is the explicit refresh, chain and sidecar together."""
     fixture = Fixture(tmp_path)

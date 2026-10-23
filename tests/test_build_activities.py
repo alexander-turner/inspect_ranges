@@ -152,6 +152,25 @@ def test_resolution_refuses_colliding_unit_names(tmp_path: Path) -> None:
     assert "'tick'" in issue.message
 
 
+def test_windows_stem_collision_is_case_insensitive(tmp_path: Path) -> None:
+    """Windows task names compare case-insensitively, so case-variant stems on one Windows host would silently `Register-ScheduledTask -Force` over each other (and verification, equally case-insensitive, would pass for both); Linux keeps case-sensitive units."""
+    range_dir = tmp_path / "range"
+    write_activity(range_dir, "Backup.ps1")
+    write_activity(range_dir, "backup.ps1")
+    declarations = [
+        ScheduledActivity(script="Backup.ps1", schedule="every 5m"),
+        ScheduledActivity(script="backup.ps1", schedule="@boot"),
+    ]
+    with pytest.raises(IssueError) as excinfo:
+        resolve_activities(
+            spec_with([host_with(declarations, name="win", windows=True)]), range_dir
+        )
+    (issue,) = excinfo.value.issues
+    assert issue.code == "activity-name-conflict"
+    linux = resolve_activities(spec_with([host_with(declarations)]), range_dir)
+    assert [a.unit for a in linux] == ["Backup", "backup"]
+
+
 def exec_texts(ops: tuple[WriteOp | ExecOp, ...]) -> list[str]:
     return [" ".join(op.cmd) for op in ops if isinstance(op, ExecOp)]
 

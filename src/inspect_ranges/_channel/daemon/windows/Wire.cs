@@ -1,8 +1,7 @@
 // Protocol v3 wire codec for the Windows daemon (C# 5 / .NET Framework 4.8,
 // compiled in-guest by the in-box csc.exe; also compiled on net8 for the
-// host-side vector check). Byte-compatible with the Python reference
-// (src/inspect_ranges/_channel/{protocol,codec}.py) and the Go daemon,
-// pinned by tests/wire_vectors/v3.json.
+// host-side vector check). Byte-compatible with the host-side reference
+// codec and the Go daemon, pinned by the shared v3 wire vectors.
 //
 // Canonical JSON (the cross-codec contract): sorted keys (ordinal), compact
 // separators, raw UTF-8 (no ASCII escaping beyond JSON's required set:

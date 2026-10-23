@@ -244,7 +244,11 @@ def fleet_pins() -> dict[str, str]:
         raise DistError(
             "pin-file-invalid", f"{path} did not parse as a pin file: {error}"
         ) from error
-    pins = data.get("pins")
+    pins: object = (  # pyright: ignore[reportUnknownVariableType]
+        data.get("pins")  # pyright: ignore[reportUnknownMemberType]
+        if isinstance(data, dict)
+        else None
+    )
     if not isinstance(pins, dict):
         raise DistError("pin-file-invalid", f"{path} carries no pins mapping")
     return {

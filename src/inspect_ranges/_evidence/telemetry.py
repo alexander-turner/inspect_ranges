@@ -182,7 +182,7 @@ def _extract_cursor(data: bytes, pattern: str) -> tuple[str | None, bytes]:
 class SignalWatch:
     """A caller-injected byte-pattern watch over one collector's shipped data.
 
-    The poller runs the pattern over every shipped delta (with a carryover tail so a match spanning two polls is still seen) and invokes `on_match` once, on the first match. The poller stays records-only: what a match means belongs to the caller (the challenges layer latches a detection goal through it; see the 2026-10-23 amendment in `challenges-scoring-integrity.md`). A failing callback is logged and never disturbs shipping.
+    The poller runs the pattern over every shipped delta (with a carryover tail so a match spanning two polls is still seen) and invokes `on_match` once, on the first match. The tail is dropped at every recorded discontinuity (`reset`), so a match never bridges bytes that were not adjacent in the collector. The poller stays records-only: what a match means belongs to the caller (the challenges layer latches a detection goal through it; see the 2026-10-23 amendment in `challenges-scoring-integrity.md`). A failing callback is logged and never disturbs shipping.
     """
 
     def __init__(
@@ -217,6 +217,10 @@ class SignalWatch:
                 )
             return
         self._tail = buffer[-self.tail_bytes :]
+
+    def reset(self) -> None:
+        """Drop the carryover tail at a recorded discontinuity (poll failure, truncation, re-bootstrap, watermark regression): bytes on either side were never adjacent in the collector, so a cross-discontinuity match would latch a signal present in NO shipped chunk."""
+        self._tail = b""
 
 
 class TelemetryPoller:
@@ -257,6 +261,12 @@ class TelemetryPoller:
     def _observe(self, collector: str, data: bytes) -> None:
         for watch in self._watches.get(collector, []):
             watch.observe(data)
+
+    def _reset_watches(self, collector: str) -> None:
+        # called wherever the record notes a discontinuity, so a watch's
+        # carryover tail never bridges bytes that were not adjacent
+        for watch in self._watches.get(collector, []):
+            watch.reset()
 
     async def start(self) -> None:
         """Begin polling every collector; idempotent while running.
@@ -372,6 +382,7 @@ class TelemetryPoller:
             meta["error"] = f"{type(error).__name__}: {error}"[:300]
             if not state.failing:
                 state.failing = True
+                self._reset_watches(name)
                 await self._writer.gap(
                     f"telemetry/{name}", span=self._span(start), cause="poll-failed"
                 )
@@ -505,6 +516,7 @@ class TelemetryPoller:
             meta["advanced"] = False
             state.cursor = None
             state.replay_next = True
+            self._reset_watches(spec.name)
             await self._writer.gap(
                 f"telemetry/{spec.name}", cause="poll-truncated", dropped=0
             )
@@ -533,6 +545,7 @@ class TelemetryPoller:
             meta["advanced"] = False
             state.cursor = None
             state.replay_next = True
+            self._reset_watches(spec.name)
             logger.warning(
                 "telemetry cursor pattern matched nothing (re-bootstrap): collector=%s",
                 spec.name,
@@ -632,12 +645,14 @@ class TelemetryPoller:
                 rewritten,
             )
             state.reset_file()
+            self._reset_watches(spec.name)
             meta["anomaly"] = "watermark-regression"
         delta = data[state.offset :]
         if delta:
             await self._writer.append(
                 f"telemetry/{spec.name}", delta, span=self._span()
             )
+            self._observe(spec.name, delta)
             state.shipped.update(delta)
             state.offset += len(delta)
             state.capped = False
@@ -650,6 +665,7 @@ class TelemetryPoller:
             meta["advanced"] = False
             if not state.capped:
                 state.capped = True
+                self._reset_watches(spec.name)
                 await self._writer.gap(
                     f"telemetry/{spec.name}", cause="poll-truncated", dropped=0
                 )
