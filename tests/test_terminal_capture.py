@@ -236,6 +236,20 @@ def test_remote_location_skips_cast_but_mirrors(
     asyncio.run(scenario())
 
 
+def test_exec_remote_surface_pin() -> None:
+    """Capture leans on inspect_ai's exec_remote surface (a private module for the event classes): every runtime use is wrapped in broad excepts, so a shape change on an inspect_ai bump would silently turn capture off in live runs; this pin fails loudly here instead."""
+    import inspect
+
+    from inspect_ai.util._sandbox.environment import SandboxEnvironment
+    from inspect_ai.util._sandbox.exec_remote import ExecRemoteProcess
+
+    assert ExecStdout(data="x").data == "x"
+    assert callable(getattr(ExecRemoteProcess, "kill", None))
+    assert hasattr(ExecRemoteProcess, "__aiter__")
+    parameters = inspect.signature(SandboxEnvironment.exec_remote).parameters
+    assert "stream" in parameters
+
+
 def test_capture_off_outside_range_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
