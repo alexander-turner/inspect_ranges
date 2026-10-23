@@ -12,11 +12,32 @@ import shlex
 import subprocess
 import time
 from collections.abc import Callable
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .._attackbox.attach import (
+    ATTACH_HELPER_SOURCE,
+    Attacher,
+    AttachInvocation,
+    attachment_from_boot,
+    helper_config,
+    run_attacher,
+)
+from .._attackbox.backend import (
+    AttackBoxBackend,
+    AttackBoxHandle,
+    resolve_attack_box,
+)
+from .._attackbox.record import (
+    AttackBoxRecord,
+    AttackBoxRecordError,
+    read_attack_box_record,
+    record_timestamp,
+    write_attack_box_record,
+)
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
@@ -92,6 +113,8 @@ class UpOptions(BaseModel):
     readiness_min_window: float = 10.0
     keep_on_failure: bool = False
     uplink_network: str | None = None
+    attack_box: str | None = None
+    """An external attack-box backend origin (the `INSPECT_RANGES_ATTACK_BOX` value), consulted where `up` runs: the plan's dedicated attack box is attached (taps in the range netns, fds handed over) and booted by the registered provider instead of locally. `None` realizes the whole plan locally."""
 
 
 class GuestState(BaseModel):
@@ -231,12 +254,19 @@ _SAFE_NAME = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
 
 
 class BootInterface(BaseModel):
-    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches."""
+    """One Cloud Hypervisor guest NIC: the range bridge its tap joins and the MAC its netplan matches.
+
+    An attacker entry additionally carries the allocated address facts (ip, prefixlen, gateway): descriptive plan facts a deployment-selected external attack-box provider consumes at realize time, absent for every other guest.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     bridge: str = Field(pattern=_SAFE_NAME, max_length=15)
     mac: str = Field(pattern=r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+    network: str | None = Field(default=None, pattern=_SAFE_NAME)
+    ip: IPv4Address | None = None
+    prefixlen: int | None = Field(default=None, ge=0, le=32)
+    gateway: IPv4Address | None = None
 
 
 class BootGuest(BaseModel):
@@ -245,6 +275,7 @@ class BootGuest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_SAFE_NAME)
+    kind: Literal["host", "router", "attacker"] = "host"
     cid: int = Field(ge=3, le=99_999_999)
     image_file: str = Field(pattern=_SAFE_NAME)
     image_digest: str | None = None
@@ -306,14 +337,18 @@ def ch_uid(cid: int) -> int:
     return guest_uid(cid)
 
 
-def boot_script(boot: BootPlan) -> str:
+def boot_script(boot: BootPlan, skip: frozenset[str] = frozenset()) -> str:
     """The in-container realization script for `boot.json` (overlays, seeds, define, start). Every interpolated value is shape-validated by `BootPlan` and shell-quoted anyway.
 
     A `cloud-hypervisor` guest has no domain XML: root prepares what the unprivileged VMM cannot (a persistent tap per NIC owned by the VMM's uid, image and console-log ownership), then Cloud Hypervisor starts as its own uid (`ch_uid`) with group `kvm`, no capabilities and its default seccomp filter, detached, its vsock socket in the host-supplied directory.
+
+    `skip` names guests realized by an external provider (the attack box behind `INSPECT_RANGES_ATTACK_BOX`): they keep their boot entry (addressing facts, readiness) but this script touches nothing for them. Empty by default, so the script is byte-identical to the pre-seam output.
     """
     lines = ["#!/bin/bash", "set -euo pipefail"]
     ch_guests: list[str] = []
     for guest in boot.guests:
+        if guest.name in skip:
+            continue
         name = shlex.quote(guest.name)
         image = shlex.quote(guest.image_file)
         lines.append(
@@ -521,12 +556,70 @@ def _compose_argv(project: str, bundle: Path, *args: str) -> list[str]:
     ]
 
 
+def _external_attack_box(
+    options: UpOptions, boot: BootPlan, bundle: Path
+) -> tuple[BootGuest | None, AttackBoxBackend | None]:
+    """Resolve the external attack box, when one is configured: the attacker entry the provider realizes plus its backend bundle.
+
+    Resolution happens before any docker resource exists (the provider-runtime pattern: an unresolvable value refuses the whole realize, fast). A foothold range has no dedicated attack box and realizes normally with one INFO line; a bundle from before the attack-box facts refuses with a re-render message rather than silently booting the box locally.
+
+    Raises:
+        UpError: The backend does not resolve (`attack-box`), or the bundle cannot carry an external box (`verify-bundle`: pre-facts bundle, or an explicit non-cloud-hypervisor attacker, whose compose output lacks the shared socket mount).
+    """
+    if options.attack_box is None:
+        return None, None
+    try:
+        backend = resolve_attack_box(options.attack_box, options.state_dir)
+    except ValueError as error:
+        raise UpError("attack-box", str(error)) from error
+    if backend.capabilities.console_stream:
+        raise UpError(
+            "attack-box",
+            "the backend declares console_stream=True, which is not supported "
+            "(no ingest path exists for a provider console stream); declare "
+            "False and let the drop land as a declared evidence gap",
+        )
+    external = next((g for g in boot.guests if g.kind == "attacker"), None)
+    if external is None:
+        raw = json.loads((bundle / "boot.json").read_text())
+        if any("kind" not in entry for entry in raw.get("guests", [])):
+            raise UpError(
+                "verify-bundle",
+                "INSPECT_RANGES_ATTACK_BOX is set but this bundle predates "
+                "attack-box facts (guests carry no kind); re-render the bundle",
+            )
+        logger.info(
+            "attack-box backend configured but the range has no dedicated "
+            "attack box (foothold range); realizing normally"
+        )
+        return None, None
+    if external.vmm != "cloud-hypervisor":
+        raise UpError(
+            "verify-bundle",
+            f"an external attack box requires the attack box planned under "
+            f"cloud-hypervisor (the default), but {external.name!r} declares "
+            f"vmm: {external.vmm}; remove the attacker's vmm or unset "
+            "INSPECT_RANGES_ATTACK_BOX",
+        )
+    if any(
+        nic.network is None or nic.ip is None or nic.prefixlen is None
+        for nic in external.interfaces
+    ):
+        raise UpError(
+            "verify-bundle",
+            f"attacker entry {external.name!r} carries no address facts "
+            "(bundle rendered before attack-box support); re-render the bundle",
+        )
+    return external, backend
+
+
 def up(
     bundle: Path,
     options: UpOptions,
     runner: Runner | None = None,
     *,
     on_stage: OnStage | None = None,
+    attacher: Attacher | None = None,
 ) -> UpResult:
     """Realize a verified bundle; returns the project name and per-guest state.
 
@@ -557,6 +650,8 @@ def up(
         )
 
     guests = boot.guests
+    external, attack_backend = _external_attack_box(options, boot, bundle)
+    booted = [g.name for g in guests if external is None or g.name != external.name]
     vendor_memo: dict[str, str] = {}
 
     def verify_vendor_edge(image_file: str, guest_name: str) -> None:
@@ -596,6 +691,8 @@ def up(
             )
 
     for guest in guests:
+        if external is not None and guest.name == external.name:
+            continue  # the provider brings its own box; its image is never booted here
         image = options.image_cache / guest.image_file
         if not image.is_file():
             raise UpError(
@@ -654,9 +751,39 @@ def up(
     (project_dir(options.state_dir, project) / "boot.json").write_bytes(
         (bundle / "boot.json").read_bytes()
     )
+    if external is not None:
+        # a surviving record may hold a LIVE box's reclaim token (a prior run
+        # whose containers vanished without a down); overwriting it with an
+        # empty token would strand that box forever, the exact failure the
+        # record discipline exists to prevent, so refuse like the
+        # duplicate-project guard and let down reclaim deny-first
+        try:
+            stale = read_attack_box_record(options.state_dir, project)
+        except AttackBoxRecordError as error:
+            raise UpError("attack-box", str(error)) from error
+        if stale is not None:
+            raise UpError(
+                "attack-box",
+                f"project {project!r} already has an attack-box record (a "
+                "prior run's external box may still be live); tear it down "
+                f"first: inspect-ranges down {project}",
+            )
+        # before the provider boots anything (the owner-record discipline): a
+        # crash in the window reclaims a provider no-op, which teardown
+        # idempotency absorbs
+        write_attack_box_record(
+            options.state_dir,
+            AttackBoxRecord(
+                origin=cast(str, options.attack_box),
+                project=project,
+                guest_name=external.name,
+                cid=external.cid,
+                created=record_timestamp(),
+            ),
+        )
     log = _StageTee(StageLog(options.state_dir, project), on_stage)
     log.log("verify-bundle", "ok", files=len(cast(dict[str, Any], manifest["files"])))
-    log.log("verify-images", "ok", guests=len(guests))
+    log.log("verify-images", "ok", guests=len(booted))
     log.log("range-image", "ok", tag=range_image)
 
     env = dict(os.environ)
@@ -737,13 +864,17 @@ def up(
             guest.name: HybridEndpoint(ch_dir / f"{guest.name}.sock", ch_uid(guest.cid))
             for guest in guests
             if guest.vmm == "cloud-hypervisor"
+            and (external is None or guest.name != external.name)
         }
 
-    log.log("guest-boot", "start", guests=[g.name for g in guests])
+    log.log("guest-boot", "start", guests=booted)
     boot_result = run(
         _compose_argv(project, bundle, "exec", "-T", "range", "bash", "-s"),
         env=env,
-        input=boot_script(boot),
+        input=boot_script(
+            boot,
+            skip=frozenset({external.name}) if external is not None else frozenset(),
+        ),
         timeout=options.readiness_timeout,
     )
     if boot_result.returncode != 0:
@@ -751,9 +882,117 @@ def up(
             "guest-boot",
             f"guest boot failed: {boot_result.stderr.strip()[-800:]} "
             f"(consoles of already-booted guests under {project_dir(options.state_dir, project) / 'consoles'})",
-            consoles=[g.name for g in guests],
+            consoles=booted,
         )
     log.log("guest-boot", "ok")
+
+    if external is not None and attack_backend is not None:
+        # the external attacker is cloud-hypervisor-planned (checked above), so
+        # the shared socket dir was prepared and is mounted in the container
+        assert ch_dir is not None
+        log.log("attach", "start", guest=external.name)
+        config = helper_config(
+            external, container_socket=f"{CH_VSOCK_MOUNT}/{external.name}-attach.sock"
+        )
+        invocation = AttachInvocation(
+            argv=_compose_argv(
+                project,
+                bundle,
+                "exec",
+                "-T",
+                "range",
+                "python3",
+                "-",
+                json.dumps(config),
+            ),
+            env=env,
+            source=ATTACH_HELPER_SOURCE,
+            host_socket=ch_dir / f"{external.name}-attach.sock",
+            expected_fds=len(external.interfaces),
+        )
+        try:
+            fds = (attacher or run_attacher)(invocation)
+        except Exception as error:
+            raise fail(
+                "attach",
+                f"attack-box attachment failed: {error}",
+                guest=external.name,
+                consoles=booted,
+            ) from error
+        log.log("attach", "ok", guest=external.name, taps=len(fds))
+
+        seed_dir = bundle / "guests" / external.name / "seed"
+        try:
+            attachment = attachment_from_boot(
+                external,
+                project=project,
+                fds=fds,
+                seed_dir=seed_dir if seed_dir.is_dir() else None,
+            )
+        except ValueError as error:
+            # unreachable while _external_attack_box pre-checks the facts, but
+            # a raw escape here would skip the stage log and the teardown
+            for fd in fds:
+                os.close(fd)
+            raise fail("attach", str(error), guest=external.name) from error
+        log.log("attack-box", "start", guest=external.name)
+
+        async def boot_box() -> "AttackBoxHandle":
+            # bounded like every other boot phase (B21): a provider that never
+            # returns must fail the stage, not wedge the sample
+            return await asyncio.wait_for(
+                attack_backend.provider.boot(attachment),
+                timeout=options.readiness_timeout,
+            )
+
+        try:
+            # the provider owns the fds from this call on (it may already have
+            # handed them to a VMM process), so no close here on failure; a
+            # failed up tears the project down, and the taps die with the netns
+            handle = asyncio.run(boot_box())
+        except Exception as error:
+            try:
+                # best-effort reclaim of a half-boot; teardown is idempotent
+                # and half-boot-tolerant by contract
+                asyncio.run(attack_backend.provider.teardown(project, ""))
+            except Exception:
+                logger.exception("attack-box teardown after a failed boot failed")
+            raise fail(
+                "attack-box",
+                f"external attack box boot failed: {error}",
+                guest=external.name,
+                consoles=booted,
+            ) from error
+        log.log("attack-box", "ok", guest=external.name)
+        ch_sockets[external.name] = handle.exec_endpoint
+        try:
+            record = read_attack_box_record(options.state_dir, project)
+            if record is None:
+                # absent is exactly as untrustworthy as unreadable here: the
+                # record this very up wrote is gone (a concurrent sweep), so
+                # a success would leave a live box with no teardown trail
+                raise AttackBoxRecordError(
+                    f"the attack-box record for {project} vanished during the "
+                    "provider boot (a concurrent down or sweep?)"
+                )
+        except AttackBoxRecordError as error:
+            # nothing about this project's teardown can be trusted, so fail
+            # while the in-process backend can still reclaim directly
+            try:
+                asyncio.run(attack_backend.provider.teardown(project, ""))
+            except Exception:
+                logger.exception("attack-box teardown after a record fault failed")
+            raise fail("attack-box", str(error), guest=external.name) from error
+        write_attack_box_record(
+            options.state_dir,
+            record.model_copy(
+                update={
+                    "reclaim_token": handle.reclaim_token,
+                    "exec_socket": str(handle.exec_endpoint.path),
+                    "exec_uid": handle.exec_endpoint.peer_uid,
+                }
+            ),
+        )
 
     async def _readiness() -> list[GuestState]:
         channel = make_channel({g.name: g.cid for g in guests}, ch_sockets)
@@ -767,10 +1006,17 @@ def up(
             guest_deadline = max(
                 deadline, time.monotonic() + options.readiness_min_window
             )
+            # an external box's bar here is daemon liveness only (ping over its
+            # exec surface); the conformance battery holds the deeper bar
+            readiness = (
+                "daemon"
+                if external is not None and guest.name == external.name
+                else guest.readiness
+            )
             ready, cause = await _await_ready(
                 channel,
                 guest.name,
-                guest.readiness,
+                readiness,
                 guest_deadline,
                 min_window=options.readiness_min_window,
             )
@@ -798,7 +1044,9 @@ def up(
             f"guests not ready within {options.readiness_timeout:.0f}s: {', '.join(failed)} "
             f"(console logs under {project_dir(options.state_dir, project) / 'consoles'})",
             guest=failed[0],
-            consoles=failed,
+            consoles=[
+                name for name in failed if external is None or name != external.name
+            ],
         )
 
     log.log("ready", "ok", seconds=round(time.monotonic() - started, 1))

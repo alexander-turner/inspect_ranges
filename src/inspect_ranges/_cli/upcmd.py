@@ -5,6 +5,7 @@ from pathlib import Path
 
 import click
 
+from .._attackbox.backend import attack_box_origin
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -84,12 +85,17 @@ def up(
         raise click.UsageError("pass a BUNDLE directory or --from-spec, not both")
     if image_cache is None:
         image_cache = default_image_cache()
+    try:
+        attack_box = attack_box_origin()
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     options = UpOptions(
         project=project,
         image_cache=image_cache,
         readiness_timeout=readiness_timeout,
         keep_on_failure=keep,
         uplink_network=uplink_network,
+        attack_box=attack_box,
     )
     try:
         if from_spec is not None:

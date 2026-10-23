@@ -47,6 +47,8 @@ inspect-docs:
           href: topology.qmd
         - text: Range Sandbox
           href: provider.qmd
+        - text: Attack Box
+          href: attackbox.qmd
         - text: Operations
           href: cli.qmd
     - text: Examples

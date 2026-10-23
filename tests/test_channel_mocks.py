@@ -664,14 +664,15 @@ def test_latency_mock_catches_the_chatty_reference_bug() -> None:
     )
 
 
-def applier_stage(request: Message, stage: str) -> bytes:
-    """One honest stage-report frame for the request (public pieces only)."""
+def applier_stage(request: Message, stage: str, guests: tuple[str, ...] = ()) -> bytes:
+    """One honest stage-report frame for the request (public pieces only); a `ready` report marks `guests` ready, the way the real applier's state map does."""
     report = StageReport(
         id=request.id,
         stage=cast(
             'Literal["fetch", "construct", "boot", "verify", "ready", "failed"]',
             stage,
         ),
+        guests=dict.fromkeys(guests, "ready") if stage == "ready" else {},
     )
     return b"".join(encode_message(report))
 
@@ -679,9 +680,12 @@ def applier_stage(request: Message, stage: str) -> bytes:
 class SlowGapApplierTransport:
     """Honest applier that sleeps between two chosen stages (the sequential-readiness shape)."""
 
-    def __init__(self, *, before_stage: str, delay_s: float) -> None:
+    def __init__(
+        self, *, before_stage: str, delay_s: float, guests: tuple[str, ...] = ()
+    ) -> None:
         self.before_stage = before_stage
         self.delay_s = delay_s
+        self.guests = guests
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def connect(self, endpoint: str) -> ByteStream:
@@ -697,7 +701,7 @@ class SlowGapApplierTransport:
         for stage in ("fetch", "construct", "boot", "verify", "ready"):
             if stage == self.before_stage:
                 await asyncio.sleep(self.delay_s)
-            await stream.send(applier_stage(request, stage))
+            await stream.send(applier_stage(request, stage, self.guests))
         await stream.aclose()
 
 

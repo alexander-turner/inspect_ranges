@@ -1,11 +1,22 @@
 """`up`/`down` behavior through their public surfaces, with docker faked and real rendered bundles."""
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+from inspect_ranges._attackbox import (
+    AttackBoxBackend,
+    AttackBoxContext,
+    AttackBoxHandle,
+    AttackBoxRecord,
+    FootholdAttachment,
+    read_attack_box_record,
+    write_attack_box_record,
+)
+from inspect_ranges._attackbox.attach import AttachInvocation
 from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler import PlanOptions, render_bundle, resolve_plan
 from inspect_ranges._compiler.plan import image_file_name
@@ -1028,3 +1039,415 @@ def test_up_keeps_logging_through_a_concurrent_sweep_mid_boot(
     # every post-sweep stage landed in the recreated log, through to ready
     assert ("guest-boot", "ok") in transitions
     assert transitions[-1] == ("ready", "ok")
+
+
+# -- the external attack box (INSPECT_RANGES_ATTACK_BOX through up) --------------------
+
+
+class RecordingAttackBoxProvider:
+    """Satisfies `AttackBoxProvider`; records boots/teardowns on class state so tests reach the instance the resolver created."""
+
+    instances: ClassVar[list["RecordingAttackBoxProvider"]] = []
+
+    def __init__(self, state_dir: Path) -> None:
+        self.state_dir = state_dir
+        self.boots: list[FootholdAttachment] = []
+        self.teardowns: list[tuple[str, str]] = []
+        self.fail_boot = False
+        RecordingAttackBoxProvider.instances.append(self)
+
+    async def boot(self, attachment: FootholdAttachment) -> AttackBoxHandle:
+        self.boots.append(attachment)
+        if self.fail_boot:
+            raise RuntimeError("cell exploded")
+        return AttackBoxHandle(
+            exec_endpoint=HybridEndpoint(self.state_dir / "box.sock", 4242),
+            reclaim_token="tok-1",
+        )
+
+    async def teardown(self, project: str, reclaim_token: str) -> None:
+        self.teardowns.append((project, reclaim_token))
+
+
+def recording_box_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    return AttackBoxBackend(provider=RecordingAttackBoxProvider(ctx.state_dir))
+
+
+def failing_box_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    provider = RecordingAttackBoxProvider(ctx.state_dir)
+    provider.fail_boot = True
+    return AttackBoxBackend(provider=provider)
+
+
+RECORDING_ORIGIN = f"{__name__}.recording_box_factory"
+
+
+@pytest.fixture(autouse=True)
+def reset_recording_providers() -> None:
+    RecordingAttackBoxProvider.instances.clear()
+
+
+def fake_attacher(invocation: AttachInvocation) -> list[int]:
+    """Stands in for the in-container helper: hands back real open fds without a container."""
+    return [os.open(os.devnull, os.O_RDWR) for _ in range(invocation.expected_fds)]
+
+
+def test_up_external_attack_box_happy_path(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attacker is skipped by the boot script, attached (fds to the provider), booted externally, pinged daemon-only at readiness, and recorded for teardown-by-origin."""
+    channel = FakeChannel(ping_ok=True, exec_rc=0)
+    use_channel(monkeypatch, channel)
+    docker = FakeDocker()
+    result = up(
+        bundle,
+        options(cache, tmp_path, attack_box=RECORDING_ORIGIN),
+        runner=docker,
+        attacher=fake_attacher,
+    )
+    # the boot script never touches the attacker; web still boots
+    assert docker.last_input is not None
+    assert "attacker" not in docker.last_input and "web" in docker.last_input
+    # the provider got the attachment: plan facts plus one real open fd
+    provider = RecordingAttackBoxProvider.instances[-1]
+    attachment = provider.boots[0]
+    assert attachment.guest_name == "attacker" and attachment.cid == 3001
+    nic = attachment.interfaces[0]
+    assert nic.segment == "lab" and nic.bridge == "br-lab"
+    assert str(nic.ip).startswith("10.10.10.") and nic.prefixlen == 24
+    os.fstat(nic.tap_fd)  # a real, still-open fd
+    # readiness pinged the attacker daemon-only: the single cloud-init exec is web's
+    assert len(channel.exec_requests) == 1
+    # the exec surface rides the provider's endpoint
+    attacker_state = next(g for g in result.guests if g.name == "attacker")
+    assert attacker_state.ready
+    assert attacker_state.hybrid_vsock is not None
+    assert attacker_state.hybrid_vsock.peer_uid == 4242
+    # the record carries the reclaim token and exec socket for teardown/attach
+    record = read_attack_box_record(tmp_path / "state", result.project)
+    assert record is not None
+    assert record.origin == RECORDING_ORIGIN
+    assert record.reclaim_token == "tok-1"
+    assert record.exec_uid == 4242
+    # the stage log carries the two new stages, in order, before readiness
+    stages = [e["stage"] for e in StageLog(tmp_path / "state", result.project).events()]
+    assert (
+        stages.index("attach") < stages.index("attack-box") < stages.index("readiness")
+    )
+
+
+def test_up_without_attack_box_is_untouched(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset means untouched: every guest boots locally, no attach stage, no record."""
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    result = up(bundle, options(cache, tmp_path), runner=docker)
+    assert docker.last_input is not None and "attacker" in docker.last_input
+    assert read_attack_box_record(tmp_path / "state", result.project) is None
+    stages = [e["stage"] for e in StageLog(tmp_path / "state", result.project).events()]
+    assert "attach" not in stages and "attack-box" not in stages
+
+
+def test_up_attack_box_attach_failure_is_stage_named_and_tears_down(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]  # empty at duplicate check, one at teardown
+
+    def broken_attacher(invocation: AttachInvocation) -> list[int]:
+        raise OSError("helper never connected")
+
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path, attack_box=RECORDING_ORIGIN),
+            runner=docker,
+            attacher=broken_attacher,
+        )
+    assert error.value.stage == "attach"
+    assert docker.commands("docker", "rm"), "the failed up tore its project down"
+
+
+def test_up_attack_box_boot_failure_reclaims_best_effort(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider boot failure fails the attack-box stage, tears down, and attempts the idempotent provider teardown."""
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]  # empty at duplicate check, one at teardown
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path, attack_box=f"{__name__}.failing_box_factory"),
+            runner=docker,
+            attacher=fake_attacher,
+        )
+    assert error.value.stage == "attack-box"
+    provider = RecordingAttackBoxProvider.instances[-1]
+    assert provider.teardowns and provider.teardowns[0][1] == ""
+    assert docker.commands("docker", "rm")
+
+
+def test_up_attack_box_skips_the_attacker_image_requirement(
+    bundle: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider brings its own box: the attacker's image need not be in the consumer's cache."""
+    sparse = tmp_path / "sparse-cache"
+    sparse.mkdir()
+    (sparse / "tiny-golden.qcow2").write_bytes(b"golden")
+    channel = FakeChannel(ping_ok=True, exec_rc=0)
+    use_channel(monkeypatch, channel)
+    result = up(
+        bundle,
+        options(sparse, tmp_path, attack_box=RECORDING_ORIGIN),
+        runner=FakeDocker(),
+        attacher=fake_attacher,
+    )
+    assert any(g.name == "attacker" and g.ready for g in result.guests)
+
+
+def test_up_attack_box_with_a_foothold_range_realizes_normally(
+    cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foothold range has no dedicated attack box: the seam excludes it by construction and the range boots exactly as without the variable."""
+    spec = tiny_spec()
+    spec.attacker = Attacker(host="web", entry="external")
+    out = tmp_path / "foothold-bundle"
+    render_bundle(spec, out, PlanOptions(image_cache=cache, cid_base=3000))
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    result = up(
+        out,
+        options(cache, tmp_path, attack_box=RECORDING_ORIGIN),
+        runner=docker,
+    )
+    assert [g.name for g in result.guests] == ["web"]
+    assert not any(p.boots for p in RecordingAttackBoxProvider.instances)
+    assert read_attack_box_record(tmp_path / "state", result.project) is None
+
+
+def test_up_attack_box_refuses_an_unresolvable_backend(
+    bundle: Path, cache: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path, attack_box="no_such_pkg_xyz.boxes.cell"),
+            runner=FakeDocker(),
+        )
+    assert error.value.stage == "attack-box"
+    assert "does not import" in str(error.value)
+
+
+def test_up_attack_box_refuses_a_qemu_attacker(
+    cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = tiny_spec()
+    spec.attacker.vmm = "qemu"
+    out = tmp_path / "qemu-bundle"
+    render_bundle(spec, out, PlanOptions(image_cache=cache, cid_base=3000))
+    with pytest.raises(UpError) as error:
+        up(
+            out,
+            options(cache, tmp_path, attack_box=RECORDING_ORIGIN),
+            runner=FakeDocker(),
+        )
+    assert error.value.stage == "verify-bundle"
+    assert "cloud-hypervisor" in str(error.value)
+
+
+class VanishingRecordProvider(RecordingAttackBoxProvider):
+    """Simulates a concurrent sweep unlinking the record during the provider boot."""
+
+    async def boot(self, attachment: FootholdAttachment) -> AttackBoxHandle:
+        handle = await super().boot(attachment)
+        from inspect_ranges._attackbox.record import attack_box_record_path
+
+        attack_box_record_path(self.state_dir, attachment.project).unlink()
+        return handle
+
+
+def vanishing_record_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    return AttackBoxBackend(provider=VanishingRecordProvider(ctx.state_dir))
+
+
+def test_up_refuses_a_stale_attack_box_record(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A surviving record may hold a LIVE box's reclaim token; overwriting it with an empty one would strand that box, so up refuses like the duplicate-project guard."""
+    ready_probes(monkeypatch)
+    state = tmp_path / "state"
+    stale = _attack_box_record("ir-stale-abox", RECORDING_ORIGIN)
+    write_attack_box_record(state, stale)
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(
+                cache, tmp_path, attack_box=RECORDING_ORIGIN, project="ir-stale-abox"
+            ),
+            runner=FakeDocker(),
+            attacher=fake_attacher,
+        )
+    assert error.value.stage == "attack-box"
+    assert "already has an attack-box record" in str(error.value)
+    survivor = read_attack_box_record(state, "ir-stale-abox")
+    assert survivor is not None and survivor.reclaim_token == "tok-9", (
+        "the live token must survive the refusal"
+    )
+
+
+def test_up_fails_when_the_record_vanishes_during_boot(
+    bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent is as untrustworthy as unreadable after the boot: up fails the stage and reclaims in-process rather than succeeding with no teardown trail."""
+    ready_probes(monkeypatch)
+    docker = FakeDocker()
+    docker.ps_sequence = ["", "c1\n"]
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(cache, tmp_path, attack_box=f"{__name__}.vanishing_record_factory"),
+            runner=docker,
+            attacher=fake_attacher,
+        )
+    assert error.value.stage == "attack-box"
+    assert "vanished" in str(error.value)
+    provider = RecordingAttackBoxProvider.instances[-1]
+    assert provider.teardowns, "the in-process backend reclaimed the box"
+
+
+def test_up_cli_refuses_a_malformed_attack_box_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed INSPECT_RANGES_ATTACK_BOX prints the one-line remedy every other refusal gets, never a traceback."""
+    from click.testing import CliRunner
+    from inspect_ranges._cli.upcmd import up as up_command
+
+    monkeypatch.setenv("INSPECT_RANGES_ATTACK_BOX", "not-a-dotted-path")
+    result = CliRunner().invoke(up_command, [str(tmp_path)])
+    assert result.exit_code != 0
+    assert "INSPECT_RANGES_ATTACK_BOX" in result.output
+    assert "Traceback" not in result.output
+
+
+def exploding_teardown_factory(ctx: AttackBoxContext) -> AttackBoxBackend:
+    provider = RecordingAttackBoxProvider(ctx.state_dir)
+
+    async def explode(project: str, reclaim_token: str) -> None:
+        raise RuntimeError("cell manager unreachable")
+
+    provider.teardown = explode  # type: ignore[method-assign]
+    return AttackBoxBackend(provider=provider)
+
+
+def _attack_box_record(project: str, origin: str) -> AttackBoxRecord:
+    return AttackBoxRecord(
+        origin=origin,
+        project=project,
+        guest_name="attacker",
+        cid=3001,
+        reclaim_token="tok-9",
+        created="2026-10-23T00:00:00+00:00",
+    )
+
+
+def test_down_reclaims_the_external_attack_box_before_any_docker_call(
+    tmp_path: Path,
+) -> None:
+    """The provider's box dies before its NIC: reclaim runs before the first docker query, and the record clears so a second down is a no-op."""
+    state = tmp_path / "state"
+    write_attack_box_record(state, _attack_box_record("ir-abox", RECORDING_ORIGIN))
+    docker = FakeDocker()
+
+    def ordered(
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        input: str | None = None,
+        timeout: float | None = None,
+    ) -> "subprocess.CompletedProcess[str]":
+        assert any(p.teardowns for p in RecordingAttackBoxProvider.instances), (
+            "docker was touched before the provider reclaim"
+        )
+        return docker(argv, env=env, input=input, timeout=timeout)
+
+    down("ir-abox", state_dir=state, runner=ordered)
+    provider = RecordingAttackBoxProvider.instances[-1]
+    assert provider.teardowns == [("ir-abox", "tok-9")]
+    assert read_attack_box_record(state, "ir-abox") is None
+    down("ir-abox", state_dir=state, runner=docker)
+    assert len(provider.teardowns) == 1, "a second down reclaims nothing"
+
+
+def test_down_refuses_when_the_attack_box_origin_does_not_resolve(
+    tmp_path: Path,
+) -> None:
+    """Deny-first: an unresolvable origin refuses before any compose resource is touched (killing the netns would strand a live foreign VMM)."""
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    write_attack_box_record(
+        state, _attack_box_record("ir-abox", "no_such_pkg_xyz.boxes.cell")
+    )
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="does not resolve here"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == [], "nothing was torn down"
+    assert read_attack_box_record(state, "ir-abox") is not None, "a retry can reclaim"
+
+
+def test_down_refuses_an_unreadable_attack_box_record(tmp_path: Path) -> None:
+    """A torn or corrupt record must not read as 'no external box': down refuses with the path named, so a retry can reclaim after repair."""
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    path = state / "ir-abox" / "attackbox.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"origin": "pkg.mod.f", "proj')  # torn mid-write
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="does not parse"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == []
+
+
+def test_up_refuses_a_console_claiming_backend(
+    bundle: Path, cache: Path, tmp_path: Path
+) -> None:
+    """console_stream=True has no ingest path: the boot path refuses it, not only doctor and the battery."""
+    with pytest.raises(UpError) as error:
+        up(
+            bundle,
+            options(
+                cache,
+                tmp_path,
+                attack_box="tests.test_attackbox_backend.console_claiming_factory",
+            ),
+            runner=FakeDocker(),
+        )
+    assert error.value.stage == "attack-box"
+    assert "console_stream" in str(error.value)
+
+
+def test_down_refuses_when_the_attack_box_reclaim_fails(tmp_path: Path) -> None:
+    from inspect_ranges._runtime.down import DownError
+
+    state = tmp_path / "state"
+    write_attack_box_record(
+        state, _attack_box_record("ir-abox", f"{__name__}.exploding_teardown_factory")
+    )
+    docker = FakeDocker()
+    with pytest.raises(DownError, match="attack-box teardown failed"):
+        down("ir-abox", state_dir=state, runner=docker)
+    assert docker.calls == []
+    assert read_attack_box_record(state, "ir-abox") is not None
+
+
+def test_boot_script_skip_leaves_other_guests_identical(bundle: Path) -> None:
+    from inspect_ranges._runtime.up import load_boot
+
+    boot = load_boot(bundle)
+    full = boot_script(boot)
+    skipped = boot_script(boot, skip=frozenset({"attacker"}))
+    assert "attacker" in full and "attacker" not in skipped
+    assert boot_script(boot, skip=frozenset()) == full, "empty skip is byte-identical"

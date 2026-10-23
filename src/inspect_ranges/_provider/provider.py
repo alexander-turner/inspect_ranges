@@ -21,6 +21,7 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
+from .._attackbox.backend import attack_box_origin
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -74,6 +75,14 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
             f"got {type(config).__name__}"
         )
     raise ValueError("range requires a config: a range.yaml path or a RangeSpec object")
+
+
+def _attack_box_origin_or_up_error() -> str | None:
+    """The configured attack-box origin, with a malformed value folded to the typed stage failure every other boot refusal uses."""
+    try:
+        return attack_box_origin()
+    except ValueError as error:
+        raise UpError("attack-box", str(error)) from error
 
 
 def _default_guest(spec: RangeSpec) -> str:
@@ -388,6 +397,13 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 project=project,
                                 image_cache=runtime.image_cache,
                                 state_dir=runtime.state_dir,
+                                # consulted only where up() itself runs: the
+                                # co-resident path boots here, so the driver's
+                                # environment selects; a separated backend's
+                                # applier reads its own environment instead.
+                                # A malformed value refuses as a typed stage
+                                # failure, never a raw ValueError
+                                attack_box=_attack_box_origin_or_up_error(),
                             ),
                             on_stage,
                         )
@@ -469,6 +485,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                         project=project,
                         bundle=staging / "bundle",
                         plan=rendered_plan,
+                        state_dir=runtime.state_dir,
                     )
                     handle.evidence = session
             except BaseException as failure:

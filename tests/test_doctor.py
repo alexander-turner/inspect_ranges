@@ -580,6 +580,67 @@ def test_check_host_reports_a_failing_backend_probe(tmp_path: Path) -> None:
     assert "unreachable: region-down" in probe.detail
 
 
+def test_check_attack_box_unset_is_a_single_ok_row(tmp_path: Path) -> None:
+    """With the variable unset, the group states the default (the realizer boots the box) and nothing else."""
+    from inspect_ranges._doctor.checks import check_attack_box
+
+    results = check_attack_box(state_dir=tmp_path / "state", backend=None)
+    assert [(r.name, r.status) for r in results] == [("backend", "ok")]
+    assert "not configured" in results[0].detail
+
+
+def test_check_attack_box_resolves_and_warns_the_declared_drop(tmp_path: Path) -> None:
+    """A resolving backend reports ok, runs its probe, and carries the standing capability warn (declared console gap, weaker containment story)."""
+    from inspect_ranges._doctor.checks import check_attack_box
+
+    value = "tests.test_attackbox_backend.probing_attack_box_factory:healthy"
+    results = {
+        r.name: r for r in check_attack_box(state_dir=tmp_path / "state", backend=value)
+    }
+    assert results["backend"].status == "ok"
+    assert results["backend probe"].status == "ok"
+    capabilities = results["capabilities"]
+    assert capabilities.status == "warn"
+    assert "declared evidence gap" in capabilities.detail
+
+
+def test_check_attack_box_reports_a_failing_probe(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_attack_box
+
+    value = "tests.test_attackbox_backend.probing_attack_box_factory:cell-down"
+    results = {
+        r.name: r for r in check_attack_box(state_dir=tmp_path / "state", backend=value)
+    }
+    probe = results["backend probe"]
+    assert probe.status == "fail"
+    assert "unreachable: cell-down" in probe.detail
+
+
+def test_check_attack_box_fails_an_unresolvable_value(tmp_path: Path) -> None:
+    from inspect_ranges._doctor.checks import check_attack_box
+
+    results = check_attack_box(
+        state_dir=tmp_path / "state", backend="no_such_pkg_xyz.boxes.cell"
+    )
+    assert [(r.name, r.status) for r in results] == [("backend", "fail")]
+    assert "does not resolve" in results[0].detail
+
+
+def test_check_attack_box_refuses_the_unsupported_console_claim(
+    tmp_path: Path,
+) -> None:
+    """`console_stream=True` has no ingest path; doctor fails the capability row rather than letting the claim stand."""
+    from inspect_ranges._doctor.checks import check_attack_box
+
+    value = "tests.test_attackbox_backend.console_claiming_factory"
+    results = {
+        r.name: r for r in check_attack_box(state_dir=tmp_path / "state", backend=value)
+    }
+    capabilities = results["capabilities"]
+    assert capabilities.status == "fail"
+    assert "not supported" in capabilities.detail
+
+
 def test_check_host_fails_an_unimportable_backend(tmp_path: Path) -> None:
     """A dotted value whose package is not installed fails with the import cause named."""
     from inspect_ranges._doctor.checks import check_host

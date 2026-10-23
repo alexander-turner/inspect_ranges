@@ -25,6 +25,7 @@ from inspect_ranges._channel.channel import (
     Transport,
 )
 from inspect_ranges._channel.mocks import LatencyTransport
+from inspect_ranges._channel.vsock import HybridEndpoint
 from inspect_ranges._compiler.plan import Totals
 from inspect_ranges._host import LeasePlacement, RemoteHostProvider, SampleSpec
 from inspect_ranges._provider.provider import RangeSandboxEnvironment
@@ -99,6 +100,79 @@ def make_env(
 _LATENCY_SKIPS = frozenset(
     {"test_read_and_write_large_file_binary", "test_exec_input_large"}
 )
+
+
+# -- the attack-box seam: the fake provider's exec surface over its unix socket --
+
+
+@dataclass(frozen=True)
+class AttackBoxSelfCheckFixture:
+    endpoint: HybridEndpoint
+    project: str
+
+
+@pytest.fixture(scope="module")
+def attackbox_selfcheck(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[AttackBoxSelfCheckFixture]:
+    """One fake attack box for the module: booted through the real seam types (attachment with a live fd in, HybridEndpoint out), so every check drives the production dial path (AF_UNIX + SO_PEERCRED)."""
+    from ipaddress import IPv4Address
+
+    from inspect_ranges._attackbox import AttachedInterface, FootholdAttachment
+
+    from tests.fake_attackbox import FakeAttackBoxProvider
+
+    root = tmp_path_factory.mktemp("attackbox-selfcheck")
+    provider = FakeAttackBoxProvider(root)
+    project = f"ir-abox-selfcheck-{uuid.uuid4().hex[:6]}"
+    fd = os.open(os.devnull, os.O_RDWR)
+    attachment = FootholdAttachment(
+        project=project,
+        guest_name="box",
+        cid=30_000,
+        cpus=1,
+        memory_mb=1024,
+        interfaces=(
+            AttachedInterface(
+                segment="lab",
+                bridge="br-lab",
+                tap_fd=fd,
+                mac="52:54:00:00:00:01",
+                ip=IPv4Address("10.9.0.2"),
+                prefixlen=24,
+                gateway=None,
+            ),
+        ),
+    )
+    handle = asyncio.run(provider.boot(attachment))
+    try:
+        yield AttackBoxSelfCheckFixture(handle.exec_endpoint, project)
+    finally:
+        asyncio.run(provider.teardown(project, handle.reclaim_token))
+
+
+def _run_attackbox_check(
+    fixture: AttackBoxSelfCheckFixture, check: Check, tmp_path: Path
+) -> None:
+    from inspect_ranges._channel.vsock import VsockTransport
+
+    async def scenario() -> None:
+        channel = MessageChannel(
+            VsockTransport({}, hybrid_sockets={"box": fixture.endpoint}),
+            label="self-check-attackbox",
+        )
+        handle = SampleHandle(
+            project=fixture.project,
+            task_name="self_check",
+            staging=tmp_path / "staging",
+            totals=Totals(guests=1, cpus=1, memory_mb=1024),
+            cid_base=30_000,
+            guest_cids={"box": 30_000},
+            channel=channel,
+        )
+        await check(RangeSandboxEnvironment("box", handle))
+
+    asyncio.run(scenario())
 
 
 # -- the separated topology: a subprocess applier behind RemoteRangeHost ---------
@@ -193,7 +267,9 @@ def _run_uds_check(fixture: UdsSelfCheckFixture, check: Check, tmp_path: Path) -
 def _check_params() -> list[object]:
     """Every (check, transport) pair: CI xfails as collection-time STRICT marks (an XPASS fails the run and control-flow exceptions are never swallowed, unlike a hand-rolled try/except) and the latency 50 MiB skips as skip marks."""
     params: list[object] = []
-    kinds = ("loopback", "latency", "uds") + (("vsock",) if VSOCK_CID else ())
+    kinds = ("loopback", "latency", "uds", "attackbox") + (
+        ("vsock",) if VSOCK_CID else ()
+    )
     for transport_kind in kinds:
         for name, check in CHECKS:
             marks: list[pytest.MarkDecorator] = []
@@ -228,6 +304,11 @@ def test_self_check(
         fixture = request.getfixturevalue("uds_selfcheck")
         assert isinstance(fixture, UdsSelfCheckFixture)
         _run_uds_check(fixture, check, tmp_path)
+        return
+    if transport_kind == "attackbox":
+        box = request.getfixturevalue("attackbox_selfcheck")
+        assert isinstance(box, AttackBoxSelfCheckFixture)
+        _run_attackbox_check(box, check, tmp_path)
         return
     env, channel = make_env(tmp_path, transport_kind)
 

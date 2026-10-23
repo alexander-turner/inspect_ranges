@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._compiler.plan import ResolvedPlan
 from .._evidence.capture import (
     CAPTURE_HARVEST_TIMEOUT_S,
@@ -137,6 +138,7 @@ class EvidenceSession:
         project: str,
         bundle: Path,
         plan: ResolvedPlan,
+        state_dir: Path | None = None,
     ) -> None:
         """Open the writers after a successful boot; start capture when this process owns it.
 
@@ -164,11 +166,33 @@ class EvidenceSession:
                     buffer_cap_bytes=evidence_buffer_bytes(),
                     max_total_bytes=evidence_max_bytes(),
                 )
+                # the attack-box record up() wrote is the single source of
+                # truth for which guest an external provider realized (never
+                # re-derive from the ambient env, which can drift)
+                external: str | None = None
+                if state_dir is not None:
+                    try:
+                        record = read_attack_box_record(state_dir, project)
+                        external = record.guest_name if record else None
+                    except AttackBoxRecordError as error:
+                        # an unreadable record still proves an external box
+                        # exists: declare the plan's attacker so its console
+                        # stays a DECLARED gap, never a silently-failing poll
+                        logger.warning(
+                            "attack-box record unreadable; declaring the "
+                            "plan's attacker console external (%s)",
+                            error,
+                        )
+                        external = next(
+                            (g.name for g in plan.guests if g.kind == "attacker"),
+                            None,
+                        )
                 self._streamer = CaptureStreamer(
                     self._host,
                     ComposeTap(project, bundle),
                     segments=[network.name for network in plan.networks],
                     console_guests=[guest.name for guest in plan.guests],
+                    external_consoles=[external] if external is not None else [],
                     stage_recorder=self.recorder,
                 )
                 await self._streamer.start()

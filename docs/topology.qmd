@@ -125,5 +125,6 @@ What is not built yet, concretely: granted-URL and registry image delivery (`pre
 | `INSPECT_RANGES_HOST` | `local` | Backend selection: `local` (co-resident), `uds:<socket>` (a running applier), or `<module>.<factory>[:<config>]` (a [registered backend](#registering-a-backend)). |
 | `INSPECT_RANGES_LEASE_TTL_S` | 600 | Host lease TTL in seconds; the driver renews at TTL/3. A dead driver's sample becomes reclaimable one TTL after its last renewal. |
 | `INSPECT_RANGES_HOST_CLASS` | `unspecified` | The host-class name recorded in lease host facts (declarations, never per-instance probes). |
+| `INSPECT_RANGES_ATTACK_BOX` | unset | External [attack-box provider](attackbox.qmd#external-providers) registration (`<module>.<factory>[:<config>]`), consulted where realization runs: the driver under `local`, the applier's own environment under a separated backend. |
 
 The provider's own knobs (concurrency, retries, image cache) are on the [Range Sandbox](provider.qmd) page and apply unchanged under either backend.

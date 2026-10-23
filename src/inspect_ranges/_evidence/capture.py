@@ -2,7 +2,7 @@
 
 The capture sidecar (`supervisor.py`) rotates per-bridge pcap chunks onto its private volume; serial consoles land in the range container's `/scratch/console/`; `up()`'s stage log mirrors through `on_stage`. This module ships all of it into an `EvidenceWriter` as the record's streams: `pcap/<segment>` (chunk files, in rotation order), `capture-stderr/<segment>` (tcpdump's own output, which carries the kernel-drop summaries), `console/<guest>` (tailed continuously, not only on failure), `stages` and `verify` (stage events with host emit clocks, one side of the clock-offset pairs), `heartbeat` (capture liveness and watermarks, the completeness machinery the `detection` goal demands of scenario collectors applied to our own), and `clock` (dual-clock readings with wall-jump anomalies).
 
-Evidence never destabilizes the sample it observes: every cycle step is guarded, tap failures count into the heartbeat rather than raising, and loss is always explicit as in-chain gap records (`capture-cap`, `capture-restart`, `capture-dead`, `kernel-drops`, `capture-unreachable`, `console-truncated`). The transport is a `CaptureTap`: `ComposeTap` reaches the live project through `docker compose` exec/cp (the console path reuses the `compose cp` precedent from `up()`), and tests substitute a directory-backed tap.
+Evidence never destabilizes the sample it observes: every cycle step is guarded, tap failures count into the heartbeat rather than raising, and loss is always explicit as in-chain gap records (`capture-cap`, `capture-restart`, `capture-dead`, `kernel-drops`, `capture-unreachable`, `console-truncated`, `console-external-attack-box`). The transport is a `CaptureTap`: `ComposeTap` reaches the live project through `docker compose` exec/cp (the console path reuses the `compose cp` precedent from `up()`), and tests substitute a directory-backed tap.
 """
 
 import asyncio
@@ -285,6 +285,7 @@ class CaptureStreamer:
         *,
         segments: list[str],
         console_guests: list[str],
+        external_consoles: list[str] | None = None,
         stage_recorder: StageRecorder | None = None,
         poll_s: float = 1.0,
         heartbeat_s: float = 5.0,
@@ -293,7 +294,13 @@ class CaptureStreamer:
         self._writer = writer
         self._tap = tap
         self._segments = {name: _SegmentView() for name in segments}
-        self._consoles: dict[str, int] = {guest: 0 for guest in console_guests}
+        # a guest an external attack-box provider realizes has no console file:
+        # it is never polled, and its absence lands in the chain as one declared
+        # gap (attack-box-v1), never as a silently-missing stream
+        self._external_consoles = list(external_consoles or [])
+        self._consoles: dict[str, int] = {
+            guest: 0 for guest in console_guests if guest not in self._external_consoles
+        }
         self._recorder = stage_recorder
         self._poll_s = poll_s
         self._heartbeat_s = heartbeat_s
@@ -305,8 +312,17 @@ class CaptureStreamer:
         self._last_heartbeat: float | None = None
 
     async def start(self) -> None:
-        """Begin polling; idempotent."""
+        """Begin polling; idempotent. Each external console's declared gap lands once, before the first cycle."""
         if self._task is None:
+            for guest in self._external_consoles:
+                try:
+                    await self._writer.gap(
+                        f"console/{guest}", cause="console-external-attack-box"
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "declared console gap for %s failed: %s", guest, error
+                    )
             self._task = asyncio.create_task(self._run(), name="evidence-capture")
 
     async def stop(

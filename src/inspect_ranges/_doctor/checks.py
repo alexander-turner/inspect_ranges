@@ -14,6 +14,7 @@ PLATFORM = "Platform"
 REALIZER = "Realizer"
 PROVIDER = "Provider"
 HOST = "Host"
+ATTACK_BOX = "Attack box"
 EVIDENCE = "Evidence"
 VIRTUALIZATION = "Virtualization"
 DOCKER = "Docker"
@@ -50,6 +51,10 @@ def run_checks() -> list[CheckResult]:
     results += check_host(
         state_dir=_provider_state_dir(),
         backend=os.environ.get("INSPECT_RANGES_HOST", "local"),
+    )
+    results += check_attack_box(
+        state_dir=_provider_state_dir(),
+        backend=os.environ.get("INSPECT_RANGES_ATTACK_BOX"),
     )
     results += check_evidence(
         sink_override=os.environ.get("INSPECT_RANGES_EVIDENCE_SINK"),
@@ -563,6 +568,86 @@ def check_host(state_dir: Path, backend: str) -> list[CheckResult]:
                         fix="start or repair the backend's host, then re-run doctor",
                     )
                 )
+    return results
+
+
+def check_attack_box(state_dir: Path, backend: str | None) -> list[CheckResult]:
+    """The attack-box provider surface: resolution of a registered factory (a loud fail for a value `up` would refuse before touching any resource), the backend's own reachability probe, and the standing warn for what an external box costs (a declared console-stream evidence gap, and containment downgraded to the weaker of the two stacks).
+
+    The warn follows the evidence-group precedent: a stated condition of the configuration, not a host failure, so doctor stays green-but-honest about it.
+    """
+    from .._attackbox.backend import ENV_VAR, resolve_attack_box
+
+    if not backend:
+        return [
+            CheckResult(
+                ATTACK_BOX,
+                "backend",
+                "ok",
+                "not configured (the realizer boots the attack box)",
+            )
+        ]
+    try:
+        bundle = resolve_attack_box(backend, state_dir)
+    except Exception as error:
+        # Exception, not ValueError: a factory's own failure must land as a
+        # report, never crash doctor
+        return [
+            CheckResult(
+                ATTACK_BOX,
+                "backend",
+                "fail",
+                f"{ENV_VAR}={backend!r} does not resolve: {error}",
+                fix=(
+                    "install the package providing the provider factory, or "
+                    f"fix {ENV_VAR}"
+                ),
+            )
+        ]
+    results = [
+        CheckResult(
+            ATTACK_BOX,
+            "backend",
+            "ok",
+            f"{ENV_VAR}={backend!r} resolves",
+        )
+    ]
+    if bundle.doctor_probe is not None:
+        detail = bundle.doctor_probe()
+        results.append(
+            CheckResult(ATTACK_BOX, "backend probe", "ok", "backend reports healthy")
+            if detail is None
+            else CheckResult(
+                ATTACK_BOX,
+                "backend probe",
+                "fail",
+                detail,
+                fix="start or repair the provider's substrate, then re-run doctor",
+            )
+        )
+    if bundle.capabilities.console_stream:
+        results.append(
+            CheckResult(
+                ATTACK_BOX,
+                "capabilities",
+                "fail",
+                "console_stream=True is not supported: there is no ingest path "
+                "for a provider-supplied console stream",
+                fix="declare console_stream=False (the drop is recorded as a declared evidence gap)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                ATTACK_BOX,
+                "capabilities",
+                "warn",
+                "external attack box: the attacker's console stream is recorded "
+                "as a declared evidence gap, and the range carries the weaker "
+                "of the two containment stories (the conformance battery is "
+                "the floor)",
+            )
+        )
     return results
 
 

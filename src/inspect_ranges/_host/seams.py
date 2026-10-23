@@ -59,10 +59,20 @@ def realize_gap_allowances(
     default_window = float(UpOptions.model_fields["readiness_min_window"].default)
     readiness_timeout = max(options.readiness_timeout, default_timeout)
     probe_window = max(options.readiness_min_window, default_window)
+    # after `boot` also sits the attack-box attach plus the external provider's
+    # own boot when the HOST's environment delegates the plan's dedicated
+    # attack box (the driver cannot know whether it does, so any plan with one
+    # carries the envelope): the attach window plus the provider boot, which
+    # up bounds at its own readiness timeout
+    attack_box_s = 0.0
+    if any(guest.kind == "attacker" for guest in plan.guests):
+        from .._attackbox.attach import ATTACH_TIMEOUT_S
+
+        attack_box_s = ATTACH_TIMEOUT_S + readiness_timeout
     return {
         None: IMAGE_BUILD_TIMEOUT_S + 30.0,
         "construct": readiness_timeout + 60.0 + 30.0,
-        "boot": readiness_timeout + 30.0,
+        "boot": readiness_timeout + attack_box_s + 30.0,
         "verify": readiness_timeout + len(plan.guests) * probe_window + 30.0,
     }
 
@@ -81,10 +91,12 @@ async def _drive_realize(
     plan = ResolvedPlan.model_validate_json((bundle / "plan.json").read_text())
     digest = bundle_digest(bundle)  # UpError-typed on an unreadable manifest
     started = time.monotonic()
+    reported: dict[str, str] = {}
     try:
         async for report in channel.realize(
             digest, [], gap_allowances=realize_gap_allowances(plan, options)
         ):
+            reported = dict(report.guests)
             if on_stage is not None:
                 # never let an observer failure alter the realize outcome
                 try:
@@ -102,8 +114,16 @@ async def _drive_realize(
             # provider's layer-3 respin classifies it
             raise UpError("admission", str(refusal)) from refusal
         raise  # ENOSPC/EINVAL/ENOTSUP are permanent and stay typed
+    # readiness folds from the host's terminal report, never fabricated: a
+    # ready stream always carries per-guest states (the applier marks every
+    # guest it realized), so a guest the host never reported is not ready
     guests = [
-        GuestState(name=guest.name, cid=guest.cid, ready=True) for guest in plan.guests
+        GuestState(
+            name=guest.name,
+            cid=guest.cid,
+            ready=reported.get(guest.name) == "ready",
+        )
+        for guest in plan.guests
     ]
     return UpResult(
         project=project,

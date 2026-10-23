@@ -3,6 +3,7 @@ import click
 from .. import __version__
 from .._devbox import devbox_group
 from .appliercmd import applier
+from .attackboxcmd import attackbox
 from .buildcmd import build
 from .daemonbundle import daemon_bundle
 from .distcmd import mirror, publish, pull, push
@@ -23,6 +24,7 @@ def ranges() -> None:
 
 
 ranges.add_command(applier)
+ranges.add_command(attackbox)
 ranges.add_command(build)
 ranges.add_command(daemon_bundle)
 ranges.add_command(devbox_group)

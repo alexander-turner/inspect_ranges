@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .._attackbox.backend import attack_box_origin
+from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._channel.channel import HOST_APPLIER, ByteStream
 from .._channel.codec import (
     ChannelClosed,
@@ -638,13 +640,18 @@ class Applier:
                     emit(translated.stage, translated.detail), loop
                 )
 
-        options = UpOptions(
-            project=lease.project,
-            image_cache=self._image_cache,
-            state_dir=self._state_dir,
-        )
         failed = False
         try:
+            options = UpOptions(
+                project=lease.project,
+                image_cache=self._image_cache,
+                state_dir=self._state_dir,
+                # the applier's own environment, per the deployment-knowledge
+                # rule: the host that boots the box selects its provider. Read
+                # INSIDE the folding path: a malformed value must land as a
+                # failed report, never kill the task over an unfinished run
+                attack_box=attack_box_origin(),
+            )
             result = await asyncio.to_thread(self._up_fn, bundle, options, on_stage)
         except UpError as error:
             # failures raised before the stage log exists never reach
@@ -695,11 +702,30 @@ class Applier:
                 max_total_bytes=evidence_max_bytes(),
             )
             segments = [network.name for network in plan.networks]
+            # the attack-box record up() wrote is the single source of truth
+            # for which guest an external provider realized (never re-derive
+            # from the ambient env, which can drift)
+            try:
+                record = read_attack_box_record(self._state_dir, lease.project)
+                external = record.guest_name if record is not None else None
+            except AttackBoxRecordError as error:
+                # an unreadable record still proves an external box exists:
+                # fall back to the plan's attacker so its console stays a
+                # DECLARED gap rather than a silently-failing poll
+                logger.warning(
+                    "attack-box record unreadable; declaring the plan's "
+                    "attacker console external (%s)",
+                    error,
+                )
+                external = next(
+                    (g.name for g in plan.guests if g.kind == "attacker"), None
+                )
             streamer = CaptureStreamer(
                 writer,
                 ComposeTap(lease.project, Path(lease.bundle_path)),
                 segments=segments,
                 console_guests=[guest.name for guest in plan.guests],
+                external_consoles=[external] if external is not None else [],
                 stage_recorder=recorder,
             )
             await streamer.start()
