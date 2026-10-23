@@ -435,8 +435,8 @@ async def _check_activities(
     )
     results: list[DeclarationResult] = []
     records: list[str] = []
-    for index, activity in enumerate(host.scheduled_activity):
-        unit = activity_unit_name(host.name, index)
+    for activity in host.scheduled_activity:
+        unit = activity_unit_name(activity.script)
         cmd, user = activity_check_command(activity, unit=unit, windows=windows)
         outcome = await channel.exec(
             host.name,

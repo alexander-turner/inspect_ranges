@@ -88,7 +88,7 @@ def test_resolution_digests_the_script_content(tmp_path: Path) -> None:
         [host_with([ScheduledActivity(script="tick.sh", schedule="every 5m")])]
     )
     (resolved,) = resolve_activities(spec, range_dir)
-    assert resolved.unit == activity_unit_name("web", 0) == "ir-activity-web-0"
+    assert resolved.unit == activity_unit_name("tick.sh") == "tick"
     assert resolved.digest == hashlib.sha256(script.read_bytes()).hexdigest()
     # an edited script re-keys: the digest is content identity
     script.write_text("#!/bin/sh\necho tock\n")
@@ -104,7 +104,7 @@ def test_resolution_collects_every_refusal(tmp_path: Path) -> None:
             host_with(
                 [
                     ScheduledActivity(script="absent.sh", schedule="every 5m"),
-                    ScheduledActivity(script="absent.sh"),
+                    ScheduledActivity(script="unscheduled.sh"),
                 ]
             ),
             host_with(
@@ -129,6 +129,29 @@ def test_resolution_collects_every_refusal(tmp_path: Path) -> None:
     ]
 
 
+def test_resolution_refuses_colliding_unit_names(tmp_path: Path) -> None:
+    """Unit names derive from the script's file stem, so two scripts on one host with the same stem would realize the same unit."""
+    range_dir = tmp_path / "range"
+    write_activity(range_dir, "tick.sh")
+    write_activity(range_dir, "sub/tick.sh")
+    spec = spec_with(
+        [
+            host_with(
+                [
+                    ScheduledActivity(script="tick.sh", schedule="every 5m"),
+                    ScheduledActivity(script="sub/tick.sh", schedule="@boot"),
+                ]
+            )
+        ]
+    )
+    with pytest.raises(IssueError) as excinfo:
+        resolve_activities(spec, range_dir)
+    (issue,) = excinfo.value.issues
+    assert issue.code == "activity-name-conflict"
+    assert issue.path == ("hosts", 0, "scheduled_activity", 1, "script")
+    assert "'tick'" in issue.message
+
+
 def exec_texts(ops: tuple[WriteOp | ExecOp, ...]) -> list[str]:
     return [" ".join(op.cmd) for op in ops if isinstance(op, ExecOp)]
 
@@ -139,21 +162,21 @@ def exec_texts(ops: tuple[WriteOp | ExecOp, ...]) -> list[str]:
         pytest.param(
             "every 5m",
             None,
-            "ir-activity-web-0.timer",
+            "tick.timer",
             ["OnBootSec=5m", "OnUnitActiveSec=5m", "Type=oneshot"],
             id="interval-timer",
         ),
         pytest.param(
             "every 2h",
             "clerk",
-            "ir-activity-web-0.timer",
+            "tick.timer",
             ["OnBootSec=2h", "OnUnitActiveSec=2h", "User=clerk"],
             id="interval-with-user",
         ),
         pytest.param(
             "@boot",
             None,
-            "ir-activity-web-0.service",
+            "tick.service",
             ["Type=simple", "WantedBy=multi-user.target"],
             id="boot-service",
         ),
@@ -174,13 +197,13 @@ def test_linux_ops_install_and_enable_the_unit(
     unit_text = "\n".join(
         op.data.decode() for op in ops if isinstance(op, WriteOp) and op is not ops[0]
     )
-    for fragment in [*unit_fragments, "/opt/inspect-ranges/activities/tick.sh"]:
+    for fragment in [*unit_fragments, "/opt/guestd/activities/tick.sh"]:
         assert fragment in unit_text or any(
             fragment in text for text in exec_texts(ops)
         ), fragment
     install, enable = exec_texts(ops)
     assert "install -D -m 755" in install
-    assert "/opt/inspect-ranges/activities/tick.sh" in install
+    assert "/opt/guestd/activities/tick.sh" in install
     assert "systemctl daemon-reload" in enable
     assert f"systemctl enable {enabled}" in enable
     assert all(op.user == "root" for op in ops if isinstance(op, ExecOp))
@@ -227,9 +250,9 @@ def test_windows_ops_register_the_scheduled_task(
     assert staging.path.startswith("C:\\Windows\\Temp\\")
     promote, register = exec_texts(ops)
     assert "Move-Item" in promote
-    assert "C:\\ProgramData\\inspect-ranges\\activities\\tick.ps1" in promote
-    assert "Register-ScheduledTask -TaskName 'ir-activity-win-0'" in register
-    assert '-File "C:\\ProgramData\\inspect-ranges\\activities\\tick.ps1"' in register
+    assert "C:\\ProgramData\\guestd\\activities\\tick.ps1" in promote
+    assert "Register-ScheduledTask -TaskName 'tick'" in register
+    assert '-File "C:\\ProgramData\\guestd\\activities\\tick.ps1"' in register
     for fragment in fragments:
         assert fragment in register, fragment
     # the contract default "root" is not a Windows principal; the daemon's own
@@ -243,14 +266,14 @@ def test_windows_ops_register_the_scheduled_task(
         pytest.param(
             "every 5m",
             False,
-            ("systemctl", "is-enabled", "--", "ir-activity-web-0.timer"),
+            ("systemctl", "is-enabled", "--", "tick.timer"),
             "root",
             id="linux-interval-checks-the-timer",
         ),
         pytest.param(
             "@boot",
             False,
-            ("systemctl", "is-enabled", "--", "ir-activity-web-0.service"),
+            ("systemctl", "is-enabled", "--", "tick.service"),
             "root",
             id="linux-boot-checks-the-service",
         ),
@@ -260,16 +283,14 @@ def test_activity_check_commands(
     schedule: str, windows: bool, expected: tuple[str, ...], user: str | None
 ) -> None:
     activity = ScheduledActivity(script="tick.sh", schedule=schedule)
-    cmd, probe_user = activity_check_command(
-        activity, unit="ir-activity-web-0", windows=windows
-    )
+    cmd, probe_user = activity_check_command(activity, unit="tick", windows=windows)
     assert cmd == expected and probe_user == user
 
 
 def test_windows_check_queries_the_task_state() -> None:
     activity = ScheduledActivity(script="tick.ps1", schedule="every 10m")
-    cmd, user = activity_check_command(activity, unit="ir-activity-win-0", windows=True)
+    cmd, user = activity_check_command(activity, unit="tick", windows=True)
     assert cmd[:4] == ("powershell", "-NoProfile", "-NonInteractive", "-Command")
-    assert "Get-ScheduledTask -TaskName 'ir-activity-win-0'" in cmd[4]
+    assert "Get-ScheduledTask -TaskName 'tick'" in cmd[4]
     assert "Disabled" in cmd[4]
     assert user is None

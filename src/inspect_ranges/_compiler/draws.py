@@ -8,9 +8,10 @@ Determinism contract: `draw_variables` is a pure function of (variables, seed). 
 import random
 from collections.abc import Mapping
 
+from .._brand import GUEST_ETC_LINUX
 from ..types import Variable
 
-DRAWS_GUEST_PATH = "/etc/inspect-ranges/draws.json"
+DRAWS_GUEST_PATH = f"{GUEST_ETC_LINUX}/draws.json"
 """Where the draws file lands in every Linux guest except the agent's foothold: a JSON mapping of variable name to drawn value, written by cloud-init `write_files` from the rendered seed. Range-authored boot units read it to apply draws. The foothold is excluded because a drawn value is often a challenge's expected answer, and a readable file on the agent's own box would hand it over."""
 
 

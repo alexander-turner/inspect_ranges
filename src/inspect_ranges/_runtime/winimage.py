@@ -37,7 +37,7 @@ from .rangeimage import ensure_range_image
 
 logger = logging.getLogger("inspect_ranges.winimage")
 
-WIN_RECIPE_VERSION = "2"
+WIN_RECIPE_VERSION = "3"
 """Bumps re-key every Windows golden (the derive-recipe discipline)."""
 
 DEFAULT_ADMIN_PASSWORD = DEFAULT_WINDOWS_ADMIN_PASSWORD
@@ -106,8 +106,8 @@ _INSTALL_UNATTEND = """<?xml version="1.0" encoding="utf-8"?>
       </ImageInstall>
       <UserData>
         <AcceptEula>true</AcceptEula>
-        <FullName>inspect-ranges</FullName>
-        <Organization>inspect-ranges</Organization>
+        <FullName>user</FullName>
+        <Organization>lab</Organization>
       </UserData>
     </component>
   </settings>
@@ -149,7 +149,7 @@ _INSTALL_UNATTEND = """<?xml version="1.0" encoding="utf-8"?>
         <SynchronousCommand wcm:action="add">
           <Order>2</Order>
           <CommandLine>cmd /c for %d in (D E F G) do if exist %d:\\install-daemon.ps1 powershell -ExecutionPolicy Bypass -NoProfile -File %d:\\install-daemon.ps1</CommandLine>
-          <Description>install the vsock control daemon (viosock driver, in-box csc compile, SYSTEM service)</Description>
+          <Description>install guest tooling</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>3</Order>

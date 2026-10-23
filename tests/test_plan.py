@@ -319,9 +319,7 @@ def test_render_carries_the_draws_file(cache: Path, tmp_path: Path) -> None:
             (drawn_out / f"guests/{guest}/seed/user-data").read_text()
         )
         [entry] = [
-            e
-            for e in user_data["write_files"]
-            if e["path"] == "/etc/inspect-ranges/draws.json"
+            e for e in user_data["write_files"] if e["path"] == "/etc/guestd/draws.json"
         ]
         assert json.loads(entry["content"]) == draws
         assert entry["permissions"] == "0644"

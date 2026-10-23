@@ -319,7 +319,7 @@ def _plumbing_infrastructure(events: Sequence[Event]) -> list[Finding]:
             message=f"{meaning}: {count} event(s) matched {signature!r}",
             hint=(
                 "infrastructure failure after readiness: check the guest daemon "
-                "(journalctl -u vsockd), the hypervisor load, and the channel "
+                "(journalctl -u guestd), the hypervisor load, and the channel "
                 "trace tail in the log"
             ),
             references=references[:5],
@@ -351,7 +351,7 @@ def _plumbing_repeated_retry(events: Sequence[Event]) -> list[Finding]:
             ),
             hint=(
                 "a single guest repeatedly failing exec points at its daemon or "
-                "its VMM, not the agent; check that guest's console and vsockd "
+                "its VMM, not the agent; check that guest's console and guestd "
                 "logs"
             ),
             references=references[:5],

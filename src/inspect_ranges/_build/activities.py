@@ -2,17 +2,19 @@
 
 A `hosts[].scheduled_activity` declaration names a script under the range's `activities/` directory plus a schedule (`@boot`, or `every <N>s|m|h`). The build resolves and content-digests each script at the fail-fast resolution step (the digest enters the guest's build key, so an edited script rebuilds exactly the guests that declare it), then installs each activity as a persistent unit in the guest after recipes and before verification: on Linux a systemd service (plus a timer for interval schedules) enabled under `/etc/systemd/system/`, on Windows a scheduled task registered through `Register-ScheduledTask`. The captured image carries the unit, so every consumer boot runs the activity on its schedule with no per-sample work. Units are enabled, never started, at build: a build-time run would dirty the captured disk at an arbitrary point, and the verification engine checks the enabled unit instead (`verify.py`, kind `activity`).
 
-Unit and task names are `ir-activity-<guest>-<index>` in declaration order, derived from the spec alone, so verification needs no record of the realization. The activity runs as the declared `user` (`User=` on the Linux service; an S4U principal on the Windows task, no stored credential), root/SYSTEM otherwise.
+Unit and task names are the script's file stem (sanitized), derived from the spec alone, so verification needs no record of the realization and the installed unit reads like ordinary admin cruft rather than a harness marker (`_brand.py`); two declarations on one host that would realize the same name refuse at resolution. The activity runs as the declared `user` (`User=` on the Linux service; an S4U principal on the Windows task, no stored credential), root/SYSTEM otherwise.
 """
 
 import asyncio
+import re
 import shlex
 from collections.abc import Mapping
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, Union
 
 from pydantic import BaseModel, ConfigDict
 
+from .._brand import GUEST_OPT_LINUX, GUEST_PROGRAMDATA_WINDOWS
 from .._channel.channel import MessageChannel, request_id
 from .._channel.protocol import Budget, ExecRequest
 from .._channel.vsock import HybridEndpoint, VsockTransport
@@ -31,19 +33,21 @@ from .recipes import StageSink
 ACTIVITIES_DIR_NAME = "activities"
 """Directory inside a range that holds its scheduled-activity scripts."""
 
-LINUX_ACTIVITY_DIR = "/opt/inspect-ranges/activities"
+LINUX_ACTIVITY_DIR = f"{GUEST_OPT_LINUX}/activities"
 """Where activity scripts land in a Linux guest."""
 
-WINDOWS_ACTIVITY_DIR = "C:\\ProgramData\\inspect-ranges\\activities"
+WINDOWS_ACTIVITY_DIR = f"{GUEST_PROGRAMDATA_WINDOWS}\\activities"
 """Where activity scripts land in a Windows guest."""
 
 ACTIVITY_EXEC_BUDGET_MS = 120_000
 """Per-exec budget for the install commands (file promotion, unit registration; Windows PowerShell cold starts cost seconds)."""
 
+_UNIT_NAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 
-def activity_unit_name(guest: str, index: int) -> str:
-    """The systemd unit / scheduled task base name for one declaration: `ir-activity-<guest>-<index>` in declaration order, derived from the spec alone."""
-    return f"ir-activity-{guest}-{index}"
+
+def activity_unit_name(script: str) -> str:
+    """The systemd unit / scheduled task base name for one declaration: the script's file stem with unit-unsafe characters collapsed to `-`, derived from the spec alone (resolution refuses same-host collisions)."""
+    return _UNIT_NAME_CHARS.sub("-", PurePosixPath(script).stem)
 
 
 def schedule_interval(schedule: str) -> tuple[int, Literal["s", "m", "h"]] | None:
@@ -83,20 +87,33 @@ class ResolvedActivity(BaseModel):
     @property
     def unit(self) -> str:
         """The in-guest unit / task base name."""
-        return activity_unit_name(self.guest, self.index)
+        return activity_unit_name(self.declaration.script)
 
 
 def resolve_activities(spec: RangeSpec, range_dir: Path) -> list[ResolvedActivity]:
     """Resolve and pre-validate every host's scheduled activities, failing fast before anything boots.
 
-    All issues across all declarations are collected into one refusal: missing script files (`activity-not-resolved`), declarations without a schedule (`activity-schedule-required`), and second-granularity intervals on Windows hosts, whose task scheduler repeats at one-minute granularity (`activity-schedule-unsupported`).
+    All issues across all declarations are collected into one refusal: missing script files (`activity-not-resolved`), declarations without a schedule (`activity-schedule-required`), second-granularity intervals on Windows hosts, whose task scheduler repeats at one-minute granularity (`activity-schedule-unsupported`), and two declarations on one host whose scripts realize the same unit name (`activity-name-conflict`), since unit names derive from the script's file stem.
     """
     resolved: list[ResolvedActivity] = []
     issues: list[Issue] = []
     for host_index, host in enumerate(spec.hosts):
         windows = host.os.type == "windows"
+        unit_names: dict[str, str] = {}
         for index, activity in enumerate(host.scheduled_activity):
             path_prefix = ("hosts", host_index, "scheduled_activity", index)
+            unit = activity_unit_name(activity.script)
+            if unit in unit_names:
+                issues.append(
+                    Issue(
+                        code="activity-name-conflict",
+                        path=(*path_prefix, "script"),
+                        message=f"host {host.name!r} declares activities {unit_names[unit]!r} and {activity.script!r}, which both realize the unit name {unit!r}",
+                        hint="give the scripts distinct file stems (unit and task names derive from the stem)",
+                    )
+                )
+                continue
+            unit_names[unit] = activity.script
             if activity.schedule is None:
                 issues.append(
                     Issue(
@@ -188,7 +205,9 @@ def _linux_units(activity: ResolvedActivity) -> dict[str, str]:
     unit = activity.unit
     script = linux_script_path(activity)
     user_line = f"User={declaration.user}\n" if declaration.user is not None else ""
-    description = f"inspect-ranges activity {declaration.script} ({unit})"
+    # the description is just the unit name: unit text is agent-readable in
+    # the captured image, so it carries no harness identity (_brand.py)
+    description = unit
     if interval is None:
         service = (
             f"[Unit]\nDescription={description}\n\n"

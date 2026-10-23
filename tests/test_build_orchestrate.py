@@ -2137,7 +2137,7 @@ def test_build_realizes_activities_between_recipes_and_verify(
         verify_fn=tracking_verify,
     )
     assert order == ["recipe"] * 3 + ["activity", "verify"]
-    assert recorder.calls == [("web", "ir-activity-web-0", False)]
+    assert recorder.calls == [("web", "tick", False)]
     assert not result.cached
     manifest = load_manifest(tmp_path / "builds", "buildme")
     assert manifest is not None
@@ -2152,7 +2152,7 @@ def test_build_realizes_activities_between_recipes_and_verify(
             digest=script_digest,
             schedule="every 5m",
             user=None,
-            unit="ir-activity-web-0",
+            unit="tick",
         ),
     )
     db = manifest.guest("db")
@@ -2184,8 +2184,8 @@ def test_activity_script_edit_rebuilds_exactly_that_guest(
     assert [guest for guest, _, _ in again.captures] == ["web"]
     # db is reused, so its activity is skipped: the realized image carries it
     assert recorder.calls == [
-        ("web", "ir-activity-web-0", False),
-        ("db", "ir-activity-db-0", True),
+        ("web", "tick", False),
+        ("db", "tock", True),
     ]
 
 

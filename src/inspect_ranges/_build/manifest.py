@@ -105,7 +105,7 @@ class ActivityRecord(BaseModel):
     schedule: str
     user: str | None = None
     unit: str
-    """The in-guest systemd unit / scheduled task base name (`ir-activity-<guest>-<index>`)."""
+    """The in-guest systemd unit / scheduled task base name (the script's sanitized file stem)."""
 
 
 class GuestRecord(BaseModel):

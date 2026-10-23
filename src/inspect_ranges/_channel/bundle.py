@@ -17,25 +17,28 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from .._brand import GUEST_BRAND, GUEST_OPT_LINUX
 from .protocol import PROTOCOL_VERSION
 
-DAEMON_VERSION = "3.1.0"
+DAEMON_VERSION = "3.2.0"
 
 GO_PIN = "go1.23.6"
 PINNED_GO = Path.home() / ".local/go-toolchains" / GO_PIN / "bin/go"
 GO_SOURCE = Path(__file__).parent / "daemon" / "linux"
 
-_INSTALL_SH = """#!/bin/sh
-# Install vsockd v3 into a Linux guest (run from the extracted bundle dir).
+# every in-guest name below (install paths, unit, description) carries the
+# guest brand token, never the harness identity (_brand.py)
+_INSTALL_SH = f"""#!/bin/sh
+# Install the guest control daemon (run from the extracted bundle dir).
 set -eu
-install -D -m 0755 linux/vsockd /opt/inspect-ranges/vsockd
-install -D -m 0644 linux/vsockd.service /etc/systemd/system/vsockd.service
-systemctl enable vsockd.service
+install -D -m 0755 linux/{GUEST_BRAND} {GUEST_OPT_LINUX}/{GUEST_BRAND}
+install -D -m 0644 linux/{GUEST_BRAND}.service /etc/systemd/system/{GUEST_BRAND}.service
+systemctl enable {GUEST_BRAND}.service
 """
 
-_UNIT = """[Unit]
-Description=inspect-ranges guest control daemon (v3)
-# no start limit: a retried in-guest `systemctl restart vsockd` is
+_UNIT = f"""[Unit]
+Description={GUEST_BRAND}
+# no start limit: a retried in-guest `systemctl restart {GUEST_BRAND}` is
 # self-amplifying (the op's reply dies with the daemon, the resend re-runs it
 # on the restarted daemon's empty dedupe store), and the default 5-in-10s
 # limit then kills the unit PERMANENTLY, bricking the control channel. The
@@ -45,7 +48,7 @@ Description=inspect-ranges guest control daemon (v3)
 # restarts for the guest's lifetime at RestartSec pacing instead of stopping.
 StartLimitIntervalSec=0
 [Service]
-ExecStart=/opt/inspect-ranges/vsockd
+ExecStart={GUEST_OPT_LINUX}/{GUEST_BRAND}
 Restart=always
 # with the start limit off, a daemon that cannot start must back off rather
 # than hot-loop at the 100ms default for the guest's lifetime
@@ -162,7 +165,7 @@ def _tar_bytes(members: dict[str, bytes]) -> bytes:
             info.mtime = 0
             info.uid = info.gid = 0
             info.uname = info.gname = ""
-            info.mode = 0o755 if name.endswith((".sh", "vsockd")) else 0o644
+            info.mode = 0o755 if name.endswith((".sh", GUEST_BRAND)) else 0o644
             tar.addfile(info, io.BytesIO(data))
     return tar_buffer.getvalue()
 
@@ -202,9 +205,9 @@ def write_bundle(
     The one place that knows the bundle member layout; `build_daemon_bundle` calls it with the real build, and tests call it with stand-in bytes so fixtures cannot drift from the layout production emits.
     """
     members = {
-        "linux/vsockd": binary,
+        f"linux/{GUEST_BRAND}": binary,
         "linux/install.sh": _INSTALL_SH.encode(),
-        "linux/vsockd.service": _UNIT.encode(),
+        f"linux/{GUEST_BRAND}.service": _UNIT.encode(),
     }
     for source in _WINDOWS_SOURCES:
         # the Windows daemon ships as source + installer: it compiles

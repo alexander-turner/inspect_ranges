@@ -82,9 +82,9 @@ def test_sidecar_carries_the_contract(tmp_path: Path) -> None:
     sidecar = json.loads((tmp_path / "daemon.json").read_text())
     assert sidecar["protocol"] == 3
     assert set(sidecar["files"]) == {
-        "linux/vsockd",
+        "linux/guestd",
         "linux/install.sh",
-        "linux/vsockd.service",
+        "linux/guestd.service",
         "windows/Wire.cs",
         "windows/Store.cs",
         "windows/Exec.cs",
@@ -115,5 +115,5 @@ def test_cli_daemon_bundle(tmp_path: Path) -> None:
     result = CliRunner().invoke(ranges, ["daemon-bundle", "-o", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "bundle sha256:" in result.output
-    assert (tmp_path / "vsockd-bundle-3.1.0.tar").exists()
+    assert (tmp_path / "vsockd-bundle-3.2.0.tar").exists()
     assert (tmp_path / "daemon.json").exists()

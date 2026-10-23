@@ -40,9 +40,9 @@ echo "step: boot-apply unit for the telnet_port draw (variable-draws-v0)"
 cat > /tmp/apply-draws.sh.$$ <<'SCRIPT'
 #!/bin/sh
 set -e
-draws=/etc/inspect-ranges/draws.json
+draws=/etc/guestd/draws.json
 [ -f "$draws" ] || exit 0
-port=$(python3 -c 'import json; print(json.load(open("/etc/inspect-ranges/draws.json")).get("telnet_port", ""))')
+port=$(python3 -c 'import json; print(json.load(open("/etc/guestd/draws.json")).get("telnet_port", ""))')
 [ -n "$port" ] || exit 0
 sed -i "s/^\( *port *= *\).*/\1$port/" /etc/xinetd.d/telnet
 systemctl restart xinetd
@@ -50,7 +50,7 @@ SCRIPT
 "$IR_PUSH" /tmp/apply-draws.sh.$$ /usr/local/sbin/kypo-apply-draws --mode 755
 cat > /tmp/apply-draws.service.$$ <<'UNIT'
 [Unit]
-Description=Move telnetd to the drawn port from the inspect-ranges draws file
+Description=Move telnetd to the drawn port from the draws file
 # write_files runs in cloud-init.service, so the draws file exists by then
 After=cloud-init.service xinetd.service
 

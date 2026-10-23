@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from inspect_ai.util import SandboxEnvironmentLimits
 from inspect_ai.util._subprocess import ExecResult as InspectExecResult
 
+from .._brand import GUEST_BRAND
 from .._channel.channel import (
     ChannelBudgetError,
     ExecOutcome,
@@ -200,7 +201,7 @@ async def provider_exec(
             # accepted exposure, stated here honestly. The first word is
             # force-quoted so a NAME=value cmd[0] stays a command (ENOENT),
             # never a shell assignment.
-            script_path = f"/tmp/.ir-exec-{request_id()}.sh"
+            script_path = f"/tmp/.{GUEST_BRAND}-{request_id()}.sh"
             exports = "".join(
                 f"export {shlex.quote(key)}={shlex.quote(value)}\n"
                 for key, value in (env or {}).items()

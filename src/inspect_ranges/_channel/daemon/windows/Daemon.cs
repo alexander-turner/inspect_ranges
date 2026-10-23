@@ -218,7 +218,7 @@ namespace VsockD
         public const int PORT = 5000;
         public const int KillGraceMs = 5000;  // pinned by the wire vectors
         public const int WaitDelayMs = 5000;  // pinned by the wire vectors
-        public static string BaseDir = "C:\\vsockd";
+        public static string BaseDir = "C:\\guestd";
         // the daemon identity's sandbox home: relative guest paths and the
         // default exec cwd resolve here (per-user execs default to the
         // logon profile instead; see ExecEngine)
@@ -228,7 +228,7 @@ namespace VsockD
         // supervised listener recoveries since start; surfaced in diag_result
         // so the storm battery can assert the accept loop never wedged
         static long _listenerRestarts;
-        public static string Version = "vsockd 3.1.0 (windows)";
+        public static string Version = "vsockd 3.2.0 (windows)";
         // minted once per daemon process ("N" = 32 lowercase hex): a restart,
         // which empties the dedupe store, surfaces to the host as a session
         // change rather than a silent loss of exactly-once (provider-v1
@@ -240,7 +240,7 @@ namespace VsockD
 
         // quality-review B7: diagnostics live ONLY in the in-memory ring
         // (read over the channel via diag_result). The daemon used to also
-        // append every entry to C:\vsockd\vsockd.log, a file any in-guest
+        // append every entry to its home dir log, a file any in-guest
         // reader could see, contradicting the recorded diag posture
         // ("an in-guest ring buffer, never written anywhere the range can
         // see"); nothing is written to disk now.

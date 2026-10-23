@@ -11,6 +11,8 @@ import re
 import uuid
 from dataclasses import dataclass, field
 
+from .._brand import GUEST_BRAND
+
 PANE_WIDTH = 160
 PANE_HEIGHT = 40
 HISTORY_LIMIT = 50_000
@@ -28,7 +30,7 @@ SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 _ENTER_KEYS = frozenset({"Enter", "C-m", "KPEnter", "C-j", "^M", "^J"})
 _NEWLINE_CHARS = "\r\n"
 
-SINK_DIR = "/tmp/.ir-terminal"
+SINK_DIR = f"/tmp/.{GUEST_BRAND}"
 
 
 def sink_path(session: str) -> str:
@@ -39,9 +41,9 @@ def sink_path(session: str) -> str:
 def wait_channel(session: str, nonce: str) -> str:
     """The per-send tmux wait channel the blocking completion signal uses.
 
-    The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately. Signals are server-wide and outlive sessions, and the send counter restarts at zero when a name is reopened, so the nonce the tool passes is the session life's `SessionState.token` plus the send counter, never the counter alone.
+    The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately. Signals are server-wide and outlive sessions, and the send counter restarts at zero when a name is reopened, so the nonce the tool passes is the session life's `SessionState.token` plus the send counter, never the counter alone. The name is deliberately bland (`done-...`): it echoes in the pane, so it must not read as a harness marker (`_brand.py`).
     """
-    return f"ir-done-{session}-{nonce}"
+    return f"done-{session}-{nonce}"
 
 
 def valid_session_name(session: str) -> bool:
@@ -227,7 +229,7 @@ def find_new_content(previous_buffer: str | None, current_buffer: str) -> str | 
     return None
 
 
-_WAIT_ECHO = re.compile(r"; tmux wait -S ir-done-\S+")
+_WAIT_ECHO = re.compile(r"; tmux wait -S done-\S+")
 
 
 def scrub_harness_echo(text: str) -> str:

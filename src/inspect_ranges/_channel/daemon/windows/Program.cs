@@ -9,7 +9,7 @@ namespace VsockD
 {
     sealed class DaemonService : ServiceBase
     {
-        public DaemonService() { ServiceName = "vsockd"; }
+        public DaemonService() { ServiceName = "guestd"; }
 
         protected override void OnStart(string[] args)
         {

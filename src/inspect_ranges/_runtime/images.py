@@ -20,6 +20,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from .._brand import GUEST_BRAND, GUEST_OPT_LINUX
 from .._channel.bundle import (
     BundleError,
     DaemonBundleInfo,
@@ -31,7 +32,7 @@ from .._compiler.plan import image_file_name, image_sidecar_file_name
 
 logger = logging.getLogger(__name__)
 
-RECIPE_VERSION = "4"
+RECIPE_VERSION = "5"
 """Bumping this invalidates every derived golden (it is part of the derivation key)."""
 
 
@@ -157,7 +158,7 @@ def resolve_daemon_bundle(
 def _extract_daemon(bundle_path: Path, staging: Path) -> tuple[Path, Path]:
     """Extract the verified bundle's binary and unit into `staging`; returns their paths."""
     with tarfile.open(bundle_path, mode="r:") as tar:
-        for member in ("linux/vsockd", "linux/vsockd.service"):
+        for member in (f"linux/{GUEST_BRAND}", f"linux/{GUEST_BRAND}.service"):
             try:
                 handle = tar.extractfile(member)
             except KeyError as error:
@@ -171,7 +172,7 @@ def _extract_daemon(bundle_path: Path, staging: Path) -> tuple[Path, Path]:
                 )
             target = staging / Path(member).name
             target.write_bytes(handle.read())
-    return staging / "vsockd", staging / "vsockd.service"
+    return staging / GUEST_BRAND, staging / f"{GUEST_BRAND}.service"
 
 
 def _run(argv: list[str], cwd: Path) -> None:
@@ -394,15 +395,15 @@ def _derive_locked(
                     "--run-command",
                     "useradd --create-home --home-dir /home/agent --shell /bin/sh agent",
                     "--mkdir",
-                    "/opt/inspect-ranges",
+                    GUEST_OPT_LINUX,
                     "--copy-in",
-                    f"{daemon_binary}:/opt/inspect-ranges",
+                    f"{daemon_binary}:{GUEST_OPT_LINUX}",
                     "--chmod",
-                    "0755:/opt/inspect-ranges/vsockd",
+                    f"0755:{GUEST_OPT_LINUX}/{GUEST_BRAND}",
                     "--copy-in",
                     f"{daemon_unit}:/etc/systemd/system",
                     "--link",
-                    "/etc/systemd/system/vsockd.service:/etc/systemd/system/multi-user.target.wants/vsockd.service",
+                    f"/etc/systemd/system/{GUEST_BRAND}.service:/etc/systemd/system/multi-user.target.wants/{GUEST_BRAND}.service",
                     "--link",
                     "/dev/null:/etc/systemd/system/systemd-networkd-wait-online.service",
                     "--link",

@@ -152,7 +152,7 @@ def test_large_argv_rides_the_wrapper_script(tmp_path: Path) -> None:
         from tests.local_endpoint import LocalEndpoint
 
         assert isinstance(endpoint, LocalEndpoint)
-        leftovers = list((endpoint.root / "tmp").glob(".ir-exec-*"))
+        leftovers = list((endpoint.root / "tmp").glob(".guestd-*"))
         assert leftovers == [], f"wrapper scripts leaked: {leftovers}"
 
     asyncio.run(scenario())
@@ -384,7 +384,7 @@ def test_wrapper_upload_travels_with_mode_600(tmp_path: Path) -> None:
         assert result.success and result.stdout == chunk
         endpoint = transport.guests["box"]
         wrapper_modes = [
-            mode for path, mode in endpoint.file_modes.items() if "/.ir-exec-" in path
+            mode for path, mode in endpoint.file_modes.items() if "/.guestd-" in path
         ]
         assert wrapper_modes == [0o600]
 
@@ -432,7 +432,7 @@ def test_wrapper_for_third_user_stays_0600_and_is_chowned(tmp_path: Path) -> Non
             ["sh", "-c", "echo $HOME"], env={"HOME": "/x"}, user="somebody-else"
         )
         assert not result.success, "the CI endpoint cannot switch users"
-        wrappers = [path for path in endpoint.file_modes if "/.ir-exec-" in path]
+        wrappers = [path for path in endpoint.file_modes if "/.guestd-" in path]
         assert [endpoint.file_modes[path] for path in wrappers] == [0o600, 0o600]
         owners = [endpoint.file_owners[path] for path in wrappers]
         assert owners == ["agent", "somebody-else"], (

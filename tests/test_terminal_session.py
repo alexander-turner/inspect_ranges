@@ -54,19 +54,19 @@ def test_session_name_grammar(name: str, valid: bool) -> None:
         ("", False, [""], False),
         # blocking strips the trailing newline and appends the signal (one
         # argument, so no fragment can be tmux's lone-`;` command separator)
-        ("ls -la\n", True, ["ls -la; tmux wait -S ir-done-s-ab-7", "Enter"], True),
-        ("make\r\n", True, ["make; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        ("ls -la\n", True, ["ls -la; tmux wait -S done-s-ab-7", "Enter"], True),
+        ("make\r\n", True, ["make; tmux wait -S done-s-ab-7", "Enter"], True),
         # a bare Enter key blocks on whatever was already typed
-        ("Enter", True, ["; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        ("Enter", True, ["; tmux wait -S done-s-ab-7", "Enter"], True),
         # unescaped trailing semicolons are trimmed: `cmd;; tmux wait` is a
         # shell syntax error that runs nothing and stalls to the timeout
-        ("echo hi;\n", True, ["echo hi; tmux wait -S ir-done-s-ab-7", "Enter"], True),
-        ("ls ; ;\n", True, ["ls; tmux wait -S ir-done-s-ab-7", "Enter"], True),
+        ("echo hi;\n", True, ["echo hi; tmux wait -S done-s-ab-7", "Enter"], True),
+        ("ls ; ;\n", True, ["ls; tmux wait -S done-s-ab-7", "Enter"], True),
         # an escaped `\;` is a literal shell argument, not a separator: it stays
         (
             "echo a\\;\n",
             True,
-            ["echo a\\;; tmux wait -S ir-done-s-ab-7", "Enter"],
+            ["echo a\\;; tmux wait -S done-s-ab-7", "Enter"],
             True,
         ),
         # keystrokes that execute nothing fall back to non-blocking
@@ -217,10 +217,10 @@ def test_command_builders_shape() -> None:
     assert (
         start[0] == "bash"
         and "pipe-pane" in start[2]
-        and "/tmp/.ir-terminal/s.pipe" in start[2]
+        and "/tmp/.guestd/s.pipe" in start[2]
     )
     # the sink truncates at open: a reopened name must not replay its last life
-    assert ": > /tmp/.ir-terminal/s.pipe" in start[2]
+    assert ": > /tmp/.guestd/s.pipe" in start[2]
     # history-limit applies only to windows created after it is set, so the
     # global raise must precede new-session (and be restored after)
     assert start[2].index("history-limit 50000") < start[2].index("new-session")
@@ -255,7 +255,7 @@ def test_assemble_cast_orders_and_offsets_events() -> None:
 
 
 def test_scrub_harness_echo_removes_wait_suffix() -> None:
-    echoed = "$ ls /opt; tmux wait -S ir-done-main-b7f168f4-1\ninspect-ranges\n$"
+    echoed = "$ ls /opt; tmux wait -S done-main-b7f168f4-1\nguestd\n$"
     scrubbed = scrub_harness_echo(echoed)
     assert "tmux wait" not in scrubbed
     assert scrubbed.startswith("$ ls /opt\n")

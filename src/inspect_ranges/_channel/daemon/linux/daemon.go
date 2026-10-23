@@ -40,7 +40,7 @@ const (
 	KillGrace      = 5 * time.Second // SIGTERM, then SIGKILL after grace
 	WaitDelay      = 5 * time.Second // bound on reaping pipe copiers after exit (cmd.WaitDelay)
 	MaxConnActive  = 512             // resource bound against floods; polls must outlive held exec slots
-	DaemonVersion  = "vsockd 3.1.0 (go)"
+	DaemonVersion  = "vsockd 3.2.0 (go)"
 	// exec must not PATH-resolve a privilege boundary: a range-writable PATH
 	// entry could shadow runuser, so the daemon invokes it absolutely
 	RunuserPath    = "/usr/sbin/runuser"

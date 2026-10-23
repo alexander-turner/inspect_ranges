@@ -649,9 +649,9 @@ DEFAULT_WINDOWS_ADMIN_PASSWORD = "RangeAdm!n2026"
 """The Windows golden's built-in Administrator password when none was recorded: deliberate scenario content (ranges authenticate in-guest with it; the CONTROL plane is the vsock daemon as SYSTEM and never uses it). The install recipe (`winimage`) shares this constant, so a default-derived golden and a default-rendered seed agree."""
 
 _WINDOWS_UNATTEND_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
-<!-- Per-boot specialize seed for a sysprep'd inspect-ranges Windows golden:
-     hostname, static addressing (interfaces keyed by MAC), and the OOBE
-     answers that keep the first boot unattended. Rendered per guest. -->
+<!-- Per-boot specialize seed: hostname, static addressing (interfaces
+     keyed by MAC), and the OOBE answers that keep the first boot
+     unattended. Rendered per guest. -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="specialize">
