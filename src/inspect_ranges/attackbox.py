@@ -21,8 +21,8 @@ from ._attackbox import (
     parse_attack_box,
     resolve_attack_box,
 )
+from ._attackbox.backend import DoctorProbe
 from ._channel.vsock import HybridEndpoint
-from ._host.backend import DoctorProbe
 
 __all__ = [
     "ENV_VAR",

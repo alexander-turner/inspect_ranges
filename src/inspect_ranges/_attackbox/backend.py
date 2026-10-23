@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .._channel.vsock import HybridEndpoint
-from .._host.backend import DoctorProbe
 from .record import AttackBoxRecord
 
 ENV_VAR = "INSPECT_RANGES_ATTACK_BOX"
+
+DoctorProbe = Callable[[], str | None]
+"""An optional reachability probe for `inspect-ranges doctor`: `None` when healthy, else the failure detail (the `_host/backend.py` shape, aliased here so the realizer can import this module without the host-seam dependency chain)."""
 
 _GRAMMAR = "(expected a backend factory as '<module>.<factory>[:<config>]')"
 

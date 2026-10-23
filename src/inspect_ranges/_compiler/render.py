@@ -537,6 +537,7 @@ def _boot_guest(
         if guest.kind == "attacker":
             for nic, interface in zip(interfaces, guest.interfaces, strict=True):
                 network = networks[interface.network]
+                nic["network"] = interface.network
                 nic["ip"] = str(interface.ip)
                 nic["prefixlen"] = network.cidr.prefixlen
                 if network.gateway is not None:
