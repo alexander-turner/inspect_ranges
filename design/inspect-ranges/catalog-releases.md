@@ -119,3 +119,23 @@ SUPERSEDES `sha256:52d43f1f57b41bc5c03228eee430ae59e047f03581a4864a0491b72cd4ee5
 ## 2026-10-21 — the typed catalog list (eight names)
 
 `publish OK  catalog@sha256:ade2e4b70e6d226fd29b0dc5918f52cba19ba256db4d369b46c7d33ea2359122 -> docker.io/meridianlabsai/inspect-ranges (8 name(s))`, run in-session under the user's standing authorization, sequenced after the user's main push landed the typed reader (the compatibility is one-way: pre-change readers see a typed list as empty, recorded in the slice's CHANGELOG bullet). The list now enumerates every published name with its kind: `attack`, `ubuntu-noble`, `ubuntu-focal` as images; `vulhub-zabbix`, `kypo-demo`, `cyris-basic`, `dmz-pivot`, `equifax` as ranges. Verified post-publish: `source_names` enumerates all eight, `catalog_entries` reports the kinds above, and `images pin --from` writes exactly the three image pins with digests unchanged (`attack` 43a10d17..., `ubuntu-noble` f66e784b..., `ubuntu-focal` de3f863e...), the per-class drift split working as designed. A whole-org `mirror` now carries the images and every published example build in one command.
+
+## 2026-10-23 — the guestd rebake (everything supersedes)
+
+The whole catalog republished in one day for the in-guest brand rename ([guest-brand.md](guest-brand.md)): the daemon bundle digest moved (3.2.0: guestd member names, installer, unit, the Windows service, plus the review round's Wire.cs identity-string fix), so both Linux goldens re-derived (recipe 5), attack rebuilt over the new noble, and all five published ranges rebuilt and repushed. Every root digest moves; pin files regenerate.
+
+| Name | Kind | Root digest |
+|---|---|---|
+| `ubuntu-noble` | image | `sha256:cf8779959de94f4fe862a26c1ff3fdfc4cf12bba6aef82e072e8b1bc2666b4a8` |
+| `ubuntu-focal` | image | `sha256:424a2f9bfb0f7e86e54152b023e59a77829feda66b067ea519c0543b70045a60` |
+| `attack` | image | `sha256:b7a21cc0f11cb799fc7435aff77ee90a010b220609705db27f2f4a59e2eb3de3` |
+| `daemon-bundle` | artifact | `sha256:0a2439587e977c1f25670df5c94d491b35be16b526bc127e32099d2310d45f71` (bundle sha256 `bc9bc3a1b171a2ea…`) |
+| `vulhub-zabbix` | range | `sha256:bb6ba9afc4af339d138d12c5dd6adaf78e42dfc7a1b01bffc3bab596ebd0bd98` |
+| `kypo-demo` | range | `sha256:d814247b64d4a6ca4eb57bbf5a1bba34fafae27cac025af4af5c7458b7e7c975` |
+| `cyris-basic` | range | `sha256:9ad98ca3c578062f99a81f4c95b67acf55e882dd9eaf8a86f32cb8433d7cde68` |
+| `dmz-pivot` | range | `sha256:d086125d5e4e41da689edf4434abc1f80d83f8169c5d56bc7a3a42c1bf359d24` |
+| `equifax` | range | `sha256:f602650d0c995440af968a877cdd93a84f9392d031280b427217768fa77f5156` |
+
+The list rewrote to the same eight names (`catalog@sha256:2b98b028539bf3edb0bc437b6b097acd0ae30584e39dcc3c9e3553c93b8faa60`), and `images pin --from` wrote the three image pins post-publish (the digests above). Spec hashes did not move (no range.yaml changed), so each range push supersedes its name's tag under the same `spec-<sha256>` ref and consumers on current git resolve the new builds with no code change; old roots stay served by digest.
+
+Proof behind the push: every range rebuilt green with full trios on the rebaked stack (splunk-detection and goad-light stay local-only by policy; splunk's converged build and both its trios ran green the same day), the terminal acceptance battery passed 16/16 against the new dmz build, and a live Opus vulhub sample scored 1.0 valid with corroboration scanning 2.8 MB of flush-shipped capture (the fleet-pass zero-bytes finding closed in production). Windows golden re-derived locally (win recipe 3, never published).
