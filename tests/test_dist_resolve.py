@@ -209,6 +209,46 @@ def test_pin_form_pulls_without_spec_match(tmp_path: Path) -> None:
     assert report.root == root.digest
 
 
+def test_pin_file_discovers_from_cwd_upward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unset, `pins.json` discovers lockfile-style at or above the working directory (nearest wins); an explicit env path overrides discovery, and the empty string disables both."""
+    from inspect_ranges._dist.resolve import PIN_FILE_ENV, fleet_pins
+
+    (tmp_path / "pins.json").write_text('{"pins": {"attack": "sha256:root-at-top"}}')
+    nested = tmp_path / "examples" / "range"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    monkeypatch.delenv(PIN_FILE_ENV, raising=False)
+    assert fleet_pins() == {"attack": "sha256:root-at-top"}
+
+    nearer = nested / "pins.json"
+    nearer.write_text('{"pins": {"attack": "sha256:root-nearer"}}')
+    assert fleet_pins() == {"attack": "sha256:root-nearer"}
+
+    explicit = tmp_path / "elsewhere.json"
+    explicit.write_text('{"pins": {"attack": "sha256:root-explicit"}}')
+    monkeypatch.setenv(PIN_FILE_ENV, str(explicit))
+    assert fleet_pins() == {"attack": "sha256:root-explicit"}
+
+    monkeypatch.setenv(PIN_FILE_ENV, "")
+    assert fleet_pins() == {}
+
+
+def test_discovered_pin_file_that_does_not_parse_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discovered file that does not conform refuses rather than silently unpinning: a typo'd real pin file must never read as 'no pins'."""
+    from inspect_ranges._dist.resolve import PIN_FILE_ENV, fleet_pins
+
+    (tmp_path / "pins.json").write_text("{broken")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(PIN_FILE_ENV, raising=False)
+    with pytest.raises(DistError, match="pin-file-invalid"):
+        fleet_pins()
+
+
 @pytest.mark.parametrize("payload", ["[]", "null", '"x"', "3", '{"pins": []}'])
 def test_pin_file_that_is_not_a_pins_object_refuses_typed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
