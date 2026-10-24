@@ -9,6 +9,7 @@ from typing import Any
 
 import inspect_ranges._terminal.capture as capture_module
 import pytest
+from inspect_ai.util import Store
 from inspect_ai.util._sandbox.exec_remote import ExecStdout
 from inspect_ranges._terminal.capture import (
     captures_for_tests,
@@ -65,14 +66,23 @@ class FakeSandbox:
 _STORE_IDS = count(4242)
 
 
+current_store: Store | None = None
+"""The current test's sample store, served through the patched `_current_store` (module-level so the fixture closure sees reassignment)."""
+
+
 @pytest.fixture()
 def arm(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> Iterator[tuple[FakeEvidence, FakeProcess, SessionState, int]]:
     """A per-test store id (the module registry is shared state, so a reused id would leak one test's sample entry into the next) with the registry entry discarded afterward."""
+    global current_store
     evidence = FakeEvidence(str(tmp_path / "evidence"))
     process = FakeProcess(["chunk-one\n", "chunk-two\n"])
-    monkeypatch.setattr(capture_module, "_evidence_session", lambda: evidence)
+    current_store = Store()
+    monkeypatch.setattr(
+        capture_module, "_capture_target", lambda: (True, evidence, "ir-cap-test")
+    )
+    monkeypatch.setattr(capture_module, "_current_store", lambda: current_store)
     monkeypatch.setattr(capture_module, "sandbox", lambda: FakeSandbox(process))
 
     tasks: list[asyncio.Task[None]] = []
@@ -250,10 +260,92 @@ def test_exec_remote_surface_pin() -> None:
     assert "stream" in parameters
 
 
+def test_store_cast_written_with_life_suffixes(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+) -> None:
+    """Every cast also lands in the sample store under the asciinema convention, with later lives suffixed like the files."""
+    _, _, state, store_id = arm
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        await asyncio.sleep(0.05)
+        await stop_capture(store_id, "s")
+        assert current_store is not None
+        first = current_store.get("asciinema:terminal-s")
+        assert isinstance(first, str)
+        assert json.loads(first.split("\n")[0])["title"] == "terminal session s"
+        second_life = SessionState(opened_wall=1_700_000_100.0, opened_monotonic=0.0)
+        await start_capture(store_id, "s", second_life, lambda: None)
+        await stop_capture(store_id, "s")
+        assert current_store.get("asciinema:terminal-s-2") is not None
+
+    asyncio.run(scenario())
+
+
+def test_records_without_evidence_and_finalizes_by_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sample with no evidence session still records: chunks accumulate, the store cast writes, no mirroring and no cast file; the provider's project-keyed finalize stops it."""
+    from inspect_ranges._terminal.capture import finalize_terminal_captures
+
+    process = FakeProcess(["only-chunk\n"])
+    sample_store = Store()
+    monkeypatch.setattr(
+        capture_module, "_capture_target", lambda: (True, None, "ir-no-evidence")
+    )
+    monkeypatch.setattr(capture_module, "_current_store", lambda: sample_store)
+    monkeypatch.setattr(capture_module, "sandbox", lambda: FakeSandbox(process))
+    tasks: list[asyncio.Task[None]] = []
+
+    def run_background(fn: Any, *args: Any) -> None:
+        tasks.append(asyncio.get_event_loop().create_task(fn(*args)))
+
+    monkeypatch.setattr(capture_module, "background", run_background)
+    state = SessionState(opened_wall=1_700_000_000.0, opened_monotonic=0.0)
+    store_id = next(_STORE_IDS)
+
+    async def scenario() -> None:
+        await start_capture(store_id, "s", state, lambda: None)
+        await asyncio.sleep(0.05)
+        assert len(state.chunks) == 1
+        await finalize_terminal_captures("ir-no-evidence")
+        assert process.killed
+        cast = sample_store.get("asciinema:terminal-s")
+        assert isinstance(cast, str) and "only-chunk" in cast
+        assert captures_for_tests(store_id) == {}
+        await finalize_terminal_captures("ir-no-evidence")  # idempotent
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        discard_sample_captures(store_id)
+
+
+def test_dead_store_ref_skips_the_store_cast(
+    arm: tuple[FakeEvidence, FakeProcess, SessionState, int],
+) -> None:
+    """The deferred-teardown case: the sample store is gone, so the store write is skipped (by decision) while the evidence cast still lands."""
+    global current_store
+    evidence, _, state, store_id = arm
+
+    async def scenario() -> None:
+        global current_store
+        await start_capture(store_id, "s", state, lambda: None)
+        await asyncio.sleep(0.05)
+        current_store = None  # drop the only strong reference; the weakref dies
+        import gc
+
+        gc.collect()
+        await stop_capture(store_id, "s")
+        assert (Path(evidence.location) / "terminal-s.cast").exists()
+
+    asyncio.run(scenario())
+
+
 def test_capture_off_outside_range_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(capture_module, "_evidence_session", lambda: None)
+    monkeypatch.setattr(capture_module, "_capture_target", lambda: (False, None, None))
     state = SessionState()
 
     async def scenario() -> None:

@@ -268,3 +268,49 @@ def test_scrub_harness_echo_removes_wait_suffix() -> None:
     scrubbed = scrub_harness_echo(echoed)
     assert "tmux wait" not in scrubbed
     assert scrubbed.startswith("$ ls /opt\n")
+
+
+@pytest.mark.parametrize(
+    ("cap_mb_env", "expected_mb"),
+    [("", 50), ("200", 200), ("junk", 50), ("0", 1)],
+)
+def test_cast_store_cap_parses_with_fallback(
+    monkeypatch: pytest.MonkeyPatch, cap_mb_env: str, expected_mb: int
+) -> None:
+    from inspect_ranges._terminal.cast import CAST_STORE_CAP_ENV, cast_store_cap_bytes
+
+    if cap_mb_env:
+        monkeypatch.setenv(CAST_STORE_CAP_ENV, cap_mb_env)
+    else:
+        monkeypatch.delenv(CAST_STORE_CAP_ENV, raising=False)
+    assert cast_store_cap_bytes() == expected_mb * 1024 * 1024
+
+
+def test_clip_cast_keeps_header_and_tail_with_a_marker() -> None:
+    import json as json_module
+
+    from inspect_ranges._terminal.cast import clip_cast
+
+    header = json_module.dumps({"version": 2, "width": 80, "height": 24})
+    events = [
+        json_module.dumps([float(i), "o", f"line-{i:04d} " + "x" * 50])
+        for i in range(100)
+    ]
+    cast = header + "\n" + "\n".join(events)
+    clipped = clip_cast(cast, 2000)
+    lines = clipped.split("\n")
+    assert json_module.loads(lines[0])["version"] == 2, "the header survives"
+    marker = json_module.loads(lines[1])
+    assert marker[1] == "m" and "clipped" in marker[2]
+    assert len(clipped.encode()) <= 2000 + len(lines[1])  # marker rides the budget
+    for line in lines[2:]:
+        event = json_module.loads(line)  # every kept line is a whole event
+        assert event[1] == "o"
+    assert "line-0099" in clipped and "line-0000" not in clipped, "tail kept, head cut"
+
+
+def test_clip_cast_leaves_small_casts_alone() -> None:
+    from inspect_ranges._terminal.cast import clip_cast
+
+    cast = '{"version": 2}\n[0.1, "o", "hi"]'
+    assert clip_cast(cast, 10_000) == cast

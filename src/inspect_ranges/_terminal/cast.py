@@ -39,3 +39,39 @@ def assemble_cast(
     lines = [json.dumps(header)]
     lines.extend(json.dumps([round(at, 6), kind, data]) for at, _, kind, data in events)
     return "\n".join(lines) + "\n"
+
+
+CAST_STORE_CAP_ENV = "INSPECT_RANGES_CAST_STORE_CAP_MB"
+DEFAULT_CAST_STORE_CAP_MB = 50
+"""Generous by design: range evals run few samples and their logs are large anyway, so the cap exists for the pathological session (a runaway scan spewing output for the whole wall clock), not the normal one."""
+
+
+def cast_store_cap_bytes() -> int:
+    """The store-cast size cap in bytes (`INSPECT_RANGES_CAST_STORE_CAP_MB`, default 50); a malformed value falls back to the default."""
+    import os
+
+    raw = os.environ.get(CAST_STORE_CAP_ENV, "")
+    try:
+        cap_mb = int(raw) if raw else DEFAULT_CAST_STORE_CAP_MB
+    except ValueError:
+        cap_mb = DEFAULT_CAST_STORE_CAP_MB
+    return max(1, cap_mb) * 1024 * 1024
+
+
+def clip_cast(cast: str, cap_bytes: int) -> str:
+    """Clip an asciicast document to roughly `cap_bytes`, keeping the header and the tail of the event stream (the end of a session is what gets replayed), with a marker event recording the cut.
+
+    The result stays a valid cast: whole event lines only, the marker inserted at time zero so ordering holds, and the full document remains in the evidence record. Pure.
+    """
+    encoded = cast.encode(errors="replace")
+    if len(encoded) <= cap_bytes:
+        return cast
+    header, _, events = cast.partition("\n")
+    marker = json.dumps(
+        [0.0, "m", "clipped to the tail; the full cast is in the evidence record"]
+    )
+    budget = cap_bytes - len(header.encode()) - len(marker.encode()) - 2
+    tail = events.encode(errors="replace")[-max(budget, 0) :].decode(errors="replace")
+    newline = tail.find("\n")
+    tail = tail[newline + 1 :] if newline >= 0 else ""
+    return f"{header}\n{marker}\n{tail}"

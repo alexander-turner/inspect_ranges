@@ -44,6 +44,7 @@ from .._runtime.ownership import (
     write_owner,
 )
 from .._runtime.up import UpError, UpOptions, UpResult, bundle_digest
+from .._terminal.capture import finalize_terminal_captures
 from ..schema import load_range, revalidate_range
 from ..types import RangeSpec
 from .admission import default_max_sandboxes
@@ -621,6 +622,10 @@ class RangeSandboxEnvironment(SandboxEnvironment):
 
         `finalize evidence` runs first (bounded, idempotent, never raises: evidence failure must never alter teardown), then `down`; the binding is written only after a successful teardown (in the separated topology the host's seal digest is read back then, since the applier seals at teardown). Leases (CID and host), the registry entry, and the admission charge are released only AFTER a successful teardown: a failed `down` means the VMs still hold their CIDs and resources, so freeing them would hand live CIDs to the next sample. A failed handle stays findable (registry for `task_cleanup`, leases plus the provider-marked owner record for `cli_cleanup` and the reaper), and its host-lease renewal keeps running until a teardown finally succeeds or the driver exits.
         """
+        # terminal recorders stop first so their final chunks and casts land
+        # while the evidence writer is still open; keyed by project because
+        # the deferred path runs outside the sample's store context
+        await finalize_terminal_captures(handle.project)
         if handle.evidence is not None:
             await handle.evidence.finalize()
         await asyncio.to_thread(runtime.down_fn, handle.project, runtime.state_dir)
