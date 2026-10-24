@@ -386,7 +386,7 @@ def test_state_dropped_when_store_is_collected() -> None:
 
 
 def test_viewer_is_compact(armed: tuple[Any, Store, str]) -> None:
-    """Everything load-bearing in the title, keystrokes fenced below, no screen and no duplicated action line (viewer UX review, 2026-10-23)."""
+    """Everything load-bearing in the title, keystrokes fenced below (bash-highlighted, execute-Enter trimmed), no screen and no duplicated action line (viewer UX reviews, 2026-10-23/24)."""
     _, _, session = armed
     call = ToolCall(
         id="1",
@@ -400,7 +400,30 @@ def test_viewer_is_compact(armed: tuple[Any, Store, str]) -> None:
     view = _terminal_viewer(call)
     assert view.call is not None
     assert view.call.title == f"terminal send · {session}"
-    assert view.call.content == "```text\nnc -lvnp 4444\n\n```"
+    assert view.call.content == "```bash\nnc -lvnp 4444\n```"
+    multiline = _terminal_viewer(
+        ToolCall(
+            id="3",
+            function="terminal",
+            arguments={
+                "action": "send",
+                "session": session,
+                # interior newlines are content; only the execute-Enter trims
+                "keystrokes": "cat <<'EOF' > x\nline\nEOF\n",
+            },
+        )
+    )
+    assert multiline.call is not None
+    assert multiline.call.content == "```bash\ncat <<'EOF' > x\nline\nEOF\n```"
+    enter_only = _terminal_viewer(
+        ToolCall(
+            id="4",
+            function="terminal",
+            arguments={"action": "send", "session": session, "keystrokes": "\n"},
+        )
+    )
+    assert enter_only.call is not None
+    assert enter_only.call.content == "", "a bare Enter renders like a poll"
     bare = _terminal_viewer(
         ToolCall(
             id="2",

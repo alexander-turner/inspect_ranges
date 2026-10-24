@@ -175,17 +175,26 @@ def test_find_new_content(
 
 
 @pytest.mark.parametrize(
-    ("new_content", "screen", "expected_head"),
+    ("new_content", "screen", "first_read", "expected_head"),
     [
         # a determinable delta returns raw, no header (viewer UX review 2026-10-23)
-        ("\nfile-a", "ignored", "\nfile-a"),
-        (None, "the screen", "Current Terminal Screen:"),
+        ("\nfile-a", "ignored", False, "\nfile-a"),
+        (None, "the screen", False, "Current Terminal Screen:"),
         # a whitespace-only delta reports the screen, not a blank delta
-        ("   \n", "the screen", "Current Terminal Screen:"),
+        ("   \n", "the screen", False, "Current Terminal Screen:"),
+        # a session's FIRST read has no previously-seen screen to re-act on,
+        # so the label is noise there (viewer UX review 2026-10-24); the
+        # mid-session lost-anchor fallback above keeps it
+        (None, "the screen", True, "the screen"),
+        ("   \n", "the screen", True, "the screen"),
     ],
 )
-def test_label_output(new_content: str | None, screen: str, expected_head: str) -> None:
-    assert label_output(new_content, screen).startswith(expected_head)
+def test_label_output(
+    new_content: str | None, screen: str, first_read: bool, expected_head: str
+) -> None:
+    assert label_output(new_content, screen, first_read=first_read).startswith(
+        expected_head
+    )
 
 
 def test_clip_output_keeps_tail_and_marks() -> None:

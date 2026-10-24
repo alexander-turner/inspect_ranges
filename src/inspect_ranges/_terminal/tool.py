@@ -82,7 +82,13 @@ def _terminal_viewer(call: ToolCall) -> ToolCallView:
     action = str(arguments.get("action", ""))
     session = str(arguments.get("session", "main"))
     keystrokes = str(arguments.get("keystrokes", ""))
-    content = f"```text\n{keystrokes}\n```" if keystrokes else ""
+    # the execute-Enter every command carries would render as a trailing blank
+    # line in the fence (viewer UX review, 2026-10-24); display drops exactly
+    # one, and what the model sent stays byte-exact
+    shown = keystrokes[:-1] if keystrokes.endswith("\n") else keystrokes
+    # bash highlighting fits the dominant shell case; keystrokes driving other
+    # programs (a python repl, msfconsole) highlight imperfectly and harmlessly
+    content = f"```bash\n{shown}\n```" if shown else ""
     return ToolCallView(
         call=ToolCallContent(
             title=f"terminal {action} · {session}", format="markdown", content=content
@@ -101,6 +107,7 @@ def _open_sessions() -> str:
 
 async def _read_result(session: str, state: SessionState) -> str:
     """Capture, compute the delta, and clip; the visible screen is fetched only for the fallback."""
+    first_read = state.previous_buffer is None
     entire = await _exec(capture_pane_command(session, entire=True))
     current = entire.stdout if entire.success else ""
     delta = find_new_content(state.previous_buffer, current)
@@ -109,7 +116,9 @@ async def _read_result(session: str, state: SessionState) -> str:
         return clip_output(scrub_harness_echo(label_output(delta, "")))
     visible = await _exec(capture_pane_command(session))
     screen = visible.stdout if visible.success else current[-3000:]
-    return clip_output(scrub_harness_echo(label_output(delta, screen)))
+    return clip_output(
+        scrub_harness_echo(label_output(delta, screen, first_read=first_read))
+    )
 
 
 @tool(viewer=_terminal_viewer, parallel=False)

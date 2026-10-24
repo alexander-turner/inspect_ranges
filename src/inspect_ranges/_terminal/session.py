@@ -240,13 +240,17 @@ def scrub_harness_echo(text: str) -> str:
     return _WAIT_ECHO.sub("", text)
 
 
-def label_output(new_content: str | None, visible_screen: str) -> str:
+def label_output(
+    new_content: str | None, visible_screen: str, first_read: bool = False
+) -> str:
     """The model-facing read result: the raw delta when determinable; the screen, labeled, otherwise.
 
-    The delta carries no header (viewer UX review, 2026-10-23); the fallback keeps its label because a re-rendered screen presented as new output would invite re-acting on old lines.
+    The delta carries no header (viewer UX review, 2026-10-23). The fallback keeps its label because a re-rendered screen presented as new output would invite re-acting on old lines; a session's FIRST read is the exception (viewer UX review, 2026-10-24): no previously-seen screen exists, so there is nothing to re-act on and the label is noise.
     """
     if new_content is not None and new_content.strip():
         return new_content
+    if first_read:
+        return visible_screen
     return f"Current Terminal Screen:\n{visible_screen}"
 
 
