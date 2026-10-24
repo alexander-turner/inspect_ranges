@@ -17,7 +17,7 @@ A range declaring guest content needs a matching build first: your own ([Buildin
 
 Each stage consumes only the verified output of the one before it: `render` emits a digest-manifested bundle, and `up` refuses to act on anything whose digests do not verify.
 
-Moving builds and images between machines (`push`, `pull`, `mirror`, `publish`) is [Distribution](distribution.qmd); the deployment-shape recipes are [Images](images.qmd). This page is the narrative tour of the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
+Moving builds and images between machines (`push`, `pull`, `mirror`, `publish`) is [Distribution](distribution.qmd); the deployment-shape recipes are [Images](images.qmd). This page walks the lifecycle; complete option listings for every command are in the [CLI reference](reference/index.qmd#cli).
 
 ## `up`
 
@@ -29,7 +29,7 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 ## `down`
 
-`inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. The sweep asserts operator quiescence: it cannot tell a crashed project from one mid-boot, so run it only when nothing on the host should be live. A failed removal keeps the ownership record so a retry can still find the project.
+`inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. The sweep cannot tell a crashed project from one mid-boot, so run it only when nothing on the host should be live. A failed removal keeps the ownership record so a retry can still find the project.
 
 ## `applier`
 
@@ -56,5 +56,5 @@ On failure, the error names the stage and guest, the affected guests' serial con
 ::: {.callout-note}
 ## Current Boundaries
 
-`up` realizes cold-boot bundles only: checkpoint instantiation is planned later work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections, as do `roles`, `defense`, Active Directory, telemetry-bearing postures, and `scheduled_activity` (installed as persistent units in the captured images), so nothing boots with silently missing content. Windows guests are first-class (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (bundle signing is planned as part of image-distribution work).
+`up` realizes cold-boot bundles only: checkpoint instantiation is planned later work. `provisioning`, `services`, and `vulnerabilities` realize through [`build`](building.qmd): a range declaring them refuses every content-consuming verb (`range-not-built`) until a matching build manifest exists, and boots its captured realized images once one does. `users`, `misconfigurations`, and `data` realize through `build` like the content sections, as do `roles`, `defense`, Active Directory, telemetry-bearing postures, and `scheduled_activity` (installed as persistent units in the captured images), so nothing boots with silently missing content. Windows guests are supported (goldens derive locally with `images derive-windows`). Bundles are trusted operator input: verification proves integrity, not provenance (bundle signing is planned as part of image-distribution work).
 :::

@@ -60,9 +60,9 @@ The assurance claim: **export upgrades the timeline, not the source.** Pre-compr
 
 Operational note: the guest daemon reaps each command's process group when the command returns, so an in-guest background producer started over the channel must detach with `setsid` to outlive its starting exec.
 
-## The Exec Witness
+## Exec Witness {#the-exec-witness}
 
-The guest daemon can witness every `execve` on a Linux guest (kernel process connector) and the host ships the events to `exec/<guest>`: pid, parent, uid, argv (sanitized, byte-capped), and the guest timestamp. The subscriber is lazy-armed by the host's first poll, so builds never activate it, and `INSPECT_RANGES_EXEC_WITNESS=0` disables it completely with no image rebuild. The stream is record-only (no goal or corroboration reads it) and carries the same guest-tier assurance as telemetry export: the pre-compromise timeline is immutable once streamed, loss is always a counted gap (`exec-ring-overflow`, `exec-subscriber-loss`), coverage is decidable from the per-poll records on `exec-meta/<guest>`, and a Windows guest or a kernel without the connector gets one declared `unsupported` record instead of silence. Design: `execve-witness-v1.md` (adopted from glovebox PR #15's execve witness).
+The guest daemon can witness every `execve` on a Linux guest (kernel process connector) and the host ships the events to `exec/<guest>`: pid, parent, uid, argv (sanitized, byte-capped), and the guest timestamp. The subscriber is lazy-armed by the host's first poll, so builds never activate it, and `INSPECT_RANGES_EXEC_WITNESS=0` disables it completely with no image rebuild. The stream is record-only (no goal or corroboration reads it) and carries the same guest-tier assurance as telemetry export: the pre-compromise timeline is immutable once streamed, loss is always a counted gap (`exec-ring-overflow`, `exec-subscriber-loss`), coverage is decidable from the per-poll records on `exec-meta/<guest>`, and a Windows guest or a kernel without the connector gets one declared `unsupported` record instead of silence. The concept is adopted from glovebox PR #15, with attribution recorded in the changelog.
 
 ## Verifying a Record
 

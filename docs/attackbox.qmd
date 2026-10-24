@@ -6,17 +6,17 @@ llms-description: "The attack box: the catalog `attack` image a dedicated attack
 
 ## Overview
 
-The attack box is the machine the agent works from: in a range with a dedicated attacker it is the sample's sandbox, every `sandbox().exec()` lands in it, and targets are reachable only over the range network (the agent/target wall; see [Range Sandbox](provider.qmd#foothold-sandbox)). Declaring one is part of the range definition and covered in [Guests](guests.qmd#the-attacker-guest); an assumed-breach range has no attack box (the agent starts on a declared target host instead), so nothing on this page applies to it.
+The attack box is the machine the agent works from. In a range with a dedicated attacker it is the sample's sandbox: every `sandbox().exec()` lands in it, and targets are reachable only over the range network (the agent/target wall; see [Range Sandbox](provider.qmd#foothold-sandbox)). Declaring one is part of the range definition ([Guests](guests.qmd#the-attacker-guest)). An assumed-breach range has no attack box (the agent starts on a declared target host), so nothing on this page applies to it.
 
-This page covers what the box actually runs: the default image and its tool contract, the boot defaults, substituting your own image, and, for deployments that want to bring the entire machine from outside the realizer, the external provider seam.
+This page covers the default image and its tool contract, the boot defaults, custom images, and the provider seam that lets a deployment supply the whole machine externally.
 
 ## Default Image
 
-A dedicated attack box with no `image:` boots the catalog's `attack` image, pulled automatically at eval init like any catalog name (see [Images](images.qmd)). It is a kali-class toolset built by a pinned recipe over the `ubuntu-noble` golden, so the operating system is Ubuntu 24.04 with the guest control daemon baked in, and the build refuses if anything beyond loopback is left listening (the attacker-surface sweep in [Security](security.qmd#proving-containment) expects a silent box, and the image guarantees it from birth).
+A dedicated attack box with no `image:` boots the catalog's `attack` image, pulled automatically at eval init like any catalog name (see [Images](images.qmd)). It is a kali-class toolset built by a pinned recipe over the `ubuntu-noble` golden, so the operating system is Ubuntu 24.04 with the guest control daemon baked in. The build refuses if anything beyond loopback is left listening, which is what the attacker-surface sweep in [Security](security.qmd#proving-containment) expects of the box.
 
-The tool contract is asserted at image build, so [behavioral checks](building.qmd#behavioral-checks), which run with no egress, may rely on every name here: `nmap`, `ncat`, `socat`, `curl`, `wget`, `tcpdump`, `sqlmap`, `hydra`, `john`, `gobuster`, `ffuf`, `smbclient`, `ldapsearch`, `dig`, `nc`, `tmux`, `msfconsole`, `msfvenom`, the impacket scripts `psexec.py`, `wmiexec.py`, `secretsdump.py`, `GetUserSPNs.py`, `raiseChild.py`, `lookupsid.py`, `atexec.py`, `smbexec.py`, and `mssqlclient.py`, plus `impacket` and `requests` importable from python3 and metasploit at major version 6. A missing tool fails the image build, never an eval.
+The tool contract is asserted at image build, so [behavioral checks](building.qmd#behavioral-checks), which run with no egress, may rely on every name here: `nmap`, `ncat`, `socat`, `curl`, `wget`, `tcpdump`, `sqlmap`, `hydra`, `john`, `gobuster`, `ffuf`, `smbclient`, `ldapsearch`, `dig`, `nc`, `tmux`, `msfconsole`, `msfvenom`, the impacket scripts `psexec.py`, `wmiexec.py`, `secretsdump.py`, `GetUserSPNs.py`, `raiseChild.py`, `lookupsid.py`, `atexec.py`, `smbexec.py`, and `mssqlclient.py`, plus `impacket` and `requests` importable from python3 and metasploit at major version 6. A missing tool fails the image build, so an eval never sees one.
 
-Beyond the contract, `/etc/attack-image.manifest` inside the image records every package and version the feeds actually delivered; read it from a pulled copy without booting anything by finding the cached file with `inspect-ranges images list` and running `virt-cat -a <file> /etc/attack-image.manifest` (`virt-cat` installs with libguestfs-tools, which `doctor` already requires).
+`/etc/attack-image.manifest` inside the image records every package and version the feeds delivered. Read it from a pulled copy without booting anything: find the cached file with `inspect-ranges images list`, then run `virt-cat -a <file> /etc/attack-image.manifest` (`virt-cat` installs with libguestfs-tools, which `doctor` already requires).
 
 ## Boot Defaults
 
@@ -24,28 +24,28 @@ Beyond the contract, `/etc/attack-image.manifest` inside the image records every
 - **VMM**: Cloud Hypervisor, so the most adversarial guest gets the smaller device model (unprivileged per-guest uid, seccomp, credential-checked hybrid vsock; see [Security](security.qmd#virtual-machine-monitors)). Declare `vmm: qemu` to opt out.
 - **Sizing**: 1 cpu and 1024 MB unless `resources:` declares otherwise.
 - **Execution identity**: commands run as the unprivileged `agent` user (home `/home/agent`); `user=` switches, with the environment semantics described in [Range Sandbox](provider.qmd#execution-identity).
-- **Egress**: whatever the definition declares, `none` being the shipped examples' posture; see [Networks](networks.qmd#egress).
+- **Egress**: whatever the definition declares; the shipped examples use `none`. See [Networks](networks.qmd#egress).
 
 ## Custom Images
 
-Declare `image:` on the attacker to boot any image instead: another catalog name, or your own golden. The one hard requirement is the guest control daemon (exec, files, and readiness all ride it); derive your image over a published golden, or bake the daemon in with the `daemon-bundle` artifact (see [Images](images.qmd#catalog)). The tool contract above is a property of the `attack` image, not of attack boxes generally: behavioral checks that rely on it should keep the default image or assert their own tooling.
+Declare `image:` on the attacker to boot any image instead: another catalog name, or your own golden. The one hard requirement is the guest control daemon, which carries exec, files, and readiness. Derive your image over a published golden, or bake the daemon in with the `daemon-bundle` artifact (see [Images](images.qmd#catalog)). The tool contract above is a property of the `attack` image, not of attack boxes generally: behavioral checks that rely on it should keep the default image or assert their own tooling.
 
 ## External Providers
 
-Everything above has the realizer render and boot the attack box like any guest. The provider seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an L2 attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine behind both and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
+By default the realizer renders and boots the attack box like any guest. The provider seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
 
-Selection is deployment knowledge, never part of the range: `range.yaml` has no provider field, and the same published bundle realizes identically with or without one. The seam covers dedicated attack boxes only; an assumed-breach range's foothold is a built, verified content guest, so it is excluded by construction and realizes normally.
+The deployment selects the provider, not the range definition: `range.yaml` has no provider field, and the same published bundle realizes the same way with or without one. The seam covers dedicated attack boxes only; an assumed-breach range's foothold is a built, verified target host, so the seam does not apply to it.
 
 ``` {.bash .fragment}
 INSPECT_RANGES_ATTACK_BOX=glovebox_ranges.provider.factory:cell-pool-a \
   inspect eval my_task.py
 ```
 
-The variable is consulted where realization runs: the eval process under the `local` host backend, the applier's own environment under a separated one (see [Range Host](topology.qmd)).
+The variable is read where realization runs: the eval process under the `local` host backend, the applier's own environment under a separated one (see [Range Host](topology.qmd)).
 
 ## Registering a Provider
 
-The variable's value is the registration, exactly as `INSPECT_RANGES_HOST` works: `<module>.<factory>[:<config>]` names an `AttackBoxFactory` that is imported and called at resolution, and the value splits on the first colon, so a config may itself contain colons. The same value persists verbatim as the project's attack-box origin, so a fresh process (`inspect-ranges down`, the reaper) re-resolves teardown from disk alone; the only cross-process requirement is that the provider's package is installed where the reclaiming process runs. Factories must be cheap and must not dial anything; remote work belongs in the provider's `boot`.
+Registration works like `INSPECT_RANGES_HOST`: the value `<module>.<factory>[:<config>]` names an `AttackBoxFactory`, imported and called at resolution, and the value splits on the first colon, so a config may itself contain colons. The same value persists as the project's attack-box origin, so any later process (`inspect-ranges down`, the reaper) can resolve teardown from disk; the provider's package just has to be installed where that process runs. Factories must be cheap and must not dial anything; remote work belongs in the provider's `boot`.
 
 The factory returns an `AttackBoxBackend` bundle:
 
@@ -66,21 +66,21 @@ def factory(ctx: AttackBoxContext) -> AttackBoxBackend:
 
 `boot(attachment)` receives a `FootholdAttachment` and returns an `AttackBoxHandle`; `teardown(project, reclaim_token)` must be idempotent and tolerate a token from a half-completed boot.
 
-**Attachment in.** The realizer creates one tap per attacker interface inside the range container's network namespace (never a bridge or veth leg in the host netns: the [containment invariant](security.qmd) that the host carries zero range state survives by construction) and hands over the open fds. Each `AttachedInterface` carries the tap fd plus the allocated facts the box must present on that segment: the MAC and address the range's ACLs and scoring treat as this guest. The provider owns the fds from the moment `boot` is called: pass them to the VMM, close them at teardown. The taps are non-persistent (they die with the last fd, and unconditionally with the range container) and carry `IFF_VNET_HDR`, matching what QEMU and Cloud Hypervisor request when creating taps themselves.
+**Attachment in.** The realizer creates one tap per attacker interface inside the range container's network namespace and hands over the open fds; it never creates a bridge or veth leg in the host namespace, which must stay free of range state ([Security](security.qmd)). Each `AttachedInterface` carries the tap fd plus the facts the box must present on that segment: the MAC and address the range's ACLs and scoring treat as this guest. The provider owns the fds from the moment `boot` is called: pass them to the VMM, close them at teardown. The taps are non-persistent (they die with the last fd, and with the range container regardless) and carry `IFF_VNET_HDR`, matching what QEMU and Cloud Hypervisor request when creating taps themselves.
 
-**Exec surface out.** `AttackBoxHandle.exec_endpoint` is a unix socket plus the uid its peer must have (`SO_PEERCRED`-checked at every dial), serving the Cloud Hypervisor hybrid-vsock shape: the `CONNECT <port>` / `OK <port>` preamble, then one guest-control request per connection in the daemon wire protocol. That protocol includes the [exec witness](evidence.qmd#the-exec-witness) (`exec_events`), and the witness is part of the attack-box bar: the evidence poller reads the box's process timeline through this surface every two seconds, and the battery requires it to actually witness (a typed `ENOSYS`/`EPROTO` refusal is the declared-drop path for ordinary guests, but fails `attackbox verify`, since every native dedicated attack box serves it). The straightforward way to be conformant is to run the standard in-guest daemon in the box; a shim is acceptable exactly as far as the battery passes it. Readiness at boot is daemon liveness (the realizer pings the surface through its ordinary strict loop and fails the sample loudly if it never answers); the battery holds the deeper bar.
+**Exec surface out.** `AttackBoxHandle.exec_endpoint` is a unix socket plus the uid its peer must have (`SO_PEERCRED`-checked at every dial), serving the Cloud Hypervisor hybrid-vsock shape: the `CONNECT <port>` / `OK <port>` preamble, then one guest-control request per connection in the daemon wire protocol. The protocol includes the [exec witness](evidence.qmd#the-exec-witness) (`exec_events`), and the witness is part of the bar: the evidence poller reads the box's process timeline through this surface every two seconds, and the battery requires the stream to work (a typed `ENOSYS`/`EPROTO` refusal is fine for ordinary guests but fails `attackbox verify`). The simplest conformant implementation is the standard in-guest daemon; a shim passes exactly when the battery passes it. Readiness at boot is daemon liveness: the realizer pings the surface and fails the sample if it never answers.
 
-**Lifecycle.** The realizer writes the attack-box record before `boot` runs and completes it (reclaim token, exec socket) after. Teardown is deny-first through `inspect-ranges down`: the origin resolves and the provider's box is reclaimed before any range resource is touched, so the box never outlives its NIC and an unresolvable origin refuses rather than stranding a live VM.
+**Lifecycle.** The realizer writes the attack-box record before `boot` runs and completes it (reclaim token, exec socket) after. `inspect-ranges down` resolves the origin and reclaims the provider's box before touching any range resource, so the box never outlives its NIC; an origin that does not resolve refuses the teardown rather than stranding a live VM.
 
 ## Evidence and Doctor
 
-The provider's box produces no console stream, and that loss is declared rather than silent: evidence capture records one in-chain gap (`console-external-attack-box`) on `console/<guest>` and never polls the guest, so the absence is verifiable offline. Segment pcap and beacon corroboration are unaffected: capture is bridge-side, and the foreign box's frames cross the same bridges. The [exec witness](evidence.qmd#the-exec-witness) is the opposite case: it rides the exec surface the provider supplies, so a conformant box ships its `exec/<guest>` process timeline like any native guest. Declaring `console_stream=True` is refused (there is no ingest path).
+The provider's box produces no console stream, and the loss is recorded: evidence capture writes one gap record (`console-external-attack-box`) on `console/<guest>` and never polls the guest, so the absence is visible offline. Segment pcap and beacon corroboration are unaffected, since capture is bridge-side and the foreign box's frames cross the same bridges. The [exec witness](evidence.qmd#the-exec-witness) is different: it rides the exec surface the provider supplies, so a conformant box ships its `exec/<guest>` process timeline like any native guest. Declaring `console_stream=True` is refused (there is no ingest path).
 
-`inspect-ranges doctor` gains an Attack box group: resolution of the configured value, the bundle's own reachability probe, and a standing warn stating the declared console gap and the containment caveat below.
+`inspect-ranges doctor` gains an Attack box group: resolution of the configured value, the bundle's own reachability probe, and a standing warning naming the console gap and the containment caveat below.
 
 ## `attackbox verify`
 
-The conformance battery is the gate: **a provider boots when it passes**. It realizes a range through the registered provider and holds every obligation as a report row:
+A provider is ready when the conformance battery passes. The battery realizes a range through the registered provider and reports every obligation as a row:
 
 ``` {.bash .fragment}
 INSPECT_RANGES_ATTACK_BOX=their.pkg.factory:cfg \
@@ -93,11 +93,11 @@ INSPECT_RANGES_ATTACK_BOX=their.pkg.factory:cfg \
 - **attacker-surface**: the agent-containment negative checks against the foreign box: a shared-segment defender sweeping the attacker finds zero answers, hypervisor endpoints answer exactly their declared service, reserved segment addresses stay silent.
 - **session-stability**: the exec surface pins one daemon session across dials.
 - **exec-parity**: inspect-ai's full sandbox `self_check` suite over the surface, with an empty xfail pin; exit codes, truncation, budgets, `user=`, and timeout kills must all behave.
-- **exec-witness**: a marker command run through the surface appears in the box's `exec/<guest>` stream with honest cursor semantics; serving the verb with an eternally empty ring fails, and so does a typed refusal.
+- **exec-witness**: a marker command run through the surface appears in the box's `exec/<guest>` stream with honest cursor semantics; an always-empty ring fails, and so does a typed refusal.
 - **teardown**: `down` reclaims the box before the netns, clears the record, re-dial refuses, and a second `down` is a no-op.
 
 `--keep` leaves the range running for inspection (teardown obligations are skipped and the final `down` command printed); `--json` emits the report machine-readably; a failing row exits nonzero. The canonical battery spec is `dmz_pivot` (a dedicated attack box with a Linux defender sharing its segment, so every obligation engages); any spec with that shape works.
 
 ## Containment Caveat
 
-A range with an external attack box carries the weaker of the two containment stories: the battery proves point-in-time behavior, not architecture, and the exec surface's operator controls its implementation. That is the same trust position as root on a compromised target, declared rather than hidden; [Security](security.qmd) states where the boundary sits. For runs where the realizer's own containment stack is the requirement, leave the variable unset.
+A range with an external attack box is only as contained as the external stack: the battery proves behavior at a point in time, not architecture, and the exec surface's operator controls its implementation. The trust position matches root on a compromised target, and the record says so (the doctor warning, the declared evidence gap). For runs where the realizer's own containment stack is the requirement, leave the variable unset.

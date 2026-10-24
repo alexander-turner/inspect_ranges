@@ -799,7 +799,7 @@ forest = RangeSpec(
 ```
 :::
 
-ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects). The shipped [goad_light](examples/goad_light.md) example is the built exemplar: one forest, two domains, three Windows Server guests, and a seeded ACL-abuse chain to Domain Admin.
+ACL edge rights use the vocabulary observed in real ranges (`GenericAll`, `GenericWrite`, `WriteDacl`, `WriteOwner`, `ForceChangePassword`, `SelfMembership`, `AddMember`); principals and targets are names as AD knows them (users, groups, OUs, or computer objects). The shipped [goad_light](examples/goad_light.md) example is the built reference: one forest, two domains, three Windows Server guests, and a seeded ACL-abuse chain to Domain Admin.
 
 ## Provisioning References {#provisioning-references}
 
@@ -1014,7 +1014,7 @@ spec = randomized()
 
 ## Guest Configuration {#how-configuration-reaches-a-guest}
 
-The range compiler (the plan and render steps) emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. Linux guests inject over cloud-init (a seed presented as a read-only virtio disk). Windows hosts inject over a per-boot unattend seed: a read-only cdrom whose answer file drives the sysprep'd golden's specialize pass (hostname, MAC-keyed static addressing, resolvers), with readiness announced by the in-guest control daemon. Because that addressing is always static, a Windows guest attached to a `dhcp: true` network never takes a lease and is configured statically all the same (validation warns `windows-dhcp-static`). Windows routers are not yet realized and refuse at planning. An attack box is Linux by construction (the `attacker:` block declares no `os` field). A Windows host declaring `vmm: cloud-hypervisor` refuses at planning, since the seed rides removable media that Cloud Hypervisor cannot present. Other injectors are designed but not yet implemented: configuration baked at build time for images without an agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints.
+The range compiler (the plan and render steps) emits each guest's desired configuration (addressing, resolvers, hostname, the router's firewall); how it reaches the guest is a per-image capability. Linux guests inject over cloud-init (a seed presented as a read-only virtio disk). Windows hosts inject over a per-boot unattend seed: a read-only cdrom whose answer file drives the sysprep'd golden's specialize pass (hostname, MAC-keyed static addressing, resolvers), with readiness announced by the in-guest control daemon. Because that addressing is always static, a Windows guest attached to a `dhcp: true` network never takes a lease and is configured statically all the same (validation warns `windows-dhcp-static`). Windows routers are not yet realized and refuse at planning. An attack box is always Linux (the `attacker:` block has no `os` field). A Windows host declaring `vmm: cloud-hypervisor` refuses at planning, since the seed rides removable media that Cloud Hypervisor cannot present. Other injectors are designed but not yet implemented: configuration baked at build time for images without an agent, DHCP-only for unmodifiable appliances, and pre-configured checkpoints.
 
 ::: {.panel-tabset group="definition-language"}
 ### YAML
