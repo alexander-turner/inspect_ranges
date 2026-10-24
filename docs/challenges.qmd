@@ -162,13 +162,13 @@ At most 8 distinct values per goal are ever verified, earliest first, with overf
 
 ## Terminal Sessions
 
-The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell. It is the recommended default for react-style range tasks (every shipped example wires it; tool surface changes measured difficulty, so compare like with like):
+The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell.
 
 ``` python
 solver=react(tools=[bash(), terminal(), verify_goal()])
 ```
 
-The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes; every session records to evidence with asciicast playback ([Evidence](evidence.qmd#captured-streams)). The tool runs on the foothold and changes no containment: reverse-shell reachability stays a topology fact (same-segment always works; cross-segment needs an ACL admitting target-to-attacker flows, as equifax declares). For concurrent agents in one sample, `terminal(instance="...")` gives each its own terminals, following `bash_session`'s contract.
+The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes;. The tool runs on the attack box and changes no containment.
 
 ## Scoring Lifecycle
 
