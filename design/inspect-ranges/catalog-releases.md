@@ -139,3 +139,23 @@ The whole catalog republished in one day for the in-guest brand rename ([guest-b
 The list rewrote to the same eight names (`catalog@sha256:2b98b028539bf3edb0bc437b6b097acd0ae30584e39dcc3c9e3553c93b8faa60`), and `images pin --from` wrote the three image pins post-publish (the digests above). Spec hashes did not move (no range.yaml changed), so each range push supersedes its name's tag under the same `spec-<sha256>` ref and consumers on current git resolve the new builds with no code change; old roots stay served by digest.
 
 Proof behind the push: every range rebuilt green with full trios on the rebaked stack (splunk-detection and goad-light stay local-only by policy; splunk's converged build and both its trios ran green the same day), the terminal acceptance battery passed 16/16 against the new dmz build, and a live Opus vulhub sample scored 1.0 valid with corroboration scanning 2.8 MB of flush-shipped capture (the fleet-pass zero-bytes finding closed in production). Windows golden re-derived locally (win recipe 3, never published).
+
+## 2026-10-23 — the exec-witness rebake (everything supersedes)
+
+The second republish day of the day, for the exec witness ([execve-witness-v1](execve-witness-v1.md)): the daemon bundle digest moved (3.3.0: the `exec_events` verb, the lazy-armed Linux subscriber, the Windows codec tables; bundle sha256 `1d86d6a2739e6c97…`), so both goldens re-derived (recipe 5, daemon 3.3.0), attack rebuilt over the new noble at **recipe version 5** (the republish-discipline bump), and all five published ranges repushed from their post-witness rebuilds. Published at main commit `261c8a2` (the merge that also lands the attack-box provider seam, attack-box-v1).
+
+| Name | Kind | Root digest |
+|---|---|---|
+| `ubuntu-noble` | image | `sha256:80282f626bf8492068636214ca96678966dcadc0a46fbd0b976aed1a286a1674` |
+| `ubuntu-focal` | image | `sha256:e85b3f392dc20b1686231baa7af317aa872bb4da0687c8d46725b3249683e030` |
+| `attack` | image | `sha256:626b43aa50c672d39e73e028069cddbb6961ddaf1f63bbd4b9cfab6a1a39afd9` |
+| `daemon-bundle` | artifact | `sha256:f52263dd626c7fb685b05661527c5417f8838eaa1cb6dc688aec8f0b1bfeb878` (bundle sha256 `1d86d6a2739e6c97…`) |
+| `vulhub-zabbix` | range | `sha256:55dd75fb03c30356ab4c7c5d6dd6bdda60d2ff34e21bf118778a55a5f6f29c72` |
+| `kypo-demo` | range | `sha256:a862d9b006ee9f77bcf030b8a24bf04c8f4bb6d311a06ea28ff0b80615c4a8ec` |
+| `cyris-basic` | range | `sha256:a76106ae69f469b82d97ab55b8fb111d9644776681eb21b214039897ed27cf2c` |
+| `dmz-pivot` | range | `sha256:7938074e6f879cc74ed67fda4c31e6fc155621772793bc96165808ee65ce1d0c` |
+| `equifax` | range | `sha256:6543b6f19e7005aef5fcc7901af0d07da706378b1293df38a8c82425948950a4` |
+
+The list rewrote to the same eight names (`catalog@sha256:80176c92ef53cab9c8c46c46ef4cf7db6bb852ba357a469816b487c59bedab50`), and `images pin --from` regenerated `pins.json` to the three image pins above. Spec hashes did not move, so each range push supersedes its name under the same `spec-<sha256>` ref; old roots stay served by digest. A rebuild note for the record: the five range builds were cached from the post-witness rebuilds (19:05-19:40, over the 3.3.0 goldens) and republished as-is, since the attacker image is resolved by catalog name at eval init rather than frozen into a range build, so the attack recipe bump re-keys only `attack` itself.
+
+Proof behind the push: all five builds green over the 3.3.0 goldens with the witness's fork-storm battery 10/10 at merge; the attack-box conformance battery ran live against dmz-pivot the same day (realize, session-stability, teardown green through the real seam; the boot-nothing reference provider honestly refused the reach, surface, and witness rows). Published by the project publisher, per the user's in-session authorization ("full rebake day").
