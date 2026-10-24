@@ -168,13 +168,7 @@ The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persi
 solver=react(tools=[bash(), terminal(), verify_goal()])
 ```
 
-One tool, four actions. `open` creates a named session (and more than one can run at once: a listener in one, the exploit trigger in another). `send` types keystrokes verbatim; a trailing newline executes, and tmux key names (`C-c`) send control sequences. After a send the result reports new output since the agent's last look, or the current screen when the delta cannot be determined. `read` polls without typing. `close` ends the session.
-
-Waiting has two modes. The default sends and waits `duration` seconds (poll with short durations rather than waiting long). `block=True` waits up to `timeout` seconds for the command to complete, using a shell completion signal, so it takes a single command line and works only when the session sits at a shell prompt: inside a caught shell or msfconsole the signal text would be typed into the program, and the tool refuses with the foreground command named (multi-line keystrokes are refused for the same reason, since an interior newline can start such a program before the signal arrives).
-
-The transcript shows each call compactly (the action and session in the title, the keystrokes beneath), and the full session records to the `terminal/<session>` evidence stream with an asciicast written beside the evidence when the session closes (at sample finalize for sessions still open) ([Evidence](evidence.qmd#captured-streams)), so a session can be played back after the run. The tool runs on the foothold and changes no containment: reverse-shell reachability stays a topology fact (same-segment always works; cross-segment needs an ACL admitting target-to-attacker flows, as equifax declares).
-
-Instancing follows `bash_session`: `terminal(instance="...")` names a terminal namespace, tools sharing an instance share their sessions, and distinct instances get separate terminals down to the guest's tmux sessions and evidence casts. With no instance, concurrent agents in one sample each get their own terminals through their tool-state scope; a single-agent task keeps bare session names.
+The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes; every session records to evidence with asciicast playback ([Evidence](evidence.qmd#captured-streams)). The tool runs on the foothold and changes no containment: reverse-shell reachability stays a topology fact (same-segment always works; cross-segment needs an ACL admitting target-to-attacker flows, as equifax declares). For concurrent agents in one sample, `terminal(instance="...")` gives each its own terminals, following `bash_session`'s contract.
 
 ## Scoring Lifecycle
 

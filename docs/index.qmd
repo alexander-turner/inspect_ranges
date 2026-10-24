@@ -232,7 +232,7 @@ Any Inspect agent can be the attacker. The agent works from the attack box, a re
 
 ### Terminal Sessions
 
-The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold: listeners that hold caught reverse shells, long-running scans in parallel sessions, msfconsole kept open across calls. It is the recommended default for react-style range tasks (the shipped examples wire it as shown above), and each session records to evidence with an asciicast for playback. [Challenges](challenges.qmd#terminal-sessions) covers the actions, waiting modes, and the one caveat: tool surface changes measured difficulty, so compare like with like.
+The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold: listeners that hold caught reverse shells, long-running scans in parallel sessions, msfconsole kept open across calls. It is the recommended default for react-style range tasks (the shipped examples wire it as shown above), and each session records to evidence with an asciicast for playback. The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes; the one caveat is that tool surface changes measured difficulty, so compare like with like ([Challenges](challenges.qmd#terminal-sessions)).
 
 ### SWE Agents
 
