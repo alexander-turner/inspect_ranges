@@ -165,7 +165,7 @@ At most 8 distinct values per goal are ever verified, earliest first, with overf
 The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold, so interactive programs survive across tool calls: a telnet login, msfconsole, or a listener holding a caught reverse shell.
 
 ``` python
-solver=react(tools=[bash(), terminal(), verify_goal()])
+solver=react(tools=[terminal(), verify_goal()])
 ```
 
 The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes;. The tool runs on the attack box and changes no containment.

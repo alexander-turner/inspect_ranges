@@ -274,7 +274,7 @@ def challenge_setup(
 
     Prober-based goals (`availability`, `degrade`, `tamper`) start the active prober after a successful setup, probing from the rendered probe endpoint on a cadence; `detection` and `evade` goals start the telemetry export poller for their collector, which must have a matching entry in `telemetry_collectors` (poll mechanics are deployment knowledge the schema deliberately does not carry: the collector name binds the two). Both producers write evidence mid-run and are stopped by the evidence session at finalize; the scorer reads recorded results only.
 
-    This solver never touches the agent's tools: `verify_goal()` is the only submission channel, and the task author always passes it to their agent (`react(tools=[bash(), verify_goal()])`, or inspect_swe's `bridged_tools=[verify_goal()]`). The dataset's appended prompt paragraph names the tool and the goal ids for every challenge; this solver registers the sample's verification context so the tool can verify cheap-tier goals at call time.
+    This solver never touches the agent's tools: `verify_goal()` is the only submission channel, and the task author always passes it to their agent (`react(tools=[terminal(), verify_goal()])`, or inspect_swe's `bridged_tools=[verify_goal()]`). The dataset's appended prompt paragraph names the tool and the goal ids for every challenge; this solver registers the sample's verification context so the tool can verify cheap-tier goals at call time.
     """
     collectors = telemetry_collectors or []
 

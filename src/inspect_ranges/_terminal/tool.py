@@ -139,7 +139,7 @@ async def _read_result(session: str, state: SessionState) -> str:
 def terminal(instance: str | None = None) -> Tool:
     """A tool giving the agent persistent terminal sessions on its foothold.
 
-    Pass it alongside `bash()` (`react(tools=[bash(), terminal(), verify_goal()])`). Sessions are tmux sessions on the foothold guest, so interactive programs (telnet, caught reverse shells, msfconsole) stay alive across tool calls. Adding the tool changes measured difficulty: adopt it per task, deliberately (`terminal-tool-v1.md`).
+    Sessions are tmux sessions on the foothold guest, so interactive programs (telnet, caught reverse shells, msfconsole) stay alive across tool calls. Adding the tool changes measured difficulty: adopt it per task, deliberately (`terminal-tool-v1.md`).
 
     Instancing follows `bash_session`: tools sharing an `instance` (or both leaving it `None` in the same tool-state scope) share their sessions; distinct instances (or distinct scopes, e.g. concurrent agents in one sample) get fully separate terminals, down to the guest's tmux sessions and the evidence casts. The default namespace keeps today's bare tmux names.
 
