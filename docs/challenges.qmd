@@ -174,6 +174,8 @@ Waiting has two modes. The default sends and waits `duration` seconds (poll with
 
 The transcript shows each call compactly (the action and session in the title, the keystrokes beneath), and the full session records to the `terminal/<session>` evidence stream with an asciicast written beside the evidence when the session closes (at sample finalize for sessions still open) ([Evidence](evidence.qmd#captured-streams)), so a session can be played back after the run. The tool runs on the foothold and changes no containment: reverse-shell reachability stays a topology fact (same-segment always works; cross-segment needs an ACL admitting target-to-attacker flows, as equifax declares).
 
+Instancing follows `bash_session`: `terminal(instance="...")` names a terminal namespace, tools sharing an instance share their sessions, and distinct instances get fully separate terminals down to the guest's tmux sessions and evidence casts. With no instance, concurrent agents in one sample each get their own terminals through their tool-state scope; a plain single-agent task keeps today's bare session names.
+
 ## Scoring Lifecycle
 
 **Setup.** `challenge_setup()` generates each proof value from independent entropy and plants it with no world-readable window, owned by the declared account. Values never appear in process arguments, environment, logs, or the durable evidence record; the `plants` evidence stream carries digests and metadata only.

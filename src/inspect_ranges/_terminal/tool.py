@@ -5,6 +5,7 @@ One action-dispatch tool (`open`, `send`, `read`, `close`) over the mechanics in
 Blocking sends append a shell completion signal, so they are refused unless the pane's foreground command is a shell: inside a caught reverse shell or msfconsole the appended text would execute on the target. Every non-happy path returns a string to the agent, never raises.
 """
 
+import hashlib
 import logging
 import time
 import weakref
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 import anyio
 from inspect_ai.tool import Tool, ToolCall, ToolCallContent, ToolCallView, tool
 from inspect_ai.util import sandbox, store
+from inspect_ai.util._tool_state import tool_state_instance
 
 from .capture import discard_sample_captures, start_capture, stop_capture
 from .session import (
@@ -47,8 +49,9 @@ _MAX_DURATION_S = 60.0
 _MAX_TIMEOUT_S = 600.0
 
 # per-sample session state, keyed by the store object (the verify-context
-# registry pattern); recorder handles and buffers cannot ride the store itself
-_STATES: dict[int, dict[str, SessionState]] = {}
+# registry pattern) and then by the tool-state namespace; recorder handles and
+# buffers cannot ride the store itself
+_STATES: dict[int, dict[str, dict[str, SessionState]]] = {}
 
 
 def _discard_on_gc(store_id: int) -> None:
@@ -57,15 +60,26 @@ def _discard_on_gc(store_id: int) -> None:
     discard_sample_captures(store_id)
 
 
-def _states() -> dict[str, SessionState]:
+def _namespace_prefix(instance: str | None) -> str:
+    """The guest-side name prefix for this call's tool-state namespace.
+
+    Resolution follows `bash_session` exactly: an explicit `instance` names a shared namespace, `None` resolves the ambient `tool_state_scope` (concurrent agents in one sample each get their own terminals), and no instance plus no scope is the default namespace, whose prefix is EMPTY so every existing eval's tmux names, sinks, wait channels, and cast streams stay byte-identical. A non-default namespace prefixes a short stable hash because the namespace string is arbitrary and the name keys tmux targets, sink paths, and evidence streams.
+    """
+    namespace = tool_state_instance(instance)
+    if namespace is None:
+        return ""
+    return f"t{hashlib.sha256(namespace.encode()).hexdigest()[:8]}-"
+
+
+def _states(prefix: str) -> dict[str, SessionState]:
     sample_store = store()
     store_id = id(sample_store)
-    states = _STATES.get(store_id)
-    if states is None:
-        states = {}
-        _STATES[store_id] = states
+    namespaces = _STATES.get(store_id)
+    if namespaces is None:
+        namespaces = {}
+        _STATES[store_id] = namespaces
         weakref.finalize(sample_store, _discard_on_gc, store_id)
-    return states
+    return namespaces.setdefault(prefix, {})
 
 
 def discard_terminal_state(sample_store: object) -> None:
@@ -100,8 +114,8 @@ async def _exec(cmd: list[str], timeout_s: float = 30.0) -> "ExecResult[str]":
     return await sandbox().exec(cmd, timeout=int(timeout_s))
 
 
-def _open_sessions() -> str:
-    names = ", ".join(sorted(_states())) or "none"
+def _open_sessions(states: dict[str, SessionState]) -> str:
+    names = ", ".join(sorted(states)) or "none"
     return f"Open sessions: {names}."
 
 
@@ -122,10 +136,15 @@ async def _read_result(session: str, state: SessionState) -> str:
 
 
 @tool(viewer=_terminal_viewer, parallel=False)
-def terminal() -> Tool:
+def terminal(instance: str | None = None) -> Tool:
     """A tool giving the agent persistent terminal sessions on its foothold.
 
     Pass it alongside `bash()` (`react(tools=[bash(), terminal(), verify_goal()])`). Sessions are tmux sessions on the foothold guest, so interactive programs (telnet, caught reverse shells, msfconsole) stay alive across tool calls. Adding the tool changes measured difficulty: adopt it per task, deliberately (`terminal-tool-v1.md`).
+
+    Instancing follows `bash_session`: tools sharing an `instance` (or both leaving it `None` in the same tool-state scope) share their sessions; distinct instances (or distinct scopes, e.g. concurrent agents in one sample) get fully separate terminals, down to the guest's tmux sessions and the evidence casts. The default namespace keeps today's bare tmux names.
+
+    Args:
+        instance: Instance id (each unique instance id has its own terminal namespace).
 
     Returns:
         The terminal tool.
@@ -167,20 +186,25 @@ def terminal() -> Tool:
             )
         duration = min(max(duration, 0.0), _MAX_DURATION_S)
         timeout = min(max(timeout, 1.0), _MAX_TIMEOUT_S)
-        states = _states()
+        # the namespace resolves per call (a contextvar carries the ambient
+        # scope); `real` is the guest-side name (tmux target, sink, wait
+        # channel, cast stream) and `session` stays the model-facing one
+        prefix = _namespace_prefix(instance)
+        real = f"{prefix}{session}"
+        states = _states(prefix)
         try:
             if action == "open":
                 state = states.get(session)
                 if state is not None:
-                    alive = await _exec(has_session_command(session))
+                    alive = await _exec(has_session_command(real))
                     if alive.success:
-                        result = await _read_result(session, state)
-                        return f"Session {session!r} is already open. {_open_sessions()}\n{result}"
+                        result = await _read_result(real, state)
+                        return f"Session {session!r} is already open. {_open_sessions(states)}\n{result}"
                     states.pop(session, None)
                     # the dead session's recorder is still tailing: stop it (and
                     # write its cast) before the name starts a fresh life
-                    await stop_capture(id(store()), session)
-                started = await _exec(start_session_command(session))
+                    await stop_capture(id(store()), real)
+                started = await _exec(start_session_command(real))
                 if not started.success:
                     detail = (started.stderr or started.stdout).strip()[-500:]
                     return f"Could not open session {session!r}: {detail}"
@@ -194,28 +218,28 @@ def terminal() -> Tool:
                 def cleanup(store_id: int = store_id) -> None:
                     _STATES.pop(store_id, None)
 
-                await start_capture(store_id, session, state, cleanup)
-                result = await _read_result(session, state)
-                return f"Opened session {session!r}. {_open_sessions()}\n{result}"
+                await start_capture(store_id, real, state, cleanup)
+                result = await _read_result(real, state)
+                return f"Opened session {session!r}. {_open_sessions(states)}\n{result}"
 
             state = states.get(session)
             if state is None:
-                return f"Session {session!r} is not open. {_open_sessions()}"
+                return f"Session {session!r} is not open. {_open_sessions(states)}"
 
             if action == "read":
                 state.markers.append((time.monotonic(), f"read {session}"))
-                return await _read_result(session, state)
+                return await _read_result(real, state)
 
             if action == "close":
                 state.markers.append((time.monotonic(), f"close {session}"))
-                final = await _read_result(session, state)
-                await _exec(kill_session_command(session))
-                await stop_capture(id(store()), session)
+                final = await _read_result(real, state)
+                await _exec(kill_session_command(real))
+                await stop_capture(id(store()), real)
                 # the recorder has drained the sink; a closed session must not
                 # leave its pipe file behind
-                await _exec(remove_sink_command(session))
+                await _exec(remove_sink_command(real))
                 states.pop(session, None)
-                return f"Closed session {session!r}. {_open_sessions()}\nFinal {final}"
+                return f"Closed session {session!r}. {_open_sessions(states)}\nFinal {final}"
 
             # send
             if block and multiline_block(keystrokes):
@@ -228,10 +252,10 @@ def terminal() -> Tool:
             # the token keeps the channel unique across lives of the name: tmux
             # remembers signals server-wide, and the counter restarts at zero
             nonce = f"{state.token}-{state.sends}"
-            keys, blocking = prepare_send(session, keystrokes, block, nonce)
+            keys, blocking = prepare_send(real, keystrokes, block, nonce)
             if blocking:
                 state.sends += 1
-                foreground = await _exec(pane_command_command(session))
+                foreground = await _exec(pane_command_command(real))
                 if not is_shell(foreground.stdout):
                     name = foreground.stdout.strip() or "unknown"
                     return (
@@ -242,24 +266,24 @@ def terminal() -> Tool:
             state.markers.append(
                 (time.monotonic(), f"send {session}: {keystrokes[:80]!r}")
             )
-            for send_command in send_keys_commands(session, keys):
+            for send_command in send_keys_commands(real, keys):
                 sent = await _exec(send_command)
                 if not sent.success:
                     detail = (sent.stderr or sent.stdout).strip()[-500:]
                     return f"Send to session {session!r} failed: {detail}"
             if blocking:
                 done = await _exec(
-                    wait_done_command(session, timeout, nonce), timeout_s=timeout + 15
+                    wait_done_command(real, timeout, nonce), timeout_s=timeout + 15
                 )
                 if not done.success:
-                    result = await _read_result(session, state)
+                    result = await _read_result(real, state)
                     return (
                         f"The command did not complete within {timeout:.0f}s "
                         f"(it may still be running; poll with read).\n{result}"
                     )
             elif duration > 0:
                 await anyio.sleep(duration)
-            return await _read_result(session, state)
+            return await _read_result(real, state)
         except Exception as error:  # noqa: BLE001  (string-only error discipline)
             logger.warning("terminal %s on %r failed: %s", action, session, error)
             return f"terminal {action} on session {session!r} failed: {error}"

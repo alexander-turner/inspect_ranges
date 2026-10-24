@@ -376,13 +376,123 @@ def test_state_dropped_when_store_is_collected() -> None:
 
     sample_store = Store()
     init_subtask_store(sample_store)
-    _states()["main"] = SessionState()
+    _states("")["main"] = SessionState()
     key = id(sample_store)
     assert key in _STATES
     init_subtask_store(Store())  # release the context's reference
     del sample_store
     gc.collect()
     assert key not in _STATES
+
+
+def test_instances_get_their_own_tmux_sessions(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """Two instances' same-named sessions are different guest tmux sessions with separate output; an explicit shared instance shares (the bash_session contract)."""
+    from inspect_ranges._terminal.tool import (
+        _namespace_prefix,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    _, _, session = armed
+    # Any mirrors the fixture's typing: ToolResult narrows poorly for `in`
+    tool_a: Any = terminal(instance="agent-a")
+    tool_b: Any = terminal(instance="agent-b")
+    tool_a2: Any = terminal(instance="agent-a")
+    real_a = f"{_namespace_prefix('agent-a')}{session}"
+    real_b = f"{_namespace_prefix('agent-b')}{session}"
+
+    async def scenario() -> None:
+        assert f"Opened session '{session}'" in await tool_a(
+            action="open", session=session
+        )
+        assert f"Opened session '{session}'" in await tool_b(
+            action="open", session=session
+        )
+        # both namespaces exist as DISTINCT tmux sessions on the host
+        listed = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        assert real_a in listed and real_b in listed and real_a != real_b
+        # output typed in a's session never shows in b's
+        await tool_a(
+            action="send",
+            session=session,
+            keystrokes="echo iso-$((40+2))\n",
+            block=True,
+        )
+        read_b = await tool_b(action="send", session=session, duration=0.2)
+        assert "iso-42" not in read_b
+        # the same explicit instance shares a's state and sessions
+        again = await tool_a2(action="open", session=session)
+        assert f"Session '{session}' is already open" in again
+        await tool_a(action="close", session=session)
+        await tool_b(action="close", session=session)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        for real in (real_a, real_b):
+            subprocess.run(
+                ["tmux", "kill-session", "-t", real], capture_output=True, check=False
+            )
+            Path(sink_path(real)).unlink(missing_ok=True)
+
+
+def test_default_namespace_keeps_bare_tmux_names(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """No instance and no scope is the default namespace: guest names, sinks, and streams are byte-identical to the pre-instance tool."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        listed = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        assert session in listed
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_tool_state_scope_isolates_default_instances(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """Concurrent agents in one sample, each in their own tool-state scope, get their own terminals without passing an instance."""
+    from inspect_ai.util._tool_state import tool_state_scope
+    from inspect_ranges._terminal.tool import (
+        _namespace_prefix,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    tool, _, session = armed
+    with tool_state_scope("agent1"):
+        real_scoped = f"{_namespace_prefix(None)}{session}"
+    assert real_scoped != session, "a scope must namespace the default instance"
+
+    async def scenario() -> None:
+        with tool_state_scope("agent1"):
+            await tool(action="open", session=session)
+        # outside the scope the default namespace has no such session
+        outside = await tool(action="read", session=session)
+        assert f"Session '{session}' is not open" in outside
+        with tool_state_scope("agent1"):
+            await tool(action="close", session=session)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", real_scoped],
+            capture_output=True,
+            check=False,
+        )
+        Path(sink_path(real_scoped)).unlink(missing_ok=True)
 
 
 def test_viewer_is_compact(armed: tuple[Any, Store, str]) -> None:
