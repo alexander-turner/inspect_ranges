@@ -427,6 +427,40 @@ class RangeOracle:
         )
         return meta, data, meta_gapped or data_gapped
 
+    async def exec_events(
+        self, guest: str
+    ) -> "tuple[list[SpannedRecord], list[SpannedRecord], bool]":
+        """The guest's exec-witness record for scoring: coverage meta records (`exec-meta/<guest>`), witnessed execve event records (`exec/<guest>`), and the gap flag.
+
+        Guest-tier assurance, like `telemetry_export`: the pre-compromise timeline is immutable once streamed, but a compromised guest can forge what it reports from the moment it falls, so events are observation, never proof against an in-guest root adversary.
+
+        The gap flag is True when either stream carries any counted loss (`exec-ring-overflow`, `exec-subscriber-loss`, `exec-witness-restart`, `poll-failed`): an observation hole, and the consumer decides what incompleteness means for its verdict. A guest whose daemon can never serve the verb gets one declared meta record instead of silence, `outcome: "unsupported"` with `reason: "daemon-unsupported"` plus the `errno` and `detail` that named the refusal; a Windows guest gets the same `unsupported` shape with `reason: "os-windows"`, declared at witness start without ever being polled.
+
+        Event records carry the guest clock (`ts_ms`); chunk spans carry host wall clocks. Exec events stamp no `wall` key, so `SpannedRecord.wall()` falls back to the enclosing chunk's span start for them (meta records' host stamp is `host_ts`, so the same fallback applies there).
+
+        One manifest fetch serves both streams (the `telemetry_export` discipline: a custom goal may check per candidate against a possibly remote store).
+        """
+        return cast(
+            "tuple[list[SpannedRecord], list[SpannedRecord], bool]",
+            await self._memoized(
+                ("exec-events", guest),
+                lambda: self._exec_events_fetch(guest),
+            ),
+        )
+
+    async def _exec_events_fetch(
+        self, guest: str
+    ) -> "tuple[list[SpannedRecord], list[SpannedRecord], bool]":
+        store = self._evidence_store()
+        manifest = await manifest_records(store, "driver")
+        meta, meta_gapped = await stream_json_records(
+            store, "driver", f"exec-meta/{guest}", manifest=manifest
+        )
+        events, events_gapped = await stream_json_records(
+            store, "driver", f"exec/{guest}", manifest=manifest
+        )
+        return meta, events, meta_gapped or events_gapped
+
     def _evidence_store(self) -> EvidenceStore:
         session = self._handle.evidence
         if session is None:

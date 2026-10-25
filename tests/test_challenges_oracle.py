@@ -29,13 +29,21 @@ from inspect_ranges._challenges.setup import (
     run_setup,
 )
 from inspect_ranges._channel.channel import (  # pyright: ignore[reportPrivateUsage]
+    GuestError,
     LoopbackTransport,
     MessageChannel,
     TransportFailure,
     _StoredReply,
 )
-from inspect_ranges._channel.protocol import ExecRequest, Message, WriteFileRequest
+from inspect_ranges._channel.protocol import (
+    ExecEventsReply,
+    ExecRequest,
+    Message,
+    WriteFileRequest,
+)
 from inspect_ranges._compiler.plan import ResolvedPlan, Totals
+from inspect_ranges._evidence.execwitness import ExecWitnessPoller
+from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
 from inspect_ranges._evidence.telemetry import CollectorSpec, FileSource
 from inspect_ranges._provider.provider import (
     RangeSandboxEnvironment,
@@ -44,6 +52,7 @@ from inspect_ranges._provider.provider import (
 from inspect_ranges._provider.state import SampleHandle
 
 from tests.local_endpoint import LocalEndpoint, _result_reply
+from tests.test_evidence_execwitness import WitnessFakeChannel, event, reply
 
 VALUE_MARKER = b"never-in-argv"
 """Plant values in these tests carry this marker so residue scans are unambiguous."""
@@ -479,6 +488,98 @@ class TestOracleSurface:
         assert oracle.available_observers() == frozenset(
             {"evidence-sink", "segment-pcap", "console"}
         )
+
+
+class FakeEvidenceSession(FakePlantSession):
+    """`FakePlantSession` plus the `.location` the oracle's evidence accessors derive their read store from."""
+
+    def __init__(self, location: str) -> None:
+        super().__init__()
+        self.location = location
+
+
+async def _witnessed_oracle(
+    root: Path, script: list[ExecEventsReply | Exception]
+) -> RangeOracle:
+    """An oracle over a record the real `ExecWitnessPoller` wrote from scripted replies (the production-written-fixture discipline: the accessor reads exactly what the witness ships, never a hand-built transcript)."""
+    channel = WitnessFakeChannel()
+    channel.script = list(script)
+    location = root / "evidence"
+    writer = EvidenceWriter(LocalDirSink(location), part_interval_s=0, writer="driver")
+    poller = ExecWitnessPoller(cast(Any, channel), writer, ["box"], [], meta_flush_s=0)
+    await poller.poll_once("box")
+    await poller.stop()
+    await writer.checkpoint()
+    oracle, _, _ = make_oracle(root, session=FakeEvidenceSession(str(location)))
+    return oracle
+
+
+class TestExecEventsAccessor:
+    def test_round_trip_ordering_spans_and_memo(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle = await _witnessed_oracle(
+                tmp_path,
+                [
+                    reply([event(0, argv=["id"]), event(1, argv=["nmap", "-sV"])], 2),
+                    reply([], 2),
+                ],
+            )
+            meta, events, gapped = await oracle.exec_events("box")
+            assert not gapped
+            assert [e.record["seq"] for e in events] == [0, 1]
+            assert events[1].record["argv"] == ["nmap", "-sV"]
+            assert [m.record["outcome"] for m in meta] == ["ok", "ok"]
+            # exec events stamp no `wall`: the chunk's host span start is the fallback
+            assert "wall" not in events[0].record
+            assert events[0].wall() == events[0].wall_start > 0.0
+            with oracle.evidence_memo():
+                first = await oracle.exec_events("box")
+                assert await oracle.exec_events("box") is first
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            pytest.param([reply([event(5)], 6), reply([], 6)], id="ring-overflow"),
+            pytest.param(
+                [reply([event(0)], 1, drops=3), reply([], 1, drops=3)],
+                id="subscriber-loss",
+            ),
+        ],
+    )
+    def test_counted_loss_flips_the_gap_flag(
+        self, tmp_path: Path, script: list[ExecEventsReply | Exception]
+    ) -> None:
+        async def scenario() -> None:
+            oracle = await _witnessed_oracle(tmp_path, script)
+            _, events, gapped = await oracle.exec_events("box")
+            assert gapped
+            assert events, "surviving events still read back alongside the gap"
+
+        asyncio.run(scenario())
+
+    def test_daemon_unsupported_declares_one_meta_record(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle = await _witnessed_oracle(
+                tmp_path, [GuestError("ENOSYS", "exec witness unavailable", None)]
+            )
+            meta, events, gapped = await oracle.exec_events("box")
+            assert events == [] and not gapped
+            [drop] = meta
+            assert drop.record["outcome"] == "unsupported"
+            assert drop.record["reason"] == "daemon-unsupported"
+            assert drop.record["errno"] == "ENOSYS"
+
+        asyncio.run(scenario())
+
+    def test_no_evidence_session_refuses(self, tmp_path: Path) -> None:
+        async def scenario() -> None:
+            oracle, _, _ = make_oracle(tmp_path)
+            with pytest.raises(OracleSetupError):
+                await oracle.exec_events("box")
+
+        asyncio.run(scenario())
 
 
 class TestPlantStore:

@@ -22,7 +22,7 @@ Evidence is on by default inside an eval: when a sample runs under Inspect, the 
 | `stages`, `verify` | The realization stage stream (with host emit clocks) and the readiness/verification results. |
 | `session` | Daemon session pins and re-pins: a guest daemon restart is itself evidence. |
 | `telemetry/<collector>`, `telemetry-meta/<collector>` | Exported in-guest telemetry deltas and the per-poll watermark records that make coverage decidable (below). |
-| `exec/<guest>`, `exec-meta/<guest>` | The exec witness: every `execve` on a Linux guest (pid, ppid, uid, argv, guest timestamp), from a daemon subscriber armed by the host's first poll, with per-poll coverage records so "no events" vs "witness dead" is decidable; a Windows guest or a connector-less kernel gets one declared `unsupported` record instead. Record-only: no goal or corroboration reads it. |
+| `exec/<guest>`, `exec-meta/<guest>` | The exec witness: every `execve` on a Linux guest (pid, ppid, uid, argv, guest timestamp), from a daemon subscriber armed by the host's first poll, with per-poll coverage records so "no events" vs "witness dead" is decidable; a Windows guest or a connector-less kernel gets one declared `unsupported` record instead. No shipped goal or corroboration reads it; custom goals may through the oracle's `exec_events()`. |
 | `draws` | The per-sample variable draw seed and values (non-secret by construction), so recorded samples re-derive post-hoc. |
 | `plants` | What challenge setup planted where (tokens, flags), timestamped: the scorer's proof-contract record. |
 | `probe/<goal id>` | The nonce-bound active prober's transcript for goals that use it. |
