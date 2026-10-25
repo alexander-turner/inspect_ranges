@@ -405,7 +405,7 @@ def test_reopen_of_dead_session_stops_stale_capture(
     calls: list[tuple[str, str]] = []
 
     async def fake_start(
-        store_id: int, name: str, state: Any, on_finalize: Any
+        store_id: int, name: str, state: Any, on_finalize: Any, opener: Any = None
     ) -> None:
         calls.append(("start", name))
 

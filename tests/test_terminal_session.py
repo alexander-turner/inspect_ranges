@@ -310,6 +310,50 @@ def test_assemble_cast_orders_and_offsets_events() -> None:
     assert events[3] == [2.0, "o", "out-late"]
 
 
+def test_assemble_cast_carries_opener_identity_in_the_header() -> None:
+    """`ir_*` header fields are additive (parsers ignore unknown keys): present when the opener is known, absent otherwise, so older casts present flat and older players stay unaffected."""
+    from inspect_ranges._terminal.cast import SessionOpener
+
+    cast = assemble_cast(
+        chunks=[],
+        markers=[(100.0, "open")],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="terminal session main",
+        session="main",
+        opener=SessionOpener(
+            agent_span_id="span-abc", agent_name="researcher", tool_span_id="span-def"
+        ),
+    )
+    header = json.loads(cast.split("\n", 1)[0])
+    assert header["ir_session"] == "main"
+    assert header["ir_agent_span_id"] == "span-abc"
+    assert header["ir_agent"] == "researcher"
+    assert header["ir_tool_span_id"] == "span-def"
+
+    bare = assemble_cast(
+        chunks=[],
+        markers=[(100.0, "open")],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="s",
+    )
+    bare_header = json.loads(bare.split("\n", 1)[0])
+    assert not any(key.startswith("ir_") for key in bare_header)
+
+    unattributed = assemble_cast(
+        chunks=[],
+        markers=[],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="s",
+        session="s",
+        opener=SessionOpener(),
+    )
+    unattributed_header = json.loads(unattributed.split("\n", 1)[0])
+    assert set(k for k in unattributed_header if k.startswith("ir_")) == {"ir_session"}
+
+
 def test_scrub_harness_echo_removes_wait_suffix() -> None:
     echoed = "$ ls /opt; tmux wait -S done-main-b7f168f4-1\nguestd\n$"
     scrubbed = scrub_harness_echo(echoed)

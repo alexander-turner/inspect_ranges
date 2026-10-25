@@ -12,11 +12,26 @@ import weakref
 from typing import TYPE_CHECKING
 
 import anyio
+from inspect_ai.event import SpanBeginEvent
+from inspect_ai.log import transcript
 from inspect_ai.tool import Tool, ToolCall, ToolCallContent, ToolCallView, tool
-from inspect_ai.util import sandbox, store
+from inspect_ai.util import current_span_id, sandbox, store
 from inspect_ai.util._tool_state import tool_state_instance
 
 from .capture import discard_sample_captures, start_capture, stop_capture
+from .cast import SessionOpener
+
+try:
+    # a private path with in-tree precedent (inspect_ai._sentinel._agent_state
+    # imports it the same way); guarded so a future inspect_ai refactor costs
+    # agent attribution on casts, never the tool itself
+    from inspect_ai.util._span import current_agent_span_id
+except ImportError:  # pragma: no cover
+
+    def current_agent_span_id() -> str | None:
+        return None
+
+
 from .session import (
     SessionState,
     blocking_send_refusal,
@@ -71,6 +86,28 @@ def _namespace_prefix(instance: str | None) -> str:
     if namespace is None:
         return ""
     return f"t{hashlib.sha256(namespace.encode()).hexdigest()[:8]}-"
+
+
+def _current_opener() -> SessionOpener:
+    """The agent context opening this session, captured now or never.
+
+    Sample finalize runs outside every span, so open time is the only reliable attribution point (agent-spans investigation, 2026-10-25). `current_span_id` is this call's own `type="tool"` span; `current_agent_span_id` is the nearest enclosing agent span and the grouping key the viewer joins on; the agent NAME is denormalized from the transcript's `SpanBeginEvent` so casts stay labeled in logs written without events. Identity capture must never cost a session, so any failure here degrades to an unattributed opener.
+    """
+    agent_span = current_agent_span_id()
+    agent_name: str | None = None
+    if agent_span is not None:
+        try:
+            for event in reversed(transcript().events):
+                if isinstance(event, SpanBeginEvent) and event.id == agent_span:
+                    agent_name = event.name
+                    break
+        except Exception:  # noqa: BLE001  (labeling, never load-bearing)
+            agent_name = None
+    return SessionOpener(
+        agent_span_id=agent_span,
+        agent_name=agent_name,
+        tool_span_id=current_span_id(),
+    )
 
 
 def _states(prefix: str) -> dict[str, SessionState]:
@@ -223,7 +260,7 @@ def terminal(instance: str | None = None) -> Tool:
                 def cleanup(store_id: int = store_id) -> None:
                     _STATES.pop(store_id, None)
 
-                await start_capture(store_id, real, state, cleanup)
+                await start_capture(store_id, real, state, cleanup, _current_opener())
                 result = await _read_result(real, state)
                 return f"Opened session {session!r}. {_open_sessions(states)}\n{result}"
 

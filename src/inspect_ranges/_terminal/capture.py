@@ -17,7 +17,7 @@ import anyio
 from inspect_ai.util import background, sandbox
 from inspect_ai.util._sandbox.exec_remote import ExecRemoteProcess, ExecStdout
 
-from .cast import assemble_cast, cast_store_cap_bytes, clip_cast
+from .cast import SessionOpener, assemble_cast, cast_store_cap_bytes, clip_cast
 from .session import SessionState, sink_path
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ class _Capture:
     session: str
     state: SessionState
     evidence: "EvidenceSession | None"
+    opener: SessionOpener | None = None
     process: ExecRemoteProcess | None = None
     stopped: bool = False
     drained: anyio.Event = field(default_factory=anyio.Event)
@@ -90,10 +91,11 @@ async def start_capture(
     session: str,
     state: SessionState,
     on_finalize: "Callable[[], None]",
+    opener: SessionOpener | None = None,
 ) -> None:
     """Start recording an open session; quietly a no-op outside a range sandbox.
 
-    `on_finalize` runs once at sample finalize after every recorder stops (the tool passes its state cleanup).
+    `on_finalize` runs once at sample finalize after every recorder stops (the tool passes its state cleanup). `opener` is the agent context that opened the session, captured by the tool at open time; it rides the cast header so playback can group sessions by agent.
     """
     recording, evidence, project = _capture_target()
     if not recording:
@@ -118,7 +120,9 @@ async def start_capture(
 
             if evidence is not None:
                 evidence.register_producer(finalize)
-        capture = _Capture(session=session, state=state, evidence=sample.evidence)
+        capture = _Capture(
+            session=session, state=state, evidence=sample.evidence, opener=opener
+        )
         sample.captures[session] = capture
         process = await sandbox().exec_remote(
             [
@@ -220,6 +224,8 @@ def _write_cast(sample: _SampleCaptures, capture: _Capture) -> None:
             start_monotonic=capture.state.opened_monotonic,
             start_wall=capture.state.opened_wall,
             title=f"terminal session {capture.session}",
+            session=capture.session,
+            opener=capture.opener,
         )
     except Exception as error:  # noqa: BLE001
         logger.info("terminal cast for %r not assembled: %s", capture.session, error)

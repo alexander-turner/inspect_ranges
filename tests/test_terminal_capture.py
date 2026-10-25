@@ -282,6 +282,77 @@ def test_store_cast_written_with_life_suffixes(
     asyncio.run(scenario())
 
 
+def test_opener_identity_rides_the_cast_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opener captured at session open lands as `ir_*` fields on the stored cast's header, so playback can group sessions by agent (absent fields present flat)."""
+    from inspect_ranges._terminal.capture import finalize_terminal_captures
+    from inspect_ranges._terminal.cast import SessionOpener
+
+    process = FakeProcess(["chunk\n"])
+    sample_store = Store()
+    monkeypatch.setattr(
+        capture_module, "_capture_target", lambda: (True, None, "ir-opener")
+    )
+    monkeypatch.setattr(capture_module, "_current_store", lambda: sample_store)
+    monkeypatch.setattr(capture_module, "sandbox", lambda: FakeSandbox(process))
+    tasks: list[asyncio.Task[None]] = []
+
+    def run_background(fn: Any, *args: Any) -> None:
+        tasks.append(asyncio.get_event_loop().create_task(fn(*args)))
+
+    monkeypatch.setattr(capture_module, "background", run_background)
+    state = SessionState(opened_wall=1_700_000_000.0, opened_monotonic=0.0)
+    store_id = next(_STORE_IDS)
+
+    async def scenario() -> None:
+        await start_capture(
+            store_id,
+            "s",
+            state,
+            lambda: None,
+            SessionOpener(
+                agent_span_id="sp-1", agent_name="researcher", tool_span_id="sp-2"
+            ),
+        )
+        await asyncio.sleep(0.05)
+        await finalize_terminal_captures("ir-opener")
+        cast = sample_store.get("asciinema:terminal-s")
+        assert isinstance(cast, str)
+        header = json.loads(cast.split("\n", 1)[0])
+        assert header["ir_agent_span_id"] == "sp-1"
+        assert header["ir_agent"] == "researcher"
+        assert header["ir_tool_span_id"] == "sp-2"
+        assert header["ir_session"] == "s"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        discard_sample_captures(store_id)
+
+
+def test_current_opener_reads_the_enclosing_agent_span() -> None:
+    """Inside an agent span, `_current_opener` captures the agent span id, the denormalized agent name, and the tool call's own span id; outside any span everything is None."""
+    from inspect_ai.util import span
+    from inspect_ai.util._store import init_subtask_store
+    from inspect_ranges._terminal.tool import _current_opener
+
+    async def scenario() -> None:
+        init_subtask_store(Store())
+        bare = _current_opener()
+        assert bare.agent_span_id is None and bare.agent_name is None
+
+        async with span("researcher", type="agent"):
+            async with span("terminal", type="tool"):
+                opener = _current_opener()
+        assert opener.agent_name == "researcher"
+        assert opener.agent_span_id is not None
+        assert opener.tool_span_id is not None
+        assert opener.tool_span_id != opener.agent_span_id
+
+    asyncio.run(scenario())
+
+
 def test_records_without_evidence_and_finalizes_by_project(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
