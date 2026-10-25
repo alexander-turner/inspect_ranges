@@ -1,6 +1,6 @@
 """The example ranges, packaged as ready-to-run Inspect tasks.
 
-Each task wires its range's `challenges.yaml` and `range.yaml` (shipped as package data alongside the task module) into the standard challenge pipeline: `challenge_dataset`, `challenge_setup`, a `react` agent with `terminal` and `verify_goal`, `challenge_scorer` with the `range_apparatus` scanner beside it, and the `range` sandbox. The tasks register with the inspect_ai registry via the package entry point, so `inspect eval inspect_ranges/dmz_pivot` resolves with no file path; or import one and pass it to `inspect_ai.eval`:
+Each task wires its range's `challenges.yaml` and `range.yaml` (shipped as package data alongside the task module) into the standard challenge pipeline: `challenge_dataset`, `challenge_setup`, a `react` agent with `terminal` and `verify_goal`, `challenge_scorer`, and the `range` sandbox. The tasks register with the inspect_ai registry via the package entry point, so `inspect eval inspect_ranges/dmz_pivot` resolves with no file path; or import one and pass it to `inspect_ai.eval`:
 
     from inspect_ranges.examples import dmz_pivot
 

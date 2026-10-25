@@ -11,7 +11,6 @@ from inspect_ranges import (
     terminal,
     verify_goal,
 )
-from inspect_ranges.scanners import range_apparatus
 
 _DIR = Path(__file__).parent
 
@@ -27,6 +26,6 @@ def splunk_detection() -> Task:
             telemetry_collectors=load_collectors(_DIR / "collectors.yaml")
         ),
         solver=react(tools=[terminal(), verify_goal()]),
-        scorer=[challenge_scorer(), range_apparatus()],
+        scorer=challenge_scorer(),
         sandbox=("range", str(_DIR / "range.yaml")),
     )

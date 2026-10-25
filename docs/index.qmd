@@ -1,7 +1,7 @@
 ---
 title: "Inspect Ranges"
 description: "Inspect AI extension for cyber range evaluations."
-llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer plus range_apparatus, range sandbox), the terminal tool as the react default (persistent tmux sessions on the foothold, evidence-recorded with asciicast playback), the SWE-agent variant (inspect_swe claude_code with bridged_tools; those scaffolds keep their own shell tooling, so no terminal there), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
+llms-description: "What Inspect Ranges is and the end-to-end shape of using it: the dmz-pivot range definition (networks, router ACL, hosts, attacker), challenges.yaml with typed goals (execute, exfiltrate, flag), the eval task wiring (challenge_dataset, challenge_setup, verify_goal, challenge_scorer, range sandbox, with the range_apparatus scanner as the range developer's diagnostic), the terminal tool as the react default (persistent tmux sessions on the foothold, evidence-recorded with asciicast playback), the SWE-agent variant (inspect_swe claude_code with bridged_tools; those scaffolds keep their own shell tooling, so no terminal there), the goal-type table, the examples table (dmz-pivot through the Windows AD and detection ranges, each with a README in its directory), the architecture (one unprivileged range container per sample, golden images with copy-on-write overlays, the containment stack), and getting started with doctor and the image catalog."
 ---
 
 ## Overview
@@ -187,7 +187,7 @@ Verification is corroborated by evidence captured outside every VM (per-segment 
 
 ### Task Definition
 
-A task brings together the challenge dataset, a setup step that plants per-sample proof material, an agent carrying the `verify_goal()` tool, and the challenge scorer, with the `range_apparatus` scanner beside it reporting apparatus anomalies per sample (zero findings is healthy). Each sample boots its own fresh copy of the range and tears it down when the sample completes, so no state carries over between samples or runs:
+A task brings together the challenge dataset, a setup step that plants per-sample proof material, an agent carrying the `verify_goal()` tool, and the challenge scorer. Each sample boots its own fresh copy of the range and tears it down when the sample completes, so no state carries over between samples or runs:
 
 ``` {.python filename="task.py"}
 from inspect_ai import Task, task
@@ -200,8 +200,6 @@ from inspect_ranges import (
     terminal,
     verify_goal,
 )
-from inspect_ranges.scanners import range_apparatus
-
 @task
 def dmz_pivot() -> Task:
     return Task(
@@ -212,10 +210,12 @@ def dmz_pivot() -> Task:
         solver=react(
             tools=[terminal(), verify_goal()]
         ),
-        scorer=[challenge_scorer(), range_apparatus()],
+        scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
 ```
+
+While developing a range, the [range_apparatus](building.qmd#scan) scanner is the companion diagnostic: wire it beside the scorer or run `scout scan` over finished logs, and zero findings is the healthy state.
 
 ### Evaluation
 
@@ -257,7 +257,7 @@ def dmz_pivot_swe() -> Task:
         solver=claude_code(
             bridged_tools=[verify_goal()]
         ),
-        scorer=[challenge_scorer(), range_apparatus()],
+        scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
 ```

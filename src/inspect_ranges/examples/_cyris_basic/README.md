@@ -118,7 +118,6 @@ from inspect_ranges import (
     terminal,
     verify_goal,
 )
-from inspect_ranges.scanners import range_apparatus
 
 
 @task
@@ -127,7 +126,7 @@ def cyris_basic() -> Task:
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
         solver=react(tools=[terminal(), verify_goal()]),
-        scorer=[challenge_scorer(), range_apparatus()],
+        scorer=challenge_scorer(),
         sandbox=("range", "range.yaml"),
     )
 ```

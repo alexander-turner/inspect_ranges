@@ -119,7 +119,7 @@ Set a wall-clock limit beside the message cap: real-model samples on pivot-shape
 
 The registry form runs the shipped task; your own range runs the same way with the [Range Tasks](index.qmd#range-tasks) wiring ([Range Sandbox](provider.qmd) covers the provider).
 
-To exercise boot, planting, scoring, and teardown with no model spend, run against inspect's mock model: `inspect eval task.py --model mockllm/model --message-limit 4`. The agent does nothing, so expect a 0 score, the scorer's zero-submissions warning, and the matching `range_apparatus` finding; on this run those show the apparatus working.
+To exercise boot, planting, scoring, and teardown with no model spend, run against inspect's mock model: `inspect eval task.py --model mockllm/model --message-limit 4`. The agent does nothing, so expect a 0 score and the scorer's zero-submissions warning (plus the matching `range_apparatus` finding when the scanner below is wired); on this run those show the apparatus working.
 
 ### Scan {#scan}
 

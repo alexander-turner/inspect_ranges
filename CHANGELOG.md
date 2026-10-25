@@ -1,5 +1,7 @@
 ## Unreleased
 
+- The example tasks' default wiring is `scorer=challenge_scorer()` alone: `range_apparatus` leaves the shipped scorer lists (and the README/docs wiring snippets) now that phase-1 development is closed, repositioned as the range developer's diagnostic (wire it beside the scorer while building a range, or `scout scan` over finished logs; [Building](building.qmd#scan) is its home). Nothing changes in the library: the scanner was never a library default, and the apparatus column's lower-is-better reading beside accuracy was noise for eval consumers.
+
 - inspect-ai floor moves to 0.3.285 (terminal UI improvements in the viewer's session playback).
 
 - Challenges: the 8-candidate anti-oracle bound now holds at all three verification sites; the mid-run poller previously verified every distinct submitted value uncapped on its next tick, so a flood past `verify_goal`'s cap could still latch a pass (pre-ship review P0-1). The poller now verifies only the earliest 8 distinct values per goal (the scorer's rule), and overflow remains recorded and visible as `candidates_dropped` in the score metadata. Also: a goal latched achieved mid-run can now record `corroborated: false` from the scorer's full check; previously the end-of-run `false` was discarded and the result read `null` (no observer declared) instead of `false` (a declared observer found nothing). `true` still never downgrades, and an achieved latch is never un-achieved or re-timestamped (P1-5).
