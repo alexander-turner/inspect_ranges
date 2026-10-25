@@ -252,12 +252,19 @@ class MessageChannel:
         channel_budget_s: float = DEFAULT_CHANNEL_BUDGET_MS / 1000,
         untimed_bound_s: float = DEFAULT_UNTIMED_BOUND_MS / 1000,
         grace_s: float = _CHANNEL_GRACE_S,
+        expected_unready: bool = False,
     ) -> None:
+        """A channel over `transport`, with `expected_unready` naming the one channel whose unreachability is routine.
+
+        `expected_unready` demotes retry lines and loss/budget trace dumps from WARNING/ERROR to INFO: on the boot-time readiness channel a daemon that is not up yet is the normal state, and a warning the user can do nothing about reads as a defect (user policy, 2026-10-25). Tamper verdicts stay ERROR on every channel: malformed replies are extraordinary even mid-boot.
+        """
         self._transport = transport
         self._label = label
         self._channel_budget_s = channel_budget_s
         self._untimed_bound_s = untimed_bound_s
         self._grace_s = grace_s
+        self._retry_level = logging.INFO if expected_unready else logging.WARNING
+        self._loss_level = logging.INFO if expected_unready else logging.ERROR
         self._trace: deque[TraceEvent] = deque(maxlen=_TRACE_TAIL)
         self.stats = ChannelStats()
 
@@ -287,17 +294,23 @@ class MessageChannel:
             extra={"request_id": rid, "endpoint": endpoint, "channel": self._label},
         )
 
-    def _dump_trace(self, request: Message, endpoint: str, reason: str) -> None:
+    def _dump_trace(
+        self, request: Message, endpoint: str, reason: str, *, level: int | None = None
+    ) -> None:
+        level = self._loss_level if level is None else level
         self._log(
-            logging.ERROR,
+            level,
             "failure",
             rid=request.id,
             endpoint=endpoint,
             detail=f"{reason}; trace tail follows",
         )
         for line in self.trace_tail():
-            logger.error(
-                "  %s", line, extra={"request_id": request.id, "endpoint": endpoint}
+            logger.log(
+                level,
+                "  %s",
+                line,
+                extra={"request_id": request.id, "endpoint": endpoint},
             )
 
     def _tamper(
@@ -313,7 +326,7 @@ class MessageChannel:
 
         `attempts` stamps the delivery count when the caller is on the counting path (a post-delivery tamper demonstrably had its frames sent); `None` means the counting path was never reached.
         """
-        self._dump_trace(request, endpoint, reason)
+        self._dump_trace(request, endpoint, reason, level=logging.ERROR)
         error = TamperError(f"{request.kind} id={request.id}: {reason}")
         error.attempts = attempts
         raise error from cause
@@ -413,7 +426,7 @@ class MessageChannel:
                 # the request provably never left: not a delivery
                 last_failure = f"{type(failure).__name__}: {failure}"
                 self._log(
-                    logging.WARNING,
+                    self._retry_level,
                     "retry",
                     rid=request.id,
                     endpoint=endpoint,
@@ -430,7 +443,7 @@ class MessageChannel:
                 deliveries += 1
                 last_failure = f"{type(failure).__name__}: {failure}"
                 self._log(
-                    logging.WARNING,
+                    self._retry_level,
                     "retry",
                     rid=request.id,
                     endpoint=endpoint,
@@ -959,7 +972,7 @@ class MessageChannel:
                 ) from None
             except ConnectionError as loss:
                 self._log(
-                    logging.WARNING,
+                    self._retry_level,
                     "realize-resume",
                     rid=request.id,
                     endpoint=HOST_APPLIER,

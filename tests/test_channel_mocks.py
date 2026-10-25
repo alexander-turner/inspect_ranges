@@ -463,6 +463,61 @@ def test_provably_undelivered_exec_resends_exactly_once() -> None:
     asyncio.run(scenario_run())
 
 
+@pytest.mark.parametrize(
+    ("expected_unready", "retry_level", "dump_level"),
+    [(False, logging.WARNING, logging.ERROR), (True, logging.INFO, logging.INFO)],
+)
+def test_expected_unready_demotes_retry_and_loss_levels(
+    expected_unready: bool,
+    retry_level: int,
+    dump_level: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The readiness channel's boot-race noise logs at INFO; the default channel keeps WARNING retries and ERROR loss dumps (a user must never see a warning they can do nothing about)."""
+    recovering = MessageChannel(
+        FailFirstConnects(LoopbackTransport(["web"]), failures=2),
+        label="levels",
+        channel_budget_s=0.3,
+        expected_unready=expected_unready,
+    )
+    unreachable = MessageChannel(
+        FailFirstConnects(LoopbackTransport(["web"]), failures=99),
+        label="levels",
+        channel_budget_s=0.2,
+        expected_unready=expected_unready,
+    )
+
+    async def scenario_run() -> None:
+        await recovering.ping("web")
+        with pytest.raises(TransportFailure):
+            await unreachable.ping("web")
+
+    with caplog.at_level(logging.INFO, logger="inspect_ranges.channel"):
+        asyncio.run(scenario_run())
+    retries = [r for r in caplog.records if " retry " in r.getMessage()]
+    dumps = [r for r in caplog.records if "trace tail follows" in r.getMessage()]
+    assert retries and all(r.levelno == retry_level for r in retries)
+    assert dumps and all(r.levelno == dump_level for r in dumps)
+
+
+def test_tamper_dumps_stay_error_on_an_expected_unready_channel(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`expected_unready` never quiets tamper: a malformed reply is extraordinary even mid-boot."""
+    channel = MessageChannel(
+        HostileTransport("wrong-id"), label="boot-tamper", expected_unready=True
+    )
+
+    async def scenario_run() -> None:
+        with pytest.raises(TamperError):
+            await channel.exec("web", ExecRequest(id=request_id(), cmd=["true"]))
+
+    with caplog.at_level(logging.INFO, logger="inspect_ranges.channel"):
+        asyncio.run(scenario_run())
+    dumps = [r for r in caplog.records if "trace tail follows" in r.getMessage()]
+    assert dumps and all(r.levelno == logging.ERROR for r in dumps)
+
+
 @pytest.mark.parametrize("scenario", ["wrong-id", "wrong-kind"])
 def test_exec_post_delivery_tamper_carries_attempts(scenario: str) -> None:
     """Exec's post-delivery tamper verdicts carry the honest delivery count on both the wrong-id and the `_expect` wrong-kind paths."""

@@ -482,11 +482,14 @@ def make_channel(
     """The readiness channel to this range's guests (a test seam; built inside the event loop).
 
     The per-round-trip allowance is readiness-tuned: a daemon that accepts but never replies must cost seconds per attempt, not the channel's long default, or one wedged guest overshoots the whole readiness budget. Long cloud-init waits stay fine: exec liveness rides pending polls, each bounded by this allowance.
+
+    `expected_unready` logs this channel's retries and loss dumps at INFO: a daemon not yet listening is the normal state of a booting guest, and a warning the user can do nothing about reads as a defect. Readiness outcomes still surface through the stage stream; tamper verdicts stay ERROR.
     """
     return MessageChannel(
         VsockTransport(cids, hybrid_sockets=hybrid_sockets),
         label="up-readiness",
         channel_budget_s=10.0,
+        expected_unready=True,
     )
 
 

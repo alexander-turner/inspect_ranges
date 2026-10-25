@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Boot-time readiness noise logs at INFO: the `up-readiness` channel's connect retries and loss/budget trace dumps are the normal state of a still-booting guest, and a warning the user can do nothing about reads as a defect, so that one channel is constructed `expected_unready` (retries demote WARNING to INFO, loss dumps ERROR to INFO; at the default log level the lines no longer appear in eval transcripts at all). Tamper verdicts stay ERROR on every channel, and every other channel's levels are unchanged. The apparatus scanner's readiness-label skip stays for runs captured at info.
+
 - The oracle gains `exec_events(guest)`: the exec witness's coverage records (`exec-meta/<guest>`) and execve event records (`exec/<guest>`) with a gap flag, read-only and memoized like the other evidence accessors, so custom goal types can consume the witnessed timeline. Guest-tier assurance like `telemetry_export` (events are observation, not proof); no shipped goal or corroboration reads it yet.
 
 - inspect-ai floor moves to 0.3.284: its viewer plays `asciinema:*` keys from the sample's final store (one player per named session in a Terminal Sessions card on the sample's Metadata tab, with the keys kept out of the store tree), so terminal() session recordings now play inline in `inspect view` with no extra wiring.

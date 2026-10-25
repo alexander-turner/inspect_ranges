@@ -2,7 +2,7 @@
 
 One seam serves every consumer: the scout scanner, the direct scorer-list online form, and offline validation over eval logs all call `apparatus_findings` with the sample's events, messages, and metadata. Detectors are deterministic and fire only on concrete anomaly signatures mined from the real provider, channel, and challenges code (each signature constant cites its source), deduped per sample; a detector that cannot see its inputs (no `range_spec`, no recorded score) stays quiet rather than guessing.
 
-Post-readiness scoping: the provider's boot path polls guests through the `up-readiness` channel, whose retry and failure lines are EXPECTED in healthy logs (the daemon is not up yet), so plumbing detectors skip any line carrying that label (`_runtime/up.py` `make_channel`) and consider logger events only after the sample's first model, tool, or sandbox event (boot precedes all three); sample-level error events and tool-call errors are post-readiness by construction and are always considered.
+Post-readiness scoping: the provider's boot path polls guests through the `up-readiness` channel, whose retry and failure lines are EXPECTED in healthy logs (the daemon is not up yet) and log at INFO since 2026-10-25, so they are absent at the default log level; plumbing detectors still skip any line carrying that label (`_runtime/up.py` `make_channel`, for runs captured at info) and consider logger events only after the sample's first model, tool, or sandbox event (boot precedes all three); sample-level error events and tool-call errors are post-readiness by construction and are always considered.
 """
 
 import re
