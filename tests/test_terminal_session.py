@@ -6,8 +6,10 @@ import pytest
 from inspect_ranges._terminal.cast import assemble_cast
 from inspect_ranges._terminal.session import (
     OUTPUT_CLIP_BYTES,
+    PANE_WIDTH,
     SEND_CHUNK_CHARS,
     SessionState,
+    blocking_send_refusal,
     capture_pane_command,
     clip_output,
     find_new_content,
@@ -21,6 +23,7 @@ from inspect_ranges._terminal.session import (
     start_session_command,
     valid_session_name,
     wait_channel,
+    wait_channel_prefix,
     wait_done_command,
 )
 
@@ -80,6 +83,50 @@ def test_prepare_send(
     keys, blocking = prepare_send("s", keystrokes, block, "ab-7")
     assert keys == expected_keys
     assert blocking is expected_blocking
+
+
+@pytest.mark.parametrize(
+    ("keystrokes", "fragment"),
+    [
+        # complete single commands take the splice: no refusal
+        ("ls -la\n", None),
+        ("echo hi;\n", None),  # trailing `;` is trimmed by prepare_send
+        ("echo a\\;\n", None),  # escaped `\;` is a literal argument, kept
+        ("echo 'quoted & | # ok'\n", None),  # operators inside quotes are inert
+        ('grep "#" file\n', None),
+        ("echo a\\& b\\#c\n", None),  # escaped operator and hash are inert
+        ("echo foo#bar\n", None),  # `#` mid-word is not a comment
+        ("echo $#\n", None),  # a parameter, not a comment
+        ("Enter", None),  # bare Enter blocks on what was already typed
+        ("C-c", None),  # does not execute: falls back to non-blocking
+        ("nc -lvnp 4444 &", None),  # no trailing newline: non-blocking anyway
+        # backgrounding contradicts block, and `&;` is a syntax error
+        ("nc -lvnp 4444 &\n", "`&`"),
+        ("sleep 5 & \n", "`&`"),
+        # unfinished continuations splice into a syntax error that runs nothing
+        ("echo pre &&\n", "`&&`"),
+        ("echo pre ||\n", "`||`"),
+        ("cat file |\n", "`|`"),
+        # an unquoted comment absorbs the splice: the command runs, the signal never fires
+        ("echo hi  # check output\n", "comment"),
+        ("# just a note\n", "comment"),
+        ("echo done; # trailing\n", "comment"),
+        # an unclosed quote wedges the shell reading continuation input
+        ("echo 'unclosed\n", "single quote"),
+        ('echo "unclosed\n', "double quote"),
+        # a trailing escape absorbs the splice into the command's arguments
+        ("echo foo \\\n", "backslash"),
+    ],
+)
+def test_blocking_send_refusal(keystrokes: str, fragment: str | None) -> None:
+    """A blocking line the completion-signal splice would break is refused with the problem and remedy named; complete lines and non-blocking fallbacks pass (pre-ship P1-6)."""
+    refusal = blocking_send_refusal(keystrokes)
+    if fragment is None:
+        assert refusal is None
+    else:
+        assert refusal is not None
+        assert refusal.startswith("Refusing block=True")
+        assert fragment in refusal
 
 
 def test_wait_channel_is_per_send() -> None:
@@ -268,6 +315,41 @@ def test_scrub_harness_echo_removes_wait_suffix() -> None:
     scrubbed = scrub_harness_echo(echoed)
     assert "tmux wait" not in scrubbed
     assert scrubbed.startswith("$ ls /opt\n")
+
+
+_PREFIX = wait_channel_prefix("main", "b7f168f4")
+_SUFFIX = "; tmux wait -S done-main-b7f168f4-12"
+
+
+@pytest.mark.parametrize(
+    "break_at", [0, 1, 2, 10, 15, 21, 30, len(_SUFFIX) - 2, len(_SUFFIX) - 1]
+)
+def test_scrub_harness_echo_removes_wrapped_wait_suffix(break_at: int) -> None:
+    """capture-pane inserts a newline where the pane wraps at 160 columns, and the wrap can fall between ANY two characters of the echoed signal (or just before it); every split point must scrub without leaking a fragment to the model (pre-ship P1-7)."""
+    body = "$ echo " + "x" * (PANE_WIDTH - 7 - break_at)
+    echoed = body + _SUFFIX
+    assert len(body) + break_at == PANE_WIDTH
+    text = f"{echoed[:PANE_WIDTH]}\n{echoed[PANE_WIDTH:]}\nout-42\n$ "
+    assert scrub_harness_echo(text, _PREFIX) == f"{body}\nout-42\n$ "
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # a lookalike broken at a non-wrap column is agent-authored text, kept
+        "note; tmux wa\nit -S done-main-b7f168f4-3\n$ ",
+        # another session's (or an agent-authored) channel is not ours
+        "$ cat notes; tmux wait -S done-other-ffffffff-1\nkept\n$ ",
+    ],
+)
+def test_scrub_harness_echo_keeps_lookalikes(text: str) -> None:
+    """The scrub is anchored to our channel prefix and, for wrapped forms, to the wrap column, so text that merely resembles the signal survives byte-exact."""
+    assert scrub_harness_echo(text, _PREFIX) == text
+
+
+def test_scrub_harness_echo_anchored_still_removes_plain_form() -> None:
+    echoed = f"$ ls /opt{_SUFFIX}\nguestd\n$"
+    assert scrub_harness_echo(echoed, _PREFIX) == "$ ls /opt\nguestd\n$"
 
 
 @pytest.mark.parametrize(

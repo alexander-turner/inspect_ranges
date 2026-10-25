@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from .._brand import GUEST_BRAND
 
@@ -44,6 +45,11 @@ def wait_channel(session: str, nonce: str) -> str:
     The channel carries a per-send `nonce` because tmux remembers a `wait -S` signal that fires with no waiter: a timed-out blocking send whose command later completes would otherwise leave a stale signal that releases the next blocking wait on the session immediately. Signals are server-wide and outlive sessions, and the send counter restarts at zero when a name is reopened, so the nonce the tool passes is the session life's `SessionState.token` plus the send counter, never the counter alone. The name is deliberately bland (`done-...`): it echoes in the pane, so it must not read as a harness marker (`_brand.py`).
     """
     return f"done-{session}-{nonce}"
+
+
+def wait_channel_prefix(session: str, token: str) -> str:
+    """The channel-name prefix shared by every send in one session life (the per-life `token` plus a send counter forms the nonce), used to anchor the echo scrub to our own channels."""
+    return f"done-{session}-{token}-"
 
 
 def valid_session_name(session: str) -> bool:
@@ -195,6 +201,92 @@ def _trim_trailing_semicolons(command: str) -> str:
     return trimmed
 
 
+def _mask_line(line: str) -> tuple[str, str]:
+    r"""Mask quoted and backslash-escaped characters of a command line with `x`, preserving length and positions, and report the pending parse state at end of line (`'` or `"` for an unclosed quote, `\` for a trailing escape, `""` when the line parses to completion). Shell operators and comment markers surface in the masked line only where the shell would honor them."""
+    masked: list[str] = []
+    quote = ""
+    escaped = False
+    for char in line:
+        if escaped:
+            escaped = False
+            masked.append("x")
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+            masked.append("x")
+        elif quote == '"':
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = ""
+            masked.append("x")
+        elif char == "\\":
+            escaped = True
+            masked.append("x")
+        elif char in "'\"":
+            quote = char
+            masked.append("x")
+        else:
+            masked.append(char)
+    return "".join(masked), "\\" if escaped else quote
+
+
+# an unquoted `#` opens a comment only at the start of a word (after
+# whitespace, an operator, or the start of the line); `foo#bar`, `$#`, and
+# `${#var}` are not comments
+_COMMENT_START = re.compile(r"(?:^|[\s;&|()])#")
+
+
+def blocking_send_refusal(keystrokes: str) -> str | None:
+    r"""The refusal message when a blocking command line cannot take the completion signal splice, or `None` when it can.
+
+    The signal is appended to the line as `; tmux wait -S <channel>`, so the line must be a complete command the splice extends. An unclosed quote or a trailing `\` leaves the shell reading continuation input with the signal inside it; an unquoted `#` comment absorbs the splice, so the command runs but the signal never fires; a trailing unquoted `&` backgrounds the command (nothing to wait for) and, like a trailing `&&`/`||`/`|` continuation, splices into a shell syntax error that runs nothing. Each case would stall the send to its full timeout and report "it may still be running" falsely, so it is refused with the remedy named instead. Keystrokes that do not execute (or a bare Enter) are never inspected: they fall back to non-blocking or block on what was already typed, and non-blocking sends stay byte-exact.
+    """
+    if not _executes(keystrokes) or _is_enter_key(keystrokes):
+        return None
+    line = _trim_trailing_semicolons(keystrokes.rstrip(_NEWLINE_CHARS))
+    masked, pending = _mask_line(line)
+    if pending in ("'", '"'):
+        name = "single" if pending == "'" else "double"
+        return (
+            f"Refusing block=True: the command line has an unclosed {name} quote, "
+            "so the shell would wait for more input with the completion signal "
+            "typed into the pending string. Close the quote, or use duration polling."
+        )
+    if pending == "\\":
+        return (
+            "Refusing block=True: the command line ends with a `\\` line "
+            "continuation, so the appended completion signal would be read as part "
+            "of the command instead of running after it. Drop the trailing "
+            "backslash, or use duration polling."
+        )
+    if _COMMENT_START.search(masked):
+        return (
+            "Refusing block=True: the command line carries an unquoted `#` comment, "
+            "which would absorb the appended completion signal: the command would "
+            "run, but the send would stall to its full timeout. Remove the comment, "
+            "or use duration polling."
+        )
+    tail = masked.rstrip()
+    for op in ("&&", "||", "|"):
+        if tail.endswith(op):
+            return (
+                f"Refusing block=True: the command line ends with `{op}`, an "
+                "unfinished continuation, so the appended completion signal would "
+                "splice into a shell syntax error and the command would never run. "
+                "Complete the command, or use duration polling."
+            )
+    if tail.endswith("&"):
+        return (
+            "Refusing block=True: the command line ends with an unquoted `&`, "
+            "which backgrounds the command, so the shell returns at once and there "
+            "is no completion to wait for (and the appended completion signal "
+            "would splice into a shell syntax error that runs nothing). Drop the "
+            "`&`, or drop block=True and poll the background job with read."
+        )
+    return None
+
+
 def prepare_send(
     session: str, keystrokes: str, block: bool, nonce: str
 ) -> tuple[list[str], bool]:
@@ -229,15 +321,42 @@ def find_new_content(previous_buffer: str | None, current_buffer: str) -> str | 
     return None
 
 
-_WAIT_ECHO = re.compile(r"; tmux wait -S done-\S+")
+@lru_cache(maxsize=32)
+def _wait_echo_patterns(
+    channel_prefix: str | None,
+) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """The unwrapped and wrapped-once forms of the blocking signal's pane echo.
+
+    `capture-pane` inserts a newline where the pane wraps at `PANE_WIDTH`, and the wrap can fall between ANY two characters of the echoed suffix (or just before it); the suffix is far shorter than the pane width, so at most one wrap newline can land inside it. The wrapped pattern is the alternation of the suffix with a single newline at each possible split point, built once per channel prefix. With a `channel_prefix` (`wait_channel_prefix`) the channel part matches our prefix plus the send counter; without one it falls back to the generic `done-` form.
+    """
+    if channel_prefix is None:
+        literal = "; tmux wait -S done-"
+        tail, broken_tail = r"\S+", r"\S*\n\S+"
+    else:
+        literal = f"; tmux wait -S {channel_prefix}"
+        tail, broken_tail = r"\d+", r"\d*\n\d+"
+    plain = re.compile(re.escape(literal) + tail)
+    alternatives = [
+        re.escape(literal[:split]) + "\n" + re.escape(literal[split:]) + tail
+        for split in range(len(literal))
+    ]
+    alternatives.append(re.escape(literal) + broken_tail)
+    return plain, re.compile("|".join(alternatives))
 
 
-def scrub_harness_echo(text: str) -> str:
+def scrub_harness_echo(text: str, channel_prefix: str | None = None) -> str:
     """Remove the blocking signal's pane echo from model-facing output.
 
-    A blocking send appends `; tmux wait -S <channel>` to the command line, and the pane echoes it back; the model should read its own command, not the harness suffix. Casts keep the raw pane: only tool results are scrubbed.
+    A blocking send appends `; tmux wait -S <channel>` to the command line, and the pane echoes it back; the model should read its own command, not the harness suffix. The pane wraps at `PANE_WIDTH`, so the echoed suffix can carry one capture newline anywhere inside it; a wrapped match is removed only when its interior newline sits exactly at the wrap column, so agent-authored text that merely resembles the suffix mid-line survives. The tool threads `channel_prefix` (the session life's `wait_channel_prefix`), anchoring the match to our own channel names. Casts keep the raw pane: only tool results are scrubbed.
     """
-    return _WAIT_ECHO.sub("", text)
+    plain, wrapped = _wait_echo_patterns(channel_prefix)
+
+    def scrub_wrapped(match: re.Match[str]) -> str:
+        newline = match.string.index("\n", match.start(), match.end())
+        column = newline - (match.string.rfind("\n", 0, newline) + 1)
+        return "" if column == PANE_WIDTH else match.group(0)
+
+    return plain.sub("", wrapped.sub(scrub_wrapped, text))
 
 
 def label_output(

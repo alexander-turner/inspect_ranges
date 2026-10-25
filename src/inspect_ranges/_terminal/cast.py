@@ -61,14 +61,19 @@ def cast_store_cap_bytes() -> int:
 def clip_cast(cast: str, cap_bytes: int) -> str:
     """Clip an asciicast document to roughly `cap_bytes`, keeping the header and the tail of the event stream (the end of a session is what gets replayed), with a marker event recording the cut.
 
-    The result stays a valid cast: whole event lines only, the marker inserted at time zero so ordering holds, and the full document remains in the evidence record. Pure.
+    The result stays a valid cast: whole event lines only, the marker inserted at time zero so ordering holds. Pure.
     """
     encoded = cast.encode(errors="replace")
     if len(encoded) <= cap_bytes:
         return cast
     header, _, events = cast.partition("\n")
     marker = json.dumps(
-        [0.0, "m", "clipped to the tail; the full cast is in the evidence record"]
+        [
+            0.0,
+            "m",
+            "clipped to the tail under the store cap; when evidence is enabled, "
+            "the evidence record carries the session's full raw stream",
+        ]
     )
     budget = cap_bytes - len(header.encode()) - len(marker.encode()) - 2
     tail = events.encode(errors="replace")[-max(budget, 0) :].decode(errors="replace")

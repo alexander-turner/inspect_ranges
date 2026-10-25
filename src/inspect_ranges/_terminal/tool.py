@@ -1,6 +1,6 @@
 """`terminal(action, ...)`: named tmux sessions on the foothold guest.
 
-One action-dispatch tool (`open`, `send`, `read`, `close`) over the mechanics in `session.py`. The model receives plain delta strings; the transcript viewer renders each call against the screen snapshot the previous execution wrote to the store, so a call's view shows the terminal as it stood when the model chose its keystrokes (`terminal-tool-v1.md`, Transcript views). The tool declares `parallel=False`: sessions are stateful and the view's offset-by-one semantics require serialized execution.
+One action-dispatch tool (`open`, `send`, `read`, `close`) over the mechanics in `session.py`. The model receives plain delta strings; the transcript viewer renders each call compactly as a title plus the fenced keystrokes (`terminal-tool-v1.md`, Transcript views). The tool declares `parallel=False`: sessions are stateful, so execution must serialize.
 
 Blocking sends append a shell completion signal, so they are refused unless the pane's foreground command is a shell: inside a caught reverse shell or msfconsole the appended text would execute on the target. Every non-happy path returns a string to the agent, never raises.
 """
@@ -19,6 +19,7 @@ from inspect_ai.util._tool_state import tool_state_instance
 from .capture import discard_sample_captures, start_capture, stop_capture
 from .session import (
     SessionState,
+    blocking_send_refusal,
     capture_pane_command,
     clip_output,
     find_new_content,
@@ -34,6 +35,7 @@ from .session import (
     send_keys_commands,
     start_session_command,
     valid_session_name,
+    wait_channel_prefix,
     wait_done_command,
 )
 
@@ -122,16 +124,19 @@ def _open_sessions(states: dict[str, SessionState]) -> str:
 async def _read_result(session: str, state: SessionState) -> str:
     """Capture, compute the delta, and clip; the visible screen is fetched only for the fallback."""
     first_read = state.previous_buffer is None
+    channel_prefix = wait_channel_prefix(session, state.token)
     entire = await _exec(capture_pane_command(session, entire=True))
     current = entire.stdout if entire.success else ""
     delta = find_new_content(state.previous_buffer, current)
     state.previous_buffer = current
     if delta is not None and delta.strip():
-        return clip_output(scrub_harness_echo(label_output(delta, "")))
+        return clip_output(scrub_harness_echo(label_output(delta, ""), channel_prefix))
     visible = await _exec(capture_pane_command(session))
     screen = visible.stdout if visible.success else current[-3000:]
     return clip_output(
-        scrub_harness_echo(label_output(delta, screen, first_read=first_read))
+        scrub_harness_echo(
+            label_output(delta, screen, first_read=first_read), channel_prefix
+        )
     )
 
 
@@ -249,6 +254,14 @@ def terminal(instance: str | None = None) -> Tool:
                     "signal could be typed into a program an earlier line started. "
                     "Send one command per blocking send, or use duration polling."
                 )
+            if block:
+                # a line the completion-signal splice would break (trailing `&`,
+                # `&&`/`||`/`|`, an unquoted comment, an unclosed quote) stalls
+                # the send to its full timeout with a false "may still be
+                # running"; refuse it with the remedy named (pre-ship P1-6)
+                refusal = blocking_send_refusal(keystrokes)
+                if refusal is not None:
+                    return refusal
             # the token keeps the channel unique across lives of the name: tmux
             # remembers signals server-wide, and the counter restarts at zero
             nonce = f"{state.token}-{state.sends}"

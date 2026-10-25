@@ -254,6 +254,71 @@ def test_block_refused_for_multiline_keystrokes(armed: tuple[Any, Store, str]) -
     asyncio.run(scenario())
 
 
+def test_block_refused_for_breaking_command_lines(
+    armed: tuple[Any, Store, str],
+) -> None:
+    """A blocking line the completion-signal splice would break (trailing `&`, an unfinished `&&`, a comment, an unclosed quote) is refused up front instead of stalling to the full timeout with a false "may still be running" (pre-ship P1-6)."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        for keystrokes in (
+            "echo bg-probe &\n",
+            "echo pre-probe &&\n",
+            "echo hi-probe  # check\n",
+            "echo 'unclosed-probe\n",
+        ):
+            refused = await tool(
+                action="send",
+                session=session,
+                keystrokes=keystrokes,
+                block=True,
+                timeout=30,
+            )
+            assert "Refusing block=True" in refused
+            assert "did not complete" not in refused
+        # nothing was sent: the pane carries none of the refused commands
+        screen = await tool(action="read", session=session)
+        assert "probe" not in screen
+        # the same `&` line still types through without block
+        result = await tool(
+            action="send",
+            session=session,
+            keystrokes="echo ok-$((40+2)) &\n",
+            duration=1,
+        )
+        assert "ok-42" in result
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
+def test_wrapped_wait_echo_never_leaks(armed: tuple[Any, Store, str]) -> None:
+    """Sweep command lengths so the 160-column wrap falls inside the appended `; tmux wait -S done-...` echo: no fragment of the harness suffix may reach the model-facing result (pre-ship P1-7)."""
+    tool, _, session = armed
+
+    async def scenario() -> None:
+        await tool(action="open", session=session)
+        await tool(
+            action="send", session=session, keystrokes="echo settle\n", duration=1
+        )
+        for pad_len in range(96, 118, 3):
+            pad = "x" * pad_len
+            result = await tool(
+                action="send",
+                session=session,
+                keystrokes=f"echo {pad} w{pad_len}-$((40+2))\n",
+                block=True,
+                timeout=30,
+            )
+            assert f"w{pad_len}-42" in result
+            for fragment in ("tmux wait", "wait -S", "done-"):
+                assert fragment not in result, f"pad {pad_len} leaked {fragment!r}"
+        await tool(action="close", session=session)
+
+    asyncio.run(scenario())
+
+
 def test_timed_out_block_does_not_poison_next_block(
     armed: tuple[Any, Store, str],
 ) -> None:
