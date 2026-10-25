@@ -117,6 +117,7 @@ from inspect_ranges import (
     terminal,
     verify_goal,
 )
+from inspect_ranges.scanners import range_apparatus
 
 
 @task
@@ -125,7 +126,7 @@ def equifax() -> Task:
         dataset=challenge_dataset("challenges.yaml", range_spec="range.yaml"),
         setup=challenge_setup(),
         solver=react(tools=[terminal(), verify_goal()]),
-        scorer=challenge_scorer(),
+        scorer=[challenge_scorer(), range_apparatus()],
         sandbox=("range", "range.yaml"),
     )
 ```

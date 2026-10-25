@@ -104,6 +104,7 @@ from inspect_ranges import (
     terminal,
     verify_goal,
 )
+from inspect_ranges.scanners import range_apparatus
 
 
 @task
@@ -114,7 +115,7 @@ def splunk_detection() -> Task:
             telemetry_collectors=load_collectors(Path("collectors.yaml"))
         ),
         solver=react(tools=[terminal(), verify_goal()]),
-        scorer=challenge_scorer(),
+        scorer=[challenge_scorer(), range_apparatus()],
         sandbox=("range", "range.yaml"),
     )
 ```

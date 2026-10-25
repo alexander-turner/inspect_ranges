@@ -26,7 +26,7 @@ Evidence is on by default inside an eval: when a sample runs under Inspect, the 
 | `draws` | The per-sample variable draw seed and values (non-secret by construction), so recorded samples re-derive post-hoc. |
 | `plants` | What challenge setup planted where (tokens, flags), timestamped: the scorer's proof-contract record. |
 | `probe/<goal id>` | The nonce-bound active prober's transcript for goals that use it. |
-| `terminal/<session>` | The agent's terminal sessions when the task wires the [terminal](challenges.qmd#terminal-sessions) tool: the raw pane output, host-timestamped; at close (or sample finalize for a session still open) an asciicast assembled from it (with per-call markers) lands beside the evidence as `terminal-<session>.cast`, with numbered suffixes when a reopened name records more than one life. |
+| `terminal/<session>` | The agent's terminal sessions when the task wires the [terminal](challenges.qmd#terminal-sessions) tool: the pane output re-encoded as UTF-8 (non-UTF-8 bytes read as U+FFFD), host-timestamped; at close (or sample finalize for a session still open) an asciicast assembled from it (with per-call markers) lands beside a local evidence location as `terminal-<session>.cast`, with numbered suffixes when a reopened name records more than one life (a remote location carries the stream but gets no cast file). |
 | `heartbeat`, `clock` | Capture liveness and watermarks for our own collectors, and wall-clock anomaly records. |
 
 ## Storage
@@ -94,7 +94,7 @@ Local evidence (a local log dir, no override) is fine for development and does n
 | `INSPECT_RANGES_EVIDENCE_MAX_MB` | 4096 | Per-writer volume cap (a sample has at most two writers: `driver` and `host`). Breach yields in-chain `evidence-cap` gaps and an `incomplete` seal, never a failed sample. |
 | `INSPECT_RANGES_EXEC_WITNESS` | unset (on) | Set `0` to disable the exec witness: the per-guest poller is never constructed, so the in-guest subscriber never arms (lazy-arm makes this the complete kill switch, no image rebuild involved). |
 | `INSPECT_RANGES_CAST_STORE_CAP_MB` | 50 | Per-session cap on the asciicast copy written into the sample store (and so into the eval log) for viewer playback; an over-cap cast keeps its tail with a marker noting the cut, and the evidence copy stays complete. |
-| `CAPTURE_CHUNK_MB`, `CAPTURE_CAP_MB`, `CAPTURE_MAX_RESTARTS`, `CAPTURE_POLL_S` | 10 / 2048 / 5 / 0.5 | Capture sidecar tuning, read from the environment at `up`: rotation chunk size, per-segment disk cap, tcpdump restart budget, supervisor poll cadence. |
+| `CAPTURE_CHUNK_MB`, `CAPTURE_CAP_MB`, `CAPTURE_MAX_RESTARTS` | 10 / 2048 / 5 | Capture sidecar tuning, read from the environment at `up`: rotation chunk size, per-segment disk cap, tcpdump restart budget. |
 
 The finalize flush budget (30 seconds) and the manifest batching cadence (15 seconds / 256 records) are constants: teardown is never hostage to a slow uplink, and what cannot flush inside the budget is recorded in the seal rather than silently dropped.
 
