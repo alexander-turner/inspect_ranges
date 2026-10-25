@@ -234,6 +234,14 @@ Any Inspect agent can be the attacker. The agent works from the attack box, a re
 
 The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold: listeners that hold caught reverse shells, long-running scans in parallel sessions, msfconsole kept open across calls. It is the recommended default for react-style range tasks (the shipped examples wire it as shown above), and each session records to evidence with an asciicast for playback. The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes; the one caveat is that tool surface changes measured difficulty, so compare like with like ([Challenges](challenges.qmd#terminal-sessions)).
 
+Inspect View provides native support for replaying terminal sessions on the `Terminal` tab of the sample:
+
+```{.bash filename="Terminal"}
+inspect view
+```
+
+![](images/view-terminal-tab.png){.border}
+
 ### SWE Agents
 
 Coding-agent scaffolds like Claude Code and Codex run as the attacker via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/): the scaffold executes inside the attack box, its model calls proxy back to Inspect, and `bridged_tools` exposes `verify_goal()` to it over MCP. The scaffold's own completion ends the run:
