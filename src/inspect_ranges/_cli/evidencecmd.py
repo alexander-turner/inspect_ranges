@@ -80,7 +80,7 @@ def evidence() -> None:
     "expect_seal",
     multiple=True,
     metavar="WRITER=DIGEST",
-    help="Externally-held seal digest to bind against (repeatable, one per writer). Without it, verification attests internal consistency only: the chain anchors everything at or below the seal, but a forged or absent seal, or a record transplanted from another location, is not detectable from the location alone.",
+    help="Externally-held seal digest to bind against (repeatable, one per writer). DIGEST is the bare hex from the sample-store binding or its INFO log line; a leading `sha256:` prefix is accepted and stripped. With any binding supplied, a writer at the location that no --expect-seal names is itself a break (the binding records the complete writer set, so additions are detected). Without it, verification attests internal consistency only: the chain anchors everything at or below the seal, but a forged or absent seal, an added writer, or a record transplanted from another location, is not detectable from the location alone.",
 )
 def verify(
     location: str, shallow: bool, as_json: bool, expect_seal: tuple[str, ...]
@@ -92,6 +92,8 @@ def verify(
     expected: dict[str, str] = {}
     for item in expect_seal:
         writer_name, separator, digest = item.partition("=")
+        # bindings store bare hex; accept the conventional sha256: spelling too
+        digest = digest.removeprefix("sha256:")
         if not separator or not writer_name or not digest:
             raise click.ClickException(
                 f"--expect-seal takes WRITER=DIGEST, got {item!r}"

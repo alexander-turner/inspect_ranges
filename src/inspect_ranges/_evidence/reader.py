@@ -2,7 +2,7 @@
 
 The reader is the only component that reads evidence; the writer never does (put-only credentials). `verify_location` replays every writer's manifest from genesis, recomputing the chain record by record and checking every referenced chunk, and reports the FIRST break with its neighborhood: the output is designed for incident use, so a sample's evidence trouble is diagnosable from the manifest alone, without host access.
 
-Scope of the guarantee (chunk-1 verification, 2026-10-15): the chain anchors everything at or below the seal, so any in-chain rewrite, reorder, deletion, or hole is a chain, sequence, digest, or seal mismatch here, detectable from the location alone. The seal tier itself (its fields, its presence, the record's location, the writer set) is unanchored until someone holds the seal digest externally: that holder is the sample-store binding written at finalize, and `verify_location(expected_seals=...)` (CLI `--expect-seal writer=digest`) is how a binding-holder supplies it, which upgrades verification from internal consistency to the full detection claim. Without a binding, a re-put seal with forged fields, a deleted seal plus tail truncation, or a whole-record transplant to another location all verify as internally consistent. An UNSEALED record is extendable as well as truncatable (no seal binds the part count or chain heads yet); verify reports such locations as unsealed rather than pretending, and the lifecycle makes unsealed-at-rest an anomaly (finalize and the reaper both seal).
+Scope of the guarantee (chunk-1 verification, 2026-10-15): the chain anchors everything at or below the seal, so any in-chain rewrite, reorder, deletion, or hole is a chain, sequence, digest, or seal mismatch here, detectable from the location alone. The seal tier itself (its fields, its presence, the record's location, the writer set) is unanchored until someone holds the seal digest externally: that holder is the sample-store binding written at finalize, and `verify_location(expected_seals=...)` (CLI `--expect-seal writer=digest`) is how a binding-holder supplies it, which upgrades verification from internal consistency to the full detection claim, writer set included: the binding records a seal digest for every writer the sample's session sealed (complete by construction; see `write_binding` in `_provider/evidence.py`), so a writer present at the location but absent from a supplied binding is a `writer-unbound` break rather than an internally-consistent addition. Without a binding, a re-put seal with forged fields, a deleted seal plus tail truncation, or a whole-record transplant to another location all verify as internally consistent. An UNSEALED record is extendable as well as truncatable (no seal binds the part count or chain heads yet); verify reports such locations as unsealed rather than pretending, and the lifecycle makes unsealed-at-rest an anomaly (finalize and the reaper both seal).
 """
 
 import hashlib
@@ -80,6 +80,7 @@ class Break(EvidenceModel):
         "seal-writer-mismatch",
         "seal-digest-mismatch",
         "seal-missing",
+        "writer-unbound",
     ]
     key: str
     """The object key where the break was observed."""
@@ -159,7 +160,7 @@ async def verify_location(
 ) -> VerifyReport:
     """Replay every writer's chain at a location and report the first break per writer.
 
-    With `deep` (the default) every referenced chunk is fetched and its digest and size checked; without it only manifests, chains, and seals are replayed. `expected_seals` maps writer names to externally-held seal digests (the sample-store binding): a supplied digest must match the computed one, a supplied writer must be present and sealed, and the writer's `ok` then carries the full detection claim instead of internal consistency only.
+    With `deep` (the default) every referenced chunk is fetched and its digest and size checked; without it only manifests, chains, and seals are replayed. `expected_seals` maps writer names to externally-held seal digests (the sample-store binding): a supplied digest must match the computed one, a supplied writer must be present and sealed, a writer present at the location but absent from a non-empty binding is a `writer-unbound` break (the binding names the complete writer set, so additions are detected, not just mutations), and the writer's `ok` then carries the full detection claim instead of internal consistency only.
     """
     report = VerifyReport(location=location)
     referenced: set[str] = set()
@@ -175,6 +176,7 @@ async def verify_location(
             deep=deep,
             referenced=referenced,
             expected_digest=expected.get(writer),
+            binding_supplied=bool(expected),
         )
     for writer in sorted(set(expected) - set(writers)):
         report.writers[writer] = WriterReport(
@@ -198,6 +200,7 @@ async def _verify_writer(
     deep: bool,
     referenced: set[str],
     expected_digest: str | None = None,
+    binding_supplied: bool = False,
 ) -> WriterReport:
     result = WriterReport(writer=writer)
     keys = await store.list(f"manifests/{writer}")
@@ -256,6 +259,25 @@ async def _verify_writer(
                 ),
             )
             return result
+
+    if binding_supplied and expected_digest is None:
+        # the finalize-time binding records a seal digest for every writer the
+        # sample's session sealed (write_binding in _provider/evidence.py), so
+        # a writer at the location that the binding does not name is an
+        # addition, however internally consistent: a put-only credential can
+        # still create new keys.
+        result.first_break = Break(
+            kind="writer-unbound",
+            key=seal_key(writer),
+            detail=(
+                "the supplied binding does not name this writer: the "
+                "finalize-time binding records a seal digest for every writer "
+                "the sample's session sealed (the complete writer set), so a "
+                "writer at the location with no binding entry is an addition "
+                "the binding holder never made, however internally consistent"
+            ),
+        )
+        return result
 
     for index, key in enumerate(part_keys):
         expected = part_key(writer, index)

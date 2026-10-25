@@ -45,7 +45,7 @@ At finalize, the sample's Inspect store receives the binding under `inspect_rang
 
 Collectors in the range container are trusted **while the instance is uncompromised**, and their output is preserved off-instance as it streams. The record itself is tamper-evident by format: write-once chunks, a per-stream hash chain over every record's full metadata, explicit in-chain gap records, and a terminal seal per writer binding chain heads and counts.
 
-The format's own guarantee has an exact scope. Everything **at or below the seal** is tamper-evident from the location alone: any rewrite, reorder, deletion, or hole breaks the chain and `evidence verify` names the first break. The **seal tier itself** (its fields, its presence, the record's location) is anchored only by the seal digest held outside the record, which is exactly what the sample-store binding provides: run `evidence verify --expect-seal` with the binding's digests and the full claim holds. Without a binding, verify attests internal consistency only, and an **unsealed** record is extendable as well as truncatable. The lifecycle makes unsealed-at-rest an anomaly: finalize seals (`complete`, or `incomplete` when something could not flush inside the budget), and the independent reaper process ([Operations](cli.qmd#reaper)) seals abandoned records (`reaped`), so even a `kill -9` of the driver leaves a verifiable record of everything streamed before the kill.
+The format's own guarantee has an exact scope. Everything **at or below the seal** is tamper-evident from the location alone: any rewrite, reorder, deletion, or hole breaks the chain and `evidence verify` names the first break. The **seal tier itself** (its fields, its presence, the record's location, the writer set) is anchored only by the seal digest held outside the record, which is exactly what the sample-store binding provides: run `evidence verify --expect-seal` with the binding's digests and the full claim holds. A writer at the location that the binding does not name is itself a break: additions are detected, not just mutations. Without a binding, verify attests internal consistency only, and an **unsealed** record is extendable as well as truncatable. The lifecycle makes unsealed-at-rest an anomaly: finalize seals (`complete`, or `incomplete` when something could not flush inside the budget), and the independent reaper process ([Operations](cli.qmd#reaper)) seals abandoned records (`reaped`), so even a `kill -9` of the driver leaves a verifiable record of everything streamed before the kill.
 
 Two bounded windows are part of the design and visible in the record rather than silent:
 
@@ -70,11 +70,12 @@ The guest daemon can witness every `execve` on a Linux guest (kernel process con
 # internal consistency: replay every chain, report coverage and gaps
 inspect-ranges evidence verify ./logs/mytask.evidence/sample1_1_1
 
-# the full guarantee: anchor each writer's seal to the digest from the
-# eval log's binding (store key inspect_ranges:evidence)
+# the full guarantee: anchor each writer's seal to its digest from
+# the eval log's binding (store key inspect_ranges:evidence); the
+# digests are bare hex, exactly as the binding and INFO line show
 inspect-ranges evidence verify \
   s3://bucket/logs/run.evidence/sample1_1_1 \
-  --expect-seal driver=sha256:... --expect-seal host=sha256:...
+  --expect-seal driver=4f8b21... --expect-seal host=9d03ce...
 ```
 
 Output names the first chain break with its neighborhood, per-stream coverage spans, the gap inventory, and each seal's claimed lease and sample ids; `--json` emits the report for tooling. Exit status is 0 only when every chain replays and every supplied binding matches. Timestamps come from both clocks: capture records carry the range host's wall and monotonic clocks, driver records carry the driver's, and paired records around stage reports bound the offset between them, so cross-clock comparisons carry a tolerance instead of a hidden assumption.

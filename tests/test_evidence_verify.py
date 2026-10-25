@@ -410,6 +410,40 @@ def test_cross_location_transplant_needs_the_binding(tmp_path: Path) -> None:
     assert host.first_break.kind == "seal-digest-mismatch"
 
 
+def _build_forged_writer(root: Path, writer_name: str) -> None:
+    """An internally-consistent extra writer, as a compromised capture host could fabricate (a put-only credential refuses only rewrites, never new keys)."""
+
+    async def build() -> None:
+        clock = FakeClock()
+        writer = EvidenceWriter(
+            LocalDirSink(root),
+            part_interval_s=0,
+            writer=writer_name,
+            lease_id="lease-9",
+            clock=clock,
+            retry_wait_s=0,
+        )
+        await writer.append("pcap/dmz", b"forged-frame", span=_span(clock))
+        await writer.seal()
+
+    asyncio.run(build())
+
+
+def test_forged_added_writer_needs_the_binding(tmp_path: Path) -> None:
+    """A fabricated extra writer is clean without the binding; with it, the addition is the break."""
+    digest = _build_sealed(tmp_path)
+    _build_forged_writer(tmp_path, "intruder")
+    # without the binding: internal consistency only, the addition reads clean
+    unbound = _verify(tmp_path)
+    assert unbound.ok and unbound.writers["intruder"].ok
+    # with the genuine binding: the unbound writer is the break, host stays ok
+    bound = _verify_bound(tmp_path, {"host": digest})
+    assert not bound.ok and bound.writers["host"].ok
+    broke = bound.writers["intruder"].first_break
+    assert broke is not None and broke.kind == "writer-unbound"
+    assert "addition" in broke.detail
+
+
 def test_expected_seal_for_an_absent_writer_breaks(tmp_path: Path) -> None:
     digest = _build_sealed(tmp_path)
     report = _verify_bound(tmp_path, {"host": digest, "driver": "f" * 64})
@@ -436,3 +470,34 @@ def test_cli_expect_seal(tmp_path: Path) -> None:
         evidence, ["verify", str(tmp_path), "--expect-seal", "nodigest"]
     )
     assert malformed.exit_code != 0 and "WRITER=DIGEST" in malformed.output
+
+
+def test_cli_expect_seal_sha256_prefix(tmp_path: Path) -> None:
+    """Bindings store bare hex; the conventional sha256: spelling is accepted too."""
+    digest = _build_sealed(tmp_path)
+    runner = CliRunner()
+    ok = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", f"host=sha256:{digest}"]
+    )
+    assert ok.exit_code == 0 and "binding CHECKED" in ok.output
+    empty = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", "host=sha256:"]
+    )
+    assert empty.exit_code != 0 and "WRITER=DIGEST" in empty.output
+
+
+def test_cli_expect_seal_names_unbound_writer(tmp_path: Path) -> None:
+    """The writer-unbound break reaches both the human output and --json."""
+    digest = _build_sealed(tmp_path)
+    _build_forged_writer(tmp_path, "intruder")
+    runner = CliRunner()
+    broken = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", f"host={digest}"]
+    )
+    assert broken.exit_code == 1 and "BREAK [writer-unbound]" in broken.output
+    as_json = runner.invoke(
+        evidence, ["verify", str(tmp_path), "--expect-seal", f"host={digest}", "--json"]
+    )
+    assert as_json.exit_code == 1
+    parsed: dict[str, Any] = json.loads(as_json.output)
+    assert parsed["writers"]["intruder"]["first_break"]["kind"] == "writer-unbound"

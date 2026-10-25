@@ -446,9 +446,9 @@ def test_host_seal_miss_reap_seals_before_the_lease_release(tmp_path: Path) -> N
             raise AssertionError("no lease exists for the reaper to act on")
 
         assert sweep(state, store=store, down_fn=never_down) == []
-        report = await verify_location(
-            LocalDirStore(tmp_path), expected_seals={"host": seals["host"]}
-        )
+        # the full binding (both writers): a partial one would flag the
+        # legitimate driver writer as writer-unbound, by design
+        report = await verify_location(LocalDirStore(tmp_path), expected_seals=seals)
         host = report.writers["host"]
         assert report.ok and host.sealed and host.binding_checked
         assert host.seal_status == "reaped", "the driver's reap-seal is honest"
