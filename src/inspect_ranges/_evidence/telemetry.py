@@ -42,6 +42,9 @@ POLL_COMMAND_MS = 10_000
 """In-guest budget for one poll command (`Budget.command_ms`)."""
 
 POLL_UNTIMED_BOUND_MS = 30_000
+
+REBOOTSTRAP_AFTER_FAILURES = 5
+"""Consecutive command-poll failures on one cursor before the collector declares the stuck window lost and re-bootstraps at now. Transient failures recover losslessly on the same cursor well inside the streak; a window whose own content fails the poll (the exporter gap-marker refusal) can never succeed, so without this bound one poisoned window wedges the collector for the rest of the sample. The streak-opening `poll-failed` gap owns the lost window, and the re-bootstrap is visible on the meta stream (`rebootstrap: true`), so coverage stays decidable from the record alone."""
 """Outer per-poll budget across attempts (`Budget.untimed_bound_ms`)."""
 
 DEFAULT_META_FLUSH_S = 15.0
@@ -137,6 +140,7 @@ class _CollectorState:
         self.shipped = hashlib.sha256()  # digest of every shipped file byte
         self.replay_next = False  # the next bootstrap re-ships a seen window
         self.failing = False  # a poll-failed gap has been recorded for this streak
+        self.fail_streak = 0  # consecutive failures; a full streak re-bootstraps
         self.capped = False  # a poll-truncated gap has been recorded for this stall
         self.polls = 0
         self.errors = 0
@@ -378,6 +382,7 @@ class TelemetryPoller:
                 await self._poll_file(spec, spec.source, state, meta)
         except Exception as error:  # channel/transport failure: observation hole
             state.errors += 1
+            state.fail_streak += 1
             meta["outcome"] = "error"
             meta["error"] = f"{type(error).__name__}: {error}"[:300]
             if not state.failing:
@@ -392,7 +397,32 @@ class TelemetryPoller:
                     spec.guest,
                     error,
                 )
+            # a cursor-pinned command source can wedge: a window whose content
+            # itself fails the poll (the splunk wrapper's gap-marker refusal,
+            # 2026-10-25 pre-ship fleet: 273 consecutive failures on one
+            # cursor) re-runs forever because the cursor advances only on
+            # success. After a full streak the stuck window is declared lost
+            # (the streak-opening gap above owns it) and the collector
+            # re-bootstraps at now, so one poisoned window costs a bounded
+            # hole, never the sample's whole record. Transient failures keep
+            # their lossless same-cursor retries (the streak bound is why).
+            if (
+                isinstance(spec.source, CommandSource)
+                and state.cursor is not None
+                and state.fail_streak >= REBOOTSTRAP_AFTER_FAILURES
+            ):
+                state.cursor = None
+                state.replay_next = True
+                meta["rebootstrap"] = True
+                logger.info(
+                    "telemetry poll re-bootstrapping after %d failures on one "
+                    "cursor: collector=%s (the stuck window is recorded as the "
+                    "streak's gap)",
+                    state.fail_streak,
+                    name,
+                )
         else:
+            state.fail_streak = 0
             if state.failing:
                 state.failing = False
                 recovered = True

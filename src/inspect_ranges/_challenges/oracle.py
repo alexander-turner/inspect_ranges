@@ -15,6 +15,7 @@ from inspect_ai.util import sandbox
 from .._channel.channel import ExecOutcome, MessageChannel, request_id
 from .._channel.protocol import DEFAULT_BULK_CAP, Budget, ExecRequest
 from .._compiler.plan import ResolvedPlan
+from .._evidence.manifest import GapRecord
 from .._evidence.reader import EvidenceStore, manifest_records, stream_chunks
 from .._evidence.s3 import store_for_location
 from .._provider.provider import sample_handle_for
@@ -401,13 +402,13 @@ class RangeOracle:
 
     async def telemetry_export(
         self, collector: str
-    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]":
-        """The collector's export for scoring: meta records, data chunks with spans (`None` spans mark the delivered-but-uncommitted tail), and the gap flag.
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], list[tuple[float, float]]]":
+        """The collector's export for scoring: meta records, data chunks with spans (`None` spans mark the delivered-but-uncommitted tail), and the wall-clock spans of every in-chain gap on either stream (empty means no gaps; the consumer window-scopes them, 2026-10-25 amendment).
 
         One manifest fetch serves both streams (the detection check runs per goal, possibly on a poller cadence, against a possibly remote store).
         """
         return cast(
-            "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]",
+            "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], list[tuple[float, float]]]",
             await self._memoized(
                 ("telemetry-export", collector),
                 lambda: self._telemetry_export_fetch(collector),
@@ -416,16 +417,22 @@ class RangeOracle:
 
     async def _telemetry_export_fetch(
         self, collector: str
-    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], bool]":
+    ) -> "tuple[list[SpannedRecord], list[tuple[bytes, float | None, float | None]], list[tuple[float, float]]]":
         store = self._evidence_store()
         manifest = await manifest_records(store, "driver")
-        meta, meta_gapped = await stream_json_records(
+        meta, _ = await stream_json_records(
             store, "driver", f"telemetry-meta/{collector}", manifest=manifest
         )
-        data, data_gapped = await stream_chunks_with_spans(
+        data, _ = await stream_chunks_with_spans(
             store, "driver", f"telemetry/{collector}", manifest=manifest
         )
-        return meta, data, meta_gapped or data_gapped
+        streams = {f"telemetry-meta/{collector}", f"telemetry/{collector}"}
+        gaps = sorted(
+            (entry.span.start.wall, entry.span.end.wall)
+            for entry in manifest
+            if isinstance(entry, GapRecord) and entry.stream in streams
+        )
+        return meta, data, gaps
 
     async def exec_events(
         self, guest: str

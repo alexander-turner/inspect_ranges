@@ -188,6 +188,7 @@ $bridgeDir = 'C:\ProgramData\range-telemetry'
 New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
 Set-Content -Path "$bridgeDir\export-events.ps1" -Value @'
 $state = 'C:\ProgramData\range-telemetry\state.json'
+$bootstate = 'C:\ProgramData\range-telemetry\boot.txt'
 $out = 'C:\ProgramData\range-telemetry\events.log'
 $channels = @('Microsoft-Windows-Sysmon/Operational', 'Security', 'Microsoft-Windows-PowerShell/Operational')
 while ($true) {
@@ -195,6 +196,13 @@ while ($true) {
   if (Test-Path $state) {
     (Get-Content -Raw $state | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $marks[$_.Name] = [long]$_.Value }
   }
+  # the OS boot session distinguishes the two regression causes: a captured
+  # image's first boot starts new RecordId generations on every channel (a
+  # bootstrap, markerless by design, like the wrapper's bootstrap-at-now),
+  # while a regression INSIDE a boot session has no innocent cause (clearing
+  # a log is the canonical one) and is always a marker, head intact or not
+  $bootNow = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+  $freshBoot = (-not (Test-Path $bootstate)) -or ((Get-Content -Raw $bootstate).Trim() -ne $bootNow)
   foreach ($channel in $channels) {
     $last = if ($marks.ContainsKey($channel)) { $marks[$channel] } else { 0 }
     $all = @(Get-WinEvent -LogName $channel -MaxEvents 4000 -ErrorAction SilentlyContinue |
@@ -205,11 +213,17 @@ while ($true) {
     # with the window still reading complete (measured: an eval boot's whole
     # technique chain, EventID 10 included, vanished under the stale
     # watermark). A newest record BELOW the watermark proves the restart;
-    # re-bootstrap from the new generation (lossless while the generation
-    # fits the read bound; a generation that already lost its head gets the
-    # adjacency marker below). Undetected only if the new generation outruns
-    # the old watermark before the first cycle, implausible on the 8 s
-    # cadence from boot against realize-scale watermarks.
+    # re-bootstrap from the new generation. On a FRESH BOOT SESSION this is
+    # a bootstrap, markerless even when the generation already lost its head
+    # to the boot burst: the lost records are boot-era, before any scenario
+    # activity a detection window could need, and the marker previously fired
+    # here wedged the sample's whole export (the marker line indexes once,
+    # the wrapper fails every window carrying it, and the poll cursor only
+    # advances on success — 2026-10-25 pre-ship fleet, execute-and-confirm
+    # indeterminate at 273 consecutive failed polls). A regression INSIDE a
+    # boot session keeps the marker unconditionally (head intact or not):
+    # RecordIds never regress mid-session innocently, so that shape is
+    # tamper-grade (clearing a log), strictly louder than before.
     $regressed = $false
     if ($last -gt 0 -and $all.Count -gt 0 -and $all[$all.Count - 1].RecordId -lt $last) {
       $last = 0
@@ -218,17 +232,24 @@ while ($true) {
     $events = @($all | Where-Object { $_.RecordId -gt $last })
     # overflow: RecordIds are contiguous per channel, so an oldest new record
     # that does not adjoin the watermark proves the read bound skipped the
-    # middle of a burst (or a restarted generation lost its head); the skip
-    # is recorded as an explicit marker the splunk-side wrapper fails loud
-    # on. A true bootstrap (no prior state) stays markerless by design,
+    # middle of a burst; the skip is recorded as an explicit marker the
+    # splunk-side wrapper fails loud on. A true bootstrap (no prior state,
+    # or the regression of a fresh boot session) stays markerless by design,
     # mirroring the wrapper's bootstrap-at-now. The token is assembled from
     # fragments: this script's own 4104 script-block record travels a
     # collected channel, and the assembled token must only ever ship as a
     # real marker.
-    if (($last -gt 0 -or $regressed) -and $events.Count -gt 0 -and $events[0].RecordId -gt ($last + 1)) {
+    $overflow = ($last -gt 0) -and $events.Count -gt 0 -and $events[0].RecordId -gt ($last + 1)
+    $tamper = $regressed -and -not $freshBoot
+    if ($overflow -or $tamper) {
       $marker = 'RANGE-TELEMETRY-' + 'GAP'
-      $dropped = $events[0].RecordId - $last - 1
-      Add-Content -Path $out -Value ("$((Get-Date).ToUniversalTime().ToString('o')) channel=$channel $marker exporter-overflow dropped=$dropped first_skipped=$($last + 1) last_skipped=$($events[0].RecordId - 1)")
+      if ($overflow) {
+        $dropped = $events[0].RecordId - $last - 1
+        $cause = "exporter-overflow dropped=$dropped first_skipped=$($last + 1) last_skipped=$($events[0].RecordId - 1)"
+      } else {
+        $cause = 'watermark-regression-in-session'
+      }
+      Add-Content -Path $out -Value ("$((Get-Date).ToUniversalTime().ToString('o')) channel=$channel $marker $cause")
     }
     foreach ($event in $events) {
       # flatten EVERY line-break class, bare CR included: `\r?\n` missed a
@@ -241,6 +262,7 @@ while ($true) {
     }
   }
   $marks | ConvertTo-Json | Set-Content -Path $state
+  Set-Content -Path $bootstate -Value $bootNow
   Start-Sleep -Seconds 8
 }
 '@

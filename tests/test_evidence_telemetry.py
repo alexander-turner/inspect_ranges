@@ -206,6 +206,47 @@ def test_command_rc_failure_is_one_gap_per_streak_and_recovers(
     asyncio.run(run())
 
 
+def test_full_failure_streak_rebootstraps_instead_of_wedging(tmp_path: Path) -> None:
+    """A window whose own content fails the poll (the exporter gap-marker refusal) would otherwise re-run on the same cursor forever; after `REBOOTSTRAP_AFTER_FAILURES` the collector declares the window lost (the streak's gap owns it) and re-bootstraps at now (2026-10-25 amendment)."""
+
+    async def run() -> None:
+        from inspect_ranges._evidence.telemetry import REBOOTSTRAP_AFTER_FAILURES
+
+        channel = FakeChannel()
+        script: list[ExecOutcome | Exception] = [exec_ok(b"evt-1\n-- cursor: c1\n")]
+        script += [exec_ok(b"poisoned window\n", rc=1)] * REBOOTSTRAP_AFTER_FAILURES
+        script += [
+            exec_ok(b"evt-2\n-- cursor: c2\n"),  # the bootstrap at now
+            exec_ok(b"evt-3\n-- cursor: c3\n"),
+        ]
+        channel.exec_script = script
+        poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
+        for _ in range(1 + REBOOTSTRAP_AFTER_FAILURES + 2):
+            await poller.poll_once("journal")
+        await writer.seal()
+
+        # one gap owns the lost window; the wedge never produces a second
+        assert await gap_causes(store, "telemetry/journal") == ["poll-failed"]
+        meta = await meta_records(store, "journal")
+        outcomes = [m["outcome"] for m in meta]
+        assert outcomes == ["ok"] + ["error"] * REBOOTSTRAP_AFTER_FAILURES + [
+            "ok",
+            "ok",
+        ]
+        assert meta[REBOOTSTRAP_AFTER_FAILURES].get("rebootstrap") is True
+        # the poll after the streak runs the BOOTSTRAP command (no cursor
+        # substitution), then cursor-mode resumes on the new watermark
+        bootstrap_call = channel.exec_calls[1 + REBOOTSTRAP_AFTER_FAILURES]
+        assert not any("c1" in arg for arg in bootstrap_call.cmd), (
+            "the re-bootstrap must abandon the poisoned cursor"
+        )
+        resumed_call = channel.exec_calls[1 + REBOOTSTRAP_AFTER_FAILURES + 1]
+        assert any("c2" in arg for arg in resumed_call.cmd)
+        assert (await verify_location(store)).ok
+
+    asyncio.run(run())
+
+
 def test_command_channel_exception_is_poll_failure_not_raise(tmp_path: Path) -> None:
     async def run() -> None:
         channel = FakeChannel()

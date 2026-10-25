@@ -19,7 +19,8 @@ from inspect_ranges._challenges.observedtypes import (
 )
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import DetectionGoal, EvadeGoal, SeverityFilter
-from inspect_ranges._evidence.manifest import ClockSpan, ClockStamp
+from inspect_ranges._evidence.manifest import ClockSpan, ClockStamp, GapRecord
+from inspect_ranges._evidence.reader import manifest_records
 from inspect_ranges._evidence.s3 import store_for_location
 from inspect_ranges._evidence.sink import EvidenceWriter, LocalDirSink
 
@@ -64,13 +65,20 @@ async def _write_tail_state(root: Path) -> None:
 async def _observations(root: Path) -> Observations:
     """The production readers plus the production assembly (never a transcript of either)."""
     store = store_for_location(str(root))
-    meta, meta_gapped = await stream_json_records(
-        store, "driver", "telemetry-meta/siem"
+    manifest = await manifest_records(store, "driver")
+    meta, _ = await stream_json_records(
+        store, "driver", "telemetry-meta/siem", manifest=manifest
     )
-    data, data_gapped = await stream_chunks_with_spans(
-        store, "driver", "telemetry/siem"
+    data, _ = await stream_chunks_with_spans(
+        store, "driver", "telemetry/siem", manifest=manifest
     )
-    return telemetry_observations_from(meta, data, meta_gapped or data_gapped)
+    gaps = sorted(
+        (entry.span.start.wall, entry.span.end.wall)
+        for entry in manifest
+        if isinstance(entry, GapRecord)
+        and entry.stream in {"telemetry-meta/siem", "telemetry/siem"}
+    )
+    return telemetry_observations_from(meta, data, gaps)
 
 
 def _severity() -> SeverityFilter:

@@ -202,7 +202,7 @@ class TestSensorTamper:
     ]
 
     def gapped(self, data: list[bytes]) -> Observations:
-        return telemetry_obs([meta_record(1.0)], data, gapped=True)
+        return telemetry_obs([meta_record(1.0)], data, gaps=[(0.9, 1.0)])
 
     def test_default_indeterminate_never_a_free_pass(self) -> None:
         result = EvadeType().compare(goal(), self.gapped(self.QUIET), EMPTY_STORE)

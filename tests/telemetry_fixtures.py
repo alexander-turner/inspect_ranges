@@ -24,10 +24,13 @@ def meta_record(wall: float, outcome: str = "ok", **extra: Any) -> dict[str, Any
 def telemetry_obs(
     meta: list[dict[str, Any]],
     data: list[bytes],
-    gapped: bool = False,
+    gaps: list[tuple[float, float]] | None = None,
     data_spans: list[list[float]] | None = None,
 ) -> Observations:
-    """Exported-telemetry observations for `compare`, assembled through the production function."""
+    """Exported-telemetry observations for `compare`, assembled through the production function.
+
+    `gaps` carries in-chain gap wall spans (the window-scoped completeness input, 2026-10-25 amendment); omit it for a clean record.
+    """
     spans = data_spans if data_spans is not None else [[0.0, 10.0]] * len(data)
     records = [
         SpannedRecord(
@@ -40,5 +43,5 @@ def telemetry_obs(
     return telemetry_observations_from(
         records,
         [(chunk, span[0], span[1]) for chunk, span in zip(data, spans, strict=True)],
-        gapped,
+        gaps or [],
     )
