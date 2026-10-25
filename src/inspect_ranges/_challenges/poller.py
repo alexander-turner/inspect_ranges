@@ -16,7 +16,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Any
 
-from .engine import Observations, goal_type, latch, latched_records
+from .engine import CANDIDATE_CAP, Observations, goal_type, latch, latched_records
 from .schema import AnswerGoal, Challenge, Goal
 from .submission import SUBMISSIONS_STORE_KEY
 from .timings import add_timing
@@ -208,13 +208,17 @@ class GoalPoller:
             latest = max(float(entry["wall"]) for entry in entries)
             if latest <= self._seen.get(goal.id, float("-inf")):
                 continue
-            # every distinct value gets a chance, oldest first (same rule as
-            # the scorer: a later wrong submission never buries a right one)
+            # every distinct value within the oracle bound gets a chance,
+            # oldest first (same rule and cap as the scorer: a later wrong
+            # submission never buries a right one, and value #9+ is never
+            # verified anywhere; overflow stays recorded for the scorer's
+            # candidates_dropped metadata)
             values: list[str] = []
             for entry in sorted(entries, key=lambda e: float(e["wall"])):
                 text = str(entry["value"])
                 if text not in values:
                     values.append(text)
+            values = values[:CANDIDATE_CAP]
             compare_started = time.monotonic()
             record = None
             try:

@@ -62,7 +62,7 @@ JUDGE_WEIGHT_CAP = 0.25
 """Model-graded goals' maximum share of a challenge's total weight when any non-model-graded goal exists (slice-4 recorded decision). A judge scores the agent's own account and is an injection surface, so it must never dominate a mixed challenge; an all-model-graded challenge is deliberately uncapped (there is nothing higher-assurance to protect)."""
 
 CANDIDATE_CAP = 8
-"""Distinct submitted values verified per goal, earliest first; this is the oracle bound: an agent gets at most this many verified guesses per goal, with dedup and the cap applied BEFORE any verify work at both verification sites (`verify_goal`'s call-time check and the scorer's end-of-run pass; the scorer logs overflow and records it in the score metadata as `candidates_dropped`).
+"""Distinct submitted values verified per goal, earliest first; this is the oracle bound: an agent gets at most this many verified guesses per goal, with dedup and the cap applied BEFORE any verify work at all three verification sites (`verify_goal`'s call-time check, the mid-run poller's tick, and the scorer's end-of-run pass; the scorer logs overflow and records it in the score metadata as `candidates_dropped`, and `verify_goal` keeps recording past-cap submissions unverified so that visibility holds).
 
 Without the bound, verification cost scales linearly with `verify_goal` calls the agent controls (one judge model generate and one full check per candidate; the fifteen-minute performance gate's first real catch), and in-band verification would otherwise hand the agent an unbounded value oracle. Eight is deliberate headroom over honest use (a goal has one right answer; retries beyond a handful are noise or flooding), and the drop is visible to reviewers rather than silent."""
 
@@ -210,7 +210,7 @@ def latch(
 ) -> LatchRecord:
     """Latch a goal result into the sample store: first PASS wins, timestamped.
 
-    An existing achieved record is returned unchanged (never downgraded or re-stamped, so a transient state that later reverts keeps its credit and its original timestamp). A non-achieved record is replaced when the new result passes, improves partial credit, or resolves an indeterminate.
+    An existing achieved record is never downgraded or re-stamped (a transient state that later reverts keeps its credit and its original timestamp); only its `corroborated` label may settle from a later achieved result: `True` upgrades anything below it, an achieved full check's `False` settles a `None` (a declared observer found nothing, distinct from no observer declared), and `True` never downgrades. A non-achieved record is replaced when the new result passes, improves partial credit, or resolves an indeterminate.
 
     Args:
         store: The sample store (`inspect_ai.util.store()` or `state.store`).
@@ -226,18 +226,20 @@ def latch(
     raw: dict[str, dict[str, object]] = dict(store.get(LATCHES_STORE_KEY, {}))
     existing = LatchRecord.model_validate(raw[goal_id]) if goal_id in raw else None
     if existing is not None and existing.achieved:
-        # Never downgraded or re-stamped, but corroboration may UPGRADE: a
-        # cheap-tier poller latch (corroborated None, it reads no evidence)
-        # must not permanently mask the full check's corroborated=True.
-        if (
-            result.achieved
-            and result.corroborated is True
-            and (existing.corroborated is not True)
-        ):
-            upgraded = existing.model_copy(update={"corroborated": True})
-            raw[goal_id] = upgraded.model_dump(mode="json")
+        # Never downgraded or re-stamped, but corroboration may SETTLE: a
+        # cheap-tier latch (corroborated None, it reads no evidence) must not
+        # permanently mask the full check's verdict. True upgrades anything
+        # below it; an achieved full check's False settles a None (a declared
+        # observer found nothing, distinct from no observer declared); True
+        # never downgrades.
+        settled = (
+            result.corroborated is True and existing.corroborated is not True
+        ) or (result.corroborated is False and existing.corroborated is None)
+        if result.achieved and settled:
+            updated = existing.model_copy(update={"corroborated": result.corroborated})
+            raw[goal_id] = updated.model_dump(mode="json")
             store.set(LATCHES_STORE_KEY, raw)
-            return upgraded
+            return updated
         return existing
     fresh = LatchRecord(
         achieved=result.achieved,

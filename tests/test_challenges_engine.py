@@ -285,6 +285,46 @@ class TestLatch:
         )
         assert downgrade.corroborated is True  # never downgraded
 
+    @pytest.mark.parametrize(
+        ("existing_corr", "new_achieved", "new_corr", "expected"),
+        [
+            pytest.param(None, True, False, False, id="full-check-false-settles-none"),
+            pytest.param(True, True, False, True, id="true-never-downgrades-to-false"),
+            pytest.param(False, True, True, True, id="true-upgrades-false"),
+            pytest.param(False, True, None, False, id="none-settles-nothing"),
+            pytest.param(None, False, False, None, id="non-achieved-never-settles"),
+        ],
+    )
+    def test_corroboration_settles_an_achieved_latch(
+        self,
+        existing_corr: bool | None,
+        new_achieved: bool,
+        new_corr: bool | None,
+        expected: bool | None,
+    ) -> None:
+        """An achieved record's `corroborated` label settles upward only: a mid-run latch's `None` takes the full check's `True` or `False`, `True` is permanent, and a non-achieved later result changes nothing."""
+        store = Store()
+        first = latch(
+            store,
+            "g",
+            GoalResult(achieved=True, corroborated=existing_corr),
+            assurance="guest-corroborated",
+            primitive="execute",
+            elapsed_s=0.1,
+        )
+        settled = latch(
+            store,
+            "g",
+            GoalResult(achieved=new_achieved, corroborated=new_corr),
+            assurance="guest-corroborated",
+            primitive="execute",
+            elapsed_s=0.1,
+        )
+        assert settled.achieved  # the achieved flag itself never downgrades
+        assert settled.corroborated is expected
+        assert settled.wall == first.wall  # settling never re-stamps
+        assert latched_records(store)["g"].corroborated is expected  # persisted
+
     def test_partial_survives_indeterminate_then_clean_fail(self) -> None:
         """Earned partial credit floors every replacement: 0.4 -> indeterminate -> clean fail keeps 0.4."""
         store = Store()

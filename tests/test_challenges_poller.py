@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from inspect_ai.util import Store
-from inspect_ranges._challenges.engine import latched_records
+from inspect_ranges._challenges.engine import CANDIDATE_CAP, latched_records
 from inspect_ranges._challenges.poller import (
     POLL_S_ENV,
     GoalPoller,
@@ -276,5 +276,33 @@ class TestCandidates:
             submit(store, "f", "typo")
             poller._tick()  # pyright: ignore[reportPrivateUsage]
             assert latched_records(store)["f"].achieved
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize(
+        ("right_index", "achieved"),
+        [
+            pytest.param(CANDIDATE_CAP - 1, True, id="right-value-inside-the-cap"),
+            pytest.param(CANDIDATE_CAP, False, id="right-value-past-the-cap"),
+        ],
+    )
+    def test_candidate_cap_holds_at_the_tick(
+        self, tmp_path: Path, right_index: int, achieved: bool
+    ) -> None:
+        """The tick verifies at most `CANDIDATE_CAP` distinct values, earliest first (the oracle bound holds at every verification site); overflow stays recorded for the scorer's `candidates_dropped` metadata."""
+
+        async def scenario() -> None:
+            poller, store, _, value = await planted_poller(tmp_path)
+            texts = [f"wrong-{i}" for i in range(CANDIDATE_CAP)]
+            texts.insert(right_index, value.decode())
+            base = time.time() - 60
+            for offset, text in enumerate(texts):
+                submit(store, "f", text, wall=base + offset)
+            poller._tick()  # pyright: ignore[reportPrivateUsage]
+            assert latched_records(store)["f"].achieved is achieved
+            # overflow is never trimmed: the scorer reads the full submission
+            # list to record candidates_dropped
+            raw: list[dict[str, object]] = store.get(SUBMISSIONS_STORE_KEY, [])
+            assert len(raw) == CANDIDATE_CAP + 1
 
         asyncio.run(scenario())
