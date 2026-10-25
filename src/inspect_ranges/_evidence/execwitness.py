@@ -4,7 +4,7 @@ Polls the daemon's `exec_events` verb for every Linux guest and ships events to 
 
 Loss is never silent and maps to in-chain gaps: a reply whose first event's seq is past the cursor means the ring overwrote (`exec-ring-overflow`, with the lost count), a `drops` delta means kernel-side loss (`exec-subscriber-loss`), and a transport failure is the existing `poll-failed`. A typed refusal (`ENOSYS` from a connector-less kernel, `EPROTO` from a daemon without the verb — the Windows daemon's unknown-kind fallback) writes one terminal `unsupported` record, the DECLARED CAPABILITY DROP, and ends that guest's loop; Windows guests get theirs at `start()` without ever being polled.
 
-Record-only v1: nothing here is read by any goal or by `corroborate()`; the stream is corroboration and forensics for reviewers. Guest-tier trust, like telemetry export: pre-compromise events are immutable once streamed, and a root attacker can starve the daemon from that moment (visible as poll failures, never silent).
+Record-only for shipped scoring: no shipped goal and no `corroborate()` reads these streams; custom goal types may read them through the oracle's `exec_events()` (2026-10-25), and the stream remains forensics for reviewers. Guest-tier trust, like telemetry export: pre-compromise events are immutable once streamed, and a root attacker can starve the daemon from that moment (visible as poll failures, never silent).
 """
 
 import asyncio

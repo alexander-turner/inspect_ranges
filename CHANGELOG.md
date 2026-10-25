@@ -1,5 +1,7 @@
 ## Unreleased
 
+- The oracle gains `exec_events(guest)`: the exec witness's coverage records (`exec-meta/<guest>`) and execve event records (`exec/<guest>`) with a gap flag, read-only and memoized like the other evidence accessors, so custom goal types can consume the witnessed timeline. Guest-tier assurance like `telemetry_export` (events are observation, not proof); no shipped goal or corroboration reads it yet.
+
 - inspect-ai floor moves to 0.3.284: its viewer plays `asciinema:*` keys from the sample's final store (one player per named session in a Terminal Sessions card on the sample's Metadata tab, with the keys kept out of the store tree), so terminal() session recordings now play inline in `inspect view` with no extra wiring.
 
 - terminal() session recording no longer requires evidence capture (any range sandbox records; evidence mirroring and the cast files stay evidence-gated), and every session's asciicast is also written into the sample store under `asciinema:terminal-<name>` (life-suffixed), clipped to `INSPECT_RANGES_CAST_STORE_CAP_MB` (default 50; tail kept with a marker, the evidence copy stays complete). The store keys target the inspect viewer binding that plays `asciinema:*` casts from the sample store (landed in inspect-ai 0.3.284, now the required floor). Finalize is provider-owned by project (deferred teardown runs outside the sample's store context; an interrupted sample's store cast is deliberately lost while evidence still gets it).
