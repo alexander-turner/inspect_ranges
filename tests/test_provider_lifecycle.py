@@ -512,6 +512,102 @@ def test_cli_cleanup_reap_seals_evidence_before_releasing_the_lease(
     asyncio.run(scenario())
 
 
+def _cleanup_runtime(tmp_path: Path) -> tuple[ProviderRuntime, FakeSeams]:
+    """The fresh-process shape the cli_cleanup tests share: the fallback runtime with a rigged down seam (caller resets `_fallback_state` and the ambient env first)."""
+    runtime = provider_runtime()
+    runtime.state_dir = tmp_path / "projects"
+    runtime.state_dir.mkdir(parents=True, exist_ok=True)
+    seams = FakeSeams(runtime)
+    runtime.down_fn = seams.down
+    return runtime, seams
+
+
+def _plant_leased_project(
+    runtime: ProviderRuntime, project: str, origin: str
+) -> LeaseStore:
+    """One crashed sample's on-disk pair: the CID lease plus a host lease recording `origin`."""
+    runtime.allocator.lease(project, 2)
+    store = lease_store(runtime)
+    store.acquire(
+        project=project,
+        task_name="t",
+        sample_id="s1",
+        isolation="shared",
+        origin=origin,
+        bundle_path=str(runtime.state_dir),
+        bundle_digest="0" * 64,
+        staging=str(runtime.state_dir.parent / "staging" / project),
+        host_facts=HostFacts(arch="x86_64", hostname="driver", host_class="test"),
+        ttl_s=600,
+    )
+    return store
+
+
+def test_cli_cleanup_refuses_an_unresolvable_lease_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host lease recording a backend this shell cannot resolve reclaims NOTHING: a direct down would succeed vacuously over a still-running remote range, so both leases stay findable (the reaper's origin-unresolvable rule) and the project is reported as a failure."""
+    import inspect_ranges._provider.state as state_module
+
+    monkeypatch.delenv("INSPECT_RANGES_HOST", raising=False)
+    monkeypatch.setattr(state_module, "_fallback_state", None)
+
+    async def scenario() -> None:
+        runtime, seams = _cleanup_runtime(tmp_path)
+        project = "ir-remote-victim-abc123"
+        store = _plant_leased_project(
+            runtime, project, origin="ghost_backend.factory:remote-host-7"
+        )
+        with pytest.raises(RuntimeError, match="does not resolve"):
+            await Env.cli_cleanup(None)
+        assert seams.down_calls == [], "no vacuous local down against a remote host"
+        assert len(store.leases()) == 1, "the reaper's retry anchor survives"
+        assert runtime.allocator.leased_projects() == [project]
+
+    asyncio.run(scenario())
+
+
+def test_cli_cleanup_routes_teardown_through_the_lease_origin_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolvable separated origin tears down through that backend's reclaimer, never the ambient down seam; release follows reclaim success, and a second run finds nothing left (idempotent)."""
+    import inspect_ranges._provider.state as state_module
+    from inspect_ranges._host import HostBackend
+
+    monkeypatch.delenv("INSPECT_RANGES_HOST", raising=False)
+    monkeypatch.setattr(state_module, "_fallback_state", None)
+
+    async def scenario() -> None:
+        runtime, seams = _cleanup_runtime(tmp_path)
+        project = "ir-remote-victim-def456"
+        origin = "fleet_backend.factory:region-a"
+        store = _plant_leased_project(runtime, project, origin=origin)
+        reclaimed: list[str] = []
+
+        def reclaim(lease: HostLease, state_dir: Path) -> None:
+            assert store.get(lease.lease_id) is not None, (
+                "teardown success precedes any release"
+            )
+            reclaimed.append(lease.project)
+
+        def resolver(value: str, state_dir: Path) -> HostBackend:
+            assert value == origin, "the lease's RECORDED origin routes teardown"
+            return HostBackend(
+                provider=LocalHostProvider(state_dir, gate=lambda: []),
+                reclaim=reclaim,
+            )
+
+        runtime.resolve_origin = resolver
+        await Env.cli_cleanup(None)
+        assert reclaimed == [project]
+        assert seams.down_calls == [], "the backend owned the teardown"
+        assert store.leases() == [] and runtime.allocator.leased_projects() == []
+        await Env.cli_cleanup(None)  # idempotent: nothing left to reclaim
+        assert reclaimed == [project] and seams.down_calls == []
+
+    asyncio.run(scenario())
+
+
 def test_config_forms_and_registration() -> None:
     import inspect_ranges._registry as registry_module
     from inspect_ai.util._sandbox.registry import registry_find_sandboxenv

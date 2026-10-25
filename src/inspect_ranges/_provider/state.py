@@ -25,6 +25,7 @@ from .._channel.vsock import HybridEndpoint
 from .._compiler.plan import PlanOptions, ResolvedPlan, Totals, resolve_plan
 from .._compiler.render import render_bundle
 from .._host.host import HostProvider, RangeHost
+from .._host.reaper import OriginResolver
 from .._runtime.down import DownResult, down
 
 # the canonical default lives in the (light) runtime layer so CLI commands
@@ -71,6 +72,13 @@ def _default_up(bundle: Path, options: UpOptions, on_stage: OnStage | None) -> U
 
 def _default_down(project: str, state_dir: Path) -> DownResult:
     return down(project, state_dir=state_dir)
+
+
+def _default_resolve_origin(origin: str, state_dir: Path) -> "HostBackend":
+    """The reaper's resolver (`resolve_host_backend`), imported lazily like `_install_backend`'s."""
+    from .._host.backend import resolve_host_backend
+
+    return resolve_host_backend(origin, state_dir)
 
 
 @dataclass
@@ -165,6 +173,8 @@ class ProviderRuntime:
         self.down_fn: DownFn = _default_down
         self.render_fn: RenderFn = render_bundle
         self.channel_factory: ChannelFactory = _default_channel_factory
+        self.resolve_origin: OriginResolver = _default_resolve_origin
+        """`cli_cleanup`'s teardown-by-origin seam: a host lease's recorded origin to its backend bundle, the same resolution the reaper runs (`_reap_one`); tests inject fakes."""
         self.registry: dict[str, SampleHandle] = {}
         self.host_backend = os.environ.get("INSPECT_RANGES_HOST", "local")
         self._admission: WeightedAdmission | None = None

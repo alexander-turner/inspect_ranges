@@ -744,6 +744,8 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         """Fresh-process cleanup from on-disk state: provider-origin projects only.
 
         Provider origin is the union of the CID lease registry (written before anything boots, so it covers crash windows) and owner records marked `origin="provider"`.
+
+        Teardown routes by each host lease's recorded origin, the reaper's discipline (`_reap_one`): the origin re-resolves through the backend grammar and tears down through that backend's reclaimer (direct `down` seam for a co-resident backend). An origin this process cannot resolve reclaims NOTHING for that project: a direct `down` would "succeed" vacuously against a host that lives elsewhere, so both leases stay findable and the project lands in the failure report until the backend's package is installed where cleanup runs. Only a project with no host lease at all (the crash window before `acquire` writes one, a strictly local leftover) uses the ambient runtime's down seam.
         """
         runtime = provider_runtime()  # fresh process: the fallback runtime, real seams
         leased = set(await asyncio.to_thread(runtime.allocator.leased_projects))
@@ -760,36 +762,64 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         host_leases = await asyncio.to_thread(lease_store.leases)
         failures: list[str] = []
         for project in targets:
+            project_leases = [
+                lease for lease in host_leases if lease.project == project
+            ]
             try:
-                await asyncio.to_thread(runtime.down_fn, project, runtime.state_dir)
+                if project_leases:
+                    # the lease's recorded origin is the self-describing
+                    # teardown address (topology.qmd): re-resolve it from disk
+                    # like the reaper does, never the ambient
+                    # INSPECT_RANGES_HOST this fresh shell happens to carry
+                    lease = project_leases[0]
+                    try:
+                        backend = await asyncio.to_thread(
+                            runtime.resolve_origin, lease.origin, runtime.state_dir
+                        )
+                    except Exception as error:
+                        failures.append(
+                            f"{project}: recorded origin {lease.origin!r} does "
+                            f"not resolve here ({error}); nothing was reclaimed "
+                            "and its leases stay findable; install the "
+                            "backend's package where cleanup runs, then re-run"
+                        )
+                        continue
+                    reclaim = backend.reclaimer()
+                    if reclaim is not None:
+                        await asyncio.to_thread(reclaim, lease, runtime.state_dir)
+                    else:
+                        await asyncio.to_thread(
+                            runtime.down_fn, project, runtime.state_dir
+                        )
+                else:
+                    await asyncio.to_thread(runtime.down_fn, project, runtime.state_dir)
             except Exception as error:
                 failures.append(f"{project}: {error}")
                 continue
             await asyncio.to_thread(runtime.allocator.release, project)
-            for lease in host_leases:
-                if lease.project == project:
-                    if lease.evidence_location is not None:
-                        # the reaper's rule applies here too: after teardown,
-                        # before release, a record the dead driver never sealed
-                        # gets its reaped seal; releasing the lease first would
-                        # delete the only pointer to it (quality-review A7).
-                        # Best-effort like the reaper: evidence trouble never
-                        # blocks reclamation.
-                        try:
-                            await seal_abandoned(
-                                lease.evidence_location,
-                                lease_id=lease.lease_id,
-                                sample_id=lease.sample_id,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "cli_cleanup reap-seal failed for %s at %s "
-                                "(record stays unsealed, reported as such by "
-                                "verify)",
-                                project,
-                                lease.evidence_location,
-                            )
-                    await asyncio.to_thread(lease_store.release, lease.lease_id)
+            for lease in project_leases:
+                if lease.evidence_location is not None:
+                    # the reaper's rule applies here too: after teardown,
+                    # before release, a record the dead driver never sealed
+                    # gets its reaped seal; releasing the lease first would
+                    # delete the only pointer to it (quality-review A7).
+                    # Best-effort like the reaper: evidence trouble never
+                    # blocks reclamation.
+                    try:
+                        await seal_abandoned(
+                            lease.evidence_location,
+                            lease_id=lease.lease_id,
+                            sample_id=lease.sample_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "cli_cleanup reap-seal failed for %s at %s "
+                            "(record stays unsealed, reported as such by "
+                            "verify)",
+                            project,
+                            lease.evidence_location,
+                        )
+                await asyncio.to_thread(lease_store.release, lease.lease_id)
             remove_project(runtime.state_dir, project)
             shutil.rmtree(runtime.staging_root() / project, ignore_errors=True)
         # no blanket prune: leases outside `targets` may belong to a
