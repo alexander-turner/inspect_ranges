@@ -1,5 +1,7 @@
 ## Unreleased
 
+- inspect-ai floor moves to 0.3.285 (terminal UI improvements in the viewer's session playback).
+
 - Challenges: the 8-candidate anti-oracle bound now holds at all three verification sites; the mid-run poller previously verified every distinct submitted value uncapped on its next tick, so a flood past `verify_goal`'s cap could still latch a pass (pre-ship review P0-1). The poller now verifies only the earliest 8 distinct values per goal (the scorer's rule), and overflow remains recorded and visible as `candidates_dropped` in the score metadata. Also: a goal latched achieved mid-run can now record `corroborated: false` from the scorer's full check; previously the end-of-run `false` was discarded and the result read `null` (no observer declared) instead of `false` (a declared observer found nothing). `true` still never downgrades, and an achieved latch is never un-achieved or re-timestamped (P1-5).
 
 - `evidence verify --expect-seal` now anchors the writer set: a writer present at the location but absent from the supplied binding is a `writer-unbound` break (the finalize-time binding names the complete writer set, so a fabricated extra writer no longer verifies OK under the full guarantee; bare verify keeps its internal-consistency-only scope). Supplied digests accept an optional `sha256:` prefix; the documented example previously showed a prefixed digest a pristine record would fail against, and now shows the bare hex the binding actually stores (pre-ship P1-4, P1-9).
