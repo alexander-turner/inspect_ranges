@@ -131,7 +131,7 @@ A whole-location mirror enumerates the source through its published catalog list
 ## Environment Vars
 
 | Variable | Default | Effect |
-|---|---|---|
+|------------------------|------------------------|------------------------|
 | `INSPECT_RANGES_REGISTRY` | the public org | Ordered, comma-separated search path of locations; first match wins, broken locations abort resolution. |
 | `INSPECT_RANGES_NEVER_PULL` | unset | Any non-empty value refuses implicit transfers (the provider's auto-pull and the build's registry tier); explicit verbs still work. |
 | `INSPECT_RANGES_RANGE_IMAGE` | unset (local build) | Digest-pinned published range container image; `up` pulls it once and boots every range inside it. |

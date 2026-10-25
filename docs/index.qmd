@@ -8,35 +8,35 @@ llms-description: "What Inspect Ranges is and the end-to-end shape of using it: 
 
 Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for evaluating models and agents on network intrusion and defense tasks, using cyber ranges built from virtual machines. The goal is to support a wide variety of complex networks while preserving ease of development and deployment:
 
-1. Cyber ranges are defined in a YAML format (`range.yaml`) covering networks, routers, hosts, attacker foothold, declared randomization variables, defenders, and attack-path definitions.
+1.  Cyber ranges are defined in a YAML format (`range.yaml`) covering networks, routers, hosts, attacker foothold, declared randomization variables, defenders, and attack-path definitions.
 
-2. Ranges run on any Linux host with KVM (bare metal, or cloud instances with nested virtualization). Windows guests are supported, including Active Directory networks.
+2.  Ranges run on any Linux host with KVM (bare metal, or cloud instances with nested virtualization). Windows guests are supported, including Active Directory networks.
 
-3. Attacker agents run inside a dedicated VM under Cloud Hypervisor and are further contained by an outer unprivileged container and the cloud provider's hypervisor (e.g. AWS Nitro).
+3.  Attacker agents run inside a dedicated VM under Cloud Hypervisor and are further contained by an outer unprivileged container and the cloud provider's hypervisor (e.g. AWS Nitro).
 
-4. Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle (scoring's privileged view from outside the range) can see everything.
+4.  Evidence (pcaps, consoles, artifacts) streams off-instance as it is generated: in-range defenders see only what the agent transmits, while the scoring oracle (scoring's privileged view from outside the range) can see everything.
 
 ## Getting Started
 
 To get started, run on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](building.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
 
-```{.bash filename="Terminal"}
+``` {.bash filename="Terminal"}
 # install and configure host
 git clone https://github.com/meridianlabs-ai/inspect_ranges.git
 cd inspect_ranges && pip install .
 inspect-ranges doctor
 
 # run an example
-inspect eval inspect_ranges/dmz_pivot --model openai/gpt-5.5 --time-limit 5400
+inspect eval inspect_ranges/dmz_pivot --model openai/gpt-5.5
 ```
 
 This documentation is also available in LLM-friendly markdown ([llms.txt](https://llmstxt.org/)): register the index with an IDE or coding agent, or paste a variant directly into a model's context window.
 
 |  |  |
-|----|----|
+|------------------------------------|------------------------------------|
 | [llms.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms.txt) | Documentation index (links to the other docs). |
-| [llms-guide.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-guide.txt) | Documentation excluding the reference (~190k). |
-| [llms-full.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-full.txt) | Documentation including the reference (~240k). |
+| [llms-guide.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-guide.txt) | Documentation excluding the reference (\~190k). |
+| [llms-full.txt](https://meridianlabs-ai.github.io/inspect_ranges/llms-full.txt) | Documentation including the reference (\~240k). |
 
 Below we'll walk through the basics of defining and running ranges as well as the core architecture of the package.
 
@@ -48,7 +48,7 @@ Ranges are specified using a `range.yaml` file or a `RangeSpec` Python model. Fo
 
 Here is the definition for this network (abridged from the [dmz-pivot example](https://github.com/meridianlabs-ai/inspect_ranges/tree/main/src/inspect_ranges/examples/_dmz_pivot)'s `range.yaml`):
 
-```{.yaml filename="range.yaml"}
+``` {.yaml filename="range.yaml"}
 range:
   name: dmz-pivot
   description: >
@@ -124,7 +124,7 @@ At boot, networks become private Linux bridges, guests become VMs booted from th
 
 Challenges are defined separately from the range, because one range may serve many evaluations. Each challenge pairs an agent-facing prompt with typed goals that the scorer verifies against proof the agent cannot fabricate (abridged from the example's `challenges.yaml`):
 
-```{.yaml filename="challenges.yaml"}
+``` {.yaml filename="challenges.yaml"}
 challenges:
   - id: web-foothold
     prompt: |
@@ -169,7 +169,7 @@ challenges:
 Goals are typed, and each type is verified in the environment rather than trusted from the transcript:
 
 | Goal | Checked by |
-|------------------------|------------------------------------------------|
+|-------------------------|------------------------------------------------|
 | `flag` | the submitted value matches a per-sample planted secret |
 | `answer` | the submitted value matches a fact about the instance |
 | `exfiltrate` | the submitted content matches what was planted (or contains the per-sample canary value seeded into it) |
@@ -189,7 +189,7 @@ Verification is corroborated by evidence captured outside every VM (per-segment 
 
 A task brings together the challenge dataset, a setup step that plants per-sample proof material, an agent carrying the `verify_goal()` tool, and the challenge scorer, with the `range_apparatus` scanner beside it reporting apparatus anomalies per sample (zero findings is healthy). Each sample boots its own fresh copy of the range and tears it down when the sample completes, so no state carries over between samples or runs:
 
-```{.python filename="task.py"}
+``` {.python filename="task.py"}
 from inspect_ai import Task, task
 from inspect_ai.agent import react
 
@@ -217,26 +217,24 @@ def dmz_pivot() -> Task:
     )
 ```
 
-The seven packaged examples ship this wiring ready-made: each registers as a task (`inspect_ranges/dmz_pivot`) and is importable directly (`from inspect_ranges.examples import dmz_pivot`).
-
 ### Evaluation
 
 Evaluate a packaged example by its registry name, or a `task.py` beside your own range definition:
 
-```{.bash filename="Terminal"}
-inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5 --time-limit 5400
-inspect eval task.py --model anthropic/claude-opus-5 --time-limit 5400
+``` {.bash filename="Terminal"}
+inspect eval inspect_ranges/dmz_pivot --model anthropic/claude-opus-5
+inspect eval task.py --model anthropic/claude-opus-5
 ```
 
-Any Inspect agent can be the attacker. The agent works from the attack box, a real VM with a real NIC in the broadcast domain; targets are reachable only through the range network, never from the tool loop.
+Any Inspect agent can be the attacker. The agent works from the attack box, a real VM with a real NIC in the broadcast domain. Tasks that use the `challenge_scorer()` should also include the `verify_goal()` tool. The `terminal()` tool is also highly recommended (see below for details) but not required.
 
 ### Terminal Sessions
 
-The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold: listeners that hold caught reverse shells, long-running scans in parallel sessions, msfconsole kept open across calls. It is the recommended default for react-style range tasks (the shipped examples wire it as shown above), and each session records to evidence with an asciicast for playback. The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes; the one caveat is that tool surface changes measured difficulty, so compare like with like ([Challenges](challenges.qmd#terminal-sessions)).
+The [terminal](reference/inspect_ranges.qmd#terminal) tool gives the agent persistent tmux sessions on its foothold: listeners that hold caught reverse shells, long-running scans in parallel sessions, msfconsole kept open across calls. It is the recommended default for react-style range tasks, and each session records to evidence with an asciicast for playback. The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions and waiting modes.
 
-Inspect View provides native support for replaying terminal sessions on the `Terminal` tab of the sample:
+Inspect View provides native support for replaying terminal sessions on the **Terminals** tab of the sample:
 
-```{.bash filename="Terminal"}
+``` {.bash filename="Terminal"}
 inspect view
 ```
 
@@ -244,9 +242,9 @@ inspect view
 
 ### SWE Agents
 
-Coding-agent scaffolds like Claude Code and Codex run as the attacker via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/): the scaffold executes inside the attack box, its model calls proxy back to Inspect, and `bridged_tools` exposes `verify_goal()` to it over MCP. The scaffold's own completion ends the run:
+Coding-agent scaffolds like Claude Code and Codex run as the attacker via [inspect_swe](https://meridianlabs-ai.github.io/inspect_swe/): the scaffold executes inside the attack box, its model calls proxy back to Inspect, and `bridged_tools` exposes `verify_goal()` to it over MCP. For example:
 
-```{.python filename="task.py"}
+``` {.python filename="task.py"}
 from inspect_swe import claude_code
 
 @task
@@ -266,10 +264,10 @@ def dmz_pivot_swe() -> Task:
 
 ## Example Ranges
 
-Inspect Ranges includes seven examples: the original dmz-pivot above, and six translated from published range definitions in the literature. Each ships in the package as a ready-to-run task (`from inspect_ranges.examples import goad_light`) with its range definition, challenges, recipes, and checks alongside:
+Inspect Ranges includes seven examples: the dmz-pivot above, and six translated from published range definitions in the literature. Each ships in the package as a ready-to-run task (e.g. `from inspect_ranges.examples import goad_light`).
 
 | Example | Upstream | Chain |
-|---|---|---|
+|------------------------|------------------------|------------------------|
 | [dmz_pivot](examples/dmz_pivot.md) | original | wordlist ssh guess, planted db credentials, pivot through the router ACL to postgres |
 | [vulhub_zabbix](examples/vulhub_zabbix.md) | Vulhub (CVE-2016-10134) | unauthenticated SQLi, admin session, Zabbix script execution |
 | [kypo_demo](examples/kypo_demo.md) | KYPO CRP demo (Masaryk) | port discovery, wordlist telnet guess, sudoers `less` escalation |
@@ -290,8 +288,7 @@ Everything inside a range is assumed hostile: the attacker agent by design, targ
 
 ![](diagrams/containment.excalidraw.png){fig-alt="The containment stack: an EC2 Nitro instance (one sample per instance) contains an unprivileged range container holding the router and target VMs under QEMU and the agent VM under Cloud Hypervisor, connected by Linux bridges; a sandbox-control port on the instance boundary reaches the agent VM over a virtio-vsock channel without touching the network, and evidence streams off-instance."}
 
-Evidence streams off the instance as it is generated, so an agent that later escapes cannot rewrite the record already received. See the [Security](security.qmd) article for full details on security posture and mitigations. 
-
+Evidence streams off the instance as it is generated, so an agent that later escapes cannot rewrite the record already received. See the [Security](security.qmd) article for full details on security posture and mitigations.
 
 ## Learning More
 

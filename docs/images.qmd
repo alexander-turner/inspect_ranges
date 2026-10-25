@@ -10,9 +10,9 @@ Every guest in a range boots from an image. The standard images (the goldens, th
 
 When a name is needed, it resolves in a fixed order:
 
-1. the local cache of already-downloaded images, which always answers first;
+1.  the local cache of already-downloaded images, which always answers first;
 
-2. the locations listed in `INSPECT_RANGES_REGISTRY`, in order, which defaults to the public catalog (`docker.io/meridianlabsai/inspect-ranges`). On a host with a pin file configured, the pin binds this download step and `images refresh`, never the cache (see [Pinned Fleet](#pinned-fleet)).
+2.  the locations listed in `INSPECT_RANGES_REGISTRY`, in order, which defaults to the public catalog (`docker.io/meridianlabsai/inspect-ranges`). On a host with a pin file configured, the pin binds this download step and `images refresh`, never the cache (see [Pinned Fleet](#pinned-fleet)).
 
 A location can be a Docker Hub org, a private registry, or a plain directory, and the same artifacts work from all three because every download verifies against its digest. A location that cannot be reached stops resolution with an error naming it; nothing quietly falls through to the next entry.
 
@@ -29,7 +29,7 @@ Two behaviors to know before the recipes below:
 The standard images publish at the project org, each consumable by bare name (hub repos are spelled `inspect-ranges-<name>`; specs keep writing the bare name):
 
 | Name | Contents |
-|---|---|
+|------------------------------------|------------------------------------|
 | `attack` | The standard attack box: a kali-class toolset built by a pinned recipe over the noble golden, with a build-asserted tool contract and a refusal to build if anything listens beyond loopback (see [Attack Box](attackbox.qmd#default-image)). A dedicated attack box with no `image:` boots it by default. |
 | `ubuntu-noble` / `ubuntu-focal` | Golden images, published as chains (the image, its provenance sidecar, and the vendor base it derives from), each with the guest control daemon baked in. |
 | `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
@@ -81,7 +81,7 @@ export INSPECT_RANGES_REGISTRY=/mnt/archive
 
 The consuming session is then identical to a connected one: digests verify the same from a directory as from a registry. The daemon bundle travels with whole-location mirrors, so air-gapped fleets can derive their own goldens too.
 
-### Pinned Fleet
+### Pinned Fleet {#pinned-fleet}
 
 ``` {.bash filename="Terminal"}
 inspect-ranges images pin \
