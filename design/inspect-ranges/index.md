@@ -50,6 +50,8 @@ Working folder for **`inspect_ranges`** — a new [Inspect](https://inspect.aisi
 
 * [Record: the first real-model fleet pass (2026-10)](fleet-pass-2026-10.md) - two full Opus passes over every example (bash arm, then terminal arm): both arms' score-and-message tables with the honest economy reading (no message win on easy tasks, decisive outcome wins on session-shaped ones), the per-session mechanism evidence behind the terminal-by-default decision, the eight findings with dispositions, and the operational lessons
 
+* [Record: the pre-release development changelog](dev-changelog.md) - the entire pre-release CHANGELOG.md, retired verbatim at the v1 release boundary so the published changelog starts clean
+
 * [Upstream licenses and attribution](LICENSES.md) - what is vendored under each `upstream/` directory, from where, and under which license
 
 ## Example ranges (development/testing baseline)
