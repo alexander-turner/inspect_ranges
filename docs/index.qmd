@@ -18,12 +18,11 @@ Inspect Ranges is an [Inspect AI](https://inspect.aisi.org.uk) extension for eva
 
 ## Getting Started
 
-To get started, run on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](building.qmd#devbox)). Install from GitHub, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
+To get started, run on a Linux host with KVM and Docker (or provision one with [`inspect-ranges devbox`](building.qmd#devbox)). Install from PyPI, then run the `doctor` command, which verifies virtualization devices, Docker, networking sysctls, and the rest of the host surface:
 
 ``` {.bash filename="Terminal"}
 # install and configure host
-git clone https://github.com/meridianlabs-ai/inspect_ranges.git
-cd inspect_ranges && pip install .
+pip install inspect-ranges
 inspect-ranges doctor
 
 # run an example
