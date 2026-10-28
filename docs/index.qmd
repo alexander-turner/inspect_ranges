@@ -273,6 +273,8 @@ Inspect Ranges includes eight examples: two originals (the dmz-pivot above and d
 | [defender_ops](examples/defender_ops.md) | original | king-of-the-hill sabotage (deface, degrade, crash-by-address) with the entry gate kept up, then a quiet patch-and-cleanup scored from the exec witness and ops log |
 : {tbl-colwidths=[20,20,60]}
 
+The `inspect_ranges/examples_smoke` task spans the Linux examples with published builds (dmz_pivot, vulhub_zabbix, kypo_demo, cyris_basic, equifax) in one eval, each sample booting its own example's range: the first challenge of each by default, every challenge with `-T per_example=all`. It is the one-command proof that a deployment pulls, boots, scores, and tears down ranges end to end.
+
 ## Architecture
 
 Each range runs in a single unprivileged Docker container, which provides the packaged virtualization stack, the network namespace that keeps range state off the host, and one-step teardown. Every guest, including the attack box, is a KVM virtual machine inside that container. Bridges and firewall rules exist only in the container's network namespace, so the host's own networking carries no range state. Removing the container destroys every VM, bridge, firewall rule, and disk overlay. A host needs only Docker and KVM; libvirt and QEMU ship inside the container image.
