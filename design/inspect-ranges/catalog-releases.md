@@ -159,3 +159,15 @@ The second republish day of the day, for the exec witness ([execve-witness-v1](e
 The list rewrote to the same eight names (`catalog@sha256:80176c92ef53cab9c8c46c46ef4cf7db6bb852ba357a469816b487c59bedab50`), and `images pin --from` regenerated `pins.json` to the three image pins above. Spec hashes did not move, so each range push supersedes its name under the same `spec-<sha256>` ref; old roots stay served by digest. A rebuild note for the record: the five range builds were cached from the post-witness rebuilds (19:05-19:40, over the 3.3.0 goldens) and republished as-is, since the attacker image is resolved by catalog name at eval init rather than frozen into a range build, so the attack recipe bump re-keys only `attack` itself.
 
 Proof behind the push: all five builds green over the 3.3.0 goldens with the witness's fork-storm battery 10/10 at merge; the attack-box conformance battery ran live against dmz-pivot the same day (realize, session-stability, teardown green through the real seam; the boot-nothing reference provider honestly refused the reach, surface, and witness rows). Published by the project publisher, per the user's in-session authorization ("full rebake day").
+
+## 2026-10-28 — defender-ops build (supersedes, same day)
+
+Published from main commit `edbbd85` (the exclusions-arc merge, PR #22) to `docker.io/meridianlabsai/inspect-ranges`, in-session at the user's request ("sync to that and then republish").
+
+| Name | Kind | Root digest |
+|---|---|---|
+| `defender-ops` | range | `sha256:740fa0d2a6797286ee72147353ad5c5e0d0f98ded3791fc48cf6e9686d0ec5b7` |
+
+SUPERSEDES `sha256:d516aa9ac67e4e78631c7e331a96e19e81181812204e0dbfb6af1aaafb611c0e` (earlier today): the arc's `quiet-journal` goal added a `defense.telemetry` flow, so the spec hash moved. New spec `sha256:2c4ec34ad9a692f517fa33f5a1b91b2134eb2577a7623291c10815bf7d7ad3c0` (was `sha256:939b36b1…`); only the monitor guest re-keyed (the journald exporter recipe), bastion and web reused from cache; the old root stays served by digest and its old spec ref. The nine-name list is unchanged (`defender-ops` was already enumerated; a range push supersedes under its name).
+
+Verified post-push: anonymous pull (fresh caches, empty `DOCKER_CONFIG`) resolved the new spec hash to the root above and materialized 13 artifacts fully verified; `images pin --from` wrote exactly the three image pins with digests unchanged. Proof behind the push (recorded in [exclusions-arc-2026-10.md](exclusions-arc-2026-10.md)): trios 6/6 on both rebuilds, the review's journal-tamper holes closed (bare-banner exporter, cursor anchor check, rate limiting off), and the real-model cleanup eval scored 1.0 valid against this exact build with all four goals determinate.
