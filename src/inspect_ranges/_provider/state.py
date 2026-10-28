@@ -142,14 +142,14 @@ def ensure_pulled(spec: "RangeSpec", *, image_cache: Path) -> None:
         )
     except DistError as error:
         display.close()
-        raise _prerequisite(str(error)) from error
+        raise prerequisite_error(str(error)) from error
     if report is not None:
         display.final(f"pull OK   {spec.meta.name}@{report.root} ({report.location})")
     if pulled_images:
         display.final(f"pull OK   catalog image(s): {', '.join(pulled_images)}")
 
 
-def _prerequisite(message: str) -> Exception:
+def prerequisite_error(message: str) -> Exception:
     """Inspect renders `PrerequisiteError` as the bare message (the docker provider's init precedent); the private-API pin is isolated with a fallback like the repo's other inspect pins."""
     try:
         from inspect_ai._util.error import PrerequisiteError
@@ -176,6 +176,8 @@ class ProviderRuntime:
         self.resolve_origin: OriginResolver = _default_resolve_origin
         """`cli_cleanup`'s teardown-by-origin seam: a host lease's recorded origin to its backend bundle, the same resolution the reaper runs (`_reap_one`); tests inject fakes."""
         self.registry: dict[str, SampleHandle] = {}
+        self.attack_box_probed: set[str] = set()
+        """The pinned attack-box origins whose release eval init fetched and whose host probe passed in this run."""
         self.host_backend = os.environ.get("INSPECT_RANGES_HOST", "local")
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None

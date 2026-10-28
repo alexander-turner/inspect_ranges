@@ -43,6 +43,25 @@ INSPECT_RANGES_ATTACK_BOX=glovebox_ranges.provider.factory:cell-pool-a \
 
 The variable is read where realization runs: the eval process under the `local` host backend, the applier's own environment under a separated one (see [Range Host](topology.qmd)).
 
+## Pinned Provider Programs
+
+A provider can also be a separate program that inspect-ranges pins, rather than a Python package you install. inspect-ranges then takes no Python dependency on the provider. It runs one pinned release of the program as `<program> attackbox boot|teardown|probe` and speaks a versioned JSON protocol with it over stdin and stdout. The tap fds cross at the numbers the request names, and a reply that is not exactly one JSON object with `"protocol": 1` is refused.
+
+Each such provider is data: a pin file in the package (for example `glovebox.pin.json`) names the release's tag, source-tarball URL, and SHA-256, where the program sits in the tarball, and the oldest version that speaks the protocol. Select one by naming its pin and release:
+
+``` {.bash .fragment}
+INSPECT_RANGES_ATTACK_BOX=inspect_ranges._attackbox.pinned.pinned_attack_box:glovebox/v0.92.3@sha256:b29cc5ee58b2bcf208237ae5cf9e90b184d2267b6ee92d82372d362da44e1247 \
+  inspect eval my_task.py
+```
+
+The first eval on a host downloads the release's source tarball and checks its SHA-256 before it extracts anything. A mismatch refuses, and nothing is cached. The extracted release moves into `~/.cache/inspect-ranges/programs/<name>/<tag>` with one atomic rename, so later evals start from the cache. `INSPECT_RANGES_NEVER_PULL=1` refuses the download. On an offline or air-gapped host, set `INSPECT_RANGES_ATTACK_BOX_PROGRAM` to an installed copy of the program instead.
+
+Before any verb runs, inspect-ranges asks the program `--version`. The answer must be one line, `<name> <MAJOR.MINOR.PATCH>`, optionally followed by a note in parentheses, and the version must be at least the pin's minimum. An older release refuses by name with the version it needs. The version flag is the one question every release answers before dispatching a verb, so an older release never meets the `attackbox` verb it does not know.
+
+The download and a `<program> attackbox probe` run at eval init, beside the catalog image pull, and only where this process boots the box: a range with a dedicated attack box under the `local` host backend. Resolving the variable stays cheap, as the seam requires. When the download or the probe fails, the eval refuses with the cause, the remedy (for a runtime that is not installed, the exact `sudo` setup command the probe returns), the bug-report URL when the probe gives one, and the way back to the built-in box. Paths with no eval init, such as the applier under a `uds:` backend, fetch the release at the first verb and refuse the same way.
+
+The origin stamped into the attack-box record names the provider, tag, and digest, so `inspect-ranges down` and the reaper tear a box down with the release that booted it, even after an upgrade moves the pin. A release older than the pin's minimum never booted a box, so its teardown has nothing to do.
+
 ## Registering a Provider
 
 Registration works like `INSPECT_RANGES_HOST`: the value `<module>.<factory>[:<config>]` names an `AttackBoxFactory`, imported and called at resolution, and the value splits on the first colon, so a config may itself contain colons. The same value persists as the project's attack-box origin, so any later process (`inspect-ranges down`, the reaper) can resolve teardown from disk; the provider's package just has to be installed where that process runs. Factories must be cheap and must not dial anything; remote work belongs in the provider's `boot`.
