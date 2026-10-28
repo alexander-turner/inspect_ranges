@@ -321,11 +321,99 @@ async def provider_exec(
     )
 
 
-async def provider_read_file(handle: SampleHandle, guest: str, file: str) -> bytes:
-    """The contract's `read_file` (bytes form; the caller decodes for text mode)."""
+def _map_user_file_stderr(stderr: str, file: str) -> BaseException | None:
+    """A user-plane file failure's stderr as the contract's exception, or `None` when unrecognized.
+
+    The exec plane has no errno channel, so the mapping sniffs the coreutils/sh message set the way `exec_permission_error` does; messages mirror `map_file_failure` exactly (the contract's `self_check` asserts the filename in `FileNotFoundError`/`PermissionError` and the word "directory" in `IsADirectoryError`).
+    """
+    lowered = stderr.lower()
+    if "no such file or directory" in lowered:
+        return FileNotFoundError(f"file not found: {file}")
+    if "permission denied" in lowered:
+        return PermissionError(f"permission denied: {file}")
+    if "is a directory" in lowered:
+        return IsADirectoryError(f"{file} is a directory")
+    if "not a directory" in lowered:
+        return NotADirectoryError(f"{file}: a path component is not a directory")
+    return None
+
+
+async def _user_file_exec(
+    handle: SampleHandle,
+    guest: str,
+    cmd: list[str],
+    user: str,
+    *,
+    stdin: bytes | None,
+    op: str,
+) -> ExecOutcome:
+    """One exec-plane run for a user-enforced file op (the oracle's privileged-read pattern: the daemon's file plane acts as the agent identity, so an explicit `user` rides `runuser` on the exec plane, content as reply bulk, the same privacy class as a file read)."""
+    channel = _channel(handle)
+    call_attempts = 0
+
+    async def attempt() -> ExecOutcome:
+        nonlocal call_attempts
+        call_attempts += 1
+        return await channel.exec(
+            guest,
+            ExecRequest(
+                id=request_id(),
+                cmd=cmd,
+                user=user,
+                budget=Budget(),
+                data_size=len(stdin) if stdin is not None else None,
+            ),
+            stdin=stdin,
+        )
+
+    try:
+        outcome = await with_retry(
+            attempt,
+            policy=handle.retry.file_policy,
+            stats=handle.stats,
+            op=op,
+            endpoint=guest,
+        )
+    except ChannelBudgetError as failure:
+        if failure.layer == "command":
+            raise timeout_error(failure, None) from failure
+        await _confirm_session_best_effort(handle, guest, op)
+        raise unavailable(failure) from failure
+    except TransportFailure as failure:
+        await _confirm_session_best_effort(handle, guest, op)
+        raise unavailable(failure) from failure
+    if stdin is not None and (outcome.attempts > 1 or call_attempts > 1):
+        # side-effecting (a write): re-delivery is restart-risky, same as the
+        # file-plane sibling
+        await _confirm_session_or_unavailable(handle, guest, op)
+    return outcome
+
+
+async def provider_read_file(
+    handle: SampleHandle, guest: str, file: str, *, user: str | None = None
+) -> bytes:
+    """The contract's `read_file` (bytes form; the caller decodes for text mode); a non-None `user` enforces that user's permissions via the exec plane."""
     channel = _channel(handle)
     path = resolve_guest_path(file)
     limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE  # per call: a ContextVar
+    if user is not None:
+        outcome = await _user_file_exec(
+            handle, guest, ["cat", "--", path], user, stdin=None, op="read_file"
+        )
+        if outcome.rc != 0:
+            stderr = outcome.stderr.decode("utf-8", errors="replace")
+            mapped = _map_user_file_stderr(stderr, file)
+            if mapped is not None:
+                raise mapped
+            raise RuntimeError(
+                f"read_file as {user!r} failed on {guest}:{path} "
+                f"(rc {outcome.rc}): {stderr.strip()}"
+            )
+        if outcome.stdout_truncated or len(outcome.stdout) > limit:
+            raise output_limit_error(
+                SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR, None
+            )
+        return outcome.stdout
 
     async def attempt() -> bytes:
         return await channel.read_file(guest, path, cap=limit)
@@ -367,14 +455,37 @@ async def provider_write_file(
     contents: str | bytes,
     *,
     mode: int | None = None,
+    user: str | None = None,
 ) -> None:
     """The contract's `write_file`; parents are auto-created by the daemon.
 
-    `mode` sets the created file's permission bits atomically with the write; `None` keeps the daemon default.
+    `mode` sets the created file's permission bits atomically with the write; `None` keeps the daemon default. A non-None `user` enforces that user's permissions via the exec plane (parents are then created as that user, so a forbidden directory honestly refuses); `mode` and `user` never combine (mode is the internal script-upload knob, user is the contract surface).
     """
     channel = _channel(handle)
     path = resolve_guest_path(file)
     data = contents.encode("utf-8") if isinstance(contents, str) else contents
+    if user is not None:
+        if mode is not None:
+            raise ValueError("write_file: mode and user are mutually exclusive")
+        script = 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"'
+        outcome = await _user_file_exec(
+            handle,
+            guest,
+            ["sh", "-c", script, "sh", path],
+            user,
+            stdin=data,
+            op="write_file",
+        )
+        if outcome.rc != 0:
+            stderr = outcome.stderr.decode("utf-8", errors="replace")
+            mapped = _map_user_file_stderr(stderr, file)
+            if mapped is not None:
+                raise mapped
+            raise RuntimeError(
+                f"write_file as {user!r} failed on {guest}:{path} "
+                f"(rc {outcome.rc}): {stderr.strip()}"
+            )
+        return
 
     call_attempts = 0
 

@@ -15,9 +15,13 @@ collectors:
   # the second sensor plane: the opswatchdog unit's journal, exported as
   # JSON records (PRIORITY rides each line) through the recipe-installed
   # wrapper, which ends EVERY successful poll with the trailing cursor
-  # banner the poller contract requires and exits nonzero on failure
-  # (poll-failed, never a silent quiet pass). The quiet-journal evade goal
-  # reads the numeric PRIORITY field (lower is more severe).
+  # banner the poller contract requires, ships an empty delta as the banner
+  # ALONE (whitespace padding would make a stalled journal read as flowing),
+  # verifies the watermark still resolves to its exact record before each
+  # delta (journalctl silently repositions past a vacuumed cursor), and
+  # exits nonzero on any failure (poll-failed, never a silent quiet pass).
+  # The quiet-journal evade goal reads the numeric PRIORITY field (lower is
+  # more severe).
   - name: opsjournal
     guest: monitor
     poll_s: 2.0

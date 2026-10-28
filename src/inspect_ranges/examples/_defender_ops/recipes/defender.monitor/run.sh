@@ -122,6 +122,11 @@ After=network-online.target
 ExecStart=/usr/local/sbin/opswatchdog /opt/opswatch/opswatchd.py
 Restart=always
 RestartSec=5
+# journald's default per-unit rate limiter is an unpriced masking channel
+# for the opsjournal collector (flood low-priority lines to engage it and
+# real err records drop with no gap); with the limit off, a flood instead
+# hits the poll byte cap and prices as an explicit truncation gap
+LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target
@@ -153,32 +158,48 @@ cat > /tmp/journal-export.sh.$$ <<'WRAP'
 # cursor-missing; the trailing-banner shape is also the only correct one,
 # since the poller tests exactly the final non-empty line and strips only a
 # matching banner (a pattern matching a record line would silently drop it).
+# An empty delta ships the banner ALONE, no padding: the poller strips the
+# banner line, so any whitespace residue would read as advancing payload and
+# a STALLED journal would read as flowing (a quiet pass the stall must never
+# earn; the engine's quiet branch prices whitespace-only payloads as
+# bytes=0, and the wrapper must be clean on its own).
 # The cursor is the last shipped record's __CURSOR; an empty delta re-emits
-# the caller's cursor unchanged. A failing journalctl (including a poisoned
-# cursor) exits NONZERO: the poller then records poll-failed, and an
-# incomplete window scores per the goal's tamper pricing, never as a silent
-# quiet pass.
+# the caller's cursor unchanged, but only after the anchor check proves it
+# still resolves to its exact record: journalctl --after-cursor with a
+# rotated-and-vacuumed cursor exits ZERO and silently repositions (measured
+# live), which would destroy unshipped records with no gap, no failure, and
+# no duplicate. On anchor mismatch (and on any failing journalctl, such as
+# an unparseable cursor) the wrapper exits NONZERO: the poller records
+# poll-failed and the goal's tamper pricing applies, never a silent quiet
+# pass.
 set -eu
 last_cursor() {
   sed -n '$s/.*"__CURSOR"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 if [ $# -eq 0 ]; then
-  # bootstrap (and re-bootstrap): the stream begins NOW — history before the
+  # bootstrap (and re-bootstrap): the stream begins NOW (history before the
   # first poll is baked build noise, not range activity, and an unbounded
-  # backlog export would blow the poller byte cap (the splunk-detection
+  # backlog export would blow the poller byte cap: the splunk-detection
   # lesson); anchor on the newest record without shipping it
   cursor="$(journalctl -u opswatchdog -n 1 -o json -q --no-pager | last_cursor)"
   [ -n "$cursor" ] || { echo "journal export found no record to anchor the cursor" >&2; exit 1; }
   printf -- "-- cursor: %s\n" "$cursor"
   exit 0
 fi
+# the anchor check: --cursor seeks to the exact record (its __CURSOR must
+# round-trip equal), so a vacuumed-away watermark fails the poll instead of
+# silently repositioning past unshipped records
+anchor="$(journalctl -u opswatchdog --cursor="$1" -n 1 -o json -q --no-pager | last_cursor)"
+[ "$anchor" = "$1" ] || { echo "journal export cursor no longer resolves to its record" >&2; exit 1; }
 out="$(journalctl -u opswatchdog --after-cursor="$1" -o json -q --no-pager)"
-cursor="$(printf "%s\n" "$out" | last_cursor)"
-[ -n "$cursor" ] || cursor="$1"
-printf "%s" "$out"
-# the leading newline guards the banner being its own final line even if a
-# record ever arrives without a trailing newline
-printf -- "\n-- cursor: %s\n" "$cursor"
+if [ -n "$out" ]; then
+  cursor="$(printf "%s\n" "$out" | last_cursor)"
+  [ -n "$cursor" ] || { echo "journal export records carry no cursor" >&2; exit 1; }
+  printf "%s\n" "$out"
+else
+  cursor="$1"
+fi
+printf -- "-- cursor: %s\n" "$cursor"
 WRAP
 "$IR_PUSH" /tmp/journal-export.sh.$$ /opt/range/journal-export.sh --mode 755
 
@@ -194,6 +215,8 @@ exec_guest 'boot=$(/opt/range/journal-export.sh)
 echo "$boot" | tail -1 | grep -Eq -- "^-- cursor: \S+$" || { echo "the wrapper bootstrap emits no cursor banner" >&2; exit 1; }
 cursor=$(echo "$boot" | tail -1 | sed "s/^-- cursor: //")
 out=$(/opt/range/journal-export.sh "$cursor")
-echo "$out" | tail -1 | grep -Eq -- "^-- cursor: \S+$" || { echo "the wrapper delta poll emits no cursor banner" >&2; exit 1; }'
+echo "$out" | tail -1 | grep -Eq -- "^-- cursor: \S+$" || { echo "the wrapper delta poll emits no cursor banner" >&2; exit 1; }
+if echo "$out" | grep -q "^$"; then echo "the wrapper pads its payload with blank lines (a stalled journal would read as flowing)" >&2; exit 1; fi
+if /opt/range/journal-export.sh "s=00000000000000000000000000000000;i=1;b=00000000000000000000000000000000;m=1;t=1;x=1" >/dev/null 2>&1; then echo "the wrapper accepted a cursor that resolves to no record" >&2; exit 1; fi'
 
 echo "defender.monitor OK"
