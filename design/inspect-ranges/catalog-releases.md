@@ -159,3 +159,23 @@ The second republish day of the day, for the exec witness ([execve-witness-v1](e
 The list rewrote to the same eight names (`catalog@sha256:80176c92ef53cab9c8c46c46ef4cf7db6bb852ba357a469816b487c59bedab50`), and `images pin --from` regenerated `pins.json` to the three image pins above. Spec hashes did not move, so each range push supersedes its name under the same `spec-<sha256>` ref; old roots stay served by digest. A rebuild note for the record: the five range builds were cached from the post-witness rebuilds (19:05-19:40, over the 3.3.0 goldens) and republished as-is, since the attacker image is resolved by catalog name at eval init rather than frozen into a range build, so the attack recipe bump re-keys only `attack` itself.
 
 Proof behind the push: all five builds green over the 3.3.0 goldens with the witness's fork-storm battery 10/10 at merge; the attack-box conformance battery ran live against dmz-pivot the same day (realize, session-stability, teardown green through the real seam; the boot-nothing reference provider honestly refused the reach, surface, and witness rows). Published by the project publisher, per the user's in-session authorization ("full rebake day").
+
+## 2026-10-28 — the example-coverage publishes (defender-ops first publish; kypo-demo and cyris-basic supersede)
+
+Published from main commit `3920ec1` (the example-coverage merge, PR #19) to `docker.io/meridianlabsai/inspect-ranges`, in-session under the user's standing authorization from the overnight directive (publish sequenced after the user's merge, per the arc's morning notes).
+
+| Name | Kind | Root digest |
+|---|---|---|
+| `defender-ops` | range | `sha256:d516aa9ac67e4e78631c7e331a96e19e81181812204e0dbfb6af1aaafb611c0e` |
+| `kypo-demo` | range | `sha256:25277d1633feb602486035aa1719aef3b3c6211c3b0d22be64a04eb702a020ec` |
+| `cyris-basic` | range | `sha256:1511f21fcbc179c715072ba1ae71c1f3d3ed261a974b547fa63fc07480dd1777` |
+
+First publish of `defender-ops`: spec `sha256:939b36b1bc0fb5d174234c2323557cb23fc146339c43f53a9f8d19a5495190f7`, realized images for `bastion`/`web`/`monitor` over the published `ubuntu-noble` (router on `ubuntu-noble`, attacker the catalog default), recipes `defender.bastion`/`defender.web`/`defender.monitor`. The hub repo auto-created on push; anonymous resolution verified below, so the org default visibility served it public as intended.
+
+`kypo-demo` SUPERSEDES `sha256:a862d9b006ee9f77bcf030b8a24bf04c8f4bb6d311a06ea28ff0b80615c4a8ec` (2026-10-23) and `cyris-basic` SUPERSEDES `sha256:a76106ae69f469b82d97ab55b8fb111d9644776681eb21b214039897ed27cf2c` (2026-10-23): both range.yaml files changed in the arc (kypo's drawn `int`/`choice` variables; cyris's deny carve-out, icmp entry, and campaign-id artifact), so each spec hash moved and the earlier builds read stale to spec-driven consumers on current main. New specs `sha256:dbf016691d1b277174f77e55690d992b0b36fc08df4487130a6935923baf91c7` (kypo, was `sha256:cfa6331d…`) and `sha256:c658d8147ad00a26313ebb97c43ad664db2448c11e5eb939541c09af89826f80` (cyris, was `sha256:6d088725…`); old roots stay served by digest and their old spec refs.
+
+The list rewrote to nine names (`catalog@sha256:3d2f28360a5601b2beaf528381153cbe997138726c3577e643295daf53dc81c6`): the three images plus all six published ranges, `defender-ops` joining enumeration. `images pin --from` re-verified post-push: exactly the three image pins with digests unchanged (`attack` 626b43aa…, `ubuntu-noble` 80282f62…, `ubuntu-focal` e85b3f39…).
+
+Anonymous verification (the P0-2 lesson), from fresh caches with an empty `DOCKER_CONFIG`: all three ranges resolved by exact spec hash to the roots above and materialized fully verified (`kypo-demo` 13 fetched, `cyris-basic` 10 fetched/4 present, `defender-ops` 10 fetched/2 present), and the typed list enumerated all nine names with correct kinds, every read credential-free.
+
+Proof behind the push: the example-coverage arc's builds and evals (recorded in [example-coverage-2026-10.md](example-coverage-2026-10.md)): defender-ops trios 6/6 twice, cyris-basic 12/12 including the rewrite-attack forgery, kypo-demo green with the drawn-banner assertion; real-model evals of all three from the merged code scored honestly end to end (defender-ops cleanup 1.0 with the witness-fed custom goal, kypo's full ladder including the drawn rung, cyris measuring the deny carve-out live and the snapshot-scored campaign-id).
