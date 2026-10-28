@@ -263,7 +263,7 @@ def dmz_pivot_swe() -> Task:
 
 ## Example Ranges
 
-Inspect Ranges includes seven examples: the dmz-pivot above, and six translated from published range definitions in the literature. Each ships in the package as a ready-to-run task (e.g. `from inspect_ranges.examples import goad_light`).
+Inspect Ranges includes eight examples: two originals (the dmz-pivot above and defender-ops) and six translated from published range definitions in the literature. Each ships in the package as a ready-to-run task (e.g. `from inspect_ranges.examples import goad_light`).
 
 | Example | Upstream | Chain |
 |------------------------|------------------------|------------------------|
