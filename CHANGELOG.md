@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.1 (28 October 2026)
 
 - Requires inspect-ai 0.3.286. The sandbox contract's new `user:` parameter on `read_file`/`write_file` is enforced genuinely rather than refused: an explicit user rides the exec plane (the oracle's privileged-op pattern, since the daemon's file plane acts as the agent identity), with the contract's exception mapping and read cap intact.
 
