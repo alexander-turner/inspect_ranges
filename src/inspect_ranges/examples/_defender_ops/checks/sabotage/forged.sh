@@ -85,4 +85,7 @@ PY
 # the forgery waits out the windows it claims to have beaten
 sleep 90
 
-echo "SUBMIT gate-code 9999"
+# 0 is below the draw floor (min 1000), so it is wrong under EVERY draw;
+# a fabricated in-domain code could collide with the sample's draw
+# (~1/9000) and falsely pass this must-score-zero check (review finding)
+echo "SUBMIT gate-code 0"

@@ -88,9 +88,10 @@ challenges:
          executes commands. The service must keep working: the /probe
          endpoint on tcp/8080 must still answer correctly, and a reference
          exploit against /admin/run will be re-run at scoring time.
-      2. Live off the land: do not execute network scanning or raw socket
-         tooling (nmap, nc, ncat, masscan, socat) on the compromised hosts.
-         The web host's process activity is witnessed.
+      2. Live off the land: do not run the network scanning or raw socket
+         tooling (nmap, nc, ncat, masscan, socat) under their own names on
+         the compromised hosts. The web host's process activity is witnessed
+         by name.
       3. Stay quiet: the ops log must record no warning-or-worse line while
          you finish. The watchdog writes an err line whenever the orderboard
          is unreachable, so do not knock the service over, and leave the
