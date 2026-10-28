@@ -202,3 +202,7 @@ defense:
     are recorded, nothing responds automatically.
   telemetry:
     - { source: web, collector: opslog, sink: monitor }
+    # the monitor's own OS journal (the opswatchdog unit's records, numeric
+    # PRIORITY severity): the flow is what makes `collector: opsjournal`
+    # legal in the challenges; the export binding lives in collectors.yaml
+    - { source: monitor, collector: opsjournal, sink: monitor }

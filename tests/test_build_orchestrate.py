@@ -21,6 +21,7 @@ from inspect_ranges._build.recipes import RecipeTarget, ResolvedRecipe, StageSin
 from inspect_ranges._runtime.up import GuestState, UpOptions, UpResult
 from inspect_ranges.types import (
     Attacker,
+    DnsConfig,
     Host,
     Interface,
     IssueError,
@@ -201,6 +202,30 @@ def test_egress_build_spec_transforms_routerless_networks(tmp_path: Path) -> Non
     assert spec.networks[0].mode == "isolated" and spec.networks[0].egress is None
 
 
+def test_egress_build_spec_prepends_build_nameserver(tmp_path: Path) -> None:
+    """A declared-but-build-dead resolver must never sit ahead of the build resolver: glibc tries resolv.conf in order, so the appended form burned the settle budget on the dead entry (the defender-ops TEST-NET brick)."""
+    spec, _ = build_spec_fixture(tmp_path)
+    spec.networks[0].dns = DnsConfig(nameservers=["198.51.100.53"])
+    build = egress_build_spec(spec, nameserver_ip="1.1.1.1")
+    lab = build.networks[0]
+    assert lab.dns is not None and lab.dns.nameservers is not None
+    assert [str(address) for address in lab.dns.nameservers] == [
+        "1.1.1.1",
+        "198.51.100.53",
+    ]
+
+
+def test_egress_build_spec_refuses_unanswerable_build_nameserver(
+    tmp_path: Path,
+) -> None:
+    spec, _ = build_spec_fixture(tmp_path)
+    with pytest.raises(IssueError) as excinfo:
+        egress_build_spec(spec, nameserver_ip="203.0.113.7")
+    assert [issue.code for issue in excinfo.value.issues] == [
+        "build-nameserver-unanswerable"
+    ]
+
+
 def test_default_build_nameserver_derivation(tmp_path: Path) -> None:
     stub = tmp_path / "stub.conf"
     stub.write_text("nameserver 127.0.0.53\n")
@@ -360,15 +385,24 @@ def test_network_settle_gates_each_guest_once(tmp_path: Path, cache: Path) -> No
         timeout_s: float,
         hybrid_sockets: Any = None,
         windows_resolver: str | None = None,
+        resolvers: tuple[str, ...] = (),
     ) -> float:
         assert probe == "archive.ubuntu.com" and "web" in cids
+        # the failure-message detail: the guest's build-plan resolvers arrive
+        # at the seam, the prepended build nameserver first
+        assert resolvers[0] == "1.1.1.1"
         settled.append(guest)
         return 0.5
 
     build_range(
         spec,
         range_dir,
-        options_for(tmp_path, cache, settle_probe="archive.ubuntu.com"),
+        options_for(
+            tmp_path,
+            cache,
+            settle_probe="archive.ubuntu.com",
+            build_nameserver="1.1.1.1",
+        ),
         up_fn=fakes.up_fn,
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
@@ -391,6 +425,7 @@ def test_settle_failure_tears_down(tmp_path: Path, cache: Path) -> None:
         timeout_s: float,
         hybrid_sockets: Any = None,
         windows_resolver: str | None = None,
+        resolvers: tuple[str, ...] = (),
     ) -> float:
         raise BuildError("network-settle", "cannot resolve", guest=guest)
 
@@ -1737,23 +1772,23 @@ def test_scrub_never_strips_a_declared_resolver(tmp_path: Path, cache: Path) -> 
     build_range(
         spec,
         range_dir,
-        options_for(tmp_path, cache, build_nameserver="192.0.2.53"),
+        options_for(tmp_path, cache, build_nameserver="10.77.0.53"),
         up_fn=fakes.up_fn,
         down_fn=fakes.down_fn,
         recipe_fn=fakes.recipe_fn,
         ensure_uplink=fakes.ensure_uplink,
         capture_fn=fakes.capture_fn,
     )
-    assert fakes.capture_nameservers == ["192.0.2.53", "192.0.2.53"]
+    assert fakes.capture_nameservers == ["10.77.0.53", "10.77.0.53"]
 
     declared = spec.model_copy(deep=True)
     declared.meta.name = "buildme-declared"
-    declared.networks[0].dns = DnsConfig(nameservers=["192.0.2.53"])
+    declared.networks[0].dns = DnsConfig(nameservers=["10.77.0.53"])
     declared_fakes = Fakes(["web", "db", "attacker"])
     build_range(
         declared,
         range_dir,
-        options_for(tmp_path, cache, build_nameserver="192.0.2.53"),
+        options_for(tmp_path, cache, build_nameserver="10.77.0.53"),
         up_fn=declared_fakes.up_fn,
         down_fn=declared_fakes.down_fn,
         recipe_fn=declared_fakes.recipe_fn,
@@ -1972,6 +2007,7 @@ def test_build_provisions_routers_on_the_host_path(tmp_path: Path, cache: Path) 
         timeout_s: float,
         hybrid_sockets: Any = None,
         windows_resolver: str | None = None,
+        resolvers: tuple[str, ...] = (),
     ) -> float:
         settled.append(guest)
         return 0.5

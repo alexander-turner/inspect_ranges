@@ -866,20 +866,28 @@ class RangeSandboxEnvironment(SandboxEnvironment):
         )
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
-        """Write `contents` to `file` (relative paths join the per-sample working directory); parent directories are created."""
-        await provider_write_file(self._handle, self._guest, file, contents)
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
+        """Write `contents` to `file` (relative paths join the per-sample working directory); parent directories are created. A non-None `user` enforces that user's permissions (the write rides the exec plane, the oracle's privileged-op pattern)."""
+        await provider_write_file(self._handle, self._guest, file, contents, user=user)
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        """Read `file` (capped at the per-call `MAX_READ_FILE_SIZE`); strict UTF-8 decode in text mode."""
-        data = await provider_read_file(self._handle, self._guest, file)
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
+        """Read `file` (capped at the per-call `MAX_READ_FILE_SIZE`); strict UTF-8 decode in text mode. A non-None `user` enforces that user's permissions (the read rides the exec plane, the oracle's privileged-read pattern)."""
+        data = await provider_read_file(self._handle, self._guest, file, user=user)
         return data.decode("utf-8") if text else data
 
     @override

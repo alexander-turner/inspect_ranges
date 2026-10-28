@@ -755,6 +755,28 @@ def has_guest_content(host: "Host") -> bool:
     )
 
 
+_UNANSWERABLE_V4_BLOCKS = tuple(
+    ip_network(block)
+    for block in (
+        "0.0.0.0/8",
+        "127.0.0.0/8",
+        "192.0.2.0/24",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    )
+)
+
+
+def unanswerable_address(address: IPv4Address | IPv6Address) -> bool:
+    """Whether `address` lies in an IPv4 block nothing can answer on regardless of deployment: unspecified, loopback, documentation (TEST-NET), benchmark, multicast, or reserved. Deployment-private ranges (RFC 1918, CGNAT) and link-local are deliberately excluded: a VPC resolver is routinely private (and on AWS, link-local at 169.254.169.253) and perfectly reachable, so `is_private` would be the wrong predicate."""
+    if not isinstance(address, IPv4Address):
+        return False
+    return any(address in block for block in _UNANSWERABLE_V4_BLOCKS)
+
+
 def has_router_content(router: "Router") -> bool:
     """Whether a router declares buildable guest content (provisioning): the router analog of `has_guest_content`, shared by the same consumers.
 
@@ -1404,6 +1426,37 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
                     path=("hosts", host_index, "fqdn"),
                     message=f"host fqdn {host.fqdn!r} is under '.local', which Linux stub resolvers reserve for mDNS and never send to unicast DNS",
                     hint="Windows guests resolve it; Linux guests need resolver domain routing (see the netsvc spike findings)",
+                )
+            )
+
+    # a dns.nameservers entry nothing can ever answer (documentation TEST-NET,
+    # benchmark, reserved, multicast, loopback blocks) realizes
+    # fine and can be deliberate scenario dressing, but every guest lookup
+    # through it waits out the full resolver timeout before any fallback (the
+    # range still realizes correctly, hence a warning). An entry inside a
+    # declared network's cidr is exempt: a guest can serve it there, though
+    # an in-range resolver is better declared through dns.authoritative,
+    # which is cross-checked against the guest list
+    declared_v4_cidrs = [
+        network.cidr
+        for network in spec.networks
+        if isinstance(network.cidr, IPv4Network)
+    ]
+    for network_index, network in enumerate(spec.networks):
+        if network.dns is None or not network.dns.nameservers:
+            continue
+        for ns_index, nameserver in enumerate(network.dns.nameservers):
+            if not unanswerable_address(nameserver):
+                continue
+            if any(nameserver in cidr for cidr in declared_v4_cidrs):
+                continue
+            issues.append(
+                Issue(
+                    code="dns-nameserver-unanswerable",
+                    severity="warning",
+                    path=("networks", network_index, "dns", "nameservers", ns_index),
+                    message=f"network {network.name!r} nameserver {nameserver} is in an address block nothing can answer (documentation/benchmark/reserved); guests wait out the resolver timeout on it for every lookup",
+                    hint="declare a reachable resolver, or an in-range one through dns.authoritative; keep it only as deliberate scenario dressing",
                 )
             )
 

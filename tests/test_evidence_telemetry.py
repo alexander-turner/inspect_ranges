@@ -301,7 +301,11 @@ def test_command_banner_only_output_is_quiet_and_ships_nothing(
         channel.exec_script = [
             exec_ok(b"evt-1\n-- cursor: c1\n"),
             exec_ok(b"-- cursor: c1\n"),
-            exec_ok(b"-- cursor: c1\n"),
+            # a wrapper that pads the banner with a separator newline: the
+            # whitespace payload must not read as flow (bytes stays 0, or a
+            # stalled sensor behind a chatty wrapper would hand quiet
+            # verdicts to a silenced plane)
+            exec_ok(b"\n-- cursor: c1\n"),
         ]
         poller, writer, store = make_poller(tmp_path, channel, [journal_spec()])
         for _ in range(3):
@@ -313,6 +317,7 @@ def test_command_banner_only_output_is_quiet_and_ships_nothing(
         meta = await meta_records(store, "journal")
         assert [m["outcome"] for m in meta] == ["ok", "quiet", "quiet"]
         assert [m["watermark"] for m in meta] == ["c1", "c1", "c1"]
+        assert [m["bytes"] for m in meta[1:]] == [0, 0]
 
     asyncio.run(run())
 
