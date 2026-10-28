@@ -46,6 +46,8 @@ from ._challenges import (
     validate_challenges,
     verify_goal,
 )
+from ._compiler.plan import Totals, plan_totals
+from ._dist.resolve import catalog_image_references
 from ._terminal import terminal
 from .schema import (
     load_range,
@@ -83,7 +85,9 @@ __all__ = [
     "Scoring",
     "SeverityFilter",
     "TamperGoal",
+    "Totals",
     "__version__",
+    "catalog_image_references",
     "challenge_dataset",
     "challenge_scorer",
     "challenge_setup",
@@ -91,6 +95,7 @@ __all__ = [
     "load_challenges",
     "load_collectors",
     "load_range",
+    "plan_totals",
     "range_json_schema",
     "range_oracle",
     "register_exploit",

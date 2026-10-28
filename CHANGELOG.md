@@ -2,6 +2,8 @@
 
 - Distribution: a registry answering 401 with a `Basic` challenge (Amazon ECR) is authenticated with the docker config's credential for the host directly, beside the existing `Bearer` token flow; a Basic challenge with no credential is a coded refusal naming the host. The docker config honors `DOCKER_CONFIG` the way the docker CLI does (`$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`), so a deployment can hand the client a config without touching the home directory.
 
+- `plan_totals(spec)` is public: the guest count and summed vCPUs and MiB a range declares (a guest without `resources:` counts 1 vCPU / 1024 MiB), computed from the spec alone so a deployment can size a host for a range whose build it has not pulled; `resolve_plan` records the same sums through it. `catalog_image_references(spec)` is public beside it: the catalog image names a range resolves outside its build (content-free hosts, routers, the attack box), which with the build itself is what a deployment mirrors for the range.
+
 ## 0.2.1 (28 October 2026)
 
 - Requires inspect-ai 0.3.286. The sandbox contract's new `user:` parameter on `read_file`/`write_file` is enforced genuinely rather than refused: an explicit user rides the exec plane (the oracle's privileged-op pattern, since the daemon's file plane acts as the agent identity), with the contract's exception mapping and read cap intact.
