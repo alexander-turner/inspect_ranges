@@ -126,6 +126,6 @@ What is not built yet, concretely: granted-URL and registry image delivery (`pre
 | `INSPECT_RANGES_LEASE_TTL_S` | 600 | Host lease TTL in seconds; the driver renews at TTL/3. A dead driver's sample becomes reclaimable one TTL after its last renewal. |
 | `INSPECT_RANGES_HOST_CLASS` | `unspecified` | The host-class name recorded in lease host facts (declarations, never per-instance probes). |
 | `INSPECT_RANGES_ATTACK_BOX` | unset | External [attack-box provider](attackbox.qmd#external-providers) registration (`<module>.<factory>[:<config>]`), consulted where realization runs: the driver under `local`, the applier's own environment under a separated backend. |
-| `INSPECT_RANGES_ATTACK_BOX_PROGRAM` | unset | Path to an installed copy of a [pinned provider program](attackbox.qmd#pinned-provider-programs), used instead of downloading the pinned release (offline or air-gapped hosts). Its `--version` must report at least the pin's minimum version. Keep it set where `down` and the reaper run, so they tear its boxes down with the same program. |
+| `INSPECT_RANGES_ATTACK_BOX_PROGRAM` | unset | Path to an installed copy of a [pinned provider program](attackbox.qmd#pinned-provider-programs), used instead of downloading the pinned release (offline or air-gapped hosts). Keep it set where `down` and the reaper run, so they tear its boxes down with the same program. |
 
 The provider's own knobs (concurrency, retries, image cache) are on the [Range Sandbox](provider.qmd) page and apply unchanged under either backend.

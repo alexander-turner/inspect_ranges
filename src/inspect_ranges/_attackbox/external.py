@@ -251,10 +251,12 @@ class ExternalProgramProvider:
         except ExternalBoxError as error:
             if status == 0:
                 raise
+            # the program's own words lead: a release that predates the
+            # protocol says here that `attackbox` is not one of its commands
             tail = stderr.decode(errors="replace")[-_STDERR_TAIL:].strip()
             raise ExternalBoxError(
-                f"`{program} attackbox {verb}` exited {status} with no protocol "
-                f"reply ({error.cause}); stderr: {tail or '(empty)'}"
+                f"{tail or '(no stderr)'} (`{program} attackbox {verb}` exited "
+                f"{status} with no protocol reply)"
             ) from error
         if "error" in reply:
             raise _error_from(reply, verb)

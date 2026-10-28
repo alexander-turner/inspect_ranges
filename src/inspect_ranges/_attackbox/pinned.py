@@ -1,14 +1,12 @@
 """A pinned external program as the attack-box provider: download, verify, cache, and run one release through `<program> attackbox` (protocol 1, `external.py`).
 
-Each provider is data: a pin file (JSON, written by the deployment) names one release by name, tag, source-tarball URL, and SHA-256, plus where the program sits in the extracted tree and the oldest version that speaks the protocol. `INSPECT_RANGES_ATTACK_BOX=<factory>:<pin file path>` selects it. The first use downloads the tarball, checks its digest before extracting anything, and moves the extracted tree into a per-user, per-release cache with one atomic rename. `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program instead, for hosts that cannot download. Either way, the program must report at least the pin's `min_version` before any verb runs.
+Each provider is data: a pin file (JSON, written by the deployment) names one release by name, tag, source-tarball URL, and SHA-256, plus where the program sits in the extracted tree. `INSPECT_RANGES_ATTACK_BOX=<factory>:<pin file path>` selects it. The first use downloads the tarball, checks its digest before extracting anything, and moves the extracted tree into a per-user, per-release cache with one atomic rename. `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program instead, for hosts that cannot download. A release that predates the protocol refuses the unknown `attackbox` command at its first verb, and that refusal surfaces as the cause (`external.py`).
 
 The origin stamped into the attack-box record carries the pin's contents, not its path (`attack_box_origin` canonicalizes the selected path into `<factory>:<pin JSON>`), so `down` and the reaper tear a box down with the release that booted it, even after the file changes. Resolution stays cheap: the download and the `probe` run at eval init (`prepare_attack_box`) or, on paths with no eval init, inside the provider's first verb.
 """
 
-import asyncio
 import hashlib
 import json
-import logging
 import os
 import re
 import tarfile
@@ -26,8 +24,6 @@ from .backend import (
 )
 from .external import ExternalBoxError, ExternalProgramProvider
 
-logger = logging.getLogger("inspect_ranges.attackbox")
-
 PROGRAM_ENV = "INSPECT_RANGES_ATTACK_BOX_PROGRAM"
 """Overrides the downloaded release with an installed provider program (offline or air-gapped hosts)."""
 
@@ -38,17 +34,7 @@ BUILTIN_HINT = f"unset {ENV_VAR} to use the built-in box"
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _DOWNLOAD_TIMEOUT_S = 60.0
-_VERSION_TIMEOUT_S = 30.0
-
-
-def _version(text: str) -> tuple[int, int, int]:
-    match = _VERSION.fullmatch(text)
-    if match is None:
-        raise ValueError(f"{text!r} is not a MAJOR.MINOR.PATCH version")
-    major, minor, patch = match.groups()
-    return int(major), int(minor), int(patch)
 
 
 @dataclass(frozen=True)
@@ -56,7 +42,7 @@ class ProgramPin:
     """One release of an external attack-box provider program, and how to find and check the program in it."""
 
     name: str
-    """The provider's name: the first word of its `--version` line, and its cache directory."""
+    """The provider's name, for messages and its cache directory."""
     tag: str
     url: str
     """The release's source tarball."""
@@ -64,8 +50,6 @@ class ProgramPin:
     """The tarball's SHA-256, checked before anything is extracted."""
     entry: str
     """The program's path inside the tarball's one top-level directory."""
-    min_version: str
-    """The oldest version that speaks attack-box protocol 1."""
 
     def __post_init__(self) -> None:
         # name and tag name cache directories, and entry a path under one:
@@ -81,7 +65,6 @@ class ProgramPin:
         entry = Path(self.entry)
         if entry.is_absolute() or ".." in entry.parts:
             raise ValueError(f"{self.name} entry {self.entry!r} leaves the release")
-        _version(self.min_version)
 
     @property
     def origin(self) -> str:
@@ -112,7 +95,7 @@ def load_pin(path: Path) -> ProgramPin:
     """The release a deployment's pin file names.
 
     Raises:
-        ValueError: The file is unreadable or does not describe a pin (`name`, `tag`, `url`, `sha256`, `entry`, `min_version`, nothing else).
+        ValueError: The file is unreadable or does not describe a pin (`name`, `tag`, `url`, `sha256`, `entry`, nothing else).
     """
     try:
         text = path.read_text()
@@ -163,16 +146,11 @@ def default_program_cache() -> Path:
     return Path.home() / ".cache" / "inspect-ranges" / "programs"
 
 
-class ProgramTooOld(ExternalBoxError):
-    """The program reports a version older than the pin's `min_version`, so it speaks no attack-box protocol."""
-
-
 def ensure_program(pin: ProgramPin, *, cache_root: Path | None = None) -> Path:
-    """The provider program for `pin`: the `INSPECT_RANGES_ATTACK_BOX_PROGRAM` override, the cached release, or a fresh verified download; checked against `min_version` before it is returned.
+    """The provider program for `pin`: the `INSPECT_RANGES_ATTACK_BOX_PROGRAM` override, the cached release, or a fresh verified download.
 
     Raises:
         ExternalBoxError: The override names no file, the download is refused (`INSPECT_RANGES_NEVER_PULL`) or fails, or the digest does not match (nothing is cached).
-        ProgramTooOld: The program reports a version below `min_version`.
     """
     override = os.environ.get(PROGRAM_ENV)
     if override:
@@ -192,69 +170,7 @@ def ensure_program(pin: ProgramPin, *, cache_root: Path | None = None) -> Path:
                     remedy=f"set {PROGRAM_ENV} to an installed {pin.name} program",
                 )
             _download_verified(pin, root / pin.name)
-    require_min_version(program, pin, override=bool(override))
     return program
-
-
-def require_min_version(program: Path, pin: ProgramPin, *, override: bool) -> None:
-    """Refuse a program older than the pin's `min_version`, judged by `<program> --version` alone.
-
-    The version flag is the one question every release answers before dispatching a verb, so asking it never reaches an older release's own handling of an unknown `attackbox` verb (glovebox's hands it to its agent launcher). The answer must be one line, `<name> <MAJOR.MINOR.PATCH>`, optionally followed by a parenthesized note.
-
-    Raises:
-        ExternalBoxError: The program does not answer, or answers outside that shape.
-        ProgramTooOld: The version is below `min_version`.
-    """
-    reported = asyncio.run(_version_line(program))
-    pattern = re.compile(rf"{re.escape(pin.name)} v?(\d+\.\d+\.\d+)(?: \([^\n]*\))?\n?")
-    match = pattern.fullmatch(reported)
-    if match is None:
-        raise ExternalBoxError(
-            f"`{program} --version` printed {reported!r}, not "
-            f"'{pin.name} MAJOR.MINOR.PATCH'"
-        )
-    if _version(match.group(1)) < _version(pin.min_version):
-        raise ProgramTooOld(
-            f"{program} is {pin.name} {match.group(1)}, but the attack box needs "
-            f"{pin.name} {pin.min_version} or newer (the first release that speaks "
-            "attack-box protocol 1)",
-            remedy=(
-                f"point {PROGRAM_ENV} at {pin.name} {pin.min_version} or newer"
-                if override
-                else None
-            ),
-        )
-
-
-async def _version_line(program: Path) -> str:
-    """`<program> --version`'s stdout, bounded; the process never outlives the call."""
-    try:
-        process = await asyncio.create_subprocess_exec(
-            str(program),
-            "--version",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError as error:
-        raise ExternalBoxError(
-            f"`{program} --version` did not start: {error}"
-        ) from error
-    try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(), timeout=_VERSION_TIMEOUT_S
-        )
-    except TimeoutError as error:
-        raise ExternalBoxError(
-            f"`{program} --version` did not answer within {_VERSION_TIMEOUT_S}s"
-        ) from error
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-    if process.returncode != 0:
-        raise ExternalBoxError(f"`{program} --version` exited {process.returncode}")
-    return stdout.decode(errors="replace")
 
 
 def _download_verified(pin: ProgramPin, root: Path) -> None:
@@ -315,36 +231,10 @@ def _download_verified(pin: ProgramPin, root: Path) -> None:
                 raise
 
 
-class PinnedProgramProvider(ExternalProgramProvider):
-    """The external-program provider over a pinned release."""
-
-    async def teardown(self, project: str, reclaim_token: str) -> None:
-        """Tear down `project`'s boxes; a release older than `min_version` never booted one, so there is nothing to tear down.
-
-        The exception is an `INSPECT_RANGES_ATTACK_BOX_PROGRAM` override that is too old: the box may have booted through a different program, so that refusal stands.
-
-        Raises:
-            ExternalBoxError: As `ExternalProgramProvider.teardown`.
-        """
-        try:
-            await super().teardown(project, reclaim_token)
-        except ProgramTooOld:
-            if os.environ.get(PROGRAM_ENV):
-                raise
-            # without this, every `up` that failed at boot under such a pin
-            # would leave a project whose `down` refuses forever
-            logger.warning(
-                "attack-box teardown for %s: the recorded release predates "
-                "attack-box protocol 1, so it booted no box; nothing to tear "
-                "down (a box booted through %s needs that variable set where "
-                "down runs)",
-                project,
-                PROGRAM_ENV,
-            )
-
-
-def _provider(pin: ProgramPin) -> PinnedProgramProvider:
-    return PinnedProgramProvider(lambda: ensure_program(pin), builtin_hint=BUILTIN_HINT)
+def _provider(pin: ProgramPin) -> ExternalProgramProvider:
+    return ExternalProgramProvider(
+        lambda: ensure_program(pin), builtin_hint=BUILTIN_HINT
+    )
 
 
 def pinned_attack_box(context: AttackBoxContext) -> AttackBoxBackend:

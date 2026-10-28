@@ -1,7 +1,8 @@
 ## Unreleased
 
 
-- Attack box: an external provider can now be a pinned program rather than a Python package. `INSPECT_RANGES_ATTACK_BOX=inspect_ranges._attackbox.pinned.pinned_attack_box:<pin file>` selects the release a deployment-written pin file names. The first eval downloads it and checks its SHA-256, the program must report the pin's minimum version, eval init probes the host, the recorded origin carries the pin's contents, and `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program for offline hosts.
+- Attack box: an external provider can now be a pinned program rather than a Python package. `INSPECT_RANGES_ATTACK_BOX=inspect_ranges._attackbox.pinned.pinned_attack_box:<pin file>` selects the release a deployment-written pin file names. The first eval downloads it and checks its SHA-256, eval init probes the host, the recorded origin carries the pin's contents, and `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program for offline hosts.
+
 
 
 

@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import sys
 import tarfile
 from collections.abc import Generator
@@ -32,9 +31,7 @@ from inspect_ranges._attackbox.pinned import (
     BUILTIN_HINT,
     FACTORY_PATH,
     PROGRAM_ENV,
-    PinnedProgramProvider,
     ProgramPin,
-    ProgramTooOld,
     ensure_program,
     load_pin,
     pin_from_config,
@@ -47,9 +44,6 @@ from tests.test_provider_lifecycle import rigged_runtime, small_spec
 
 _STUB = """\
 import json, os, sys
-if sys.argv[1:] == ["--version"]:
-    print(os.environ.get("STUB_VERSION", "glovebox 0.92.4"))
-    sys.exit(0)
 verb = sys.argv[2]
 request = json.loads(sys.stdin.read()) if verb != "probe" else None
 taps = {}
@@ -60,6 +54,7 @@ with open(os.environ["STUB_LOG"], "a") as log:
     log.write(json.dumps({"argv": sys.argv[1:], "request": request, "taps": taps}) + "\\n")
 reply = json.loads(open(os.environ["STUB_SCENARIO"]).read())[verb]
 sys.stdout.write(reply["stdout"])
+sys.stderr.write(reply.get("stderr", ""))
 sys.exit(reply.get("status", 0))
 """
 
@@ -73,7 +68,7 @@ SETUP = "sudo glovebox setup --kata"
 
 
 class Stub:
-    """A stub `glovebox` that answers `--version` and the `attackbox` verbs, with its scenario and call log."""
+    """A stub `glovebox` that answers the `attackbox` verbs, with its scenario and call log."""
 
     def __init__(self, root: Path) -> None:
         bin_dir = root / "glovebox" / "bin"
@@ -87,7 +82,6 @@ class Stub:
             url="file:///nowhere/release.tar.gz",
             sha256="ab" * 32,
             entry="bin/glovebox",
-            min_version="0.92.4",
         )
         self.pin_file = root / "glovebox.pin.json"
         """A deployment-written pin file naming the stub's release."""
@@ -96,8 +90,10 @@ class Stub:
         self.log = root / "calls.jsonl"
         self.set()
 
-    def set(self, **verbs: dict[str, Any] | str | tuple[str, int]) -> None:
-        """Set each verb's reply: an object (exit 0), raw stdout (exit 0), or `(stdout, status)`."""
+    def set(
+        self, **verbs: dict[str, Any] | str | tuple[str, int] | tuple[str, int, str]
+    ) -> None:
+        """Set each verb's reply: an object (exit 0), raw stdout (exit 0), or `(stdout, status[, stderr])`."""
         replies = {
             "boot": OK_BOOT,
             "teardown": {"protocol": 1},
@@ -107,7 +103,12 @@ class Stub:
         scenario: dict[str, dict[str, Any]] = {}
         for verb, reply in replies.items():
             if isinstance(reply, tuple):
-                scenario[verb] = {"stdout": reply[0], "status": reply[1]}
+                stderr = reply[2] if len(reply) == 3 else ""
+                scenario[verb] = {
+                    "stdout": reply[0],
+                    "status": reply[1],
+                    "stderr": stderr,
+                }
             elif isinstance(reply, str):
                 scenario[verb] = {"stdout": reply}
             else:
@@ -277,6 +278,26 @@ def test_boot_refusals_name_the_cause_and_the_builtin_box(
     assert message.endswith(BUILTIN_HINT)
 
 
+OLD_RELEASE = (
+    "glovebox: 'attackbox' is not a glovebox command. To send it as a prompt: "
+    "glovebox -- 'attackbox' (keep any flags ahead of the --). Run 'glovebox "
+    "help' for the command list."
+)
+
+
+def test_a_release_without_the_command_fails_at_probe_with_its_own_words(
+    stub: Stub,
+) -> None:
+    """A glovebox that predates the protocol refuses the unknown command before launching anything; its stderr is the cause."""
+    stub.set(probe=("", 2, OLD_RELEASE + "\n"))
+    with pytest.raises(ExternalBoxError) as raised:
+        prepare_attack_box(stub.pin.origin)
+    first, hint = str(raised.value).splitlines()
+    assert first.startswith(OLD_RELEASE)
+    assert "exited 2 with no protocol reply" in first
+    assert hint == BUILTIN_HINT
+
+
 def test_teardown_refusal_carries_the_error_object(stub: Stub, tmp_path: Path) -> None:
     stub.set(
         teardown=(
@@ -326,15 +347,15 @@ def test_a_bad_pin_file_refuses_at_selection(
         attack_box_origin()
 
 
-# -- the pin, the download, the cache, and the version floor ---------------------------
+# -- the pin, the download, and the cache -----------------------------------------------
 
 
-def release(tmp_path: Path, *, version: str) -> tuple[str, str]:
-    """A release tarball shaped like glovebox's source archive, whose program reports `version`: its `file://` URL and SHA-256."""
+def release(tmp_path: Path) -> tuple[str, str]:
+    """A release tarball shaped like glovebox's source archive: its `file://` URL and SHA-256."""
     tree = tmp_path / "src" / "agent-glovebox-9.9.9"
     (tree / "bin").mkdir(parents=True)
     program = tree / "bin" / "glovebox"
-    program.write_text(f"#!/bin/sh\necho 'glovebox {version}'\n")
+    program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
     archive = tmp_path / "release.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
@@ -349,12 +370,11 @@ def make_pin(url: str, digest: str) -> ProgramPin:
         url=url,
         sha256=digest,
         entry="bin/glovebox",
-        min_version="0.92.4",
     )
 
 
 def test_first_use_downloads_and_a_second_hits_the_cache(tmp_path: Path) -> None:
-    url, digest = release(tmp_path, version="0.92.4")
+    url, digest = release(tmp_path)
     pin = make_pin(url, digest)
     cache = tmp_path / "cache"
     program = ensure_program(pin, cache_root=cache)
@@ -366,7 +386,7 @@ def test_first_use_downloads_and_a_second_hits_the_cache(tmp_path: Path) -> None
 
 
 def test_a_hash_mismatch_refuses_and_caches_nothing(tmp_path: Path) -> None:
-    url, _ = release(tmp_path, version="0.92.4")
+    url, _ = release(tmp_path)
     pin = make_pin(url, "0" * 64)
     cache = tmp_path / "cache"
     with pytest.raises(ExternalBoxError, match="nothing was cached"):
@@ -374,75 +394,11 @@ def test_a_hash_mismatch_refuses_and_caches_nothing(tmp_path: Path) -> None:
     assert not list((cache / "glovebox").glob("v9.9.9*"))
 
 
-@pytest.mark.parametrize(
-    ("reported", "refusal"),
-    [
-        ("glovebox 0.92.4", None),
-        ("glovebox 1.0.0 (v1.0.0-3-gabc123)", None),
-        ("glovebox v0.93.0", None),
-        ("glovebox 0.92.3", "needs glovebox 0.92.4 or newer"),
-        ("glovebox 0.92.4\nlaunching claude", "not 'glovebox MAJOR.MINOR.PATCH'"),
-        ("other 9.9.9", "not 'glovebox MAJOR.MINOR.PATCH'"),
-        ("glovebox 0.92", "not 'glovebox MAJOR.MINOR.PATCH'"),
-        ("", "not 'glovebox MAJOR.MINOR.PATCH'"),
-    ],
-    ids=[
-        "at-floor",
-        "newer-with-note",
-        "v-prefix",
-        "too-old",
-        "extra-line",
-        "other-program",
-        "two-part",
-        "silent",
-    ],
-)
-def test_the_override_must_report_the_minimum_version(
-    stub: Stub,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    reported: str,
-    refusal: str | None,
-) -> None:
-    """`--version` alone decides, parsed strictly, before any verb could reach an older release's launcher."""
-    monkeypatch.setenv("STUB_VERSION", reported)
-    pin = make_pin("file:///unused", "0" * 64)
-    if refusal is None:
-        assert ensure_program(pin, cache_root=tmp_path / "cache") == stub.program
-    else:
-        with pytest.raises(ExternalBoxError, match=re.escape(refusal)):
-            ensure_program(pin, cache_root=tmp_path / "cache")
-    assert stub.calls() == [], "no attackbox verb runs while the version is checked"
-
-
-def test_a_release_below_the_floor_is_never_run(tmp_path: Path) -> None:
-    """The pinned v0.92.3 is such a release: it would treat `attackbox` as arguments for an agent launch."""
-    url, digest = release(tmp_path, version="0.92.3")
-    with pytest.raises(ProgramTooOld, match="needs glovebox 0.92.4 or newer"):
-        ensure_program(make_pin(url, digest), cache_root=tmp_path / "cache")
-
-
-def test_teardown_under_a_release_below_the_floor_is_a_no_op(tmp_path: Path) -> None:
-    """Such a release cannot have booted a box, so a failed `up`'s project still tears down; boot still refuses by name."""
-    url, digest = release(tmp_path, version="0.92.3")
-    pin = make_pin(url, digest)
-    provider = PinnedProgramProvider(
-        lambda: ensure_program(pin, cache_root=tmp_path / "cache"),
-        builtin_hint=BUILTIN_HINT,
-    )
-    asyncio.run(provider.teardown("p1", ""))
-    with (
-        tap_pipe(b"") as fd,
-        pytest.raises(ExternalBoxError, match="needs glovebox 0.92.4 or newer"),
-    ):
-        asyncio.run(provider.boot(attachment(fd)))
-
-
 def test_never_pull_refuses_the_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("INSPECT_RANGES_NEVER_PULL", "1")
-    url, digest = release(tmp_path, version="0.92.4")
+    url, digest = release(tmp_path)
     with pytest.raises(ExternalBoxError) as raised:
         ensure_program(make_pin(url, digest), cache_root=tmp_path / "cache")
     assert PROGRAM_ENV in str(raised.value)

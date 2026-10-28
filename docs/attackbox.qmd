@@ -50,7 +50,7 @@ A provider can also be a separate program that inspect-ranges pins, rather than 
 Each such provider is data: a pin file the deployment writes names one release. Select it by pointing the variable at the file:
 
 ``` {.json filename="/etc/inspect-ranges/glovebox.pin.json"}
-{"name": "glovebox", "tag": "v0.93.0", "entry": "bin/glovebox", "min_version": "0.93.0",
+{"name": "glovebox", "tag": "v0.93.0", "entry": "bin/glovebox",
  "url": "https://github.com/AlexanderMattTurner/agent-glovebox/archive/refs/tags/v0.93.0.tar.gz",
  "sha256": "<the tarball's SHA-256>"}
 ```
@@ -60,11 +60,11 @@ INSPECT_RANGES_ATTACK_BOX=inspect_ranges._attackbox.pinned.pinned_attack_box:/et
   inspect eval my_task.py
 ```
 
-`name` is the first word the program prints for `--version`, `entry` is the program's path inside the tarball's one top-level directory, and `min_version` is the oldest version that speaks the protocol. Every field is required.
+`name` names the provider in messages and in the cache, and `entry` is the program's path inside the tarball's one top-level directory. Every field is required.
 
 The first eval on a host downloads the release's source tarball and checks its SHA-256 before it extracts anything. A mismatch refuses, and nothing is cached. The extracted release moves into `~/.cache/inspect-ranges/programs/<name>/<tag>-<digest prefix>` with one atomic rename, so later evals start from the cache. `INSPECT_RANGES_NEVER_PULL=1` refuses the download. On an offline or air-gapped host, set `INSPECT_RANGES_ATTACK_BOX_PROGRAM` to an installed copy of the program instead.
 
-Before any verb runs, inspect-ranges asks the program `--version`. The answer must be one line, `<name> <MAJOR.MINOR.PATCH>`, optionally followed by a note in parentheses, and the version must be at least the pin's minimum. An older release refuses by name with the version it needs. The version flag is the one question every release answers before dispatching a verb, so an older release never meets the `attackbox` verb it does not know.
+A release that predates the protocol does not know the `attackbox` command. It refuses it, and its own message (for glovebox, `'attackbox' is not a glovebox command`) becomes the cause the eval prints.
 
 The download and a `<program> attackbox probe` run at eval init, beside the catalog image pull, and only where this process boots the box: a range with a dedicated attack box under the `local` host backend. Resolving the variable stays cheap, as the seam requires. When the download or the probe fails, the eval refuses with the cause, the remedy (for a runtime that is not installed, the exact `sudo` setup command the probe returns), the bug-report URL when the probe gives one, and the way back to the built-in box. Paths with no eval init, such as the applier under a `uds:` backend, fetch the release at the first verb and refuse the same way.
 
