@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .session import PANE_HEIGHT, PANE_WIDTH
+from .session import PANE_HEIGHT, PANE_WIDTH, wait_echo_pattern
 
 
 @dataclass(frozen=True)
@@ -31,12 +31,15 @@ def assemble_cast(
     title: str,
     session: str | None = None,
     opener: SessionOpener | None = None,
+    channel_prefix: str | None = None,
 ) -> str:
     """The asciicast v2 document for one session's capture.
 
     `chunks` and `markers` carry monotonic timestamps; event times are seconds since `start_monotonic`, clamped at zero. Events merge in time order, markers before output at equal times (the marker names the tool call that caused what follows).
 
     `session` and `opener` land as additive `ir_*` header fields (asciicast parsers ignore unknown keys), so a viewer can group sessions by the agent that opened them while older casts without the fields simply present flat.
+
+    With `channel_prefix` (the session life's `wait_channel_prefix`), the blocking signal's pane echo (`; tmux wait -S <channel>`) is scrubbed from the output stream the way tool results scrub it: the agent never typed it, so a viewer reading the playback should not see it as the agent's keystrokes. The scrub runs over the concatenated stream (the echo can straddle chunk boundaries) and is anchored to our own channel names, so nothing the agent authored is touched. Without a prefix the stream is kept raw.
     """
     header: dict[str, object] = {
         "version": 2,
@@ -57,14 +60,44 @@ def assemble_cast(
     events: list[tuple[float, int, str, str]] = []
     for at, label in markers:
         events.append((max(at - start_monotonic, 0.0), 0, "m", label))
-    for at, data in chunks:
-        events.append(
-            (max(at - start_monotonic, 0.0), 1, "o", data.decode(errors="replace"))
-        )
+    texts = [data.decode(errors="replace") for _, data in chunks]
+    if channel_prefix is not None:
+        texts = scrub_stream(texts, channel_prefix)
+    for (at, _), text in zip(chunks, texts, strict=True):
+        if text:
+            events.append((max(at - start_monotonic, 0.0), 1, "o", text))
     events.sort(key=lambda event: (event[0], event[1]))
     lines = [json.dumps(header)]
     lines.extend(json.dumps([round(at, 6), kind, data]) for at, _, kind, data in events)
     return "\n".join(lines) + "\n"
+
+
+def scrub_stream(texts: list[str], channel_prefix: str) -> list[str]:
+    """Remove the blocking signal's echo from a chunked output stream, preserving chunk boundaries and timing.
+
+    Matches are found over the concatenation (an echo split across two chunks is one match) and each chunk loses only its own share of every match, so every surviving byte keeps the chunk, and so the timestamp, it arrived in. A chunk the scrub empties comes back as `""` (the caller drops it). Pure.
+    """
+    joined = "".join(texts)
+    spans = [
+        (m.start(), m.end()) for m in wait_echo_pattern(channel_prefix).finditer(joined)
+    ]
+    if not spans:
+        return texts
+    scrubbed: list[str] = []
+    start = 0
+    for text in texts:
+        end = start + len(text)
+        kept: list[str] = []
+        cursor = start
+        for span_start, span_end in spans:
+            if span_end <= start or span_start >= end:
+                continue
+            kept.append(joined[cursor : max(span_start, start)])
+            cursor = min(span_end, end)
+        kept.append(joined[cursor:end])
+        scrubbed.append("".join(kept))
+        start = end
+    return scrubbed
 
 
 CAST_STORE_CAP_ENV = "INSPECT_RANGES_CAST_STORE_CAP_MB"

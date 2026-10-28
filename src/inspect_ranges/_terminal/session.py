@@ -344,10 +344,19 @@ def _wait_echo_patterns(
     return plain, re.compile("|".join(alternatives))
 
 
+def wait_echo_pattern(channel_prefix: str) -> re.Pattern[str]:
+    """The unwrapped form of the blocking signal's pane echo, anchored to our own channel names (`wait_channel_prefix`).
+
+    The raw pty stream (what pipe-pane records for the cast) carries no wrap newlines, so this plain form is the only one a cast scrub needs; `scrub_harness_echo` handles the wrapped forms `capture-pane` produces.
+    """
+    plain, _ = _wait_echo_patterns(channel_prefix)
+    return plain
+
+
 def scrub_harness_echo(text: str, channel_prefix: str | None = None) -> str:
     """Remove the blocking signal's pane echo from model-facing output.
 
-    A blocking send appends `; tmux wait -S <channel>` to the command line, and the pane echoes it back; the model should read its own command, not the harness suffix. The pane wraps at `PANE_WIDTH`, so the echoed suffix can carry one capture newline anywhere inside it; a wrapped match is removed only when its interior newline sits exactly at the wrap column, so agent-authored text that merely resembles the suffix mid-line survives. The tool threads `channel_prefix` (the session life's `wait_channel_prefix`), anchoring the match to our own channel names. Casts keep the raw pane: only tool results are scrubbed.
+    A blocking send appends `; tmux wait -S <channel>` to the command line, and the pane echoes it back; the model should read its own command, not the harness suffix. The pane wraps at `PANE_WIDTH`, so the echoed suffix can carry one capture newline anywhere inside it; a wrapped match is removed only when its interior newline sits exactly at the wrap column, so agent-authored text that merely resembles the suffix mid-line survives. The tool threads `channel_prefix` (the session life's `wait_channel_prefix`), anchoring the match to our own channel names. Casts get the same treatment at assembly (`assemble_cast`, over the raw stream); the evidence mirror keeps the raw pane.
     """
     plain, wrapped = _wait_echo_patterns(channel_prefix)
 

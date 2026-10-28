@@ -18,7 +18,7 @@ from inspect_ai.util import background, sandbox
 from inspect_ai.util._sandbox.exec_remote import ExecRemoteProcess, ExecStdout
 
 from .cast import SessionOpener, assemble_cast, cast_store_cap_bytes, clip_cast
-from .session import SessionState, sink_path
+from .session import SessionState, sink_path, wait_channel_prefix
 
 if TYPE_CHECKING:
     from .._provider.evidence import EvidenceSession
@@ -213,7 +213,7 @@ async def stop_all_captures(store_id: int) -> None:
 
 
 def _write_cast(sample: _SampleCaptures, capture: _Capture) -> None:
-    """Assemble the asciicast and deliver it: into the sample store always (capped), and beside the sample's evidence when a local evidence location exists.
+    """Assemble the asciicast (with the blocking signal's echo scrubbed, as tool results are) and deliver it: into the sample store always (capped), and beside the sample's evidence when a local evidence location exists. The evidence mirror (`terminal/<session>`) stays raw.
 
     A session name can record more than one life (close then reopen, or reopen after dying), each with its own cast: later lives get a numbered suffix rather than overwriting the earlier record, in the store and on disk alike.
     """
@@ -226,6 +226,7 @@ def _write_cast(sample: _SampleCaptures, capture: _Capture) -> None:
             title=f"terminal session {capture.session}",
             session=capture.session,
             opener=capture.opener,
+            channel_prefix=wait_channel_prefix(capture.session, capture.state.token),
         )
     except Exception as error:  # noqa: BLE001
         logger.info("terminal cast for %r not assembled: %s", capture.session, error)

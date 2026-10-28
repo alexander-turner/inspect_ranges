@@ -440,3 +440,73 @@ def test_clip_cast_leaves_small_casts_alone() -> None:
 
     cast = '{"version": 2}\n[0.1, "o", "hi"]'
     assert clip_cast(cast, 10_000) == cast
+
+
+_SPLIT_STREAM = f"$ ls /opt{_SUFFIX}\r\nguestd\r\n$ "
+
+
+@pytest.mark.parametrize("split", [0, 9, 12, 20, len(_SUFFIX) + 8, len(_SPLIT_STREAM)])
+def test_assemble_cast_scrubs_wait_echo_across_chunks(split: int) -> None:
+    """The echoed completion signal is removed from the cast's output stream wherever the chunk boundary falls (before, inside, or after it); surviving bytes keep their chunk, so their timestamp, and an emptied chunk is dropped."""
+    from inspect_ranges._terminal.cast import scrub_stream
+
+    chunks = [
+        (100.5, _SPLIT_STREAM[:split].encode()),
+        (101.0, _SPLIT_STREAM[split:].encode()),
+    ]
+    cast = assemble_cast(
+        chunks=chunks,
+        markers=[],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="s",
+        channel_prefix=_PREFIX,
+    )
+    events = [json.loads(line) for line in cast.strip().split("\n")[1:]]
+    assert "".join(data for _, _, data in events) == "$ ls /opt\r\nguestd\r\n$ "
+    assert all(data for _, _, data in events)
+    expected = [
+        t
+        for t, text in zip(
+            [0.5, 1.0],
+            scrub_stream([_SPLIT_STREAM[:split], _SPLIT_STREAM[split:]], _PREFIX),
+            strict=True,
+        )
+        if text
+    ]
+    assert [t for t, _, _ in events] == expected
+
+
+def test_assemble_cast_scrubs_every_send_but_keeps_lookalikes() -> None:
+    """Each blocking send carries its own counter; all of them scrub, while another channel's (or agent-authored) signal is not ours and stays."""
+    stream = (
+        "$ id; tmux wait -S done-main-b7f168f4-1\r\nuid=0\r\n"
+        "$ cat notes; tmux wait -S done-other-ffffffff-1\r\nkept\r\n"
+        "$ ls; tmux wait -S done-main-b7f168f4-2\r\n$ "
+    )
+    cast = assemble_cast(
+        chunks=[(100.0, stream.encode())],
+        markers=[],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="s",
+        channel_prefix=_PREFIX,
+    )
+    _, _, data = json.loads(cast.strip().split("\n")[1])
+    assert data == (
+        "$ id\r\nuid=0\r\n"
+        "$ cat notes; tmux wait -S done-other-ffffffff-1\r\nkept\r\n"
+        "$ ls\r\n$ "
+    )
+
+
+def test_assemble_cast_without_prefix_keeps_the_raw_stream() -> None:
+    stream = f"$ ls{_SUFFIX}\r\n$ "
+    cast = assemble_cast(
+        chunks=[(100.0, stream.encode())],
+        markers=[],
+        start_monotonic=100.0,
+        start_wall=1_700_000_000.0,
+        title="s",
+    )
+    assert json.loads(cast.strip().split("\n")[1])[2] == stream
