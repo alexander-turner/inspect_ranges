@@ -2,7 +2,7 @@
 
 Pure Python by decision (distribution-v1.md slice 2, settled by the opening probe against `registry:2` and the live hub token flow): the protocol surface this layer needs (ping, HEAD, monolithic blob upload, manifest put/get by digest and tag) is small, and owning it keeps zero external binary dependencies and full control of verification: every byte a registry returns verifies against its descriptor digest before use, exactly like the directory form. Uploads are monolithic-PUT only, a recorded narrowing of the plan's "chunked and mounted" sketch (round-2 review N6): the live battery proves monolithic against `registry:2`, cross-repo mounts and chunked resume arrive if the slice-6 hub measurements demand them, and until then the simpler protocol has fewer failure states.
 
-Auth is the standard docker credential config plus the bearer-token flow: an unauthenticated registry (a local `registry:2`) works anonymously; a 401 with a `WWW-Authenticate: Bearer` challenge is answered by fetching a token from the named realm, with Basic credentials from `~/.docker/config.json` when the host has a plain-auth entry (credential helpers are not consulted, and denials say so). Operations request least privilege (`pull` for reads, `pull,push` for writes) and tokens cache per requested scope. Redirects never carry the bearer token off the registry's origin: real registries redirect blob GETs to presigned storage URLs, and forwarding `Authorization` there both leaks the token and breaks presigned auth (round-2 review B3). Credentials never appear in errors or logs.
+Auth is the standard docker credential config plus the two challenge flows registries use: an unauthenticated registry (a local `registry:2`) works anonymously; a 401 with a `WWW-Authenticate: Bearer` challenge is answered by fetching a token from the named realm, with Basic credentials from the docker config when the host has a plain-auth entry; a 401 with a `Basic` challenge (Amazon ECR) is answered with that credential directly. The config is `$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`; credential helpers are not consulted, and denials say so. Operations request least privilege (`pull` for reads, `pull,push` for writes) and tokens cache per requested scope. Redirects never carry the bearer token off the registry's origin: real registries redirect blob GETs to presigned storage URLs, and forwarding `Authorization` there both leaks the token and breaks presigned auth (round-2 review B3). Credentials never appear in errors or logs.
 """
 
 import hashlib
@@ -47,7 +47,9 @@ _HUB_HOSTS = ("docker.io", "registry-1.docker.io", "index.docker.io")
 
 
 def _load_docker_config(config_path: Path | None) -> dict[str, Any] | None:
-    path = config_path or Path.home() / ".docker" / "config.json"
+    path = config_path or (
+        Path(os.environ.get("DOCKER_CONFIG") or Path.home() / ".docker") / "config.json"
+    )
     try:
         config: dict[str, Any] = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -65,7 +67,7 @@ def _host_keys(host: str) -> list[str]:
 def docker_auth_for(host: str, config_path: Path | None = None) -> str | None:
     """The base64 `user:secret` from the docker credential config for `host`, or `None` for anonymous.
 
-    Docker Hub's hosts (`docker.io`, `registry-1.docker.io`, `index.docker.io`) all map to the config's legacy `https://index.docker.io/v1/` key. Only plain `auths` entries are read; see `docker_config_uses_helper` for the helper-configured case.
+    Docker Hub's hosts (`docker.io`, `registry-1.docker.io`, `index.docker.io`) all map to the config's legacy `https://index.docker.io/v1/` key. The config is `config_path`, else `$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`. Only plain `auths` entries are read; see `docker_config_uses_helper` for the helper-configured case.
     """
     config = _load_docker_config(config_path)
     if config is None:
@@ -102,7 +104,7 @@ def registry_catalog(
 ) -> list[str]:
     """A registry's repository names under `prefix`, through the same bearer-auth flow as every other request (round-5 N4), paginated via `last` (round-5 N3)."""
     host = urllib.parse.urlparse(base_url).netloc
-    token: str | None = None
+    authorization: str | None = None
     names: list[str] = []
     last = ""
     while True:
@@ -110,15 +112,21 @@ def registry_catalog(
             f"&last={urllib.parse.quote(last)}" if last else ""
         )
         request = urllib.request.Request(url)
-        if token:
-            request.add_header("Authorization", f"Bearer {token}")
+        if authorization:
+            request.add_header("Authorization", authorization)
         try:
             response = _OPENER.open(request, timeout=60)
         except urllib.error.HTTPError as error:
-            if error.code == 401 and token is None:
+            if error.code == 401 and authorization is None:
                 challenge = error.headers.get("WWW-Authenticate", "")
                 error.close()
-                token = _catalog_token(challenge, host, docker_config)
+                authorization = _answer_challenge(
+                    challenge,
+                    host,
+                    "registry:catalog:*",
+                    docker_config,
+                    code="location-unenumerable",
+                )
                 continue
             body = error.read()[:200]
             error.close()
@@ -154,35 +162,63 @@ def registry_catalog(
         last = page[-1]
 
 
-def _catalog_token(challenge: str, host: str, docker_config: Path | None) -> str:
+def _answer_challenge(
+    challenge: str,
+    host: str,
+    scope: str,
+    docker_config: Path | None,
+    *,
+    code: str,
+    hint: str = "",
+) -> str:
+    """The `Authorization` header value answering a 401 challenge: a token fetched from a `Bearer` realm (the docker config's Basic credential rides along when present), or the credential itself for a `Basic` challenge, which is what Amazon ECR sends.
+
+    Args:
+        challenge: The `WWW-Authenticate` header value.
+        host: The registry host, for the credential lookup and error messages.
+        scope: The token scope to request when the challenge names none.
+        docker_config: An explicit docker config path, or `None` for the default.
+        code: The `DistError` code a refusal carries (the caller's failure class).
+        hint: Appended to refusals that may stem from a credential this client cannot read.
+
+    Raises:
+        DistError: The challenge is neither Bearer nor Basic, the realm is missing or unreachable, or a Basic challenge finds no credential.
+    """
+    auth = docker_auth_for(host, docker_config)
+    if challenge.startswith("Basic "):
+        if auth is None:
+            raise DistError(
+                code,
+                f"{host} requires Basic credentials and the docker config has "
+                f"none for it{hint}",
+            )
+        return f"Basic {auth}"
     if not challenge.startswith("Bearer "):
         raise DistError(
-            "location-unenumerable",
-            f"{host} denied the catalog with no bearer challenge",
+            code,
+            f"{host} denied access and offered no bearer or basic challenge{hint}",
         )
     params = dict(re.findall(r'(\w+)="([^"]*)"', challenge.removeprefix("Bearer ")))
     realm = params.get("realm")
     if not realm:
-        raise DistError("location-unenumerable", f"{host} sent no token realm")
-    query = {"scope": params.get("scope", "registry:catalog:*")}
+        raise DistError(code, f"{host} sent a bearer challenge without a realm")
+    query = {"scope": params.get("scope", scope)}
     if "service" in params:
         query["service"] = params["service"]
     request = urllib.request.Request(f"{realm}?{urllib.parse.urlencode(query)}")
-    auth = docker_auth_for(host, docker_config)
     if auth:
         request.add_header("Authorization", f"Basic {auth}")
     try:
         with _OPENER.open(request, timeout=60) as response:
-            token = json.loads(_read_capped(response, _MANIFEST_CAP, "token")).get(
-                "token"
-            )
+            payload = json.loads(_read_capped(response, _MANIFEST_CAP, "token"))
     except (urllib.error.URLError, OSError, ValueError) as error:
         raise DistError(
-            "location-unenumerable", f"catalog token fetch failed: {error}"
+            code, f"token fetch from {realm} failed: {error}{hint}"
         ) from error
+    token = payload.get("token") or payload.get("access_token")
     if not isinstance(token, str) or not token:
-        raise DistError("location-unenumerable", f"{realm} returned no token")
-    return token
+        raise DistError(code, f"{realm} returned no token")
+    return f"Bearer {token}"
 
 
 class _OneShotDrained(Exception):
@@ -265,7 +301,7 @@ class RegistryRepo:
         self.repo = repo
         self._host = urllib.parse.urlparse(self.base_url).netloc
         self._docker_config = docker_config
-        self._tokens: dict[str, str] = {}
+        self._authorizations: dict[str, str] = {}
 
     # -- protocol plumbing ---------------------------------------------------------
 
@@ -303,16 +339,23 @@ class RegistryRepo:
             url, method=method, data=body, headers=dict(headers or {})
         )
         scope = f"repository:{self.repo}:{actions}"
-        token = self._tokens.get(scope)
-        if token:
-            request.add_header("Authorization", f"Bearer {token}")
+        authorization = self._authorizations.get(scope)
+        if authorization:
+            request.add_header("Authorization", authorization)
         try:
             response = _OPENER.open(request, timeout=120)
         except urllib.error.HTTPError as error:
             if error.code == 401 and not _retried:
                 challenge = error.headers.get("WWW-Authenticate", "")
                 error.close()
-                self._tokens[scope] = self._fetch_token(challenge, scope)
+                self._authorizations[scope] = _answer_challenge(
+                    challenge,
+                    self._host,
+                    scope,
+                    self._docker_config,
+                    code="registry-denied",
+                    hint=self._helper_hint(),
+                )
                 return self._request(
                     method,
                     url,
@@ -380,41 +423,6 @@ class RegistryRepo:
                 "plain auths entry)"
             )
         return ""
-
-    def _fetch_token(self, challenge: str, scope: str) -> str:
-        """Answer a `WWW-Authenticate: Bearer` challenge; Basic credentials ride along when the docker config has them."""
-        if not challenge.startswith("Bearer "):
-            raise DistError(
-                "registry-denied",
-                f"{self._host} denied access and offered no bearer challenge"
-                f"{self._helper_hint()}",
-            )
-        params = dict(re.findall(r'(\w+)="([^"]*)"', challenge.removeprefix("Bearer ")))
-        realm = params.get("realm")
-        if not realm:
-            raise DistError(
-                "registry-denied",
-                f"{self._host} sent a bearer challenge without a realm",
-            )
-        query = {"scope": params.get("scope", scope)}
-        if "service" in params:
-            query["service"] = params["service"]
-        request = urllib.request.Request(f"{realm}?{urllib.parse.urlencode(query)}")
-        auth = docker_auth_for(self._host, self._docker_config)
-        if auth:
-            request.add_header("Authorization", f"Basic {auth}")
-        try:
-            with _OPENER.open(request, timeout=60) as response:
-                payload = json.loads(_read_capped(response, _MANIFEST_CAP, "token"))
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            raise DistError(
-                "registry-denied",
-                f"token fetch from {realm} failed: {error}{self._helper_hint()}",
-            ) from error
-        token = payload.get("token") or payload.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise DistError("registry-denied", f"{realm} returned no token")
-        return token
 
     # -- blobs ----------------------------------------------------------------------
 

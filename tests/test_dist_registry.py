@@ -34,11 +34,15 @@ def fake_backing_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 class FakeRegistryState:
     """One registry's content: blobs by digest, manifests by repo-scoped reference (`repo:ref`, so same-named tags in different repos never collide), plus auth and behavior knobs."""
 
-    def __init__(self, *, require_token: bool = False) -> None:
+    def __init__(
+        self, *, require_token: bool = False, basic_credential: str | None = None
+    ) -> None:
         self.blobs: dict[str, bytes] = {}
         self.manifests: dict[str, tuple[bytes, str]] = {}
         self.require_token = require_token
         self.token = "fake-token-abc"
+        # a registry challenging `Basic` (ECR's shape) accepts exactly this credential
+        self.basic_credential = basic_credential
         self.seen_basic: list[str] = []
         self.uploads = 0
         self.auth_seen: list[str | None] = []
@@ -56,6 +60,11 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def _authorized(self) -> bool:
+        if self.state.basic_credential is not None:
+            return (
+                self.headers.get("Authorization")
+                == f"Basic {self.state.basic_credential}"
+            )
         if not self.state.require_token:
             return True
         if self.path.startswith("/token"):
@@ -67,7 +76,9 @@ class _Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "127.0.0.1")
         self.send_header(
             "WWW-Authenticate",
-            f'Bearer realm="http://{host}/token",service="fake-registry"',
+            'Basic realm="fake-registry"'
+            if self.state.basic_credential is not None
+            else f'Bearer realm="http://{host}/token",service="fake-registry"',
         )
         self.end_headers()
         self.wfile.write(b"{}")
@@ -177,8 +188,12 @@ class _Handler(BaseHTTPRequestHandler):
 def fake_registry() -> "Any":
     """A live threaded v2 server; yields (base_url, state)."""
 
-    def start(require_token: bool = False) -> tuple[str, FakeRegistryState, Any]:
-        state = FakeRegistryState(require_token=require_token)
+    def start(
+        require_token: bool = False, basic_credential: str | None = None
+    ) -> tuple[str, FakeRegistryState, Any]:
+        state = FakeRegistryState(
+            require_token=require_token, basic_credential=basic_credential
+        )
         handler = type("Handler", (_Handler,), {"state": state})
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -187,8 +202,10 @@ def fake_registry() -> "Any":
 
     servers: list[Any] = []
 
-    def factory(require_token: bool = False) -> tuple[str, FakeRegistryState]:
-        url, state, server = start(require_token)
+    def factory(
+        require_token: bool = False, basic_credential: str | None = None
+    ) -> tuple[str, FakeRegistryState]:
+        url, state, server = start(require_token, basic_credential)
         servers.append(server)
         return url, state
 
@@ -246,6 +263,52 @@ def test_bearer_token_flow_uses_docker_config(
     digest = repo.put_blob_bytes(b"authenticated bytes")
     assert repo.has_blob(digest)
     assert credential in state.seen_basic
+
+
+def test_basic_challenge_is_answered_from_docker_config(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """A 401 `Basic` challenge (ECR's shape) is answered with the docker config's credential itself, no token realm involved, and the answer is reused for the scope."""
+    credential = base64.b64encode(b"AWS:ecr-password").decode()
+    url, state = fake_registry(basic_credential=credential)
+    host = url.removeprefix("http://")
+    config = tmp_path / "docker-config.json"
+    config.write_text(json.dumps({"auths": {host: {"auth": credential}}}))
+    repo = RegistryRepo(url, "ranges/basic", docker_config=config)
+    digest = repo.put_blob_bytes(b"basic bytes")
+    assert repo.has_blob(digest)
+    assert state.tokens_issued == 0
+    assert f"Basic {credential}" in state.auth_seen
+    assert state.auth_seen.count(None) == 1, "only the first request went anonymous"
+
+
+def test_basic_challenge_without_credential_refuses(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """A `Basic` challenge with no credential for the host is a coded refusal naming the host, never a retry loop."""
+    url, _ = fake_registry(basic_credential="c2VjcmV0")
+    host = url.removeprefix("http://")
+    config = tmp_path / "docker-config.json"
+    config.write_text(
+        json.dumps({"auths": {"registry.elsewhere.net": {"auth": "eA=="}}})
+    )
+    repo = RegistryRepo(url, "ranges/basic-denied", docker_config=config)
+    with pytest.raises(DistError, match=f"registry-denied.*{host} requires Basic"):
+        repo.has_blob("sha256:" + "0" * 64)
+
+
+def test_docker_config_env_names_the_default_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit path, `DOCKER_CONFIG` selects the config directory the way the docker CLI does; unset, the home directory default applies."""
+    (tmp_path / "config.json").write_text(
+        json.dumps({"auths": {"registry.example.net": {"auth": "ZW52"}}})
+    )
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path))
+    assert docker_auth_for("registry.example.net") == "ZW52"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("DOCKER_CONFIG")
+    assert docker_auth_for("registry.example.net") is None
 
 
 def test_registry_get_verifies_bytes(tmp_path: Path, fake_registry: Any) -> None:
