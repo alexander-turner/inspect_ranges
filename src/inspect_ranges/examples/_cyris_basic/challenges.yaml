@@ -72,7 +72,7 @@ challenges:
         path: /root/flag.txt
 
   # Revision (2026-10-28, example-coverage): a fourth question exercises the
-  # answer goal's host+path source (the guest-read, guest-corroborated
+  # answer goal's host+path source (snapshotted at setup, host-anchored
   # variant): the resident malware drops a campaign id in its working
   # directory (baked by the cyris.desktop recipe, v2), and the oracle reads
   # the live file at scoring, so the submission is compared against the

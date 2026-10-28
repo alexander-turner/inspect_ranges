@@ -121,7 +121,7 @@ challenges:
         type: detection
         collector: splunk
         stealth: true
-        signal: '(?im)^"?\d{4}-\d{2}-\d{2}T[0-9:.]+Z channel=Microsoft-Windows-Sysmon/Operational EventID=1 RecordID=\d+ .{0,600}OriginalFileName\W{1,5}tasklist\.exe'
+        signal: '(?im)^"?\d{4}-\d{2}-\d{2}T[0-9:.]+Z channel=Microsoft-Windows-Sysmon/Operational EventID=1 RecordID=\d+ .{0,2000}OriginalFileName\W{1,5}tasklist\.exe'
         window_s: 180
       # the graded dual on the same family: the dashboard tally. zero_at
       # declares linear decay (one launch is 2/3 credit, three launches are
@@ -139,7 +139,7 @@ challenges:
         severity:
           pattern: '^"?\d{4}-\d{2}-\d{2}T[0-9:.]+Z channel=Microsoft-Windows-Sysmon/Operational EventID=(\d+) RecordID=\d+ '
           floor: 1
-        match: '(?i)^.{0,600}OriginalFileName\W{1,5}tasklist\.exe'
+        match: '(?i)^.{0,2000}OriginalFileName\W{1,5}tasklist\.exe'
         threshold: 0
         zero_at: 3
         window_s: 180

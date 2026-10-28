@@ -23,7 +23,12 @@ from inspect_ranges._challenges.engine import (
     register_goal_type,
     registered_goal_types,
 )
-from inspect_ranges._challenges.goaltypes import ExecuteType, ExfiltrateType, FlagType
+from inspect_ranges._challenges.goaltypes import (
+    AnswerType,
+    ExecuteType,
+    ExfiltrateType,
+    FlagType,
+)
 from inspect_ranges._challenges.pcapscan import source_bound_find
 from inspect_ranges._challenges.plants import PlantStore
 from inspect_ranges._challenges.schema import (
@@ -638,14 +643,17 @@ class TestScoreChallenge:
             handle.spec = minimal_spec()
             endpoint.translate("/tmp/fact").parent.mkdir(parents=True, exist_ok=True)
             endpoint.translate("/tmp/fact").write_bytes(b"orange\n")
+            fact_goal = AnswerGoal(id="fact", host="box", path="/tmp/fact")
             challenge = Challenge(
                 id="c",
                 prompt="p",
                 goals=[
                     AnswerGoal(id="port", variable="telnet_port"),
-                    AnswerGoal(id="fact", host="box", path="/tmp/fact"),
+                    fact_goal,
                 ],
             )
+            # the host+path source snapshots at setup (fourteenth amendment)
+            await AnswerType().setup(fact_goal, oracle)
             right, _ = await score_challenge(
                 oracle, Store(), challenge, submissions(port="2323", fact="orange")
             )
@@ -720,18 +728,22 @@ class TestScoreChallenge:
         assert "check failed" in goals["fact"]["reason"]
 
     def test_latched_pass_survives_reverted_state(self, tmp_path: Path) -> None:
+        """The snapshot (fourteenth amendment) makes this trivial: the expected value is fixed at setup, so later guest-state changes move nothing in either direction."""
+
         async def scenario() -> float:
             oracle, endpoint, handle = make_oracle(tmp_path)
             handle.spec = minimal_spec()
             fact = endpoint.translate("/tmp/fact")
             fact.parent.mkdir(parents=True, exist_ok=True)
             fact.write_bytes(b"orange\n")
+            fact_goal = AnswerGoal(id="fact", host="box", path="/tmp/fact")
             challenge = Challenge(
                 id="c",
                 prompt="p",
-                goals=[AnswerGoal(id="fact", host="box", path="/tmp/fact")],
+                goals=[fact_goal],
             )
             store = Store()
+            await AnswerType().setup(fact_goal, oracle)
             first, _ = await score_challenge(
                 oracle, store, challenge, submissions(fact="orange")
             )

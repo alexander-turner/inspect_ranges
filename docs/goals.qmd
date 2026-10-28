@@ -66,7 +66,7 @@ A goal's observer requirements are declared on its `Spec` by overriding `observe
 
 ## Assurance Labels
 
-Every type carries an `assurance` label recorded in the log, naming where the trust sits: `host-anchored` (an external observer witnesses the proof), `introspected` (the proof is hypervisor-visible state such as a console stream, below an external witness but above a guest read), `guest-corroborated` (the proof is a guest read whose forgery costs the claimed access), or `model-graded`. Override `assurance_for(goal)` when a specific goal's declared source moves the trust, as the built-in `answer` type does when a goal reads its expected value from a guest.
+Every type carries an `assurance` label recorded in the log, naming where the trust sits: `host-anchored` (an external observer witnesses the proof), `introspected` (the proof is hypervisor-visible state such as a console stream, below an external witness but above a guest read), `guest-corroborated` (the proof is a guest read whose forgery costs the claimed access), or `model-graded`. Override `assurance_for(goal)` when a specific goal's declared source moves the trust.
 
 The label has scoring consequences, so choose it honestly rather than optimistically. Under `milestones` scoring, implied credit never crosses to a proof of lower assurance than the goal it would imply. Model-graded goals' weight share is capped at 25% whenever any non-model-graded goal exists.
 
