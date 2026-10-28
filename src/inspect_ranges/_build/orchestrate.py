@@ -435,14 +435,17 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
         elif network.dns.nameservers is None:
             network.dns.nameservers = [nameserver]
         elif nameserver not in network.dns.nameservers:
-            # first, never last: `resolvers_for` orders declared nameservers
-            # ahead of later entries, glibc tries resolv.conf in order (5 s
-            # per server) and honours at most three, so an appended build
+            # first, never last: glibc tries resolv.conf in order (5 s per
+            # server) and honours at most three entries, so an appended build
             # resolver sits behind a declared-but-build-dead address and the
             # settle probe's budget burns on the dead one before the working
             # resolver is ever consulted (the defender-ops TEST-NET brick,
             # 2026-10-28; the Windows probe shape recorded the same
-            # correction by querying the egress resolver directly)
+            # correction by querying the egress resolver directly). Residual:
+            # resolvers_for still puts dns.authoritative guests and the
+            # records service ahead of this list, so a network declaring
+            # three or more of those can push the build resolver past MAXNS;
+            # that corner keeps the settle gate as its honest tripwire
             network.dns.nameservers.insert(0, nameserver)
     # the build uplink (linux-examples-v1, answering the recorded goad-era
     # question): a content-carrying host whose every attachment is a

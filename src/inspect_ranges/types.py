@@ -1430,7 +1430,7 @@ def semantic_issues(spec: RangeSpec) -> list[Issue]:
             )
 
     # a dns.nameservers entry nothing can ever answer (documentation TEST-NET,
-    # benchmark, reserved, multicast, link-local, loopback blocks) realizes
+    # benchmark, reserved, multicast, loopback blocks) realizes
     # fine and can be deliberate scenario dressing, but every guest lookup
     # through it waits out the full resolver timeout before any fallback (the
     # range still realizes correctly, hence a warning). An entry inside a
