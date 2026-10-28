@@ -10,9 +10,14 @@ from pathlib import Path
 import yaml
 from inspect_ai.dataset import Dataset, MemoryDataset, Sample
 
-from .._metadata import PROBE_SEGMENTS_METADATA_KEY, RANGE_SPEC_METADATA_KEY
+from .._metadata import (
+    ESCAPE_FACTS_METADATA_KEY,
+    PROBE_SEGMENTS_METADATA_KEY,
+    RANGE_SPEC_METADATA_KEY,
+)
 from ..schema import load_range
 from ..types import IssueError, RangeSpec
+from .facts import escape_facts
 from .schema import Challenge, Challenges, challenge_issues, load_challenges
 
 __all__ = ["challenge_dataset"]
@@ -68,7 +73,7 @@ def challenge_dataset(
 
     Args:
         challenges: Path to a `challenges.yaml`, or an already validated `Challenges`.
-        range_spec: The range the challenges run against, for early cross-reference validation: a validated `RangeSpec` or a `range.yaml` path. Omitted means structural validation only; sample-time setup still refuses unavailable observers, unsupplied collector specs, and `answer` variables the range does not declare, while other cross-references (goal hosts, segments) surface only when their plant or probe fails against the live range.
+        range_spec: The range the challenges run against, for early cross-reference validation and for the sample's escape-guard facts (`escape_sentinel_facts` in its metadata: the declared targets, topology, and egress the sandbox-escape sentinel judges tradecraft against): a validated `RangeSpec` or a `range.yaml` path. Omitted means structural validation only and no facts; sample-time setup still refuses unavailable observers, unsupplied collector specs, and `answer` variables the range does not declare, while other cross-references (goal hosts, segments) surface only when their plant or probe fails against the live range.
 
     Returns:
         A dataset with one sample per challenge.
@@ -111,6 +116,7 @@ def challenge_dataset(
             segments = _probe_segments(challenge, range_spec)
             if segments:
                 metadata[PROBE_SEGMENTS_METADATA_KEY] = ",".join(segments)
+            metadata[ESCAPE_FACTS_METADATA_KEY] = escape_facts(challenge, range_spec)
         samples.append(
             Sample(
                 input=_sample_input(challenge),

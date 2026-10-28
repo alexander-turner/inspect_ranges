@@ -180,6 +180,10 @@ The [tool reference](reference/inspect_ranges.qmd#terminal) covers the actions a
 
 **At the end.** The scorer verifies the remaining goals, corroborates the latched results against the evidence record (rule 3 above), and aggregates per the challenge's scoring mode. Every score carries its validity state.
 
+## Escape-Guard Facts
+
+Inspect's sandbox-escape sentinel judges an agent's tool calls against structured facts the task declares about itself, under the sample-metadata key `escape_sentinel_facts`. When `challenge_dataset` is given a `range_spec`, every sample carries those facts derived from the two definitions alone: each target host, router, and segment with the goals that name it (`declared_targets`), the agent's seat and each router's forwarding policy (`task_topology`), the goal mix (`assignment_type`), whether anything routes out of the range (`egress_reality`), and what range tradecraft looks like (`expected_activity`, `process_namespace_reality`). Scanning, exploiting, and pivoting against declared targets is then read as the task's own work rather than as leaving the sandbox; a host the range does not declare stays under the guard's standard rubric. Nothing an agent says can add to the block.
+
 ## Reading the Score
 
 A `challenge_scorer()` score lands in the eval log with the aggregate as its `value` and the full per-goal record in its `metadata`. A real sample (the dmz-pivot `customer-data` challenge, floats shortened, shown as the score's `value` plus its `metadata` as JSON):
