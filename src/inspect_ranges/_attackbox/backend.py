@@ -206,13 +206,16 @@ def resolve_attack_box(value: str, state_dir: Path) -> AttackBoxBackend:
 def attack_box_origin() -> str | None:
     """The configured attack-box origin, validated against the grammar; `None` when unset or empty.
 
-    Validation here is parse-only (no import), so a malformed value refuses loudly wherever the origin is first consulted, before any resource exists.
+    Validation here is parse-only (no import), so a malformed value refuses loudly wherever the origin is first consulted, before any resource exists. A pinned program's value is the one exception: its pin file is read here, so the origin carries the pin's contents (`pinned.canonical_origin`).
 
     Raises:
-        ValueError: The variable is set but fits no grammar form.
+        ValueError: The variable is set but fits no grammar form, or names a pin file that does not load.
     """
     value = os.environ.get(ENV_VAR)
     if not value:
         return None
-    parse_attack_box(value)
-    return value
+    from .pinned import canonical_origin
+
+    # a pinned program's pin file path becomes the pin's contents here, so
+    # the origin up stamps names the release even after the file changes
+    return canonical_origin(value)

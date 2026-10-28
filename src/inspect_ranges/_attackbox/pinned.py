@@ -1,8 +1,8 @@
 """A pinned external program as the attack-box provider: download, verify, cache, and run one release through `<program> attackbox` (protocol 1, `external.py`).
 
-Each provider is data: a pin file `<name>.pin.json` in this package names one release by tag, source-tarball URL, and SHA-256, plus where the program sits in the extracted tree and the oldest version that speaks the protocol. The first use downloads the tarball, checks its digest before extracting anything, and moves the extracted tree into a per-user, per-tag cache with one atomic rename. `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program instead, for hosts that cannot download. Either way, the program must report at least the pin's `min_version` before any verb runs.
+Each provider is data: a pin file (JSON, written by the deployment) names one release by name, tag, source-tarball URL, and SHA-256, plus where the program sits in the extracted tree and the oldest version that speaks the protocol. `INSPECT_RANGES_ATTACK_BOX=<factory>:<pin file path>` selects it. The first use downloads the tarball, checks its digest before extracting anything, and moves the extracted tree into a per-user, per-release cache with one atomic rename. `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program instead, for hosts that cannot download. Either way, the program must report at least the pin's `min_version` before any verb runs.
 
-The origin stamped into the attack-box record names the provider, tag, and digest (`<factory>:<name>/<tag>@sha256:<hex>`), so `down` and the reaper tear a box down with the release that booted it, even after the pin moves. Resolution stays cheap: the download and the `probe` run at eval init (`prepare_attack_box`) or, on paths with no eval init, inside the provider's first verb.
+The origin stamped into the attack-box record carries the pin's contents, not its path (`attack_box_origin` canonicalizes the selected path into `<factory>:<pin JSON>`), so `down` and the reaper tear a box down with the release that booted it, even after the file changes. Resolution stays cheap: the download and the `probe` run at eval init (`prepare_attack_box`) or, on paths with no eval init, inside the provider's first verb.
 """
 
 import asyncio
@@ -14,10 +14,9 @@ import re
 import tarfile
 import tempfile
 import urllib.request
-from dataclasses import dataclass, replace
-from importlib.resources import files
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .backend import (
     ENV_VAR,
@@ -57,7 +56,7 @@ class ProgramPin:
     """One release of an external attack-box provider program, and how to find and check the program in it."""
 
     name: str
-    """The provider's name: its pin file's stem, and the first word of its `--version` line."""
+    """The provider's name: the first word of its `--version` line, and its cache directory."""
     tag: str
     url: str
     """The release's source tarball."""
@@ -67,8 +66,6 @@ class ProgramPin:
     """The program's path inside the tarball's one top-level directory."""
     min_version: str
     """The oldest version that speaks attack-box protocol 1."""
-    url_template: str
-    """The tarball URL for any tag (`{tag}`), so a recorded tag still downloads after the pin moves."""
 
     def __post_init__(self) -> None:
         # name and tag name cache directories, and entry a path under one:
@@ -88,45 +85,67 @@ class ProgramPin:
 
     @property
     def origin(self) -> str:
-        """The `INSPECT_RANGES_ATTACK_BOX` value that selects exactly this release."""
-        return f"{FACTORY_PATH}:{self.name}/{self.tag}@sha256:{self.sha256}"
+        """The origin that selects exactly this release whatever later happens to its pin file: the pin's own contents, as compact JSON."""
+        contents = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        return f"{FACTORY_PATH}:{contents}"
+
+    @property
+    def release_dir(self) -> str:
+        """The release's cache directory under its provider's: tag plus a digest prefix, so two pins that reuse a tag never share a tree."""
+        return f"{self.tag}-{self.sha256[:16]}"
 
 
-def load_pin(name: str) -> ProgramPin:
-    """The release this inspect-ranges version pins for provider `name` (`<name>.pin.json`).
+def _pin_from_json(text: str, source: str) -> ProgramPin:
+    try:
+        data: Any = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        fields = cast(dict[str, Any], data)
+        if not all(isinstance(value, str) for value in fields.values()):
+            raise ValueError("every field must be a string")
+        return ProgramPin(**cast(dict[str, str], fields))
+    except (ValueError, TypeError) as error:
+        raise ValueError(f"{source} is not a pin ({error})") from error
+
+
+def load_pin(path: Path) -> ProgramPin:
+    """The release a deployment's pin file names.
 
     Raises:
-        ValueError: No pin file has that name, or the file does not describe a pin.
+        ValueError: The file is unreadable or does not describe a pin (`name`, `tag`, `url`, `sha256`, `entry`, `min_version`, nothing else).
     """
-    if not _NAME.fullmatch(name):
-        raise ValueError(f"provider name {name!r} is not [a-z0-9-]+")
-    resource = files("inspect_ranges._attackbox").joinpath(f"{name}.pin.json")
-    if not resource.is_file():
-        raise ValueError(f"inspect-ranges pins no attack-box provider named {name!r}")
-    data: dict[str, Any] = json.loads(resource.read_text())
-    return ProgramPin(name=name, **data)
+    try:
+        text = path.read_text()
+    except OSError as error:
+        raise ValueError(f"pin file {path} is unreadable ({error})") from error
+    return _pin_from_json(text, f"pin file {path}")
 
 
 def pin_from_config(config: str | None) -> ProgramPin:
-    """The release an origin's config names (`<name>/<tag>@sha256:<hex>`).
-
-    A recorded tag that is no longer the pin keeps working: its URL follows from the pin file's template, and the recorded digest still guards the download.
+    """The release an origin's config names: a pin file's path, or (in a recorded origin) the pin's contents as JSON.
 
     Raises:
-        ValueError: The config is not `<name>/<tag>@sha256:<hex>`, or names no pinned provider.
+        ValueError: The config is absent, or names no readable pin.
     """
-    name, slash, release = (config or "").partition("/")
-    tag, at, digest = release.partition("@sha256:")
-    if not (slash and at):
+    if not config:
         raise ValueError(
-            f"pinned attack-box config {config!r} is not '<name>/<tag>@sha256:<hex>'"
+            f"{FACTORY_PATH} needs a pin file: '{FACTORY_PATH}:<path to pin.json>'"
         )
-    pinned = load_pin(name)
-    if (tag, digest) == (pinned.tag, pinned.sha256):
-        return pinned
-    return replace(
-        pinned, tag=tag, sha256=digest, url=pinned.url_template.format(tag=tag)
-    )
+    if config.startswith("{"):
+        return _pin_from_json(config, "the recorded pin")
+    return load_pin(Path(config))
+
+
+def canonical_origin(origin: str) -> str:
+    """`origin`, with a pinned program's pin file path replaced by the pin's contents; any other origin unchanged.
+
+    Raises:
+        ValueError: The origin selects a pinned program whose pin does not load.
+    """
+    parsed = parse_attack_box(origin)
+    if parsed.head != FACTORY_PATH:
+        return origin
+    return pin_from_config(parsed.config).origin
 
 
 def is_pinned_origin(origin: str | None) -> bool:
@@ -140,7 +159,7 @@ def is_pinned_origin(origin: str | None) -> bool:
 
 
 def default_program_cache() -> Path:
-    """`~/.cache/inspect-ranges/programs`: one `<name>/<tag>` directory per release."""
+    """`~/.cache/inspect-ranges/programs`: one `<name>/<tag>-<digest prefix>` directory per release."""
     return Path.home() / ".cache" / "inspect-ranges" / "programs"
 
 
@@ -162,7 +181,7 @@ def ensure_program(pin: ProgramPin, *, cache_root: Path | None = None) -> Path:
             raise ExternalBoxError(f"{PROGRAM_ENV}={override!r} names no file")
     else:
         root = cache_root if cache_root is not None else default_program_cache()
-        program = root / pin.name / pin.tag / pin.entry
+        program = root / pin.name / pin.release_dir / pin.entry
         if not program.is_file():
             from .._dist.resolve import NEVER_PULL_ENV
 
@@ -239,7 +258,7 @@ async def _version_line(program: Path) -> str:
 
 
 def _download_verified(pin: ProgramPin, root: Path) -> None:
-    """Download the release tarball, verify its SHA-256, and only then extract it into `root/<tag>` with one atomic rename.
+    """Download the release tarball, verify its SHA-256, and only then extract it into `root/<release_dir>` with one atomic rename.
 
     Raises:
         ExternalBoxError: The download failed, the digest does not match, the tarball does not extract safely, or its layout is not one top-level directory. Nothing is cached on any of these.
@@ -287,7 +306,7 @@ def _download_verified(pin: ProgramPin, root: Path) -> None:
                 f"{pin.name} {pin.tag} from {pin.url} does not hold exactly one "
                 f"top-level directory ({len(tops)} entries)"
             )
-        target = root / pin.tag
+        target = root / pin.release_dir
         try:
             os.rename(tops[0], target)
         except OSError:

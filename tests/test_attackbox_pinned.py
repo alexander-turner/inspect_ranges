@@ -12,6 +12,7 @@ import sys
 import tarfile
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import asdict
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
@@ -25,16 +26,18 @@ from inspect_ranges._attackbox import (
     attack_box_origin,
     resolve_attack_box,
 )
-from inspect_ranges._attackbox.backend import ENV_VAR
+from inspect_ranges._attackbox.backend import ENV_VAR, parse_attack_box
 from inspect_ranges._attackbox.external import ExternalBoxError
 from inspect_ranges._attackbox.pinned import (
     BUILTIN_HINT,
+    FACTORY_PATH,
     PROGRAM_ENV,
     PinnedProgramProvider,
     ProgramPin,
     ProgramTooOld,
     ensure_program,
     load_pin,
+    pin_from_config,
     prepare_attack_box,
 )
 from inspect_ranges._channel.vsock import HybridEndpoint
@@ -78,6 +81,17 @@ class Stub:
         self.program = bin_dir / "glovebox"
         self.program.write_text(f"#!{sys.executable}\n{_STUB}")
         self.program.chmod(0o755)
+        self.pin = ProgramPin(
+            name="glovebox",
+            tag="v1.2.3",
+            url="file:///nowhere/release.tar.gz",
+            sha256="ab" * 32,
+            entry="bin/glovebox",
+            min_version="0.92.4",
+        )
+        self.pin_file = root / "glovebox.pin.json"
+        """A deployment-written pin file naming the stub's release."""
+        self.pin_file.write_text(json.dumps(asdict(self.pin)))
         self.scenario = root / "scenario.json"
         self.log = root / "calls.jsonl"
         self.set()
@@ -108,12 +122,12 @@ class Stub:
 
 @pytest.fixture
 def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stub:
-    """The stub installed as the provider program, selected explicitly through the pinned glovebox origin."""
+    """The stub installed as the provider program, selected explicitly through a deployment's pin file."""
     made = Stub(tmp_path)
     monkeypatch.setenv(PROGRAM_ENV, str(made.program))
     monkeypatch.setenv("STUB_SCENARIO", str(made.scenario))
     monkeypatch.setenv("STUB_LOG", str(made.log))
-    monkeypatch.setenv(ENV_VAR, load_pin("glovebox").origin)
+    monkeypatch.setenv(ENV_VAR, f"{FACTORY_PATH}:{made.pin_file}")
     return made
 
 
@@ -279,6 +293,39 @@ def test_teardown_refusal_carries_the_error_object(stub: Stub, tmp_path: Path) -
         asyncio.run(selected_backend(tmp_path).provider.teardown("p1", ""))
 
 
+def test_the_recorded_origin_keeps_its_release_when_the_pin_file_changes(
+    stub: Stub,
+) -> None:
+    """The origin carries the pin's contents, not its path, so `down` reaches the release that booted."""
+    recorded = attack_box_origin()
+    assert recorded == stub.pin.origin
+    stub.pin_file.write_text(json.dumps({**asdict(stub.pin), "tag": "v9.0.0"}))
+    assert load_pin(stub.pin_file).tag == "v9.0.0"
+    assert recorded is not None
+    assert pin_from_config(parse_attack_box(recorded).config) == stub.pin
+
+
+@pytest.mark.parametrize(
+    ("contents", "fragment"),
+    [
+        ("not json", "is not a pin"),
+        ("[]", "is not a pin"),
+        ('{"tag": "v1"}', "is not a pin"),
+        (None, "is unreadable"),
+    ],
+    ids=["not-json", "array", "missing-fields", "missing-file"],
+)
+def test_a_bad_pin_file_refuses_at_selection(
+    stub: Stub, contents: str | None, fragment: str
+) -> None:
+    if contents is None:
+        stub.pin_file.unlink()
+    else:
+        stub.pin_file.write_text(contents)
+    with pytest.raises(ValueError, match=fragment):
+        attack_box_origin()
+
+
 # -- the pin, the download, the cache, and the version floor ---------------------------
 
 
@@ -303,7 +350,6 @@ def make_pin(url: str, digest: str) -> ProgramPin:
         sha256=digest,
         entry="bin/glovebox",
         min_version="0.92.4",
-        url_template="file:///nowhere/{tag}.tar.gz",
     )
 
 
@@ -312,7 +358,7 @@ def test_first_use_downloads_and_a_second_hits_the_cache(tmp_path: Path) -> None
     pin = make_pin(url, digest)
     cache = tmp_path / "cache"
     program = ensure_program(pin, cache_root=cache)
-    assert program == cache / "glovebox" / "v9.9.9" / "bin" / "glovebox"
+    assert program == cache / "glovebox" / f"v9.9.9-{digest[:16]}" / "bin" / "glovebox"
     Path(url.removeprefix("file://")).unlink()
     assert ensure_program(pin, cache_root=cache) == program, (
         "a cached release needs no download"
@@ -325,7 +371,7 @@ def test_a_hash_mismatch_refuses_and_caches_nothing(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
     with pytest.raises(ExternalBoxError, match="nothing was cached"):
         ensure_program(pin, cache_root=cache)
-    assert not (cache / "glovebox" / "v9.9.9").exists()
+    assert not list((cache / "glovebox").glob("v9.9.9*"))
 
 
 @pytest.mark.parametrize(
@@ -418,7 +464,7 @@ PROBE_FAILS = {
 def test_a_failed_probe_names_cause_remedy_and_the_builtin_box(stub: Stub) -> None:
     stub.set(probe=PROBE_FAILS)
     with pytest.raises(ExternalBoxError) as raised:
-        prepare_attack_box(load_pin("glovebox").origin)
+        prepare_attack_box(stub.pin.origin)
     assert str(raised.value).splitlines() == [
         "kata runtime not installed",
         f"remedy: {SETUP}",
@@ -438,7 +484,7 @@ def test_eval_init_probes_only_a_selected_program(
     selected: bool,
     probes: int,
 ) -> None:
-    """The origin `up` receives (and stamps into the attack-box record) carries the pinned tag; unset keeps the built-in box and runs nothing."""
+    """The origin `up` receives (and stamps into the attack-box record) carries the pin's contents; unset keeps the built-in box and runs nothing."""
     if not selected:
         monkeypatch.delenv(ENV_VAR)
 
@@ -451,9 +497,7 @@ def test_eval_init_probes_only_a_selected_program(
             return [options.attack_box for options in seams.up_calls]
 
     booted = asyncio.run(scenario())
-    origin = load_pin("glovebox").origin
-    assert booted == [origin if selected else None]
-    assert "glovebox/v0.92.3@sha256:" in origin
+    assert booted == [stub.pin.origin if selected else None]
     probed = [call for call in stub.calls() if call["argv"] == ["attackbox", "probe"]]
     assert len(probed) == probes
 
