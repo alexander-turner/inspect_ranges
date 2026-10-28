@@ -8,6 +8,7 @@ Each example's directory also carries its `README.md`, recipes, and checks, so t
 """
 
 from ._cyris_basic.task import cyris_basic
+from ._defender_ops.task import defender_ops
 from ._dmz_pivot.task import dmz_pivot
 from ._equifax.task import equifax
 from ._goad_light.task import goad_light
@@ -17,6 +18,7 @@ from ._vulhub_zabbix.task import vulhub_zabbix
 
 __all__ = [
     "cyris_basic",
+    "defender_ops",
     "dmz_pivot",
     "equifax",
     "goad_light",

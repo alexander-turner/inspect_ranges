@@ -4,5 +4,6 @@
 # is wrong and the flags are per-sample plants a forger cannot know.
 set -euo pipefail
 echo "SUBMIT find-telnet-port 1023"  # below the variable draw floor (min 1500), wrong under any future draw
+echo "SUBMIT report-maintenance-code 999"  # below the int draw floor (min 1000), wrong under any future draw
 echo "SUBMIT telnet-user-flag $(printf 'deadbeef%.0s' 1 2 3 4)"
 echo "SUBMIT privesc-root-flag $(printf 'cafef00d%.0s' 1 2 3 4)"

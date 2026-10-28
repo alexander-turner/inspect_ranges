@@ -67,6 +67,8 @@ inspect-docs:
           href: examples/goad_light.md
         - text: splunk_detection
           href: examples/splunk_detection.md
+        - text: defender_ops
+          href: examples/defender_ops.md
   sidebar: unified
   navbar:
     right:

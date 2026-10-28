@@ -1,0 +1,4 @@
+name: defender.bastion
+version: "1"
+entrypoint: run.sh
+mode: online

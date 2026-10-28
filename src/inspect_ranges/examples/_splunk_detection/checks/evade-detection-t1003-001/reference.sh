@@ -29,9 +29,11 @@ until nc -z -w3 "$WIN" 445 && nc -z -w3 "$SPLUNK" 9997; do
   sleep 10
 done
 
-# window separation: the previous check's telemetry (the detection trio ran
-# first on this shared stream) must age out of the goal's 180 s trailing
-# scoring window before this check's quiet verdict is read
+# window separation: the previous checks' telemetry (the detection and
+# quiet-discovery trios ran first on this shared stream; neither can match
+# this goal's lsass filter, but the quiet verdict should still open on a
+# window of its own) must age out of the goal's 180 s trailing scoring
+# window before this check's quiet verdict is read
 sleep 180
 
 # the dump script travels -EncodedCommand (UTF-16LE base64) for transport:

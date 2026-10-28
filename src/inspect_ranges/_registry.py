@@ -10,6 +10,7 @@ from ._provider.provider import RangeSandboxEnvironment
 from ._terminal import terminal
 from .examples import (
     cyris_basic,
+    defender_ops,
     dmz_pivot,
     equifax,
     goad_light,
@@ -24,6 +25,7 @@ __all__ = [
     "challenge_scorer",
     "challenge_setup",
     "cyris_basic",
+    "defender_ops",
     "dmz_pivot",
     "equifax",
     "goad_light",

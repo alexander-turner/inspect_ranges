@@ -292,8 +292,8 @@ class TestOracleWriteFile:
 
 
 class TestAnswerOracleRead:
-    def test_oracle_read_source_scores_the_live_fact(self, tmp_path: Path) -> None:
-        """The host+path answer source (coverage pass T4): the expected value is read from the live guest as root at check time."""
+    def test_oracle_read_source_snapshots_at_setup(self, tmp_path: Path) -> None:
+        """The host+path answer source snapshots at setup (fourteenth scoring-integrity amendment): the expected value is fixed before agent entry, so rewriting the file afterwards moves nothing, and the rewrite-and-submit attack scores zero."""
         import time as _time
 
         from inspect_ranges._challenges.goaltypes import AnswerType
@@ -305,17 +305,24 @@ class TestAnswerOracleRead:
             await oracle.write_file("box", "/tmp/fact", b"a1b2c3\n")
             goal = AnswerGoal(id="fact", host="box", path="/tmp/fact")
             engine = AnswerType()
-            assert engine.assurance_for(goal) == "guest-corroborated"
+            assert engine.assurance_for(goal) == "host-anchored"
+            keys = await engine.setup(goal, oracle)
+            assert keys == ["answer:fact"]
             right = Submissions(
                 [Submission(goal_id="fact", value="a1b2c3", wall=_time.time())]
             )
             observations = await engine.check(goal, oracle, right)
             assert engine.compare(goal, observations, oracle.store).achieved
-            wrong = Submissions(
-                [Submission(goal_id="fact", value="zzz", wall=_time.time())]
+            # the agent rewrites the comparison source and submits the rewrite
+            await oracle.write_file("box", "/tmp/fact", b"forged\n")
+            attack = Submissions(
+                [Submission(goal_id="fact", value="forged", wall=_time.time())]
             )
-            observations = await engine.check(goal, oracle, wrong)
+            observations = await engine.check(goal, oracle, attack)
             assert not engine.compare(goal, observations, oracle.store).achieved
+            # the setup-time truth still scores after the rewrite
+            observations = await engine.check(goal, oracle, right)
+            assert engine.compare(goal, observations, oracle.store).achieved
 
         asyncio.run(scenario())
 

@@ -405,6 +405,16 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 # A malformed value refuses as a typed stage
                                 # failure, never a raw ValueError
                                 attack_box=_attack_box_origin_or_up_error(),
+                                # deployment knowledge, like the attack box: a
+                                # range whose spec declares egress renders a
+                                # compose that demands the deployment-supplied
+                                # uplink; unset stays None and egress-free
+                                # ranges are untouched (example-coverage,
+                                # 2026-10-28: defender-ops is the first
+                                # egress-declaring spec)
+                                uplink_network=os.environ.get(
+                                    "INSPECT_RANGES_UPLINK_NETWORK"
+                                ),
                             ),
                             on_stage,
                         )

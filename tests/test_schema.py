@@ -44,7 +44,7 @@ def _with(overrides_yaml: str) -> Any:
 
 
 def test_examples_validate() -> None:
-    assert len(EXAMPLES) == 7
+    assert len(EXAMPLES) == 8
     for path in EXAMPLES:
         spec = load_range(path)
         assert spec.meta.schema_version in {"0.1", "0.2", "0.3"}

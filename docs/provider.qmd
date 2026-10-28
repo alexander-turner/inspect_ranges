@@ -112,6 +112,7 @@ Two mechanisms bound concurrency. Inspect's per-eval sample concurrency defaults
 | `INSPECT_RANGES_IMAGE_CACHE` | `~/.cache/inspect-ranges/images` | Where goldens and vendor images live (`images derive` writes here). |
 | `XDG_STATE_HOME` | `~/.local/state` | Root of provider state: project ownership, CID leases, staging (`<state>/inspect-ranges/`). |
 | `INSPECT_RANGES_MAX_SANDBOXES` | host-derived | Overrides Inspect's default sample concurrency for this provider (the resource-weighted admission gate still applies). |
+| `INSPECT_RANGES_UPLINK_NETWORK` | unset | The deployment-supplied docker network a spec-declared egress range NATs through (`mode: nat` networks, attacker `egress:`). Required to boot such a range; egress-free ranges ignore it. On a separated topology the applier's environment supplies it, per the deployment-knowledge rule. |
 | `INSPECT_RANGES_RETRY_EXEC_ATTEMPTS` | 3 | Retry attempts for `exec`. |
 | `INSPECT_RANGES_RETRY_FILE_ATTEMPTS` | 5 | Retry attempts for file operations. |
 | `INSPECT_RANGES_RETRY_WAIT_INITIAL_S` | 1 | First retry backoff (exponential with jitter). |

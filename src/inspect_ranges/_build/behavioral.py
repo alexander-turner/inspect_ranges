@@ -9,6 +9,7 @@ import asyncio
 import functools
 import hashlib
 import logging
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -488,6 +489,25 @@ async def run_behavioral_checks(
             poller = TelemetryPoller(channel, writer, collectors)
             await poller.start()
             session.register_producer(poller.stop)
+        if os.environ.get("INSPECT_RANGES_EXEC_WITNESS", "1") != "0":
+            # the proof boot produces the same witness streams a sample does
+            # (provider parity, _provider/provider.py _start_exec_witness): a
+            # goal type that reads exec/<guest> at scoring must be provable by
+            # the trio, or every check of a witness-consuming challenge reads
+            # indeterminate (found authoring defender_ops, 2026-10-28). Same
+            # kill switch as the provider; one poller for the whole boot.
+            from .._evidence.execwitness import ExecWitnessPoller
+
+            witness_writer = session.driver_writer
+            if witness_writer is not None:
+                witness = ExecWitnessPoller(
+                    channel,
+                    witness_writer,
+                    [g.name for g in plan.guests if g.os == "linux"],
+                    [g.name for g in plan.guests if g.os == "windows"],
+                )
+                await witness.start()
+                session.register_producer(witness.stop)
         for challenge in challenges.challenges:
             check_dir = range_dir / CHECKS_DIR_NAME / challenge.id
             for name in CHECK_NAMES:

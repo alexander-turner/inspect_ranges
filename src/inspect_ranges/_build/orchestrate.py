@@ -1505,6 +1505,16 @@ def _run_behavioral_phase(
                 state_dir=state_dir,
                 readiness_timeout=options.readiness_timeout,
                 keep_on_failure=False,
+                # a runtime spec that itself declares egress (nat networks or
+                # an attacker EgressPolicy) renders a compose that demands the
+                # deployment-supplied uplink; the build host's uplink network
+                # already exists (the recipe boots used it), so the proof boot
+                # reuses it. Egress-free ranges pass None, byte-identical to
+                # before (found authoring defender_ops, the first egress-
+                # declaring runtime spec, 2026-10-28).
+                uplink_network=(
+                    options.uplink_network if plan.requirements.egress_uplink else None
+                ),
             ),
             on_stage=None,
         )

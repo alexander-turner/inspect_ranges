@@ -54,7 +54,7 @@ EXAMPLES = sorted(
     for directory in root.iterdir()
     if (directory / "challenges.yaml").exists()
 )
-assert len(EXAMPLES) == 7, (
+assert len(EXAMPLES) == 8, (
     f"fixture discovery moved out from under the tests (found {EXAMPLES}); "
     "update BOTH tiers' paths and this pin together"
 )
@@ -573,6 +573,14 @@ def test_unreadable_file_reports_not_raises(tmp_path: Path) -> None:
     "directory", EXAMPLES, ids=[directory.name for directory in EXAMPLES]
 )
 def test_examples_validate(directory: Path) -> None:
+    # the CLI's validate loads the inspect_ai entry points before parsing, so
+    # examples that register custom goal types (defender_ops's `lotl`)
+    # validate here exactly as they do there
+    from inspect_ranges._challenges.registration import (
+        ensure_goal_type_registrations,
+    )
+
+    ensure_goal_type_registrations()
     report = validate_challenges(
         directory / "challenges.yaml", range_spec=directory / "range.yaml"
     )
