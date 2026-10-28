@@ -651,6 +651,9 @@ class Applier:
                 # INSIDE the folding path: a malformed value must land as a
                 # failed report, never kill the task over an unfinished run
                 attack_box=attack_box_origin(),
+                # same deployment-knowledge rule as the attack box: the host
+                # that boots the range supplies the uplink for egress specs
+                uplink_network=os.environ.get("INSPECT_RANGES_UPLINK_NETWORK"),
             )
             result = await asyncio.to_thread(self._up_fn, bundle, options, on_stage)
         except UpError as error:
