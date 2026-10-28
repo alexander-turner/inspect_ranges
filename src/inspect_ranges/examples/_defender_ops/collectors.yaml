@@ -1,0 +1,14 @@
+# collectors.yaml - the deployment-side binding between the quiet-ops goal's
+# `collector: opslog` and a real export. Consumed by BOTH proof paths: the
+# build's behavioral runner and the eval's
+# challenge_setup(telemetry_collectors=...). A file source fits the ops log:
+# low volume (watchdog heartbeats every 10 s plus boot notices), byte-offset
+# watermarks, and explicit gap records on truncation or rewrite, which the
+# evade goal's on_sensor_tamper: fail prices as a self-inflicted zero.
+collectors:
+  - name: opslog
+    guest: monitor
+    poll_s: 2.0
+    source:
+      kind: file
+      path: /var/log/opsrange/ops.log

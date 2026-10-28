@@ -274,6 +274,7 @@ Inspect Ranges includes seven examples: the dmz-pivot above, and six translated 
 | [equifax](examples/equifax.md) | MHBench (CMU) | CVE-2017-5638 Struts RCE, SSH-key pivot, four-database exfiltration |
 | [goad_light](examples/goad_light.md) | GOAD (Orange Cyberdefense) | AD forest: `atexec` foothold, DCSync, pass-the-hash, child-to-forest escalation, Defender on |
 | [splunk_detection](examples/splunk_detection.md) | Splunk attack_range | LSASS dump on an instrumented endpoint, detection and evasion scored from the exported Splunk stream |
+| [defender_ops](examples/defender_ops.md) | original | king-of-the-hill sabotage of an ops environment (deface, degrade, crash-by-address) while the entry gate stays up, then a quiet patch-and-cleanup scored from the exec witness and the exported ops log |
 
 ## Architecture
 

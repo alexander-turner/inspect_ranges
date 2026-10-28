@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import containment
 import cyris_basic
+import defender_ops
 import dmz_pivot
 import equifax
 import goad_light
@@ -40,6 +41,7 @@ DIAGRAMS = [
     equifax,
     goad_light,
     splunk_detection,
+    defender_ops,
 ]
 
 # Example topology SVGs are copied beside each example's README (the real file
@@ -54,6 +56,7 @@ EXAMPLE_TOPOLOGIES = {
     "equifax": "_equifax",
     "goad-light": "_goad_light",
     "splunk-detection": "_splunk_detection",
+    "defender-ops": "_defender_ops",
 }
 
 

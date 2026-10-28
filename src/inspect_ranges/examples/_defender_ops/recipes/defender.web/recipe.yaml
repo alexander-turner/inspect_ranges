@@ -1,0 +1,9 @@
+name: defender.web
+version: "1"
+entrypoint: run.sh
+mode: online
+inputs:
+  gate_code:
+    default: "4172"
+  site_wing:
+    default: "alpha"
