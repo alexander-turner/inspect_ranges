@@ -1247,3 +1247,42 @@ def test_scheduled_activity_gates_and_lifts() -> None:
         spec, PlanOptions(realized_sections=frozenset({"scheduled_activity"}))
     )
     assert plan.range.name == spec.meta.name
+
+
+EXAMPLES = Path(__file__).parent.parent / "src" / "inspect_ranges" / "examples"
+
+
+@pytest.mark.parametrize(
+    ("example", "guests", "cpus", "memory_mb"),
+    [
+        ("dmz_pivot", 4, 4, 7168),
+        ("vulhub_zabbix", 5, 5, 5120),
+        ("equifax", 8, 8, 15360),
+        # foothold ranges: the attacker rides a declared host, so no attack box is counted
+        ("kypo_demo", 3, 3, 6144),
+        ("cyris_basic", 3, 3, 3072),
+    ],
+)
+def test_plan_totals_sum_declared_guests_without_the_build_gate(
+    example: str, guests: int, cpus: int, memory_mb: int
+) -> None:
+    """Hosts, routers and a dedicated attack box count at their declared or default (1 vCPU / 1024 MiB) size, straight from the spec of a range whose build is not present."""
+    from inspect_ranges import load_range, plan_totals
+
+    totals = plan_totals(load_range(EXAMPLES / f"_{example}" / "range.yaml"))
+    assert (totals.guests, totals.cpus, totals.memory_mb) == (guests, cpus, memory_mb)
+
+
+def test_resolved_plan_totals_are_plan_totals(cache: Path) -> None:
+    from inspect_ranges import plan_totals
+
+    for spec in (netsvc_spec(), two_segment_spec(), nat_spec()):
+        assert resolve_plan(spec, options(cache)).totals == plan_totals(spec)
+
+
+def test_deployment_helpers_are_public() -> None:
+    """A deployment sizes and mirrors from the package's public surface: `plan_totals` and `catalog_image_references` resolve from `inspect_ranges` itself."""
+    from inspect_ranges import catalog_image_references, load_range
+
+    spec = load_range(EXAMPLES / "_dmz_pivot" / "range.yaml")
+    assert catalog_image_references(spec) == ["ubuntu-noble", "attack"]

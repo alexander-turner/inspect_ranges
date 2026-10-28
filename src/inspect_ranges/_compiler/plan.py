@@ -17,10 +17,12 @@ from pydantic import BaseModel, Field
 from ..types import (
     AnyIPNetwork,
     Attacker,
+    Host,
     Issue,
     IssueError,
     RangeSpec,
     Route,
+    Router,
     Vmm,
     has_guest_content,
 )
@@ -41,6 +43,10 @@ DEFAULT_ROUTER_IMAGE = "ubuntu-noble"
 
 DEFAULT_ATTACKER_IMAGE = "attack"
 """Image for a dedicated attack box when none is declared: the catalog's standard attack image."""
+
+DEFAULT_GUEST_CPUS = 1
+DEFAULT_GUEST_MEMORY_MB = 1024
+"""What a guest without `resources:` is sized at, for the plan and for `plan_totals`."""
 
 
 class PlanOptions(BaseModel):
@@ -159,6 +165,33 @@ class Totals(BaseModel):
     guests: int
     cpus: int
     memory_mb: int
+
+
+def plan_totals(spec: RangeSpec) -> Totals:
+    """The admission-control sums a range declares, from the spec alone.
+
+    Every host and router counts, plus the dedicated attack box when the attacker names no foothold `host`; a guest without `resources:` counts `DEFAULT_GUEST_CPUS` / `DEFAULT_GUEST_MEMORY_MB`. This is the arithmetic `resolve_plan` records in its `totals`, available without the build gate so a deployment can size a host for a range whose build it has not pulled.
+
+    Args:
+        spec: A validated range.
+
+    Returns:
+        Guest count and summed vCPUs and MiB.
+    """
+    guests: list[Host | Router | Attacker] = [*spec.hosts, *spec.routers]
+    if spec.attacker.host is None:
+        guests.append(spec.attacker)
+    return Totals(
+        guests=len(guests),
+        cpus=sum(
+            guest.resources.cpus if guest.resources else DEFAULT_GUEST_CPUS
+            for guest in guests
+        ),
+        memory_mb=sum(
+            guest.resources.memory_mb if guest.resources else DEFAULT_GUEST_MEMORY_MB
+            for guest in guests
+        ),
+    )
 
 
 class RangeIdentity(BaseModel):
@@ -646,8 +679,8 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
                 cid=guest.cid,
                 os="windows" if windows else "linux",
                 image=_resolve_image(reference, options.image_cache),
-                cpus=resources.cpus if resources else 1,
-                memory_mb=resources.memory_mb if resources else 1024,
+                cpus=resources.cpus if resources else DEFAULT_GUEST_CPUS,
+                memory_mb=resources.memory_mb if resources else DEFAULT_GUEST_MEMORY_MB,
                 disk_gb=(resources.disk_gb if resources and resources.disk_gb else 10),
                 interfaces=guest.interfaces,
                 hostname=(
@@ -683,11 +716,7 @@ def resolve_plan(spec: RangeSpec, options: PlanOptions | None = None) -> Resolve
             evidence_capture=options.evidence_capture,
             probe_segments=tuple(sorted(options.probe_segments)),
         ),
-        totals=Totals(
-            guests=len(guests),
-            cpus=sum(guest.cpus for guest in guests),
-            memory_mb=sum(guest.memory_mb for guest in guests),
-        ),
+        totals=plan_totals(spec),
     )
 
 
