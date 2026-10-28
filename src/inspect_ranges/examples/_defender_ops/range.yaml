@@ -40,8 +40,6 @@ networks:
   - name: staging
     cidr: 10.90.10.0/24
     mode: nat
-    dns:
-      nameservers: [198.51.100.53]   # the upstream resolver the egress allowlist admits
     egress:
       allow:
         - 198.51.100.53/32:udp/53    # the staging resolver

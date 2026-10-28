@@ -28,8 +28,6 @@ networks:
   - name: staging
     cidr: 10.90.10.0/24
     mode: nat                                            # <2>
-    dns:
-      nameservers: [198.51.100.53]
     egress:
       allow:
         - 198.51.100.53/32:udp/53
