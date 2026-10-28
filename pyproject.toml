@@ -66,6 +66,9 @@ artifacts = [
     "src/**/*.md",
     "src/**/*.txt",
     "src/**/*.sh",
+    # the range container's build context ships whole: `up` builds the image from it when no
+    # digest pin is set, and a wheel without the Dockerfile left that path broken for pip installs
+    "src/**/Dockerfile",
     "src/**/py.typed",
     # the examples ship their full data trees (recipes/, checks/, yaml, docs);
     # artifacts bypass `exclude`, so upstream/ needs the negated pattern too

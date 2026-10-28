@@ -1,3 +1,7 @@
+## Unreleased
+
+- Packaging: the wheel ships the range container's `Dockerfile` beside its entrypoint. 0.2.0 through 0.2.2 omitted it, so a pip install could not build the range image when `INSPECT_RANGES_RANGE_IMAGE` was unset (the default), failing at `up` with a missing build context.
+
 ## 0.2.2 (28 October 2026)
 
 - Distribution: a registry answering 401 with a `Basic` challenge (Amazon ECR) is authenticated with the docker config's credential for the host directly, beside the existing `Bearer` token flow; a Basic challenge with no credential is a coded refusal naming the host. The docker config honors `DOCKER_CONFIG` the way the docker CLI does (`$DOCKER_CONFIG/config.json`, else `~/.docker/config.json`), so a deployment can hand the client a config without touching the home directory.
