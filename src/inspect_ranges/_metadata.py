@@ -8,3 +8,6 @@ PROBE_SEGMENTS_METADATA_KEY = "inspect_ranges:probe_segments"
 
 RANGE_SPEC_METADATA_KEY = "inspect_ranges:range_spec"
 """The sample's range definition as YAML text (the file's verbatim text for a path, a serialization for a typed spec), written by `challenge_dataset` when it was given a `range_spec`; `range_apparatus` reads it so after-the-fact scans need no explicit spec."""
+
+ESCAPE_FACTS_METADATA_KEY = "escape_sentinel_facts"
+"""The sandbox-escape guard's structured facts (`_challenges/facts.py`), under the key the `escape_sentinel` package reads; written by `challenge_dataset` when it was given a `range_spec`, so the guard judges range tradecraft against the declared targets rather than as leaving the sandbox."""
