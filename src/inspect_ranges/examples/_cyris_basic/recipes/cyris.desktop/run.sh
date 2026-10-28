@@ -59,11 +59,20 @@ exec_guest 'i=0; while [ $i -lt 200 ]; do
 done'
 
 echo "step: the dummy resident malware (upstream emulate_malware: a process named daemon)"
+# the campaign id is ours (2026-10-28, example-coverage): a dropper artifact
+# in the malware's working directory, scenario content the forensics triage
+# reads and submits (scored as a guest-read answer: the oracle reads this
+# file from the live instance, so the submission corroborates against the
+# guest, not against a value in challenges.yaml)
 exec_guest 'cp /bin/sleep /usr/local/bin/daemon && chmod 755 /usr/local/bin/daemon
+mkdir -p /var/lib/daemon
+printf "OP-DUSTY-ANVIL-2214\n" > /var/lib/daemon/.campaign
+chmod 644 /var/lib/daemon/.campaign
 cat > /etc/systemd/system/daemon.service <<UNIT
 [Unit]
 Description=daemon
 [Service]
+WorkingDirectory=/var/lib/daemon
 ExecStart=/usr/local/bin/daemon infinity
 Restart=always
 [Install]
@@ -79,6 +88,7 @@ python3 -c "import crypt, spwd; e = spwd.getspnam(\"root\").sp_pwdp; assert cryp
 test -s /home/trainee/traffic1.pcap && test -s /home/trainee/traffic2.pcap
 grep -q "69.89.31.226" /var/log/auth.log
 pgrep -x daemon >/dev/null || { echo "the dummy malware is not resident" >&2; exit 1; }
+grep -q "^OP-DUSTY-ANVIL-2214\$" /var/lib/daemon/.campaign || { echo "the campaign artifact is not dropped" >&2; exit 1; }
 test ! -e /root/flag.txt || { echo "flag must not be baked" >&2; exit 1; }'
 
 echo "cyris.desktop OK"

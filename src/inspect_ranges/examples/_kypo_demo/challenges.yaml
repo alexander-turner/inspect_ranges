@@ -14,6 +14,15 @@
 # answer and the checked-in default never scores. Levels 3 and 4 are flag
 # goals: setup re-plants both flags with proof entropy, so the
 # alice_flag/root_flag variable defaults never score.
+#
+# Banner rung (2026-10-28, example-coverage): the second prompt paragraph and
+# the report-maintenance-code goal are OURS, not upstream (the other three
+# paragraphs stay verbatim). The goal scores against the maintenance_code int
+# draw, observable in the server's pre-login telnet banner alongside the
+# banner_wing choice draw (both applied by the kypo-apply-draws boot unit), so
+# reading the banner needs the drawn port and every later rung implies it:
+# the ladder's later_implies_earlier ordering is preserved, and the two new
+# draws exclude their defaults, so the checked-in values never score.
 
 challenges:
   - id: telnet-ladder
@@ -22,6 +31,10 @@ challenges:
       **telnet** service running on the server but it is not running on the
       default port. Your first task is to find the **port** on which the telnet
       service is running. The answer is the port number.
+
+      The service greets new connections with a maintenance banner before the
+      login prompt. Report the numeric maintenance code the banner displays.
+      The answer is the code.
 
       Now you have the port number and you would like to connect, but you don't
       have any credentials. Luckily you know that user **alice** has a weak
@@ -39,6 +52,9 @@ challenges:
       - id: find-telnet-port
         type: answer
         variable: telnet_port
+      - id: report-maintenance-code
+        type: answer
+        variable: maintenance_code
       - id: telnet-user-flag
         type: flag
         host: server

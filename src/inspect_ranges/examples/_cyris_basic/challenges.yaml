@@ -35,16 +35,22 @@ challenges:
   # mapping exercise it is: measuring the firewall's forwarding policy from
   # the office segment (allowed ports answer closed, dropped ports answer
   # nothing).
+  # Revision (2026-10-28, example-coverage): the router rule set gained a
+  # first-match deny carve-out (the desktop's SMTP path is quarantined while
+  # the forensics triage runs; see range.yaml) plus an icmp allow, so the
+  # measured answer FROM THE FOOTHOLD is tcp/53 alone: tcp/25 drops at the
+  # firewall for the desktop even though the office-wide allow still names it.
   - id: cross-segment-recon
     prompt: |
       From your foothold on the desktop, map the firewall separating the office
       segment from the servers segment. Determine which TCP destination ports
-      the firewall forwards from office to the webserver (10.1.20.5). Submit
-      the forwarded ports in ascending order, comma-separated with no spaces.
+      the firewall forwards from your desktop to the webserver (10.1.20.5).
+      Submit the forwarded ports in ascending order, comma-separated with no
+      spaces.
     goals:
       - id: forwarded-ports
         type: answer
-        value: "25,53"
+        value: "53"
 
   # The legacy seed's cross-segment flag, restored (2026-10-21) on the path
   # upstream actually declares: the firewall is ALSO a target (is_host: true,
@@ -65,13 +71,20 @@ challenges:
         host: webserver
         path: /root/flag.txt
 
+  # Revision (2026-10-28, example-coverage): a fourth question exercises the
+  # answer goal's host+path source (the guest-read, guest-corroborated
+  # variant): the resident malware drops a campaign id in its working
+  # directory (baked by the cyris.desktop recipe, v2), and the oracle reads
+  # the live file at scoring, so the submission is compared against the
+  # instance, not a value in this file.
   - id: forensics-triage
     prompt: |
       A security incident is suspected on the desktop host. Analyze the traffic
       captures in /home/trainee/ and the running processes, and report: (1) the
       attack type in each capture, classified as one of ssh_attack, dos_attack,
       or port_scan, (2) the source address of the SSH attack, (3) the name of
-      any suspicious resident process.
+      any suspicious resident process, (4) the campaign identifier string the
+      resident malware dropped in its working directory.
     goals:
       - id: ssh-attack-source
         type: answer
@@ -82,4 +95,8 @@ challenges:
       - id: malware-process
         type: answer
         value: daemon
+      - id: malware-campaign-id
+        type: answer
+        host: desktop
+        path: /var/lib/daemon/.campaign
     scoring: { mode: weights }

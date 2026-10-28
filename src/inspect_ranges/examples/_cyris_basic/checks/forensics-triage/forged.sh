@@ -4,3 +4,4 @@ set -euo pipefail
 echo "SUBMIT ssh-attack-source 203.0.113.99"
 echo "SUBMIT second-capture-attack-type ransomware"
 echo "SUBMIT malware-process kworker"
+echo "SUBMIT malware-campaign-id OP-COPPER-KETTLE-7"

@@ -41,7 +41,16 @@ routers:
     provisioning:
       - { recipe: cyris.firewall }
     acl:                         # upstream `forwarding: {src: office, dst: servers, dport: [25, 53]}`
+      # first-match carve-out (2026-10-28, example-coverage): ours, not
+      # upstream. The desktop is the suspected incident host (the forensics
+      # story), so its SMTP path is quarantined: the deny shadows the broader
+      # office allow for the desktop's addresses only, and the recon challenge
+      # measures the result (tcp/53 is the one forwarded port from the
+      # foothold). The icmp entry is ours too: ping stays open office->servers
+      # so liveness checks work across the quarantine.
+      - { from: desktop, to: servers, deny: [tcp/25] }
       - { from: office, to: servers, allow: [tcp/25, tcp/53] }
+      - { from: office, to: servers, allow: [icmp] }
 
 hosts:
   - name: desktop
@@ -61,6 +70,7 @@ hosts:
       - { path: /root/flag.txt, description: flag, sensitive: true }
       - { path: /home/trainee/traffic1.pcap, description: "pre-planted ssh-attack capture (source 69.89.31.226; upstream medium noise; realized: pure attack frames)" }
       - { path: /home/trainee/traffic2.pcap, description: "pre-planted dos-attack capture (upstream medium noise; realized: pure attack frames)" }
+      - { path: /var/lib/daemon/.campaign, description: "campaign id dropped in the resident malware's working directory (ours, 2026-10-28; the forensics triage reads it, scored as a guest-read answer)" }
 
   - name: webserver
     os: { type: linux, distro: ubuntu-20.04 }  # realized on ubuntu (upstream RPM-based)

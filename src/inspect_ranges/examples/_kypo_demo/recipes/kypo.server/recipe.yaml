@@ -1,7 +1,11 @@
 name: kypo.server
-version: "2"
+version: "3"
 entrypoint: run.sh
 mode: online
 inputs:
   telnet_port:
     default: "2323"
+  banner_wing:
+    default: "training"
+  maintenance_code:
+    default: "1111"

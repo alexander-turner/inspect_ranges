@@ -1,7 +1,10 @@
 #!/bin/bash
-# Reference: measure the firewall's forwarding policy from the office segment.
+# Reference: measure the firewall's forwarding policy from the foothold.
 # A forwarded port answers (RST from the webserver: no listener there), a
-# dropped port times out silently; the distinction IS the measurement.
+# dropped port times out silently; the distinction IS the measurement. The
+# first-match deny carve-out (desktop tcp/25) drops at the firewall for THIS
+# source, so the honest measurement from the desktop finds tcp/53 alone even
+# though the office-wide allow still names tcp/25.
 set -euo pipefail
 python3 - <<'PY'
 import errno, socket, time
