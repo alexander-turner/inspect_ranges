@@ -642,3 +642,64 @@ def test_local_endpoint_mirrors_the_daemon_fifo_refusal(tmp_path: Path) -> None:
         assert write_error.value.errno in ("EINVAL", "ENXIO")
 
     asyncio.run(scenario())
+
+
+def test_read_file_as_user_rides_the_exec_plane(tmp_path: Path) -> None:
+    """A user-enforced read runs `cat` under that user (the oracle's privileged-read pattern); the CI endpoint executes the current user for real."""
+    import pwd
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        await env.write_file("userread.txt", "sekrit")
+        assert await env.read_file("userread.txt", user=me) == "sekrit"
+        assert await env.read_file("userread.txt", text=False, user=me) == b"sekrit"
+
+    asyncio.run(scenario())
+
+
+def test_read_file_as_unknown_user_surfaces_the_daemon_failure(
+    tmp_path: Path,
+) -> None:
+    """An unswitchable user is an honest failure naming the user, never a mapped file error."""
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        await env.write_file("userread.txt", "sekrit")
+        with pytest.raises(RuntimeError) as info:
+            await env.read_file("userread.txt", user="no-such-user-here")
+        assert "no-such-user-here" in str(info.value)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="running as root: file modes do not bind")
+def test_read_file_as_user_maps_permission_denied(tmp_path: Path) -> None:
+    """The exec plane has no errno channel, so the stderr sniff must still name the caller's path in `PermissionError`."""
+    import pwd
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        await env.write_file("private.txt", "sekrit")
+        (tmp_path / "private.txt").chmod(0o000)
+        with pytest.raises(PermissionError) as info:
+            await env.read_file("private.txt", user=me)
+        assert "private.txt" in str(info.value)
+
+    asyncio.run(scenario())
+
+
+def test_write_file_as_user_creates_parents(tmp_path: Path) -> None:
+    """A user-enforced write creates parents as that user and round-trips content, text and binary."""
+    import pwd
+
+    async def scenario() -> None:
+        env, _ = make_env(tmp_path)
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        await env.write_file("deep/nest/f.txt", "payload", user=me)
+        assert await env.read_file("deep/nest/f.txt") == "payload"
+        await env.write_file("deep/nest/b.bin", b"\x00\x01", user=me)
+        assert await env.read_file("deep/nest/b.bin", text=False) == b"\x00\x01"
+
+    asyncio.run(scenario())

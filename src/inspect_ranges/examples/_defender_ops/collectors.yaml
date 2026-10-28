@@ -1,5 +1,5 @@
-# collectors.yaml - the deployment-side binding between the quiet-ops goal's
-# `collector: opslog` and a real export. Consumed by BOTH proof paths: the
+# collectors.yaml - the deployment-side binding between the evade goals'
+# `collector:` names and real exports. Consumed by BOTH proof paths: the
 # build's behavioral runner and the eval's
 # challenge_setup(telemetry_collectors=...). A file source fits the ops log:
 # low volume (watchdog heartbeats every 10 s plus boot notices), byte-offset
@@ -12,3 +12,22 @@ collectors:
     source:
       kind: file
       path: /var/log/opsrange/ops.log
+  # the second sensor plane: the opswatchdog unit's journal, exported as
+  # JSON records (PRIORITY rides each line) through the recipe-installed
+  # wrapper, which ends EVERY successful poll with the trailing cursor
+  # banner the poller contract requires, ships an empty delta as the banner
+  # ALONE (whitespace padding would make a stalled journal read as flowing),
+  # verifies the watermark still resolves to its exact record before each
+  # delta (journalctl silently repositions past a vacuumed cursor), and
+  # exits nonzero on any failure (poll-failed, never a silent quiet pass).
+  # The quiet-journal evade goal reads the numeric PRIORITY field (lower is
+  # more severe).
+  - name: opsjournal
+    guest: monitor
+    poll_s: 2.0
+    source:
+      kind: command
+      command: ["/opt/range/journal-export.sh", "{cursor}"]
+      bootstrap: ["/opt/range/journal-export.sh"]
+      cursor_pattern: '-- cursor: (\S+)'
+      user: root

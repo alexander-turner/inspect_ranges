@@ -58,6 +58,7 @@ from ..types import (
     Router,
     has_guest_content,
     has_router_content,
+    unanswerable_address,
 )
 from .activities import (
     ResolvedActivity,
@@ -191,9 +192,10 @@ class RecipeFn(Protocol):
 
 
 SettleFn = Callable[
-    [dict[str, int], str, str, float, "HybridSockets", str | None], float
+    [dict[str, int], str, str, float, "HybridSockets", str | None, tuple[str, ...]],
+    float,
 ]
-"""The network-settle seam: `(cids, guest, probe, timeout_s, hybrid_sockets, windows_resolver) -> seconds waited` (the map dials Cloud Hypervisor guests through their hybrid-vsock sockets; a non-None `windows_resolver` picks the Windows probe shape, querying that build resolver directly)."""
+"""The network-settle seam: `(cids, guest, probe, timeout_s, hybrid_sockets, windows_resolver, resolvers) -> seconds waited` (the map dials Cloud Hypervisor guests through their hybrid-vsock sockets; a non-None `windows_resolver` picks the Windows probe shape, querying that build resolver directly; `resolvers` is the guest's build-plan resolver list, named in the failure message so a dead resolver indicts itself)."""
 
 
 HybridSockets = dict[str, HybridEndpoint]
@@ -388,7 +390,7 @@ class BuildResult(BaseModel):
 def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> RangeSpec:
     """The egress-enabled build variant of a spec: a deep copy, never a mutation of the runtime spec.
 
-    Routerless networks flip to `mode: nat` with an allow-all v4 egress policy and the build nameserver (host-derived by default) appended to their resolvers; router-attached and `routed` networks are untouched. A content-carrying host left with no egress-bearing attachment gets a dedicated `build-uplink` NAT segment appended instead (the routed-topology answer: the runtime spec never carries it, and realized images keep no reference because network config is per-boot cloud-init). Provisioned ROUTERS deliberately get no uplink: attaching one would put a router on an egress-bearing network, the exact combination the semantic gate refuses (`egress-with-router-not-realized`), so router recipes run offline instead (module docstring). The copy re-validates, so the egress semantic gates still apply to what the build actually boots.
+    Routerless networks flip to `mode: nat` with an allow-all v4 egress policy and the build nameserver (host-derived by default) prepended to their resolvers; router-attached and `routed` networks are untouched. A content-carrying host left with no egress-bearing attachment gets a dedicated `build-uplink` NAT segment appended instead (the routed-topology answer: the runtime spec never carries it, and realized images keep no reference because network config is per-boot cloud-init). Provisioned ROUTERS deliberately get no uplink: attaching one would put a router on an egress-bearing network, the exact combination the semantic gate refuses (`egress-with-router-not-realized`), so router recipes run offline instead (module docstring). The copy re-validates, so the egress semantic gates still apply to what the build actually boots.
 
     Raises:
         IssueError: when the transformed spec fails re-validation (the semantic gates), as positioned issues where the validator carried them.
@@ -412,6 +414,17 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
                 )
             ]
         ) from error
+    if unanswerable_address(nameserver):
+        raise IssueError(
+            [
+                Issue(
+                    code="build-nameserver-unanswerable",
+                    path=("range", "name"),
+                    message=f"build nameserver {nameserver} is in an address block nothing can answer (documentation/benchmark/reserved); every build guest's resolution would stall and network-settle cannot pass",
+                    hint="pass --build-nameserver with your deployment's resolver IP",
+                )
+            ]
+        )
     for network in build.networks:
         if network.name in router_networks or network.mode == "routed":
             continue
@@ -422,7 +435,18 @@ def egress_build_spec(spec: RangeSpec, nameserver_ip: str | None = None) -> Rang
         elif network.dns.nameservers is None:
             network.dns.nameservers = [nameserver]
         elif nameserver not in network.dns.nameservers:
-            network.dns.nameservers.append(nameserver)
+            # first, never last: glibc tries resolv.conf in order (5 s per
+            # server) and honours at most three entries, so an appended build
+            # resolver sits behind a declared-but-build-dead address and the
+            # settle probe's budget burns on the dead one before the working
+            # resolver is ever consulted (the defender-ops TEST-NET brick,
+            # 2026-10-28; the Windows probe shape recorded the same
+            # correction by querying the egress resolver directly). Residual:
+            # resolvers_for still puts dns.authoritative guests and the
+            # records service ahead of this list, so a network declaring
+            # three or more of those can push the build resolver past MAXNS;
+            # that corner keeps the settle gate as its honest tripwire
+            network.dns.nameservers.insert(0, nameserver)
     # the build uplink (linux-examples-v1, answering the recorded goad-era
     # question): a content-carrying host whose every attachment is a
     # router-attached or routed segment has no egress-bearing network after
@@ -782,7 +806,7 @@ def build_range(
     else:
         tee_note = None
 
-    # derived once: egress_build_spec appends it to resolvers and the Windows
+    # derived once: egress_build_spec prepends it to resolvers and the Windows
     # scrub strips it back out; two independent resolv.conf reads could
     # disagree mid-build (slice-2 review)
     build_ns = (
@@ -938,7 +962,7 @@ def build_range(
             host.name: host.defense for host in spec.hosts if host.defense is not None
         }
         # the scrub must never strip a resolver the RUNTIME spec declares:
-        # egress_build_spec only appends build_ns where it is not already
+        # egress_build_spec only inserts build_ns where it is not already
         # declared, so a declared match means the address is legitimate
         # baked state (slice-2 review)
         declared_resolvers = {
@@ -952,6 +976,23 @@ def build_range(
         runs: list[RecipeRun] = []
         settle = settle_fn if settle_fn is not None else _settle_network
         router_names = frozenset(router.name for router in spec.routers)
+        # the guest's build-plan resolver list, in netplan order, for the
+        # settle failure message: the defender-ops brick surfaced as channel
+        # noise because the message never named the resolvers in play
+        network_resolvers = {
+            network.name: tuple(str(address) for address in network.resolvers)
+            for network in plan.networks
+        }
+        guest_resolvers = {
+            guest.name: tuple(
+                dict.fromkeys(
+                    address
+                    for interface in guest.interfaces
+                    for address in network_resolvers.get(interface.network, ())
+                )
+            )
+            for guest in plan.guests
+        }
         settled: set[str] = set()
         try:
             for step in run_steps:
@@ -977,6 +1018,7 @@ def build_range(
                         options.settle_timeout_s,
                         hybrid,
                         build_ns if step.guest in windows_hosts else None,
+                        guest_resolvers.get(step.guest, ()),
                     )
                     tee.log(
                         "network-settle",
@@ -1852,6 +1894,7 @@ def _settle_network(
     timeout_s: float,
     hybrid_sockets: "HybridSockets | None" = None,
     windows_resolver: str | None = None,
+    resolvers: tuple[str, ...] = (),
 ) -> float:
     """Block until the guest resolves `probe` (the build-egress DNS warm-up gate); returns the wait.
 
@@ -1901,9 +1944,12 @@ def _settle_network(
             except Exception as error:  # transient channel noise during early boot
                 last_cause = f"{type(error).__name__}: {error}"
             await asyncio.sleep(2.0)
+        # name the resolvers in play: the defender-ops TEST-NET brick surfaced
+        # as opaque channel noise because the message never did
+        resolver_note = f"resolvers: {', '.join(resolvers)}; " if resolvers else ""
         raise BuildError(
             "network-settle",
-            f"guest cannot resolve {probe!r} within {timeout_s:.0f} s (last cause: {last_cause}); build-time egress is not usable",
+            f"guest cannot resolve {probe!r} within {timeout_s:.0f} s ({resolver_note}last cause: {last_cause}); build-time egress is not usable",
             guest=guest,
         )
 

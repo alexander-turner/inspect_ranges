@@ -590,6 +590,12 @@ class TelemetryPoller:
             if replaying:
                 state.replay_next = False
             meta["outcome"] = "quiet"
+            # whitespace-only payload is not flow: nothing shipped, so the
+            # window-flowing check (bytes > 0) must not count a stray
+            # separator byte around the banner as pipeline data — a stalled
+            # sensor behind a chatty wrapper would otherwise read as flowing
+            # and hand quiet verdicts to a silenced plane
+            meta["bytes"] = 0
             meta["watermark"] = cursor
             meta["advanced"] = False
             state.cursor = cursor

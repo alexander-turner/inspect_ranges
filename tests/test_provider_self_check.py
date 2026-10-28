@@ -48,6 +48,8 @@ CHECKS: list[tuple[str, Check]] = [
 
 CI_XFAILS: dict[str, str] = {
     "test_exec_as_user": "needs root on the endpoint host (adduser/userdel provisioning)",
+    "test_read_file_as_user": "needs root on the endpoint host (adduser/userdel provisioning)",
+    "test_write_file_as_user": "needs root on the endpoint host (adduser/userdel provisioning)",
 }
 if os.geteuid() == 0:
     for name in (
@@ -325,8 +327,14 @@ def test_self_check(
 
 def test_ci_xfail_pin_is_short() -> None:
     """The record requires the CI pin to stay short and enumerated; growth is a review event."""
+    # grew by two with inspect-ai 0.3.286: the as-user file checks share
+    # test_exec_as_user's endpoint limitation (account provisioning needs
+    # root on the CI endpoint host); the booted-range batteries run them
+    # for real against the exec-plane user implementation
     assert set(CI_XFAILS) <= {
         "test_exec_as_user",
+        "test_read_file_as_user",
+        "test_write_file_as_user",
         "test_read_file_not_allowed",
         "test_write_text_file_without_permissions",
         "test_write_binary_file_without_permissions",
@@ -335,7 +343,9 @@ def test_ci_xfail_pin_is_short() -> None:
 
 def test_check_inventory_matches_the_installed_suite() -> None:
     """The harness runs every exported check (a new inspect-ai check shows up here as a count change)."""
-    assert len(CHECKS) == 44, (
+    # 46 as of inspect-ai 0.3.286: test_read_file_as_user and
+    # test_write_file_as_user joined (the user-enforcing file API)
+    assert len(CHECKS) == 46, (
         f"inspect-ai self_check now exports {len(CHECKS)} checks; "
         "review the delta and update the harness expectations"
     )

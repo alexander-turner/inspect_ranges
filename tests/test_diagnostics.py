@@ -1099,6 +1099,58 @@ def test_dot_local_zone_warns_without_invalidating(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("nameserver", "cidr", "expected_codes"),
+    [
+        pytest.param(
+            "198.51.100.53",
+            "10.0.0.0/24",
+            ["dns-nameserver-unanswerable"],
+            id="test-net-entry-warns",
+        ),
+        pytest.param(
+            "198.51.100.53",
+            "198.51.100.0/24",
+            [],
+            id="in-cidr-entry-exempt",
+        ),
+        pytest.param(
+            "8.8.8.8",
+            "10.0.0.0/24",
+            [],
+            id="public-resolver-silent",
+        ),
+        pytest.param(
+            "10.0.0.5",
+            "10.0.0.0/24",
+            [],
+            id="private-resolver-silent",
+        ),
+    ],
+)
+def test_unanswerable_nameserver_warns_without_invalidating(
+    nameserver: str, cidr: str, expected_codes: list[str], tmp_path: Path
+) -> None:
+    report = report_with(
+        f"""
+        networks:
+          - name: lab
+            cidr: {cidr}
+            mode: isolated
+            dns: {{ nameservers: [{nameserver}] }}
+        hosts:
+          - name: web
+            os: {{ type: linux }}
+            image: img
+            interfaces: [{{ network: lab }}]
+        """,
+        tmp_path,
+    )
+    assert report.valid
+    assert [issue.code for issue in report.issues] == expected_codes
+    assert all(issue.severity == "warning" for issue in report.issues)
+
+
+@pytest.mark.parametrize(
     ("os_type", "dhcp", "expected"),
     [
         pytest.param(

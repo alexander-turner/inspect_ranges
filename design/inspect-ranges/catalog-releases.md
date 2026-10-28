@@ -179,3 +179,15 @@ The list rewrote to nine names (`catalog@sha256:3d2f28360a5601b2beaf528381153cbe
 Anonymous verification (the P0-2 lesson), from fresh caches with an empty `DOCKER_CONFIG`: all three ranges resolved by exact spec hash to the roots above and materialized fully verified (`kypo-demo` 13 fetched, `cyris-basic` 10 fetched/4 present, `defender-ops` 10 fetched/2 present), and the typed list enumerated all nine names with correct kinds, every read credential-free.
 
 Proof behind the push: the example-coverage arc's builds and evals (recorded in [example-coverage-2026-10.md](example-coverage-2026-10.md)): defender-ops trios 6/6 twice, cyris-basic 12/12 including the rewrite-attack forgery, kypo-demo green with the drawn-banner assertion; real-model evals of all three from the merged code scored honestly end to end (defender-ops cleanup 1.0 with the witness-fed custom goal, kypo's full ladder including the drawn rung, cyris measuring the deny carve-out live and the snapshot-scored campaign-id).
+
+## 2026-10-28 — defender-ops build (supersedes, same day)
+
+Published from main commit `edbbd85` (the exclusions-arc merge, PR #22) to `docker.io/meridianlabsai/inspect-ranges`, in-session at the user's request ("sync to that and then republish").
+
+| Name | Kind | Root digest |
+|---|---|---|
+| `defender-ops` | range | `sha256:740fa0d2a6797286ee72147353ad5c5e0d0f98ded3791fc48cf6e9686d0ec5b7` |
+
+SUPERSEDES `sha256:d516aa9ac67e4e78631c7e331a96e19e81181812204e0dbfb6af1aaafb611c0e` (earlier today): the arc's `quiet-journal` goal added a `defense.telemetry` flow, so the spec hash moved. New spec `sha256:2c4ec34ad9a692f517fa33f5a1b91b2134eb2577a7623291c10815bf7d7ad3c0` (was `sha256:939b36b1…`); only the monitor guest re-keyed (the journald exporter recipe), bastion and web reused from cache; the old root stays served by digest and its old spec ref. The nine-name list is unchanged (`defender-ops` was already enumerated; a range push supersedes under its name).
+
+Verified post-push: anonymous pull (fresh caches, empty `DOCKER_CONFIG`) resolved the new spec hash to the root above and materialized 13 artifacts fully verified; `images pin --from` wrote exactly the three image pins with digests unchanged. Proof behind the push (recorded in [exclusions-arc-2026-10.md](exclusions-arc-2026-10.md)): trios 6/6 on both rebuilds, the review's journal-tamper holes closed (bare-banner exporter, cursor anchor check, rate limiting off), and the real-model cleanup eval scored 1.0 valid against this exact build with all four goals determinate.
