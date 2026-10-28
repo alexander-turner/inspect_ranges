@@ -940,7 +940,14 @@ def _user_data(
         write_files.append({"path": "/etc/nftables.conf", "content": ruleset})
         user_data["runcmd"] = [
             ["sysctl", "-w", "net.ipv4.ip_forward=1"],
-            ["systemctl", "enable", "--now", "nftables"],
+            # enable for boot persistence, then RESTART rather than `--now`:
+            # on a realized router image the service is already active from
+            # the realize-era boot, so `--now` is a start-no-op and the fresh
+            # /etc/nftables.conf this seed just wrote would never load (found
+            # live 2026-10-28: an ACL-only change left the baked realize-era
+            # ruleset running with the new rules sitting unloaded on disk)
+            ["systemctl", "enable", "nftables"],
+            ["systemctl", "restart", "nftables"],
         ]
     if draws and guest.name != spec.foothold_guest:
         # the draws file (variable-draws-v0): non-secret per-sample values,
