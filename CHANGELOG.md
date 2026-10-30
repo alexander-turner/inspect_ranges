@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.3 (29 October 2026)
 
 - Packaging: the wheel ships the range container's `Dockerfile` beside its entrypoint. 0.2.0 through 0.2.2 omitted it, so a pip install could not build the range image when `INSPECT_RANGES_RANGE_IMAGE` was unset (the default), failing at `up` with a missing build context.
 
