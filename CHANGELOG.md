@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.4 (30 October 2026)
 
 - Distribution: a registry location may name one repository with a tag prefix (`registry.example.net/mirror:ranges`), keeping every artifact in that single repository with the name in its tags (`ranges--attack`, `ranges--vulhub-zabbix--spec-<hash>`), for registries where a repository is a pre-created, allowlisted resource (Amazon ECR): one repository admitted once serves every range. Mirror, pull, push, publish and enumeration work unchanged from it. Tag listings now follow the distribution spec's `Link` header for pagination, which is the form ECR paginates with (it refused the previous `last=<tag>` guess on repositories over a thousand tags).
 
