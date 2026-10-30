@@ -14,7 +14,7 @@ When a name is needed, it resolves in a fixed order:
 
 2.  the locations listed in `INSPECT_RANGES_REGISTRY`, in order, which defaults to the public catalog (`docker.io/meridianlabsai/inspect-ranges`). On a host with a pin file configured, the pin binds this download step and `images refresh`, never the cache (see [Pinned Fleet](#pinned-fleet)).
 
-A location can be a Docker Hub org, a private registry, or a plain directory, and the same artifacts work from all three because every download verifies against its digest. A location that cannot be reached stops resolution with an error naming it; nothing quietly falls through to the next entry.
+A location can be a Docker Hub org, a private registry (or one repository of it, with the names in the tags), or a plain directory, and the same artifacts work from all of them because every download verifies against its digest. A location that cannot be reached stops resolution with an error naming it; nothing quietly falls through to the next entry.
 
 Two behaviors to know before the recipes below:
 

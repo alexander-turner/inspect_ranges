@@ -774,6 +774,50 @@ def test_hub_name_prefix_spells_repos(tmp_path: Path) -> None:
     assert cast(RegistryRepo, acme.store_for("attack")).repo == "ranges/attack"
 
 
+def test_single_repository_form_spells_names_into_tags() -> None:
+    """`host/repo:prefix` keeps every name in one repository (for registries where a repository is a pre-created, allowlisted resource): the current root is `<prefix>--<name>`, a build `<prefix>--<name>--spec-<hash>`, both invertible; the hub form has no such prefix, and a prefix that would blur the separator refuses."""
+    from inspect_ranges._dist.registry import RegistryRepo
+
+    flat = parse_location("registry.acme.net/mirror:ranges")
+    assert not flat.is_directory and flat.tag_prefix == "ranges"
+    for name in ("attack", "dmz-pivot", "catalog"):
+        store = flat.store_for(name)
+        assert isinstance(store, RegistryRepo) and store.repo == "mirror"
+    assert flat.latest_ref("attack") == "ranges--attack"
+    assert (
+        flat.spec_ref("dmz-pivot", "ab" * 32) == f"ranges--dmz-pivot--spec-{'ab' * 32}"
+    )
+    assert (
+        flat.spec_hash_of("dmz-pivot", f"ranges--dmz-pivot--spec-{'ab' * 32}")
+        == "ab" * 32
+    )
+    assert flat.spec_hash_of("dmz-pivot", "ranges--dmz-pivot") is None
+    assert flat.spec_hash_of("attack", f"ranges--dmz-pivot--spec-{'ab' * 32}") is None
+    assert flat.name_of("ranges--attack") == "attack"
+    assert flat.name_of(f"ranges--dmz-pivot--spec-{'ab' * 32}") is None
+    assert (
+        flat.name_of("other__image--latest") is None
+    )  # another tenant's tags in the same repository
+    assert (
+        parse_location("http://127.0.0.1:5056/mirror:ranges").latest_ref("attack")
+        == "ranges--attack"
+    )
+    plain = parse_location("registry.acme.net/ranges")
+    assert (
+        plain.tag_prefix == ""
+        and plain.spec_hash_of("r", f"spec-{'ab' * 32}") == "ab" * 32
+        and plain.name_of("latest") is None
+    )
+    for bad in (
+        "docker.io/meridianlabsai/inspect-ranges:ranges",
+        "registry.acme.net/:ranges",
+        "registry.acme.net/mirror:a--b",
+        "registry.acme.net/mirror:",
+    ):
+        with pytest.raises(DistError, match="location-invalid"):
+            parse_location(bad)
+
+
 def test_hub_empty_name_prefix_refuses() -> None:
     """A trailing slash (empty third segment) refuses instead of silently degrading to the bare-org form."""
     with pytest.raises(DistError, match="location-invalid"):
