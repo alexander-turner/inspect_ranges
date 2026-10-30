@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from typing_extensions import override
 
 from .._attackbox.backend import attack_box_origin
+from .._attackbox.external import ExternalBoxError
+from .._attackbox.pinned import is_pinned_origin, prepare_attack_box
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -51,7 +53,13 @@ from .admission import default_max_sandboxes
 from .evidence import EvidenceSession, resolve_evidence_session
 from .naming import sample_project
 from .ops import provider_exec, provider_read_file, provider_write_file
-from .state import ProviderRuntime, SampleHandle, ensure_pulled, provider_runtime
+from .state import (
+    ProviderRuntime,
+    SampleHandle,
+    ensure_pulled,
+    prerequisite_error,
+    provider_runtime,
+)
 
 logger = logging.getLogger("inspect_ranges.provider")
 
@@ -84,6 +92,31 @@ def _attack_box_origin_or_up_error() -> str | None:
         return attack_box_origin()
     except ValueError as error:
         raise UpError("attack-box", str(error)) from error
+
+
+async def _prepare_attack_box(runtime: ProviderRuntime, spec: RangeSpec) -> None:
+    """Eval init's slow work for a pinned provider program: fetch the pinned release and probe the host, once per run.
+
+    Only where this process boots the box: a range with a dedicated attack box under a co-resident host backend (a separated backend's applier selects and boots its own). A malformed value is left to the sample's boot, which refuses it as a typed stage failure.
+
+    Raises:
+        Exception: Inspect's prerequisite refusal, carrying the cause, the remedy, and the way to the built-in box, when the host cannot boot the box.
+    """
+    if spec.attacker.host is not None or runtime.backend_separated:
+        return
+    try:
+        origin = attack_box_origin()
+    except ValueError:
+        return
+    if origin is None or not is_pinned_origin(origin):
+        return
+    if origin in runtime.attack_box_probed:
+        return
+    try:
+        await asyncio.to_thread(prepare_attack_box, origin)
+    except ExternalBoxError as error:
+        raise prerequisite_error(str(error)) from error
+    runtime.attack_box_probed.add(origin)
 
 
 def _default_guest(spec: RangeSpec) -> str:
@@ -156,6 +189,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                     realized_backings=realized_backings(consumed) if consumed else {},
                 ),
             )
+        await _prepare_attack_box(runtime, spec)
         del spec
         logger.info(
             "task_init %s: range %s (%d guests, %d vCPUs, %d MiB)",
