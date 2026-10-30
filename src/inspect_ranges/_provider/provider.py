@@ -893,8 +893,10 @@ class RangeSandboxEnvironment(SandboxEnvironment):
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
         raise NotImplementedError(
-            "range provides no interactive connection yet (a console "
-            "command is a recorded follow-up in provider-v1.md)"
+            "range provides no interactive connection into eval samples by "
+            "design (an operator mid-sample is an integrity hole); for "
+            "operator debugging, boot the range with 'inspect-ranges up' and "
+            "attach with 'inspect-ranges shell <project>'"
         )
 
 

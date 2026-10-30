@@ -13,6 +13,7 @@ from .imagescmd import images
 from .plancmd import plan, render
 from .reapercmd import reaper
 from .schema import schema
+from .shellcmd import shell
 from .upcmd import down, up
 from .validate import validate
 
@@ -39,6 +40,7 @@ ranges.add_command(push)
 ranges.add_command(reaper)
 ranges.add_command(render)
 ranges.add_command(schema)
+ranges.add_command(shell)
 ranges.add_command(up)
 ranges.add_command(down)
 ranges.add_command(validate)
