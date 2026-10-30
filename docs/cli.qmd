@@ -31,6 +31,12 @@ On failure, the error names the stage and guest, the affected guests' serial con
 
 `inspect-ranges down <project>` tears down by recorded ownership (compose labels and deterministic names), never by live process state: it works from any process, after any crash, and twice in a row. `down --all` sweeps every `ir-` project discovered from the ownership registry, container labels, and volume names, attempting all of them and aggregating any failures. The sweep cannot tell a crashed project from one mid-boot, so run it only when nothing on the host should be live. A failed removal keeps the ownership record so a retry can still find the project.
 
+## `shell`
+
+`inspect-ranges shell <project> [guest]` opens an interactive shell on a guest of a running range: a tmux session inside the guest, driven over the range's control channel, so it needs no SSH, no guest listener, and works on fully isolated networks. The guest defaults to the range's attacker when it has exactly one; `--session` names the tmux session (the same name reattaches, and sessions survive detach); `--user` picks the guest identity (default: the daemon identity, root on Linux); `--cast <path>` records the attach as a local asciicast. Detach with `Ctrl-]`.
+
+This is an operator surface for ranges booted with `up` (trying tasks by hand, debugging guest state and images). A project booted by the Inspect sandbox provider refuses by recorded origin, so an eval sample can never acquire an interactive operator mid-run. Guest output is treated as untrusted: display sequences pass to your terminal, but clipboard writes, palette programming, and device-control strings are filtered out. Linux guests only (the session is tmux). One known seam: the attach paints the current visible screen and then streams new output, so a full-screen program already mid-flight may need a redraw (`Ctrl-L`) to render cleanly.
+
 ## `applier`
 
 `inspect-ranges applier --socket <path>` serves the host side of a separated topology (driver on one machine, range host on another) on a unix socket, relaying guest control traffic; see [Range Host](topology.qmd). It runs the doctor readiness subset at startup and refuses to serve an unhealthy host; drivers reach it via `INSPECT_RANGES_HOST=uds:<path>`.

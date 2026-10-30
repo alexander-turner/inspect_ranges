@@ -106,7 +106,7 @@ def attach_endpoints(
     return cids, hybrid
 
 
-def _recorded_boot(state_dir: Path, project: str) -> BootPlan:
+def recorded_boot(state_dir: Path, project: str) -> BootPlan:
     """The project's recorded boot plan, with every absence or malformation refused in place.
 
     Raises:
@@ -157,7 +157,7 @@ def attach_oracle(
             "the range runs, or unset INSPECT_RANGES_HOST"
         )
     state = state_dir if state_dir is not None else default_state_dir()
-    boot = _recorded_boot(state, project)
+    boot = recorded_boot(state, project)
     run = runner if runner is not None else run_command
     try:
         running = project_containers(run, project, running_only=True)

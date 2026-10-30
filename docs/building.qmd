@@ -1,7 +1,7 @@
 ---
 title: "Building Ranges"
 description: "Developing and building ranges. Covers the development machine, the iteration loop, the build command, writing recipes, verification, and behavioral checks."
-llms-description: "Range development and the build. The dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM, verified by doctor), the iteration loop walked against dmz_pivot (validate incl. sibling challenges.yaml, plan, build with --keep/--reverify/--cid-base), and Running the Range at escalating fidelity (Poke: up --from-spec plus a range_oracle attach from a REPL or script; Smoke Eval: one sample through the real provider; Scan: range_apparatus in the scorer list or scout scan over finished logs). Plus the overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
+llms-description: "Range development and the build. The dev machine (inspect-ranges devbox up on EC2 with idle auto-stop and SSM-tunneled ssh, or any Linux host with KVM, verified by doctor), the iteration loop walked against dmz_pivot (validate incl. sibling challenges.yaml, plan, build with --keep/--reverify/--cid-base), and Running the Range at escalating fidelity (Poke: up --from-spec plus the interactive inspect-ranges shell attach and a range_oracle attach from a REPL or script; Smoke Eval: one sample through the real provider; Scan: range_apparatus in the scorer list or scout scan over finished logs). Plus the overview of range authoring (pointers to the Ranges, Guests, and Networks definition pages) plus the reference for inspect-ranges build: the build gate, the egress build plan, recipe bundles and the complete IR_* execution contract (every variable, the IR_EXEC/IR_PUSH grammar, cross-guest limits), reading build output (the stage-line transcript and stages.jsonl), incremental rebuilds and caching, declaration verification, and challenge behavioral checks with their execution context (root on the attacker, argv transport, the 16 MiB stdout cap)."
 ---
 
 ## Overview
@@ -80,7 +80,17 @@ Did the build produce the range I meant? Boot the built range directly, with no 
 inspect-ranges up --from-spec range.yaml
 ```
 
-`up` prints the compose project name (`ir-dmz-pivot-...`). Attach the range oracle (the privileged guest-access surface scoring uses; see [Challenges](challenges.qmd#scoring-lifecycle)) by that name from a REPL or script and run commands against any guest, targets included:
+`up` prints the compose project name (`ir-dmz-pivot-...`). Two attach surfaces work against it, and they compose: the interactive shell for exploring by hand, the oracle for scripted assertions.
+
+For hands-on poking, open an operator shell on a guest (see [`shell`](cli.qmd#shell) for the full behavior: tmux over the control channel, `Ctrl-]` detaches, sessions persist for reattach, eval-booted projects refuse by origin):
+
+``` {.bash filename="Terminal"}
+inspect-ranges shell ir-dmz-pivot-... web
+```
+
+This is the fastest way to try a task the way an agent would (from the foothold, over the range network) or to inspect a target from the inside, with no eval ceremony and no SSH.
+
+For scripted checks, attach the range oracle (the privileged guest-access surface scoring uses; see [Challenges](challenges.qmd#scoring-lifecycle)) by the same project name from a REPL or script and run commands against any guest, targets included:
 
 ``` python
 import asyncio
