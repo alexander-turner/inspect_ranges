@@ -1,6 +1,6 @@
 ## Unreleased
 
-
+- New command `inspect-ranges shell <project> [guest]`: an interactive operator shell on a guest of a running range, as a tmux session driven entirely over the range's control channel, so it needs no SSH and no guest listener and works on fully isolated networks. It attaches only to ranges booted with `inspect-ranges up`: a project booted by the Inspect sandbox provider refuses by recorded origin, so an eval sample can never acquire an interactive operator mid-run. Guest output is treated as untrusted and filtered before it reaches the operator's terminal (clipboard-write and palette OSC sequences and all device-control strings are dropped; display sequences and titles pass). Sessions survive detach (`Ctrl-]`) for reattach by the same name; `--user` picks the guest identity (default: the daemon identity, root on Linux); `--cast` records the attach as a local asciicast. Linux guests only. The provider's `connection()` message now points operators at `shell` instead of a recorded follow-up.
 - Attack box: an external provider can now be a pinned program rather than a Python package. `INSPECT_RANGES_ATTACK_BOX=inspect_ranges._attackbox.pinned.pinned_attack_box:<pin file>` selects the release a deployment-written pin file names. The first eval downloads it and checks its SHA-256, eval init probes the host, the recorded origin carries the pin's contents, and `INSPECT_RANGES_ATTACK_BOX_PROGRAM` names an installed program for offline hosts.
 
 
