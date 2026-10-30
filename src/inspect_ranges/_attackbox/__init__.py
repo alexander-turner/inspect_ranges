@@ -4,10 +4,12 @@ The range supplies an L2 attachment point on the foothold's segment (taps built 
 """
 
 from .backend import (
+    BUILTIN,
     ENV_VAR,
     AttachedInterface,
     AttackBoxBackend,
     AttackBoxCapabilities,
+    AttackBoxChoice,
     AttackBoxContext,
     AttackBoxFactory,
     AttackBoxHandle,
@@ -15,9 +17,13 @@ from .backend import (
     AttackBoxReclaimFn,
     FootholdAttachment,
     ParsedAttackBox,
+    attack_box_is_default,
     attack_box_origin,
+    choose_attack_box,
+    configured_attack_box,
     parse_attack_box,
     resolve_attack_box,
+    select_attack_box,
 )
 from .record import (
     AttackBoxRecord,
@@ -27,9 +33,11 @@ from .record import (
 )
 
 __all__ = [
+    "BUILTIN",
     "ENV_VAR",
     "AttachedInterface",
     "AttackBoxBackend",
+    "AttackBoxChoice",
     "AttackBoxCapabilities",
     "AttackBoxContext",
     "AttackBoxFactory",
@@ -39,10 +47,14 @@ __all__ = [
     "AttackBoxRecord",
     "FootholdAttachment",
     "ParsedAttackBox",
+    "attack_box_is_default",
     "attack_box_origin",
     "attack_box_record_path",
+    "choose_attack_box",
+    "configured_attack_box",
     "parse_attack_box",
     "read_attack_box_record",
     "resolve_attack_box",
+    "select_attack_box",
     "write_attack_box_record",
 ]

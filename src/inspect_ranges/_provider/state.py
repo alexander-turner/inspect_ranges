@@ -178,6 +178,8 @@ class ProviderRuntime:
         self.registry: dict[str, SampleHandle] = {}
         self.attack_box_probed: set[str] = set()
         """The pinned attack-box origins whose release eval init fetched and whose host probe passed in this run."""
+        self.attack_box_fallback: set[str] = set()
+        """The pinned attack-box origins a person at a terminal replaced with the built-in box for this run."""
         self.host_backend = os.environ.get("INSPECT_RANGES_HOST", "local")
         self._admission: WeightedAdmission | None = None
         self._allocator: CidAllocator | None = None

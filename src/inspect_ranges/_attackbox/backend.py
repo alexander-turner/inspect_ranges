@@ -1,6 +1,6 @@
 """Backend selection for `INSPECT_RANGES_ATTACK_BOX`: the grammar, the bundle, and the resolver.
 
-The variable's value IS the registration, exactly as `INSPECT_RANGES_HOST` works (`_host/backend.py`): a dotted import path naming an `AttackBoxFactory`, as `<module>.<factory>[:<config>]`, imported and called at resolution. There are no built-in forms; the variable's absence is the built-in behavior (the realizer renders and boots the attack box itself). The value splits on the FIRST colon, so a config may itself contain colons.
+The variable's value IS the registration, exactly as `INSPECT_RANGES_HOST` works (`_host/backend.py`): a dotted import path naming an `AttackBoxFactory`, as `<module>.<factory>[:<config>]`, imported and called at resolution. Two values are not factories: unset (or empty) selects the pinned default provider release (`pinned.py`), and `builtin` selects the built-in box (the realizer renders and boots the attack box itself). The value splits on the FIRST colon, so a config may itself contain colons.
 
 The value is persisted verbatim as the project's attack-box `origin` (`record.py`), and teardown-by-origin re-resolves it through `resolve_attack_box` in whatever process reclaims: `down` foremost, which may run fresh and never saw the driver's environment. Factories and provider constructors must therefore be cheap and must not dial anything: resolution happens in doctor, in `down`, and before `up` touches any docker resource; remote work belongs in the provider's `boot`.
 
@@ -20,6 +20,9 @@ from .._channel.vsock import HybridEndpoint
 from .record import AttackBoxRecord
 
 ENV_VAR = "INSPECT_RANGES_ATTACK_BOX"
+
+BUILTIN = "builtin"
+"""The `INSPECT_RANGES_ATTACK_BOX` value that selects the built-in box (no external provider)."""
 
 DoctorProbe = Callable[[], str | None]
 """An optional reachability probe for `inspect-ranges doctor`: `None` when healthy, else the failure detail (the `_host/backend.py` shape, aliased here so the realizer can import this module without the host-seam dependency chain)."""
@@ -203,19 +206,77 @@ def resolve_attack_box(value: str, state_dir: Path) -> AttackBoxBackend:
     return backend
 
 
+def configured_attack_box() -> str | None:
+    """The attack-box origin the environment selects, not yet validated: the pinned default provider when unset or empty, `None` for `builtin`, else the value verbatim."""
+    value = os.environ.get(ENV_VAR)
+    if not value:
+        from .pinned import default_attack_box_origin
+
+        return default_attack_box_origin()
+    if value == BUILTIN:
+        return None
+    return value
+
+
 def attack_box_origin() -> str | None:
-    """The configured attack-box origin, validated against the grammar; `None` when unset or empty.
+    """The configured attack-box origin, validated against the grammar; `None` for the built-in box (`builtin`).
 
     Validation here is parse-only (no import), so a malformed value refuses loudly wherever the origin is first consulted, before any resource exists. A pinned program's value is the one exception: its pin file is read here, so the origin carries the pin's contents (`pinned.canonical_origin`).
 
     Raises:
         ValueError: The variable is set but fits no grammar form, or names a pin file that does not load.
     """
-    value = os.environ.get(ENV_VAR)
-    if not value:
+    value = configured_attack_box()
+    if value is None:
         return None
     from .pinned import canonical_origin
 
     # a pinned program's pin file path becomes the pin's contents here, so
     # the origin up stamps names the release even after the file changes
     return canonical_origin(value)
+
+
+def attack_box_is_default() -> bool:
+    """Whether `INSPECT_RANGES_ATTACK_BOX` is unset or empty, so the pinned default provider is a default rather than a choice."""
+    return not os.environ.get(ENV_VAR)
+
+
+@dataclass(frozen=True)
+class AttackBoxChoice:
+    """The attack box one range realizes with."""
+
+    origin: str | None
+    """The external backend origin; `None` is the built-in box."""
+    reason: str | None = None
+    """Why the default stepped aside for the built-in box, when it did."""
+
+
+def choose_attack_box(
+    origin: str | None, *, default: bool, declared_image: str | None
+) -> AttackBoxChoice:
+    """The box a range gets: `origin`, unless it is the unset default and the range's attacker declares its own image.
+
+    A declared image is a promise about the box's tools and contents that only the built-in box keeps (an external provider boots its own guest), so the default steps aside for it. An explicit provider value always wins.
+    """
+    if origin is not None and default and declared_image is not None:
+        return AttackBoxChoice(
+            None,
+            f"the attacker declares image {declared_image!r}, which the default "
+            "attack box (an external provider's own guest) does not boot, so this "
+            "range uses the built-in "
+            f"box; set {ENV_VAR} to a provider to override",
+        )
+    return AttackBoxChoice(origin)
+
+
+def select_attack_box(declared_image: str | None) -> AttackBoxChoice:
+    """`choose_attack_box` over this process's environment, for a range whose attacker declares `declared_image`.
+
+    Raises:
+        ValueError: The variable is set but fits no grammar form.
+    """
+    return choose_attack_box(
+        attack_box_origin(),
+        default=attack_box_is_default(),
+        declared_image=declared_image,
+    )

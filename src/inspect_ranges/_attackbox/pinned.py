@@ -13,8 +13,9 @@ import tarfile
 import tempfile
 import urllib.request
 from dataclasses import asdict, dataclass
+from importlib.resources import files
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 from .backend import (
     ENV_VAR,
@@ -29,7 +30,12 @@ PROGRAM_ENV = "INSPECT_RANGES_ATTACK_BOX_PROGRAM"
 
 FACTORY_PATH = f"{__name__}.pinned_attack_box"
 
-BUILTIN_HINT = f"unset {ENV_VAR} to use the built-in box"
+BUILTIN_HINT = f"set {ENV_VAR}=builtin to use the built-in box"
+
+FALLBACK_QUESTION = "Fall back to the built-in attack box for this run? [y/N] "
+
+DEFAULT_PIN = "glovebox.pin.json"
+"""The packaged pin file an unset `INSPECT_RANGES_ATTACK_BOX` selects: the default provider, glovebox."""
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 _TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -102,6 +108,12 @@ def load_pin(path: Path) -> ProgramPin:
     except OSError as error:
         raise ValueError(f"pin file {path} is unreadable ({error})") from error
     return _pin_from_json(text, f"pin file {path}")
+
+
+def default_attack_box_origin() -> str:
+    """The origin an unset `INSPECT_RANGES_ATTACK_BOX` selects: the release the packaged `glovebox.pin.json` names."""
+    resource = files("inspect_ranges._attackbox").joinpath(DEFAULT_PIN)
+    return _pin_from_json(resource.read_text(), f"the packaged {DEFAULT_PIN}").origin
 
 
 def pin_from_config(config: str | None) -> ProgramPin:
@@ -258,3 +270,35 @@ def prepare_attack_box(origin: str) -> None:
         _provider(pin).probe()
     except ExternalBoxError as error:
         raise error.with_hint(BUILTIN_HINT) from error
+
+
+def confirm_fallback(
+    error: ExternalBoxError, *, name: str, stdin: TextIO, stdout: TextIO
+) -> bool:
+    """Ask whether this run should use the built-in box instead; `False` without asking unless stdin and stdout are both terminals."""
+    if not (stdin.isatty() and stdout.isatty()):
+        return False
+    stdout.write(f"The {name} attack box cannot run on this host:\n")
+    stdout.write("".join(f"  {line}\n" for line in error.detail_lines()))
+    stdout.write(FALLBACK_QUESTION)
+    stdout.flush()
+    return stdin.readline().strip().lower() in {"y", "yes"}
+
+
+def prepare_with_fallback(origin: str, *, stdin: TextIO, stdout: TextIO) -> str | None:
+    """`prepare_attack_box`, with the built-in box offered to a person at a terminal when the host cannot boot this one. Blocking.
+
+    Returns:
+        `origin` when the host can boot the box; `None` when it cannot and the person chose the built-in box for this run.
+
+    Raises:
+        ExternalBoxError: The host cannot boot the box and nobody chose the fallback (no terminal, or the answer was no).
+    """
+    try:
+        prepare_attack_box(origin)
+    except ExternalBoxError as error:
+        name = pin_from_config(parse_attack_box(origin).config).name
+        if confirm_fallback(error, name=name, stdin=stdin, stdout=stdout):
+            return None
+        raise
+    return origin

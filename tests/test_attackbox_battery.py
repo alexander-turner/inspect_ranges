@@ -46,11 +46,9 @@ def write_spec(tmp_path: Path, text: str = FOOTHOLD_SPEC) -> Path:
     return spec
 
 
-def test_battery_refuses_without_the_variable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("INSPECT_RANGES_ATTACK_BOX", raising=False)
-    with pytest.raises(BatteryError, match="INSPECT_RANGES_ATTACK_BOX is not set"):
+def test_battery_refuses_the_builtin_box(tmp_path: Path) -> None:
+    """`builtin` (the hermetic default here) names no provider to verify."""
+    with pytest.raises(BatteryError, match="INSPECT_RANGES_ATTACK_BOX=builtin"):
         run_attack_box_battery(write_spec(tmp_path))
 
 
@@ -237,11 +235,8 @@ def test_cli_verify_json_and_pass_exit_zero(
     assert payload["passed"] is True
 
 
-def test_cli_verify_turns_refusals_into_clean_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("INSPECT_RANGES_ATTACK_BOX", raising=False)
+def test_cli_verify_turns_refusals_into_clean_errors(tmp_path: Path) -> None:
     spec = write_spec(tmp_path)
     result = CliRunner().invoke(attackbox, ["verify", "--spec", str(spec)])
     assert result.exit_code != 0
-    assert "INSPECT_RANGES_ATTACK_BOX is not set" in result.output
+    assert "INSPECT_RANGES_ATTACK_BOX=builtin" in result.output

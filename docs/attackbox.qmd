@@ -1,18 +1,33 @@
 ---
 title: "Attack Box"
-description: "The machine the agent attacks from: the default image and its tool contract, boot defaults, custom images, and the provider seam for supplying the box externally."
-llms-description: "The attack box: the catalog `attack` image a dedicated attack box boots by default (Ubuntu 24.04 noble golden plus a kali-class toolset recipe, the build-asserted tool contract, /etc/attack-image.manifest, the zero-listener invariant), boot defaults (name `attacker`, Cloud Hypervisor VMM, 1 cpu / 1024 MB, the `agent` execution identity), custom images via `image:`; and the external provider seam: INSPECT_RANGES_ATTACK_BOX=<module>.<factory>[:<config>] registers an AttackBoxProvider (protocols public in inspect_ranges.attackbox), tap fds in / hybrid-vsock exec surface out, teardown-by-origin, the declared console evidence gap, doctor rows, and the attack-box conformance battery (inspect-ranges attackbox verify)."
+description: "The machine the agent attacks from: the pinned glovebox box that is the default, the built-in box's image and its tool contract, boot defaults, custom images, and the provider seam for supplying the box externally."
+llms-description: "The attack box: by default a pinned external provider program (today glovebox) run as a separate program (`<program> attackbox boot|teardown|probe`, protocol 1; a pin file per provider; downloaded and SHA-256-checked on first use, cached per user, provider and tag, INSPECT_RANGES_ATTACK_BOX_PROGRAM overrides the program; a release without the attackbox command fails at probe with its own message; an attacker that declares its own image gets the built-in box; fetched and probed at eval init; a failure prints cause and remedy, asks to fall back only on a terminal, else refuses naming INSPECT_RANGES_ATTACK_BOX=builtin); with INSPECT_RANGES_ATTACK_BOX=builtin, the catalog `attack` image a dedicated attack box boots by default (Ubuntu 24.04 noble golden plus a kali-class toolset recipe, the build-asserted tool contract, /etc/attack-image.manifest, the zero-listener invariant), boot defaults (name `attacker`, Cloud Hypervisor VMM, 1 cpu / 1024 MB, the `agent` execution identity), custom images via `image:`; and the external provider seam: INSPECT_RANGES_ATTACK_BOX=<module>.<factory>[:<config>] registers an AttackBoxProvider (protocols public in inspect_ranges.attackbox), tap fds in / hybrid-vsock exec surface out, teardown-by-origin, the declared console evidence gap, doctor rows, and the attack-box conformance battery (inspect-ranges attackbox verify)."
 ---
 
 ## Overview
 
 The attack box is the machine the agent works from. In a range with a dedicated attacker it is the sample's sandbox: every `sandbox().exec()` lands in it, and targets are reachable only over the range network (the agent/target wall; see [Range Sandbox](provider.qmd#foothold-sandbox)). Declaring one is part of the range definition ([Guests](guests.qmd#the-attacker-guest)). An assumed-breach range has no attack box (the agent starts on a declared target host), so nothing on this page applies to it.
 
-This page covers the default image and its tool contract, the boot defaults, custom images, and the provider seam that lets a deployment supply the whole machine externally.
+By default the attack box is a pinned [glovebox](https://github.com/AlexanderMattTurner/agent-glovebox) microVM, supplied through the provider seam (see [The Default Provider](#the-default-provider)). `INSPECT_RANGES_ATTACK_BOX=builtin` selects the built-in box instead, which the realizer boots like any other guest.
+
+This page covers the default provider, the built-in box's image and its tool contract, the boot defaults, custom images, and the provider seam that lets a deployment supply the whole machine externally.
+
+## The Default Provider
+
+With `INSPECT_RANGES_ATTACK_BOX` unset, the attack box comes from the pinned default provider program, today [glovebox](https://github.com/AlexanderMattTurner/agent-glovebox), a microVM sandbox with its own firewall and monitor (`glovebox.pin.json`). It runs exactly as an explicitly selected [pinned provider program](#pinned-provider-programs) does: downloaded and hash-checked on first use, version-checked, and probed at eval init.
+
+The default applies only to an attacker that takes the standard image. A range whose attacker declares its own `image:` relies on that image's tools and contents, and an external provider boots its own guest, so with the variable unset that range gets the built-in box. Eval init logs the reason as a warning and skips the download, and the project's stage log records it (`attack-box`, `box: builtin`). No attack-box record is written, so `inspect-ranges down` tears the box down as the built-in guest it is. A provider value you set explicitly always wins over a declared image.
+
+When the download or the probe fails, the eval prints the cause, the remedy (for a runtime that is not installed, the exact `sudo` setup command the probe returns), and the bug-report URL when the probe gives one. Then:
+
+- When stdin and stdout are both a terminal, the eval asks `Fall back to the built-in attack box for this run? [y/N]`. A yes boots the built-in box for this run only.
+- Otherwise the eval refuses, ending with `set INSPECT_RANGES_ATTACK_BOX=builtin to use the built-in box`. This covers batch evals and every path with no eval init, the applier under a `uds:` backend among them. The box never falls back silently.
+
+The trade is the one every external provider makes, stated in the [containment caveat](#containment-caveat) below: "A range with an external attack box is only as contained as the external stack." The provider's stack holds the agent's seat in place of the realizer's own, the console stream becomes a declared evidence gap, and `inspect-ranges doctor` carries the standing warning. Run `inspect-ranges attackbox verify` to hold the pinned release to the conformance battery on your host. For runs that need the realizer's own containment stack, set `INSPECT_RANGES_ATTACK_BOX=builtin`.
 
 ## Default Image
 
-A dedicated attack box with no `image:` boots the catalog's `attack` image, pulled automatically at eval init like any catalog name (see [Images](images.qmd)). It is a kali-class toolset built by a pinned recipe over the `ubuntu-noble` golden, so the operating system is Ubuntu 24.04 with the guest control daemon baked in. The build refuses if anything beyond loopback is left listening, which is what the attacker-surface sweep in [Security](security.qmd#proving-containment) expects of the box.
+Under `INSPECT_RANGES_ATTACK_BOX=builtin`, a dedicated attack box with no `image:` boots the catalog's `attack` image, pulled automatically at eval init like any catalog name (see [Images](images.qmd)). It is a kali-class toolset built by a pinned recipe over the `ubuntu-noble` golden, so the operating system is Ubuntu 24.04 with the guest control daemon baked in. The build refuses if anything beyond loopback is left listening, which is what the attacker-surface sweep in [Security](security.qmd#proving-containment) expects of the box.
 
 The tool contract is asserted at image build, so [behavioral checks](building.qmd#behavioral-checks), which run with no egress, may rely on every name here: `nmap`, `ncat`, `socat`, `curl`, `wget`, `tcpdump`, `sqlmap`, `hydra`, `john`, `gobuster`, `ffuf`, `smbclient`, `ldapsearch`, `dig`, `nc`, `tmux`, `msfconsole`, `msfvenom`, the impacket scripts `psexec.py`, `wmiexec.py`, `secretsdump.py`, `GetUserSPNs.py`, `raiseChild.py`, `lookupsid.py`, `atexec.py`, `smbexec.py`, and `mssqlclient.py`, plus `impacket` and `requests` importable from python3 and metasploit at major version 6. A missing tool fails the image build, so an eval never sees one.
 
@@ -32,7 +47,7 @@ Declare `image:` on the attacker to boot any image instead: another catalog name
 
 ## External Providers
 
-By default the realizer renders and boots the attack box like any guest. The provider seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
+The realizer renders and boots the built-in box like any guest. The provider seam lets a deployment substitute an externally-managed VM for that one guest: the range supplies an attachment point on the foothold's segment and routes `sandbox()` operations to the surface the provider returns; the provider supplies the machine and owns its lifecycle. Everything else in the range (targets, routers, networking, scoring, evidence capture) is untouched.
 
 The deployment selects the provider, not the range definition: `range.yaml` has no provider field, and the same published bundle realizes the same way with or without one. The seam covers dedicated attack boxes only; an assumed-breach range's foothold is a built, verified target host, so the seam does not apply to it.
 
@@ -41,7 +56,7 @@ INSPECT_RANGES_ATTACK_BOX=glovebox_ranges.provider.factory:cell-pool-a \
   inspect eval my_task.py
 ```
 
-The variable is read where realization runs: the eval process under the `local` host backend, the applier's own environment under a separated one (see [Range Host](topology.qmd)).
+The glovebox default is itself a provider behind this seam. The variable is read where realization runs: the eval process under the `local` host backend, the applier's own environment under a separated one (see [Range Host](topology.qmd)).
 
 ## Pinned Provider Programs
 
@@ -72,7 +87,7 @@ The origin stamped into the attack-box record carries the pin file's contents, n
 
 ## Registering a Provider
 
-Registration works like `INSPECT_RANGES_HOST`: the value `<module>.<factory>[:<config>]` names an `AttackBoxFactory`, imported and called at resolution, and the value splits on the first colon, so a config may itself contain colons. The same value persists as the project's attack-box origin, so any later process (`inspect-ranges down`, the reaper) can resolve teardown from disk; the provider's package just has to be installed where that process runs. Factories must be cheap and must not dial anything; remote work belongs in the provider's `boot`.
+Registration works like `INSPECT_RANGES_HOST`: apart from `builtin` and unset, the value `<module>.<factory>[:<config>]` names an `AttackBoxFactory`, imported and called at resolution, and the value splits on the first colon, so a config may itself contain colons. The same value persists as the project's attack-box origin, so any later process (`inspect-ranges down`, the reaper) can resolve teardown from disk; the provider's package just has to be installed where that process runs. Factories must be cheap and must not dial anything; remote work belongs in the provider's `boot`.
 
 The factory returns an `AttackBoxBackend` bundle:
 
@@ -127,4 +142,4 @@ INSPECT_RANGES_ATTACK_BOX=their.pkg.factory:cfg \
 
 ## Containment Caveat
 
-A range with an external attack box is only as contained as the external stack: the battery proves behavior at a point in time, not architecture, and the exec surface's operator controls its implementation. The trust position matches root on a compromised target, and the record says so (the doctor warning, the declared evidence gap). For runs where the realizer's own containment stack is the requirement, leave the variable unset.
+A range with an external attack box is only as contained as the external stack: the battery proves behavior at a point in time, not architecture, and the exec surface's operator controls its implementation. The trust position matches root on a compromised target, and the record says so (the doctor warning, the declared evidence gap). For runs where the realizer's own containment stack is the requirement, set `INSPECT_RANGES_ATTACK_BOX=builtin`; leaving the variable unset selects the glovebox default, which is an external stack.

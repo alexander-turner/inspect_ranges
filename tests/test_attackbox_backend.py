@@ -1,5 +1,6 @@
 """Backend selection for `INSPECT_RANGES_ATTACK_BOX`: the grammar, the resolver, the bundle hooks, and the origin record."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,11 @@ from inspect_ranges._attackbox import (
     parse_attack_box,
     read_attack_box_record,
     resolve_attack_box,
+    select_attack_box,
     write_attack_box_record,
 )
 from inspect_ranges._attackbox.backend import ENV_VAR
+from inspect_ranges._attackbox.pinned import default_attack_box_origin, pin_from_config
 from inspect_ranges._channel.vsock import HybridEndpoint
 
 
@@ -131,20 +134,88 @@ def test_resolver_refuses_with_the_cause_named(
 # -- the env origin ------------------------------------------------------------------
 
 
-def test_origin_is_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_VAR, raising=False)
-    assert attack_box_origin() is None
+_PINNED = default_attack_box_origin()
 
 
-def test_origin_is_none_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(ENV_VAR, "")
-    assert attack_box_origin() is None
+def test_the_default_origin_carries_the_packaged_glovebox_pin() -> None:
+    """The record stamps the pin's contents, so `down` reaches the release that booted even after an upgrade moves the pin."""
+    from importlib.resources import files
+
+    packaged = json.loads(
+        files("inspect_ranges._attackbox").joinpath("glovebox.pin.json").read_text()
+    )
+    pin = pin_from_config(parse_attack_box(_PINNED).config)
+    assert pin.name == "glovebox"
+    assert (pin.tag, pin.sha256) == (packaged["tag"], packaged["sha256"])
 
 
-def test_origin_returns_a_valid_value_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    value = f"{__name__}.fake_attack_box_factory:cfg"
-    monkeypatch.setenv(ENV_VAR, value)
-    assert attack_box_origin() == value
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, _PINNED),
+        ("", _PINNED),
+        ("builtin", None),
+        (
+            f"{__name__}.fake_attack_box_factory:cfg",
+            f"{__name__}.fake_attack_box_factory:cfg",
+        ),
+    ],
+    ids=[
+        "unset-is-the-pinned-glovebox",
+        "empty-is-unset",
+        "builtin",
+        "dotted-verbatim",
+    ],
+)
+def test_origin_selection(
+    monkeypatch: pytest.MonkeyPatch, value: str | None, expected: str | None
+) -> None:
+    """Unset selects the pinned glovebox, with its tag and digest in the origin `up` stamps; `builtin` selects the realizer's own box."""
+    if value is None:
+        monkeypatch.delenv(ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(ENV_VAR, value)
+    assert attack_box_origin() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "declared_image", "expected_origin", "steps_aside"),
+    [
+        (None, None, _PINNED, False),
+        (None, "ubuntu-noble", None, True),
+        (
+            f"{__name__}.fake_attack_box_factory:cfg",
+            "ubuntu-noble",
+            f"{__name__}.fake_attack_box_factory:cfg",
+            False,
+        ),
+        ("builtin", None, None, False),
+    ],
+    ids=[
+        "unset-no-image-is-glovebox",
+        "unset-with-image-is-builtin",
+        "explicit-factory-with-image-wins",
+        "builtin",
+    ],
+)
+def test_select_attack_box_for_a_range(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+    declared_image: str | None,
+    expected_origin: str | None,
+    steps_aside: bool,
+) -> None:
+    """The unset default steps aside, with a stated reason, for an attacker that declares its own image; a value someone set always stands."""
+    if value is None:
+        monkeypatch.delenv(ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(ENV_VAR, value)
+    choice = select_attack_box(declared_image)
+    assert choice.origin == expected_origin
+    if steps_aside:
+        assert choice.reason is not None and "ubuntu-noble" in choice.reason
+    else:
+        assert choice.reason is None
 
 
 def test_origin_refuses_a_malformed_value_loudly(

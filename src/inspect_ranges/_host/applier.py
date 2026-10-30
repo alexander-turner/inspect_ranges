@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .._attackbox.backend import attack_box_origin
+from .._attackbox.backend import attack_box_is_default, attack_box_origin
 from .._attackbox.record import AttackBoxRecordError, read_attack_box_record
 from .._channel.channel import HOST_APPLIER, ByteStream
 from .._channel.codec import (
@@ -654,6 +654,7 @@ class Applier:
                 # same deployment-knowledge rule as the attack box: the host
                 # that boots the range supplies the uplink for egress specs
                 uplink_network=os.environ.get("INSPECT_RANGES_UPLINK_NETWORK"),
+                attack_box_is_default=attack_box_is_default(),
             )
             result = await asyncio.to_thread(self._up_fn, bundle, options, on_stage)
         except UpError as error:

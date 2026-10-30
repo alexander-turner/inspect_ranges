@@ -1092,6 +1092,64 @@ def fake_attacher(invocation: AttachInvocation) -> list[int]:
     return [os.open(os.devnull, os.O_RDWR) for _ in range(invocation.expected_fds)]
 
 
+@pytest.mark.parametrize(
+    ("attack_box", "is_default", "declared_image", "external"),
+    [
+        (RECORDING_ORIGIN, True, None, True),
+        (RECORDING_ORIGIN, True, "ubuntu-noble", False),
+        (RECORDING_ORIGIN, False, "ubuntu-noble", True),
+        (None, False, "ubuntu-noble", False),
+    ],
+    ids=[
+        "default-no-image-is-external",
+        "default-with-image-is-builtin",
+        "explicit-provider-with-image-wins",
+        "builtin",
+    ],
+)
+def test_up_default_attack_box_steps_aside_for_a_declared_image(
+    cache: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack_box: str | None,
+    is_default: bool,
+    declared_image: str | None,
+    external: bool,
+) -> None:
+    """Only the unset default yields to an attacker `image:`; the realized range then has no attack-box record (down treats the box as built-in) and the stage log says why."""
+    spec = tiny_spec()
+    spec.attacker.image = declared_image
+    bundle = tmp_path / "declared-bundle"
+    render_bundle(spec, bundle, PlanOptions(image_cache=cache, cid_base=3000))
+    use_channel(monkeypatch, FakeChannel(ping_ok=True, exec_rc=0))
+    result = up(
+        bundle,
+        options(
+            cache, tmp_path, attack_box=attack_box, attack_box_is_default=is_default
+        ),
+        runner=FakeDocker(),
+        attacher=fake_attacher,
+    )
+    record = read_attack_box_record(tmp_path / "state", result.project)
+    booted = [p.boots for p in RecordingAttackBoxProvider.instances]
+    reasons = [
+        event["reason"]
+        for event in StageLog(tmp_path / "state", result.project).events()
+        if event["stage"] == "attack-box" and event.get("box") == "builtin"
+    ]
+    if external:
+        assert record is not None and record.origin == RECORDING_ORIGIN
+        assert [len(boots) for boots in booted] == [1]
+        assert reasons == []
+    else:
+        assert record is None
+        assert all(not boots for boots in booted)
+        stepped_aside = is_default and attack_box is not None
+        assert len(reasons) == (1 if stepped_aside else 0)
+        if stepped_aside:
+            assert "ubuntu-noble" in reasons[0]
+
+
 def test_up_external_attack_box_happy_path(
     bundle: Path, cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

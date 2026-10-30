@@ -32,6 +32,8 @@ COMMAND_TIMEOUT = 30
 
 def run_checks() -> list[CheckResult]:
     """Check this machine, returning results in report order."""
+    from .._attackbox.backend import configured_attack_box
+
     results = _readiness_results()
     host = results[0]
     if host.status == "ok":
@@ -54,7 +56,7 @@ def run_checks() -> list[CheckResult]:
     )
     results += check_attack_box(
         state_dir=_provider_state_dir(),
-        backend=os.environ.get("INSPECT_RANGES_ATTACK_BOX"),
+        backend=configured_attack_box(),
     )
     results += check_evidence(
         sink_override=os.environ.get("INSPECT_RANGES_EVIDENCE_SINK"),
@@ -584,7 +586,8 @@ def check_attack_box(state_dir: Path, backend: str | None) -> list[CheckResult]:
                 ATTACK_BOX,
                 "backend",
                 "ok",
-                "not configured (the realizer boots the attack box)",
+                "built-in (INSPECT_RANGES_ATTACK_BOX=builtin: the realizer "
+                "boots the attack box)",
             )
         ]
     try:

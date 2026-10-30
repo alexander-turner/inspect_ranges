@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from .._attackbox.backend import attack_box_origin
+from .._attackbox.backend import attack_box_is_default, attack_box_origin
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -96,6 +96,7 @@ def up(
         keep_on_failure=keep,
         uplink_network=uplink_network,
         attack_box=attack_box,
+        attack_box_is_default=attack_box_is_default(),
     )
     try:
         if from_spec is not None:

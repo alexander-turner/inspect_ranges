@@ -357,7 +357,7 @@ def run_attack_box_battery(
     """Run the whole battery against `spec_path` through the registered provider; see the module docstring for the obligations.
 
     Raises:
-        BatteryError: `INSPECT_RANGES_ATTACK_BOX` is unset or does not resolve, the spec does not load, or it declares a foothold (no dedicated attack box, so the seam excludes it by construction).
+        BatteryError: `INSPECT_RANGES_ATTACK_BOX` is `builtin` or does not resolve, the spec does not load, or it declares a foothold (no dedicated attack box, so the seam excludes it by construction).
     """
     from ..schema import load_range
 
@@ -367,8 +367,10 @@ def run_attack_box_battery(
         raise BatteryError(str(error)) from error
     if origin is None:
         raise BatteryError(
-            "INSPECT_RANGES_ATTACK_BOX is not set; register the provider under "
-            "test as '<module>.<factory>[:<config>]' and re-run"
+            "INSPECT_RANGES_ATTACK_BOX=builtin selects the built-in box, which "
+            "has no provider to verify; unset it to verify the pinned default provider, "
+            "or register the provider under test as "
+            "'<module>.<factory>[:<config>]' and re-run"
         )
     state = state_dir if state_dir is not None else default_state_dir()
     try:

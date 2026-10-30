@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Literal, cast, overload
 
@@ -21,9 +22,13 @@ from inspect_ai.util._subprocess import ExecResult
 from pydantic import BaseModel
 from typing_extensions import override
 
-from .._attackbox.backend import attack_box_origin
+from .._attackbox.backend import (
+    attack_box_is_default,
+    attack_box_origin,
+    select_attack_box,
+)
 from .._attackbox.external import ExternalBoxError
-from .._attackbox.pinned import is_pinned_origin, prepare_attack_box
+from .._attackbox.pinned import is_pinned_origin, prepare_with_fallback
 from .._build.manifest import (
     apply_build_manifest,
     default_build_cache,
@@ -86,12 +91,15 @@ def _resolve_spec(config: SandboxEnvironmentConfigType | None) -> RangeSpec:
     raise ValueError("range requires a config: a range.yaml path or a RangeSpec object")
 
 
-def _attack_box_origin_or_up_error() -> str | None:
-    """The configured attack-box origin, with a malformed value folded to the typed stage failure every other boot refusal uses."""
+def _attack_box_origin_or_up_error(runtime: ProviderRuntime) -> str | None:
+    """The attack-box origin this run boots with (eval init's fallback choice applied), with a malformed value folded to the typed stage failure every other boot refusal uses."""
     try:
-        return attack_box_origin()
+        origin = attack_box_origin()
     except ValueError as error:
         raise UpError("attack-box", str(error)) from error
+    if origin in runtime.attack_box_fallback:
+        return None
+    return origin
 
 
 async def _prepare_attack_box(runtime: ProviderRuntime, spec: RangeSpec) -> None:
@@ -100,23 +108,34 @@ async def _prepare_attack_box(runtime: ProviderRuntime, spec: RangeSpec) -> None
     Only where this process boots the box: a range with a dedicated attack box under a co-resident host backend (a separated backend's applier selects and boots its own). A malformed value is left to the sample's boot, which refuses it as a typed stage failure.
 
     Raises:
-        Exception: Inspect's prerequisite refusal, carrying the cause, the remedy, and the way to the built-in box, when the host cannot boot the box.
+        Exception: Inspect's prerequisite refusal, carrying the cause, the remedy, and the way to the built-in box, when the host cannot boot the box and nobody chose the fallback.
     """
     if spec.attacker.host is not None or runtime.backend_separated:
         return
     try:
-        origin = attack_box_origin()
+        choice = select_attack_box(spec.attacker.image)
     except ValueError:
         return
+    if choice.reason is not None:
+        # up() makes the same choice from the bundle; say it here, where the
+        # eval's operator reads, and skip a download the range will not use
+        logger.warning("task_init %s: %s", spec.meta.name, choice.reason)
+        return
+    origin = choice.origin
     if origin is None or not is_pinned_origin(origin):
         return
-    if origin in runtime.attack_box_probed:
+    if origin in runtime.attack_box_probed or origin in runtime.attack_box_fallback:
         return
     try:
-        await asyncio.to_thread(prepare_attack_box, origin)
+        chosen = await asyncio.to_thread(
+            prepare_with_fallback, origin, stdin=sys.stdin, stdout=sys.stdout
+        )
     except ExternalBoxError as error:
         raise prerequisite_error(str(error)) from error
-    runtime.attack_box_probed.add(origin)
+    if chosen is None:
+        runtime.attack_box_fallback.add(origin)
+    else:
+        runtime.attack_box_probed.add(origin)
 
 
 def _default_guest(spec: RangeSpec) -> str:
@@ -438,7 +457,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 # applier reads its own environment instead.
                                 # A malformed value refuses as a typed stage
                                 # failure, never a raw ValueError
-                                attack_box=_attack_box_origin_or_up_error(),
+                                attack_box=_attack_box_origin_or_up_error(runtime),
                                 # deployment knowledge, like the attack box: a
                                 # range whose spec declares egress renders a
                                 # compose that demands the deployment-supplied
@@ -449,6 +468,7 @@ class RangeSandboxEnvironment(SandboxEnvironment):
                                 uplink_network=os.environ.get(
                                     "INSPECT_RANGES_UPLINK_NETWORK"
                                 ),
+                                attack_box_is_default=attack_box_is_default(),
                             ),
                             on_stage,
                         )

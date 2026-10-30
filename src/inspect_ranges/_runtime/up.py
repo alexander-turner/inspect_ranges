@@ -16,6 +16,7 @@ from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .._attackbox.attach import (
@@ -29,6 +30,7 @@ from .._attackbox.attach import (
 from .._attackbox.backend import (
     AttackBoxBackend,
     AttackBoxHandle,
+    choose_attack_box,
     resolve_attack_box,
 )
 from .._attackbox.record import (
@@ -114,7 +116,9 @@ class UpOptions(BaseModel):
     keep_on_failure: bool = False
     uplink_network: str | None = None
     attack_box: str | None = None
-    """An external attack-box backend origin (the `INSPECT_RANGES_ATTACK_BOX` value), consulted where `up` runs: the plan's dedicated attack box is attached (taps in the range netns, fds handed over) and booted by the registered provider instead of locally. `None` realizes the whole plan locally."""
+    """An external attack-box backend origin (`attack_box_origin()`: the pinned default provider unless `INSPECT_RANGES_ATTACK_BOX` says otherwise), consulted where `up` runs: the plan's dedicated attack box is attached (taps in the range netns, fds handed over) and booted by the registered provider instead of locally. `None` (the value `builtin`) realizes the whole plan locally."""
+    attack_box_is_default: bool = False
+    """Whether `attack_box` is the unset default (`attack_box_is_default()`): the default steps aside for the built-in box when the bundle's attacker declares its own image (`choose_attack_box`)."""
 
 
 class GuestState(BaseModel):
@@ -559,6 +563,14 @@ def _compose_argv(project: str, bundle: Path, *args: str) -> list[str]:
     ]
 
 
+def _declared_attacker_image(bundle: Path) -> str | None:
+    """The image the bundle's range declares for its attacker (`spec.yaml`, digest-verified with the bundle); `None` when it takes the default."""
+    spec: Any = yaml.safe_load((bundle / "spec.yaml").read_text())
+    attacker: Any = spec.get("attacker") or {}
+    image: Any = attacker.get("image")
+    return image if isinstance(image, str) else None
+
+
 def _external_attack_box(
     options: UpOptions, boot: BootPlan, bundle: Path
 ) -> tuple[BootGuest | None, AttackBoxBackend | None]:
@@ -588,8 +600,10 @@ def _external_attack_box(
         if any("kind" not in entry for entry in raw.get("guests", [])):
             raise UpError(
                 "verify-bundle",
-                "INSPECT_RANGES_ATTACK_BOX is set but this bundle predates "
-                "attack-box facts (guests carry no kind); re-render the bundle",
+                "an external attack box is configured (INSPECT_RANGES_ATTACK_BOX) "
+                "but this bundle predates attack-box facts (guests carry no "
+                "kind); re-render the bundle, or set "
+                "INSPECT_RANGES_ATTACK_BOX=builtin",
             )
         logger.info(
             "attack-box backend configured but the range has no dedicated "
@@ -601,8 +615,8 @@ def _external_attack_box(
             "verify-bundle",
             f"an external attack box requires the attack box planned under "
             f"cloud-hypervisor (the default), but {external.name!r} declares "
-            f"vmm: {external.vmm}; remove the attacker's vmm or unset "
-            "INSPECT_RANGES_ATTACK_BOX",
+            f"vmm: {external.vmm}; remove the attacker's vmm or set "
+            "INSPECT_RANGES_ATTACK_BOX=builtin",
         )
     if any(
         nic.network is None or nic.ip is None or nic.prefixlen is None
@@ -653,6 +667,19 @@ def up(
         )
 
     guests = boot.guests
+    builtin_reason: str | None = None
+    if options.attack_box is not None and options.attack_box_is_default:
+        choice = choose_attack_box(
+            options.attack_box,
+            default=True,
+            declared_image=_declared_attacker_image(bundle),
+        )
+        if choice.origin is None:
+            builtin_reason = choice.reason
+            logger.info("attack box for %s: %s", project, builtin_reason)
+            # no attack-box record follows, so down tears the box down as
+            # the built-in guest it is
+            options = options.model_copy(update={"attack_box": None})
     external, attack_backend = _external_attack_box(options, boot, bundle)
     booted = [g.name for g in guests if external is None or g.name != external.name]
     vendor_memo: dict[str, str] = {}
@@ -785,6 +812,8 @@ def up(
             ),
         )
     log = _StageTee(StageLog(options.state_dir, project), on_stage)
+    if builtin_reason is not None:
+        log.log("attack-box", "ok", box="builtin", reason=builtin_reason)
     log.log("verify-bundle", "ok", files=len(cast(dict[str, Any], manifest["files"])))
     log.log("verify-images", "ok", guests=len(booted))
     log.log("range-image", "ok", tag=range_image)

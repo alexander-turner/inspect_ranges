@@ -431,7 +431,7 @@ def test_a_failed_probe_names_cause_remedy_and_the_builtin_box(stub: Stub) -> No
 @pytest.mark.parametrize(
     ("selected", "probes"),
     [(True, 1), (False, 0)],
-    ids=["explicit-pinned-program", "unset-is-builtin"],
+    ids=["explicit-pinned-program", "builtin"],
 )
 def test_eval_init_probes_only_a_selected_program(
     stub: Stub,
@@ -440,9 +440,9 @@ def test_eval_init_probes_only_a_selected_program(
     selected: bool,
     probes: int,
 ) -> None:
-    """The origin `up` receives (and stamps into the attack-box record) carries the pin's contents; unset keeps the built-in box and runs nothing."""
+    """The origin `up` receives (and stamps into the attack-box record) carries the pin's contents; the built-in box runs nothing."""
     if not selected:
-        monkeypatch.delenv(ENV_VAR)
+        monkeypatch.setenv(ENV_VAR, "builtin")
 
     async def scenario() -> list[str | None]:
         with sandbox_lifecycle_scope():

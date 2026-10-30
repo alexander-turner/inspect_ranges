@@ -30,7 +30,7 @@ The standard images publish at the project org, each consumable by bare name (hu
 
 | Name | Contents |
 |------------------------------------|------------------------------------|
-| `attack` | The standard attack box: a kali-class toolset built by a pinned recipe over the noble golden, with a build-asserted tool contract and a refusal to build if anything listens beyond loopback (see [Attack Box](attackbox.qmd#default-image)). A dedicated attack box with no `image:` boots it by default. |
+| `attack` | The standard attack box: a kali-class toolset built by a pinned recipe over the noble golden, with a build-asserted tool contract and a refusal to build if anything listens beyond loopback (see [Attack Box](attackbox.qmd#default-image)). Under `INSPECT_RANGES_ATTACK_BOX=builtin`, a dedicated attack box with no `image:` boots it; the default attack box is a pinned glovebox microVM instead. |
 | `ubuntu-noble` / `ubuntu-focal` | Golden images, published as chains (the image, its provenance sidecar, and the vendor base it derives from), each with the guest control daemon baked in. |
 | `daemon-bundle` | The guest control daemon artifact, for fleets that derive their own goldens: `daemon-bundle --pull` fetches it with no Go toolchain. |
 | `inspect-ranges-range` | The hardened range container, published as a conventional Docker image (consumed as a full Docker ref, not a bare `image:` name) by digest pin (below). |

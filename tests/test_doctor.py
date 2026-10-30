@@ -580,13 +580,13 @@ def test_check_host_reports_a_failing_backend_probe(tmp_path: Path) -> None:
     assert "unreachable: region-down" in probe.detail
 
 
-def test_check_attack_box_unset_is_a_single_ok_row(tmp_path: Path) -> None:
-    """With the variable unset, the group states the default (the realizer boots the box) and nothing else."""
+def test_check_attack_box_builtin_is_a_single_ok_row(tmp_path: Path) -> None:
+    """With the built-in box selected, the group states it (the realizer boots the box) and nothing else."""
     from inspect_ranges._doctor.checks import check_attack_box
 
     results = check_attack_box(state_dir=tmp_path / "state", backend=None)
     assert [(r.name, r.status) for r in results] == [("backend", "ok")]
-    assert "not configured" in results[0].detail
+    assert "built-in" in results[0].detail
 
 
 def test_check_attack_box_resolves_and_warns_the_declared_drop(tmp_path: Path) -> None:

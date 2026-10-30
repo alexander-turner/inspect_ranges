@@ -115,7 +115,7 @@ attacker:
   entry: external
 ```
 
-At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd): `ubuntu-noble` is a published golden image, a shared read-only base disk, and the attacker declares no image, so it boots the standard kali-class attack box. The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable, realized and verified by [`inspect-ranges build`](building.qmd).
+At boot, networks become private Linux bridges, guests become VMs booted from their images, and the `acl` becomes the router's firewall. Images resolve by name from the published [image catalog](images.qmd): `ubuntu-noble` is a published golden image, a shared read-only base disk, and the attacker declares no image, so it gets the default attack box: a pinned glovebox microVM, or with `INSPECT_RANGES_ATTACK_BOX=builtin` the standard kali-class image (see [Attack Box](attackbox.qmd)). The `provisioning`, `users`, `services`, `vulnerabilities`, and `data` entries declare the guest content that makes the range solvable, realized and verified by [`inspect-ranges build`](building.qmd).
 
 ## Range Tasks
 
