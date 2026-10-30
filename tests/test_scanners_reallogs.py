@@ -21,13 +21,16 @@ DMZ_LOG = Path(
     "/tmp/publish-day/logs/dmz-eval/"
     "2026-10-21T02-40-17-00-00_task_LxaAQ9rJN7yuZEwqVucH9z.eval"
 )
-CYRIS_LOG = Path(
-    "/home/USER/inspect_ranges/design/spikes/cyris-build/tmp/logs/eval/"
-    "2026-10-21T02-32-13-00-00_task_VZ3PhPfLHRriFV4kW5Rz3b.eval"
+_SPIKES = Path(__file__).resolve().parent.parent / "design" / "spikes"
+CYRIS_LOG = (
+    _SPIKES
+    / "cyris-build/tmp/logs/eval"
+    / "2026-10-21T02-32-13-00-00_task_VZ3PhPfLHRriFV4kW5Rz3b.eval"
 )
-MH_LOG = Path(
-    "/home/USER/inspect_ranges/design/spikes/mh-build/tmp/logs/eval/"
-    "2026-10-21T02-47-33-00-00_task_2iBgpWyCbJkvqU5uwBdLkG.eval"
+MH_LOG = (
+    _SPIKES
+    / "mh-build/tmp/logs/eval"
+    / "2026-10-21T02-47-33-00-00_task_2iBgpWyCbJkvqU5uwBdLkG.eval"
 )
 DMZ_RANGE = (
     Path(__file__).parent.parent

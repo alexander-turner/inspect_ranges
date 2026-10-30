@@ -1,6 +1,6 @@
 # Round 2, Unit 3: lifecycle flow end to end, report
 
-Worktree: `/home/USER/inspect_ranges/.claude/worktrees/r2-u3-lifecycle` (detached at c68cc93). Probes kept uncommitted: `probe_host_seal_hole.py`, `probe_aclose_envelope.py` (both runnable; tmp data removed). Implicated tests re-run green: `test_provider_lifecycle.py`, `test_host_reaper.py`, `test_host_applier.py`, `test_evidence_sealer.py`, `test_evidence_session.py` (85 passed).
+Worktree: `.claude/worktrees/r2-u3-lifecycle` (detached at c68cc93). Probes kept uncommitted: `probe_host_seal_hole.py`, `probe_aclose_envelope.py` (both runnable; tmp data removed). Implicated tests re-run green: `test_provider_lifecycle.py`, `test_host_reaper.py`, `test_host_applier.py`, `test_evidence_sealer.py`, `test_evidence_session.py` (85 passed).
 
 Method: read the five named design records plus range-host-v1.md and evidence-v1.md first, then the composition acquire -> realize -> execute -> finalize -> destroy across `_provider/provider.py`, `_provider/evidence.py`, `_host/{leases,reaper,local,remote,applier,stages}.py`, `_runtime/{up,down,ownership,rangeimage}.py`, `_cli/{upcmd,reapercmd,appliercmd,evidencecmd}.py`, and `_channel/channel.py`'s realize/teardown verbs; then each recent feature (evidence sealing, owner records, scoped egress, readiness allowances, fd hygiene, admission charges, lease anchors) checked against each recovery path (reaper, cli_cleanup, down/down --all, task_cleanup both arms, applier restart).
 

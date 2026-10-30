@@ -1,6 +1,6 @@
 # Round 2, Unit 1: the scoring flow end to end
 
-Composition read of challenges.yaml -> dataset -> plant -> agent window -> poll -> submit -> score -> corroborate -> validity, across `_challenges`, `_compiler`, `_provider`, `_evidence`, and the dataset/task surface. Worktree `/home/USER/inspect_ranges/.claude/worktrees/r2-u1-scoring` at c68cc93; all 272 challenges CI tests pass there; probes were run uncommitted in the worktree. No blocking findings. Three findings total (two correctness at the lower end, one mechanical), which matches the round-2 expectation of finding less than round 1.
+Composition read of challenges.yaml -> dataset -> plant -> agent window -> poll -> submit -> score -> corroborate -> validity, across `_challenges`, `_compiler`, `_provider`, `_evidence`, and the dataset/task surface. Worktree `.claude/worktrees/r2-u1-scoring` at c68cc93; all 272 challenges CI tests pass there; probes were run uncommitted in the worktree. No blocking findings. Three findings total (two correctness at the lower end, one mechanical), which matches the round-2 expectation of finding less than round 1.
 
 ## Findings
 

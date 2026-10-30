@@ -6,7 +6,7 @@
 # with and without the --expect-seal binding. Usage: ./run.sh [down].
 # Artifacts under tmp/ (gitignored). CID band 30200+; exclusive via the
 # shared battery lock. S3 objects land under
-# s3://SCRATCH-BUCKET/inspect-ranges/spikes/evidence-v1-s3/runs/
+# s3://$INSPECT_RANGES_SCRATCH_BUCKET/inspect-ranges/spikes/evidence-v1-s3/runs/
 # and are removed at the end of the run.
 set -uo pipefail
 cd "$(dirname "$0")"
@@ -19,7 +19,7 @@ export INSPECT_RANGES_IMAGE_CACHE="$SPIKE/tmp/cache"
 export CAPTURE_CHUNK_MB=1
 export CAPTURE_MAX_RESTARTS=2
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-BUCKET="SCRATCH-BUCKET"
+BUCKET="${INSPECT_RANGES_SCRATCH_BUCKET:?set INSPECT_RANGES_SCRATCH_BUCKET to the operator scratch bucket}"
 RUNS_PREFIX="inspect-ranges/spikes/evidence-v1-s3/runs"
 IR="uv run inspect-ranges"
 

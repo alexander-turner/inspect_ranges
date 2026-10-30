@@ -1,6 +1,6 @@
 # Round 2, Unit 6: the user surface (docs claims, CLI ergonomics, knob inventory)
 
-Worktree: `/home/USER/inspect_ranges/.claude/worktrees/r2-u6-surface` at c68cc93. All probes ran read-only (scratch configs under /tmp, a scratch image cache, no ranges or VMs created). Implicated tests pass: `tests/test_docs.py` + `tests/test_cli.py` 76 passed / 6 skipped.
+Worktree: `.claude/worktrees/r2-u6-surface` at c68cc93. All probes ran read-only (scratch configs under /tmp, a scratch image cache, no ranges or VMs created). Implicated tests pass: `tests/test_docs.py` + `tests/test_cli.py` 76 passed / 6 skipped.
 
 ## Findings (ranked; none blocking)
 

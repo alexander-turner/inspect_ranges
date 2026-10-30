@@ -52,6 +52,16 @@ Directory: `src/inspect_ranges/`
 ### Common Pitfalls
 - Use the venv for all Python commands: either reference `.venv/bin/` directly or run `source .venv/bin/activate`
 
+## Internal References
+
+This is a public repository. Nothing that identifies internal or partner infrastructure may be committed, in any file or in commit message text:
+
+- No infrastructure identifiers: cloud account IDs, bucket/storage names, internal hostnames, IAM role or user names, instance IDs, internal IP addresses, absolute home paths, internal URLs.
+- No references to private or partner artifacts that a feature is being built for, in code comments, docs, design records, test names, or commit messages. Motivate features generically (what the capability is, not whose task needs it); the specific mapping lives in the private design store.
+- Scripts and records that need an internal value (a bucket, a second host) take it from an environment variable or use a stated placeholder (`SCRATCH-BUCKET`, `devbox-b`), never the literal.
+
+Definition of done: before completing any feature/slice, and before every commit, sweep the full diff (including the commit message) for internal references and eliminate them.
+
 ## Reviewing other people's pull requests
 
 Unless a maintainer asked for your review, submit any review on someone else's pull request as a **Comment**, never **Approve** or **Request changes**. In this repository those are maintainer decisions: a non-maintainer's verdict doesn't count toward merging and misleads the author about where their PR stands. Put any confirmation or concern in the comment text, and say that you are an AI agent and not a maintainer. This does not apply to agents acting for project maintainers.

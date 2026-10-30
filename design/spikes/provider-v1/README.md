@@ -21,7 +21,7 @@ Usage: `./run.sh` (exclusive via the shared battery lock; derives its own golden
 
 ## devbox-b (the realizer carry-over)
 
-Not run. The `devbox-b` instance (i-xxxxxxxxxxxxxxxxx, x.x.x.x) was STOPPED at battery time and starting it is outside this run's permissions; there is no network route from the build host while it is down. The realizer phase-exit carry-over (nested-virt coverage) and the channel's nested-wedge follow-up therefore remain open, with this harness ready to run there unchanged (`fetch` the vendor per the nested-virt spike, then `./run.sh`).
+Not run. The `devbox-b` instance was STOPPED at battery time and starting it is outside this run's permissions; there is no network route from the build host while it is down. The realizer phase-exit carry-over (nested-virt coverage) and the channel's nested-wedge follow-up therefore remain open, with this harness ready to run there unchanged (`fetch` the vendor per the nested-virt spike, then `./run.sh`).
 
 ## Files
 

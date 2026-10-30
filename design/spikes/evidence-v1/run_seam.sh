@@ -16,7 +16,7 @@ VENDOR="${VENDOR:-$HOME/.cache/inspect-ranges/images/noble-server-cloudimg-amd64
 export XDG_STATE_HOME="$SPIKE/tmp/state"
 export INSPECT_RANGES_IMAGE_CACHE="$SPIKE/tmp/cache"
 export CAPTURE_CHUNK_MB=1
-SEAM_S3_PREFIX="s3://SCRATCH-BUCKET/inspect-ranges/spikes/evidence-v1-seam/run-$(date +%s)"
+SEAM_S3_PREFIX="s3://${INSPECT_RANGES_SCRATCH_BUCKET:?set INSPECT_RANGES_SCRATCH_BUCKET to the operator scratch bucket}/inspect-ranges/spikes/evidence-v1-seam/run-$(date +%s)"
 export SEAM_S3_PREFIX
 IR="uv run inspect-ranges"
 

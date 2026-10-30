@@ -15,10 +15,10 @@ The designed fleet image-distribution path ([image-distribution](../../inspect-r
 ## How to run
 
 1. Attach the temporary policy (12 EBS-only actions, `policy.json`) from a terminal with admin credentials:
-   `aws iam put-role-policy --role-name DEVBOX-ROLE --policy-name ebs-fsr-spike --policy-document file://design/spikes/ebs-fsr/policy.json`
+   `aws iam put-role-policy --role-name "$DEVBOX_ROLE" --policy-name ebs-fsr-spike --policy-document file://design/spikes/ebs-fsr/policy.json`
 2. On the devbox: `./run.sh all` (or phase by phase: `prepare`, `snapshot`, `measure-cold`, `enable-fsr`, `measure-fsr`, `baseline`, `cleanup`). State lives in `tmp/state.env`; `cleanup` is idempotent and removes every AWS resource (volumes, snapshot, FSR) by tag.
 3. Detach the policy:
-   `aws iam delete-role-policy --role-name DEVBOX-ROLE --policy-name ebs-fsr-spike`
+   `aws iam delete-role-policy --role-name "$DEVBOX_ROLE" --policy-name ebs-fsr-spike`
 
 Expected cost: cents for the volumes/snapshot plus ~1 hour of FSR. Expected duration: ~30–45 minutes, dominated by snapshot completion and FSR optimization waits.
 

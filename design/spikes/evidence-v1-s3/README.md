@@ -1,6 +1,6 @@
 # evidence-v1 battery, slice 3: the off-instance leg (real S3)
 
-Run: `./run.sh` (shared battery flock; CID band 30200+; needs AWS credentials and the staged vendor image). `./run.sh down` tears down leftovers. S3 objects land under `s3://SCRATCH-BUCKET/inspect-ranges/spikes/evidence-v1-s3/runs/` and are removed at the end of a run; the shared scratch bucket itself stays (it is the project's designated scratch bucket, also used by the nested-virt spike; `CreateBucket` is denied to the devbox role, recorded below).
+Run: `./run.sh` (shared battery flock; CID band 30200+; needs AWS credentials and the staged vendor image). `./run.sh down` tears down leftovers. S3 objects land under `s3://$INSPECT_RANGES_SCRATCH_BUCKET/inspect-ranges/spikes/evidence-v1-s3/runs/` and are removed at the end of a run; the shared scratch bucket itself stays (it is the project's designated scratch bucket, also used by the nested-virt spike; `CreateBucket` is denied to the devbox role, recorded below).
 
 ## Result (2026-10-15, devbox)
 
@@ -18,7 +18,7 @@ Run: `./run.sh` (shared battery flock; CID band 30200+; needs AWS credentials an
 
 The worst-lag chunk (7.6 s) is the first chunk of a stream: it waits out the capture poll interval plus the first rotation. Steady-state lag tracks the streamer's poll cadence (0.5 s here) plus one put round trip.
 
-## Honest substitutions and IAM limitations (devbox role `DEVBOX-ROLE`)
+## Honest substitutions and IAM limitations (the devbox role)
 
 - **Second machine.** No second machine was reachable (no SSH alias resolves from this host), so the cross-machine verify ran as a subprocess with a scrubbed environment: fresh `HOME`, minimal `PATH`, no environment inherited from the writer, credentials only via the instance role. It still executes the repository's installed `inspect-ranges` console script from the project venv, so it proves the verifier needs nothing from the writer's process, environment, or working state, not that it needs no installation; and it shares the instance role, so a true second machine (different credentials) should replace this when the fleet work lands a second host.
 - **Put-only credentials.** `sts:AssumeRole` (self), `sts:GetFederationToken`, and all IAM introspection are denied to the devbox role, so no genuinely put-only credential could be minted. The put-only proof is client-layer and scoped precisely: a botocore event hook on the sink's real client records every S3 operation that client issues across the run, and the set is exactly `{PutObject}`. It says nothing about other clients in the process (the battery's own reads use a separate store client), so it is paired with the CI pins: the writer holds no read path (`test_writer_never_reads`) and the S3 sink exposes none.

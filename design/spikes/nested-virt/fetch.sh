@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 IMAGE_CACHE="${IMAGE_CACHE:-$HOME/.cache/inspect-ranges/images}"
 CKPT_CACHE="${CKPT_CACHE:-$HOME/.cache/inspect-ranges/checkpoints}"
-S3_PREFIX="${S3_PREFIX:-s3://SCRATCH-BUCKET/inspect-ranges/spikes/nested-virt}"
+S3_PREFIX="${S3_PREFIX:-s3://${INSPECT_RANGES_SCRATCH_BUCKET:?set S3_PREFIX or INSPECT_RANGES_SCRATCH_BUCKET}/inspect-ranges/spikes/nested-virt}"
 STAGE=tmp/stage
 
 mkdir -p "$STAGE" "$IMAGE_CACHE" "$CKPT_CACHE"

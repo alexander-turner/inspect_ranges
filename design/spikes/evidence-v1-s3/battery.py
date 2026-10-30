@@ -48,7 +48,7 @@ SPEC = SPIKE.parent / "evidence-v1" / "spec.yaml"
 TMP = SPIKE / "tmp"
 BUNDLE = TMP / "bundle"
 IMAGE_CACHE = Path(os.environ["INSPECT_RANGES_IMAGE_CACHE"])
-BUCKET = "SCRATCH-BUCKET"
+BUCKET = os.environ["INSPECT_RANGES_SCRATCH_BUCKET"]
 RUN_PREFIX = f"inspect-ranges/spikes/evidence-v1-s3/runs/{int(time.time())}"
 
 PASS = 0
