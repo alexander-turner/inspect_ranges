@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from inspect_ranges._dist import DistError, parse_location, pull_range, push_range
@@ -10,6 +11,9 @@ from inspect_ranges._dist.location import Location
 from inspect_ranges._dist.mirror import mirror_names, mirror_one, source_names
 
 from tests.test_dist_encode import GOLDEN, Fixture, fresh_dirs
+from tests.test_dist_registry import (  # noqa: F401  (fixture)
+    fake_registry,  # pyright: ignore[reportUnusedImport]
+)
 from tests.test_dist_resolve import (  # noqa: F401  (autouse fixture)
     _spec_for_fixture,
     fake_backing_probe,  # pyright: ignore[reportUnusedImport]
@@ -877,3 +881,44 @@ def test_daemon_bundle_pull_honors_the_operator_pin(tmp_path: Path) -> None:
     assert not (out / "daemon.json").exists(), "a refused fetch lands nothing"
     info = fetch_daemon_bundle([location], out, expected_sha256=built.bundle_sha256)
     assert info == built
+
+
+def test_mirror_into_a_single_repository_location_and_pull_from_it(
+    tmp_path: Path,
+    fake_registry: Any,  # noqa: F811  (the imported fixture)
+) -> None:
+    """Mirroring into `host/repo:prefix` lands every artifact in that one repository with the name in the tags (the exact-spec tag included, so spec-driven pull works from it), and the location enumerates its names from those tags; a per-name repository is never created."""
+    fixture = Fixture(tmp_path)
+    spec = _spec_for_fixture(fixture, tmp_path)
+    origin = parse_location(str(tmp_path / "origin"))
+    push_range(
+        fixture.manifest,
+        origin,
+        image_cache=fixture.image_cache,
+        build_cache=fixture.build_cache,
+        range_dir=fixture.range_dir,
+    )
+    url, state = fake_registry()
+    flat = parse_location(f"{url}/mirror:ranges")
+    result = mirror_one("distfix", origin, flat)
+    assert result.copied
+    refs = {
+        key.removeprefix("mirror:")
+        for key in state.manifests
+        if key.startswith("mirror:")
+        and not key.removeprefix("mirror:").startswith("sha256:")
+    }
+    assert "ranges--distfix" in refs and any(
+        ref.startswith("ranges--distfix--spec-") for ref in refs
+    )
+    assert all(key.startswith("mirror:") for key in state.manifests)
+    assert source_names(flat) == ["distfix"]
+    images, builds, recipes = fresh_dirs(tmp_path)
+    report = pull_range(
+        spec,  # type: ignore[arg-type]
+        [flat],
+        image_cache=images,
+        build_cache=builds,
+        recipe_cache=recipes,
+    )
+    assert report.location == flat.describe() and report.root == result.root

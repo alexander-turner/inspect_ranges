@@ -75,6 +75,19 @@ def source_names(location: Location) -> list[str]:
             ):
                 names.append(name)
         return names
+    if location.tag_prefix:
+        # one repository: the names are the current-root tags under the prefix
+        from .registry import RegistryRepo
+
+        store = location.store_for(CATALOG_REF)
+        assert isinstance(store, RegistryRepo)
+        names = [
+            name
+            for tag in store.tags()
+            if (name := location.name_of(tag)) is not None
+            and name not in (CATALOG_REF, DAEMON_REF)
+        ]
+        return list(dict.fromkeys(names))
     base, prefix = location.registry_base_and_prefix()
     if base == "https://registry-1.docker.io":
         raise DistError(
@@ -105,9 +118,9 @@ def _spec_refs_at_source(source: Location, name: str) -> list[tuple[str, str]]:
     store = source.store_for(name)
     assert isinstance(store, RegistryRepo)
     return [
-        (tag.removeprefix("spec-"), tag)
+        (spec_hash, tag)
         for tag in store.tags()
-        if tag.startswith("spec-")
+        if (spec_hash := source.spec_hash_of(name, tag)) is not None
     ]
 
 

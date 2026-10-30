@@ -221,6 +221,17 @@ def _answer_challenge(
     return f"Bearer {token}"
 
 
+def _next_link(current: str, link: str | None) -> str | None:
+    """The absolute URL of a `Link` header's `rel="next"` target, or `None` when the page was the last."""
+    if not link:
+        return None
+    for part in link.split(","):
+        target, _, params = part.strip().partition(";")
+        if 'rel="next"' in params.replace(" ", "") and target.startswith("<"):
+            return urllib.parse.urljoin(current, target.strip("<> "))
+    return None
+
+
 class _OneShotDrained(Exception):
     """Internal: a non-replayable stream body was asked for a second attempt."""
 
@@ -749,14 +760,11 @@ class RegistryRepo:
             ) from error
 
     def tags(self) -> list[str]:
-        """Every tag in this repository (paginated via `last`, so large repos enumerate completely)."""
+        """Every tag in this repository, following the distribution spec's `Link: <...>; rel="next"` pagination (the one form every registry agrees on: Amazon ECR rejects a `last=<tag>` it did not itself hand out)."""
         tags: list[str] = []
-        last = ""
-        while True:
-            suffix = "tags/list?n=1000" + (
-                f"&last={urllib.parse.quote(last)}" if last else ""
-            )
-            _, _, body = self._request("GET", self._url(suffix), ok=(200,))
+        url: str | None = self._url("tags/list?n=1000")
+        while url is not None:
+            _, headers, body = self._request("GET", url, ok=(200,))
             assert isinstance(body, bytes)
             try:
                 payload = json.loads(body)
@@ -768,11 +776,9 @@ class RegistryRepo:
             page_source = cast(
                 "list[object]", raw_tags if isinstance(raw_tags, list) else []
             )
-            page = [tag for tag in page_source if isinstance(tag, str)]
-            tags.extend(page)
-            if len(page) < 1000:
-                return tags
-            last = page[-1]
+            tags.extend(tag for tag in page_source if isinstance(tag, str))
+            url = _next_link(url, headers.get("link"))
+        return tags
 
     def ref(self, name: str) -> Descriptor:
         data, media_type = self._get_manifest_bytes(name)

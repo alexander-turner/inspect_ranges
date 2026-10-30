@@ -131,6 +131,29 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, entry[0], Content_Type=entry[1])
             return
+        if "/tags/list" in self.path:
+            # two tags a page behind an opaque token in a Link header, the
+            # shape ECR paginates with (a `last=<tag>` it did not hand out is
+            # refused there), so the client's pagination is exercised for real
+            path, _, query = self.path.partition("?")
+            repo = path.split("/v2/")[1].removesuffix("/tags/list")
+            tags = sorted(
+                ref
+                for key in self.state.manifests
+                if key.startswith(f"{repo}:")
+                and not (ref := key.removeprefix(f"{repo}:")).startswith("sha256:")
+            )
+            start = int(dict(urllib.parse.parse_qsl(query)).get("page", "0"))
+            page = tags[start : start + 2]
+            headers = (
+                {"Link": f'<{path}?page={start + 2}>; rel="next"'}
+                if start + 2 < len(tags)
+                else {}
+            )
+            self._send(
+                200, json.dumps({"name": repo, "tags": page}).encode(), **headers
+            )
+            return
         self._send(200, b"{}")
 
     do_HEAD = do_GET
@@ -597,3 +620,28 @@ def test_catalog_kinds_detect_over_http_and_pins_stay_image_only(
     assert source_names(location) == ["distfix", "focal-guest"]
     pins = generate_pin_file(location, tmp_path / "pins.json")
     assert set(pins) == {"focal-guest"}
+
+
+def test_tag_listing_follows_link_pagination(
+    tmp_path: Path, fake_registry: Any
+) -> None:
+    """Every tag arrives across pages joined by `Link: <...>; rel="next"` (relative targets resolved against the registry), which is what ECR and the spec agree on; a `last=<tag>` guess is never sent."""
+    from inspect_ranges._dist.oci import OciIndex
+    from inspect_ranges._dist.registry import _next_link
+
+    url, _ = fake_registry()
+    repo = RegistryRepo(url, "ranges/paged")
+    manifest = repo.put_manifest_bytes(
+        b"{}", "application/vnd.oci.image.manifest.v1+json"
+    )
+    for tag in ("a", "b", "c", "d", "e"):
+        repo.put_index(tag, OciIndex(manifests=[manifest]))
+    assert repo.tags() == ["a", "b", "c", "d", "e"]
+    base = "https://r.example/v2/x/tags/list"
+    assert (
+        _next_link(f"{base}?n=1000", '</v2/x/tags/list?page=2>; rel="next"')
+        == f"{base}?page=2"
+    )
+    assert _next_link(base, f'<{base}?last=b>; rel="next"') == f"{base}?last=b"
+    assert _next_link(base, None) is None
+    assert _next_link(base, '</other>; rel="prev"') is None

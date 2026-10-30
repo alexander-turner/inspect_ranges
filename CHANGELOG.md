@@ -1,3 +1,7 @@
+## Unreleased
+
+- Distribution: a registry location may name one repository with a tag prefix (`registry.example.net/mirror:ranges`), keeping every artifact in that single repository with the name in its tags (`ranges--attack`, `ranges--vulhub-zabbix--spec-<hash>`), for registries where a repository is a pre-created, allowlisted resource (Amazon ECR): one repository admitted once serves every range. Mirror, pull, push, publish and enumeration work unchanged from it. Tag listings now follow the distribution spec's `Link` header for pagination, which is the form ECR paginates with (it refused the previous `last=<tag>` guess on repositories over a thousand tags).
+
 ## 0.2.3 (29 October 2026)
 
 - Packaging: the wheel ships the range container's `Dockerfile` beside its entrypoint. 0.2.0 through 0.2.2 omitted it, so a pip install could not build the range image when `INSPECT_RANGES_RANGE_IMAGE` was unset (the default), failing at `up` with a missing build context.
