@@ -1,7 +1,7 @@
 {
   "name": "glovebox",
-  "tag": "v0.92.3",
-  "url": "https://github.com/AlexanderMattTurner/agent-glovebox/archive/refs/tags/v0.92.3.tar.gz",
-  "sha256": "b29cc5ee58b2bcf208237ae5cf9e90b184d2267b6ee92d82372d362da44e1247",
+  "tag": "v0.94.1",
+  "url": "https://github.com/AlexanderMattTurner/agent-glovebox/archive/refs/tags/v0.94.1.tar.gz",
+  "sha256": "677c33915bb331410ab5ddecccac62c55ffe77c6e817b961edaadaf69614fee5",
   "entry": "bin/glovebox"
 }
